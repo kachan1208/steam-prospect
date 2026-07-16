@@ -46,8 +46,8 @@ export default {
         sans: ['"Inter Variable"', "Inter", "system-ui", "-apple-system", "Segoe UI", "sans-serif"],
       },
       borderRadius: {
-        card: "12px",
-        lg: "10px",
+        card: "var(--radius-card)",
+        lg: "var(--radius-control)",
         xl: "16px",
       },
       boxShadow: {

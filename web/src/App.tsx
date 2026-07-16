@@ -3,7 +3,7 @@ import clsx from "clsx";
 import type { ReactNode } from "react";
 
 import { useHealth } from "./lib/api";
-import { useTheme, ACCENTS } from "./lib/theme";
+import { useTheme, ACCENTS, PRESETS } from "./lib/theme";
 import NicheFinder from "./pages/NicheFinder";
 import MarketBenchmarks from "./pages/MarketBenchmarks";
 import LaunchTiming from "./pages/LaunchTiming";
@@ -153,6 +153,30 @@ function ThemeToggle() {
   );
 }
 
+function ThemePresetPicker() {
+  const { preset, setPreset } = useTheme();
+  return (
+    <div className="mt-2.5 flex items-center gap-2 px-1">
+      <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">Theme</span>
+      <div className="flex items-center gap-0.5 rounded-lg bg-surface2 p-0.5">
+        {PRESETS.map((pz) => (
+          <button
+            key={pz.id}
+            type="button"
+            onClick={() => setPreset(pz.id)}
+            className={clsx(
+              "rounded-md px-2 py-1 text-[11px] font-medium transition-all",
+              preset === pz.id ? "bg-surface text-ink-primary shadow-xs" : "text-ink-muted hover:text-ink-secondary",
+            )}
+          >
+            {pz.name}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function AccentPicker() {
   const { accent, setAccent } = useTheme();
   return (
@@ -246,6 +270,7 @@ function Sidebar() {
 
       <div className="border-t border-chartborder p-3">
         <HealthRow />
+        <ThemePresetPicker />
         <AccentPicker />
         <div className="mt-2.5 flex items-center gap-2.5 px-1 py-1">
           <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand text-[11px] font-semibold text-brand-fg">

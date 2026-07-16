@@ -27,6 +27,10 @@
   --border: #e6e8ec;
   --border-strong: #d7dbe2;
 
+  /* radius (switched at runtime by the Theme preset) */
+  --radius-card: 12px;
+  --radius-control: 10px;
+
   /* brand accent — UI actions: primary buttons, active nav, links, focus */
   --brand: #2563eb;
   --brand-hover: #1d4ed8;
