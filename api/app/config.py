@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -60,6 +61,30 @@ class Settings(BaseSettings):
     smtp_password: str | None = Field(default=None, validation_alias="SMTP_PASSWORD")
     smtp_from: str | None = Field(default=None, validation_alias="SMTP_FROM")
     smtp_use_tls: bool = Field(default=True, validation_alias="SMTP_USE_TLS")
+
+    # Chat backend mode switch (O5, api/app/routers/chat.py). "subscription" (default) is
+    # the existing local claude-CLI path above (unmetered, single-user). "api" drives the
+    # Anthropic SDK directly, gated on anthropic_api_key — per-tenant and metered, the path
+    # that's actually hostable for multiple users once billing (the core) exists.
+    chat_mode: Literal["subscription", "api"] = "subscription"
+
+    # Append-only per-tenant chat usage log (O5): one JSON line per completed chat turn,
+    # read back by entitlements.py's chat quota check. A flat file rather than a new
+    # control-plane table/migration — see routers/chat.py::_log_chat_usage.
+    chat_usage_log_path: Path = REPO_ROOT / "data" / "chat_usage.jsonl"
+
+    # Observability (O3, api/app/observability.py). Sentry is fully inert until
+    # PROSPECT_SENTRY_DSN is set — solo/local dev runs with zero Sentry footprint, no
+    # import side effects beyond a no-op check.
+    sentry_dsn: str | None = None
+    sentry_environment: str = "development"
+    sentry_traces_sample_rate: float = 0.0
+
+    # Hardening (O4, api/app/observability.py::RateLimitMiddleware). Requests/minute
+    # ceiling used ONLY as a fallback once real per-request auth exists and resolves a
+    # caller who isn't a verified org (see RateLimitMiddleware's docstring) — solo mode's
+    # actual ceiling comes from entitlements.py, not this value.
+    rate_limit_per_minute: int = 300
 
 
 settings = Settings()
