@@ -9,6 +9,12 @@
 -- see api/app/routers/games.py, never precomputed pairwise), a review-velocity summary,
 -- and playtime percentiles — all from the per-review SAMPLE (stg_review), so these
 -- describe the sample, not Steam's true totals.
+--
+-- total_reviews/positive_ratio/owners_mid/est_rev_reviews/est_rev_owners are reconciled
+-- against the actual `reviews` table in stg_game (SteamSpy lags badly for new releases —
+-- see build_marts.py's create_staging()). review_count_source ('steamspy'|'reviews_sample'
+-- |'reconciled') records whether/how: non-'steamspy' rows are an honest lower bound, since
+-- `reviews` is itself a per-game sample.
 
 DROP TABLE IF EXISTS mart_game;
 
@@ -54,7 +60,7 @@ SELECT
     g.price_initial, g.is_free,
     pg.primary_genre,
     g.developers, g.publishers, g.self_published, g.is_indie,
-    g.owners_mid, g.total_reviews, g.positive_ratio,
+    g.owners_mid, g.total_reviews, g.positive_ratio, g.review_count_source,
     g.est_rev_reviews, g.est_rev_owners,
     g.metacritic_score, g.achievements_count, g.avg_playtime_forever,
     gh.header_image, gh.short_description,

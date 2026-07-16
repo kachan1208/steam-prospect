@@ -131,6 +131,7 @@ WITH membership AS (
 scoped AS (
     SELECT m.dimension, m.key, g.appid, g.name, g.release_year,
         g.price_initial, g.owners_mid, g.total_reviews, g.positive_ratio,
+        g.review_count_source,
         g.est_rev_reviews, g.self_published,
         row_number() OVER (PARTITION BY m.dimension, m.key ORDER BY g.est_rev_reviews DESC) AS rank_in_niche
     FROM membership m
@@ -139,7 +140,7 @@ scoped AS (
     QUALIFY rank_in_niche <= @TOP_GAMES_PER_NICHE@
 )
 SELECT s.dimension, s.key, s.rank_in_niche, s.appid, s.name, s.release_year,
-    s.price_initial, s.owners_mid, s.total_reviews, s.positive_ratio,
+    s.price_initial, s.owners_mid, s.total_reviews, s.positive_ratio, s.review_count_source,
     s.est_rev_reviews, s.self_published, gh.header_image
 FROM scoped s
 LEFT JOIN src.games gh ON gh.appid = s.appid;
