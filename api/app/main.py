@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import analytics_db
 from .config import settings
 from .control_db import init_db
-from .routers import chat, estimate, explore, games, health, market, niches, press, seasonality, views, watchlist
+from .routers import alerts, chat, estimate, explore, games, health, market, niches, press, seasonality, views, watchlist
 
 
 @asynccontextmanager
@@ -47,6 +47,7 @@ app.include_router(watchlist.router)
 app.include_router(press.router)
 app.include_router(explore.router)
 app.include_router(chat.router)
+app.include_router(alerts.router)
 
 # Alias the plan's canonical CSV export path to the niches export handler.
 app.add_api_route(

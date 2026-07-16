@@ -41,5 +41,25 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
     chat_model: str | None = None
 
+    # Transactional email (api/app/email.py) + the alert evaluator (api/app/alerts_eval.py).
+    # Default provider "console" logs the email and never fails — zero config needed. Set
+    # PROSPECT_EMAIL_PROVIDER to "smtp" or "resend" to send for real; an incomplete/missing
+    # config for the selected provider falls back to console with a warning rather than
+    # crashing the caller.
+    email_provider: str = "console"          # PROSPECT_EMAIL_PROVIDER: console | smtp | resend
+    email_from: str = "Prospect <alerts@prospect.local>"    # PROSPECT_EMAIL_FROM
+    app_base_url: str = "http://localhost:5173"             # PROSPECT_APP_BASE_URL (for links in emails)
+
+    resend_api_key: str | None = None        # PROSPECT_RESEND_API_KEY
+
+    # Deliberately un-prefixed (the common convention for these vars, matching most
+    # SMTP-sending libraries/services).
+    smtp_host: str | None = Field(default=None, validation_alias="SMTP_HOST")
+    smtp_port: int = Field(default=587, validation_alias="SMTP_PORT")
+    smtp_user: str | None = Field(default=None, validation_alias="SMTP_USER")
+    smtp_password: str | None = Field(default=None, validation_alias="SMTP_PASSWORD")
+    smtp_from: str | None = Field(default=None, validation_alias="SMTP_FROM")
+    smtp_use_tls: bool = Field(default=True, validation_alias="SMTP_USE_TLS")
+
 
 settings = Settings()
