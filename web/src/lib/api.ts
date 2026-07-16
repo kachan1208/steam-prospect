@@ -869,3 +869,81 @@ export function useRemoveWatchlist() {
     },
   });
 }
+
+// ---- explorer (Phase 4 — safe query/filter/chart builder) -------------------------------
+// Mirrors api/app/routers/explore.py's DIMENSIONS/METRICS whitelists — but the actual
+// vocabulary (which names exist) is fetched at runtime via useExploreSchema(), never
+// hardcoded here, so the UI never drifts from the server's whitelist.
+export type ExploreColumnKind = "string" | "number" | "integer" | "boolean" | "list";
+
+export interface ExploreColumnMeta {
+  name: string;
+  label: string;
+  kind: ExploreColumnKind;
+  groupable: boolean;
+  ops: string[];
+}
+
+export interface ExploreMetricMeta {
+  name: string;
+  label: string;
+}
+
+export interface ExploreSchemaResponse {
+  dimensions: ExploreColumnMeta[];
+  metrics: ExploreMetricMeta[];
+  max_limit: number;
+  max_filters: number;
+  max_select: number;
+  max_group_by: number;
+  timeout_seconds: number;
+}
+
+export function useExploreSchema() {
+  return useQuery({
+    queryKey: ["explore-schema"],
+    queryFn: () => request<ExploreSchemaResponse>("/explore/schema"),
+    staleTime: 10 * 60_000,
+  });
+}
+
+export type ExploreFilterOp = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "like" | "contains" | "is_null" | "not_null";
+
+export interface ExploreFilter {
+  col: string;
+  op: ExploreFilterOp;
+  val?: string | number | boolean | (string | number)[] | null;
+}
+
+export interface ExploreQuery {
+  select: string[];
+  filters: ExploreFilter[];
+  group_by: string[];
+  sort?: string | null;
+  order: "asc" | "desc";
+  limit: number;
+}
+
+export interface ExploreResult {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  row_count: number;
+  truncated: boolean;
+  grouped: boolean;
+  elapsed_ms: number;
+  sql_preview: string;
+}
+
+export function useRunExplore() {
+  return useMutation({
+    mutationFn: (query: ExploreQuery) =>
+      request<ExploreResult>("/explore", { method: "POST", body: JSON.stringify(query) }),
+  });
+}
+
+/** Build a download URL for the explorer CSV export (GET, triggered via <a download>). The
+ * query travels as a single URL-encoded JSON param — the API re-validates it against the
+ * same whitelist as POST /explore, so this is exactly as safe as the interactive query. */
+export function exploreExportCsvUrl(query: ExploreQuery): string {
+  return `${API_BASE}/explore/export.csv${qs({ query: JSON.stringify(query) })}`;
+}

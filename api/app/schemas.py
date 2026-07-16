@@ -500,3 +500,65 @@ class WatchlistOut(BaseModel):
     positive_ratio: Optional[float] = None
     est_rev_reviews: Optional[float] = None
     velocity_sparkline: list[int] = Field(default_factory=list)
+
+
+# ---- explorer (Phase 4 — safe query/filter/chart builder) -----------------------------
+# The request shape here is intentionally generic (col/op/val filters, optional
+# group_by, a whitelisted select list) — api/app/routers/explore.py is the ONLY place
+# that turns this into SQL, and it validates every field against a server-side
+# whitelist (see DIMENSIONS/METRICS there) before compiling anything. This model layer
+# only bounds shape/size (list lengths, limit) — it does not and cannot validate
+# column names, since the whitelist lives in the router, not here.
+FilterOp = Literal["eq", "neq", "gt", "gte", "lt", "lte", "in", "contains", "is_null", "not_null"]
+
+
+class ExploreFilter(BaseModel):
+    col: str
+    op: FilterOp
+    val: Any = None
+
+
+class ExploreQuery(BaseModel):
+    # Dimension names (row mode) or group_by-columns + metric names (grouped mode).
+    select: list[str] = Field(min_length=1, max_length=8)
+    filters: list[ExploreFilter] = Field(default_factory=list, max_length=8)
+    group_by: list[str] = Field(default_factory=list, max_length=2)
+    sort: Optional[str] = None
+    order: Literal["asc", "desc"] = "desc"
+    limit: int = Field(default=200, ge=1, le=1000)
+
+
+class ExploreColumnMeta(BaseModel):
+    name: str
+    label: str
+    kind: Literal["string", "number", "integer", "boolean", "list"]
+    groupable: bool = False
+    ops: list[str] = Field(default_factory=list)
+
+
+class ExploreMetricMeta(BaseModel):
+    name: str
+    label: str
+
+
+class ExploreSchema(BaseModel):
+    dimensions: list[ExploreColumnMeta]
+    metrics: list[ExploreMetricMeta]
+    max_limit: int
+    max_filters: int
+    max_select: int
+    max_group_by: int
+    timeout_seconds: float
+
+
+class ExploreResult(BaseModel):
+    columns: list[str]
+    rows: list[dict[str, Any]]
+    row_count: int
+    truncated: bool
+    grouped: bool
+    elapsed_ms: float
+    # Compiled parameterized SQL with `?` placeholders (never literal filter values) —
+    # transparency into what actually ran; safe to show since it is built entirely from
+    # whitelisted identifiers, never from raw client text.
+    sql_preview: str
