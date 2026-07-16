@@ -415,9 +415,15 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         CREATE TEMP TABLE stg_game AS
         WITH genre_pick AS (
             SELECT g.appid,
-                ((g.owners_mid_steamspy IS NULL OR g.owners_mid_steamspy = 0)
-                    AND g.total_reviews > 0) AS owners_is_floor_estimate,
-                COALESCE(gb.owners_multiplier, ab.owners_multiplier, @BOXLEITER_MID@) AS owners_multiplier
+                -- SteamSpy only *resolves* owners ABOVE its 0-20k catch-all bucket (mid 10k).
+                -- Inside that bucket -- or at a literal 0/NULL -- it can't tell a 300-owner game
+                -- from a 19k one, and every new release sits there until SteamSpy catches up. So
+                -- whenever we have reviews AND SteamSpy hasn't resolved the game above 20k,
+                -- substitute the reviews-based Boxleiter estimate. Rows SteamSpy placed in a
+                -- higher bucket (owners_mid > 10k) pass through untouched.
+                (g.total_reviews > 0
+                    AND (g.owners_mid_steamspy IS NULL OR g.owners_mid_steamspy <= 10000)) AS owners_is_floor_estimate,
+                g.total_reviews * COALESCE(gb.owners_multiplier, ab.owners_multiplier, @BOXLEITER_MID@) AS reviews_owner_est
             FROM _stg_game_reconciled g
             LEFT JOIN stg_primary_genre pg ON pg.appid = g.appid
             LEFT JOIN stg_genre_boxleiter gb ON gb.genre = pg.primary_genre
@@ -437,9 +443,11 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
             g.total_reviews, g.positive_reviews, g.negative_reviews, g.positive_ratio,
             g.review_count_source,
             gp.owners_is_floor_estimate,
-            CASE WHEN gp.owners_is_floor_estimate THEN g.total_reviews * gp.owners_multiplier
+            -- Bottom-bucket / zero / stale rows (flagged above) take the reviews-based Boxleiter
+            -- estimate; SteamSpy-resolved rows (>20k) keep their measured owners. Lower bound.
+            CASE WHEN gp.owners_is_floor_estimate THEN gp.reviews_owner_est
                  ELSE g.owners_mid_steamspy END AS owners_mid,
-            CASE WHEN gp.owners_is_floor_estimate THEN (g.total_reviews * gp.owners_multiplier) * g.price_initial
+            CASE WHEN gp.owners_is_floor_estimate THEN gp.reviews_owner_est * g.price_initial
                  ELSE g.est_rev_owners_steamspy END AS est_rev_owners,
             g.est_rev_reviews,
             g.avg_playtime_forever, g.ccu, g.tag_count
