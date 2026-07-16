@@ -1254,3 +1254,103 @@ export function useChannelBuzz(direction: "rising" | "cooling", limit = 20) {
     staleTime: 5 * 60_000,
   });
 }
+
+// ---- account / settings (Track G2 — profile, saved-view/API-key management, usage) -----
+export interface AccountOrg {
+  name: string;
+  slug: string;
+  plan: string;
+}
+
+export interface AccountUser {
+  email: string;
+  display_name: string | null;
+  member_since: string;
+}
+
+export interface AccountSubscription {
+  plan: string;
+  status: string;
+  current_period_end: string | null;
+}
+
+export interface AccountEntitlements {
+  plan: string;
+  can_export: boolean;
+  api_access: boolean;
+  max_saved_views: number | null;
+  max_watchlist_items: number | null;
+  max_niche_rows: number | null;
+}
+
+export interface AccountCounts {
+  saved_views: number;
+  watchlist_items: number;
+  api_keys_active: number;
+}
+
+export interface Account {
+  org: AccountOrg;
+  user: AccountUser;
+  subscription: AccountSubscription;
+  entitlements: AccountEntitlements;
+  counts: AccountCounts;
+}
+
+export function useAccount() {
+  return useQuery({ queryKey: ["account"], queryFn: () => request<Account>("/account") });
+}
+
+export interface ApiKeySummary {
+  id: number;
+  name: string;
+  prefix: string;
+  active: boolean;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+// Only the create response ever carries `secret` — the plaintext is never stored server-side
+// and cannot be fetched again, so this shape is deliberately distinct from ApiKeySummary.
+export interface ApiKeyCreated extends ApiKeySummary {
+  secret: string;
+}
+
+export function useApiKeys() {
+  return useQuery({ queryKey: ["api-keys"], queryFn: () => request<ApiKeySummary[]>("/account/api-keys") });
+}
+
+export function useCreateApiKey() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { name: string }) =>
+      request<ApiKeyCreated>("/account/api-keys", { method: "POST", body: JSON.stringify(body) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["api-keys"] });
+      qc.invalidateQueries({ queryKey: ["account"] });
+    },
+  });
+}
+
+export function useRevokeApiKey() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => request<ApiKeySummary>(`/account/api-keys/${id}/revoke`, { method: "POST" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["api-keys"] });
+      qc.invalidateQueries({ queryKey: ["account"] });
+    },
+  });
+}
+
+export interface UsageSummary {
+  saved_views: number;
+  watchlist_items: number;
+  api_keys_active: number;
+  tracking_available: boolean;
+  note: string;
+}
+
+export function useUsage() {
+  return useQuery({ queryKey: ["usage"], queryFn: () => request<UsageSummary>("/account/usage") });
+}

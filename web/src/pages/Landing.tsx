@@ -271,6 +271,11 @@ export default function Landing() {
             </span>
             Prospect
           </span>
+          <span className="foot-links">
+            <Link to="/docs">Docs</Link>
+            <Link to="/terms">Terms</Link>
+            <Link to="/privacy">Privacy</Link>
+          </span>
           <span className="foot-note">Steam market intelligence for solo &amp; indie developers.</span>
           <span className="foot-note r">Built on public Steam data · not affiliated with Valve</span>
         </div>

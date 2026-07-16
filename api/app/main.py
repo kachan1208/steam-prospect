@@ -10,7 +10,7 @@ from . import analytics_db
 from .config import settings
 from .control_db import init_db
 from .observability import setup_observability
-from .routers import alerts, chat, estimate, explore, games, health, market, marketing, niches, press, seasonality, views, watchlist
+from .routers import account, alerts, chat, estimate, explore, games, health, market, marketing, niches, press, seasonality, views, watchlist
 
 
 @asynccontextmanager
@@ -56,6 +56,7 @@ app.include_router(marketing.router)
 app.include_router(explore.router)
 app.include_router(chat.router)
 app.include_router(alerts.router)
+app.include_router(account.router)
 
 # Alias the plan's canonical CSV export path to the niches export handler.
 app.add_api_route(
