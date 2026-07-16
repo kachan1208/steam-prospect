@@ -522,6 +522,18 @@ html {
   font-family: var(--l-mono);
   font-size: 11.5px;
 }
+.landing .foot-links {
+  display: flex;
+  gap: 16px;
+}
+.landing .foot-links a {
+  font-size: 13px;
+  color: var(--muted);
+  text-decoration: none;
+}
+.landing .foot-links a:hover {
+  color: var(--ink);
+}
 
 @media (max-width: 860px) {
   .landing .hero-grid {

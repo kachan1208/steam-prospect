@@ -1,6 +1,6 @@
-import { Link, NavLink, Outlet, Route, Routes } from "react-router-dom";
+import { Link, NavLink, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import clsx from "clsx";
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 
 import { useHealth } from "./lib/api";
 import { useTheme, ACCENTS, PRESETS } from "./lib/theme";
@@ -15,6 +15,11 @@ import WatchlistPage from "./pages/Watchlist";
 import Explorer from "./pages/Explorer";
 import Chat from "./pages/Chat";
 import Landing from "./pages/Landing";
+import Onboarding, { ONBOARDING_STORAGE_KEY } from "./pages/Onboarding";
+import Settings from "./pages/Settings";
+import Docs from "./pages/Docs";
+import Terms from "./pages/Terms";
+import Privacy from "./pages/Privacy";
 
 const ICONS: Record<string, ReactNode> = {
   compass: (
@@ -72,6 +77,24 @@ const ICONS: Record<string, ReactNode> = {
   chat: (
     <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5Z" />
   ),
+  flag: (
+    <>
+      <path d="M6 21V4" />
+      <path d="M6 4h11l-2.5 3.5L17 11H6" />
+    </>
+  ),
+  gear: (
+    <>
+      <circle cx="12" cy="12" r="3.2" />
+      <path d="M12 3.5v2.2M12 18.3v2.2M20.5 12h-2.2M5.7 12H3.5M17.7 6.3l-1.55 1.55M7.85 16.15 6.3 17.7M17.7 17.7l-1.55-1.55M7.85 7.85 6.3 6.3" />
+    </>
+  ),
+  book: (
+    <>
+      <path d="M4 5.5c0-1 .9-1.8 2-1.8h5.5v15.6H6c-1.1 0-2 .3-2 1.2V5.5Z" />
+      <path d="M20 5.5c0-1-.9-1.8-2-1.8h-5.5v15.6H18c1.1 0 2 .3 2 1.2V5.5Z" />
+    </>
+  ),
 };
 
 function Icon({ name }: { name: string }) {
@@ -91,6 +114,10 @@ function Icon({ name }: { name: string }) {
 }
 
 const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: string; end?: boolean }[] }[] = [
+  {
+    label: "Guide",
+    items: [{ to: "/welcome", label: "Getting Started", icon: "flag" }],
+  },
   {
     label: "Discover",
     items: [
@@ -116,6 +143,13 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: str
     items: [
       { to: "/watchlist", label: "Watchlist", icon: "bookmark" },
       { to: "/chat", label: "Chat", icon: "chat" },
+    ],
+  },
+  {
+    label: "Account",
+    items: [
+      { to: "/settings", label: "Settings", icon: "gear" },
+      { to: "/docs", label: "Docs", icon: "book" },
     ],
   },
 ];
@@ -283,12 +317,39 @@ function Sidebar() {
           </div>
           <ThemeToggle />
         </div>
+        <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-[10px] text-ink-muted">
+          <Link to="/docs" className="hover:text-ink-secondary">
+            Docs
+          </Link>
+          <span aria-hidden="true">·</span>
+          <Link to="/terms" className="hover:text-ink-secondary">
+            Terms
+          </Link>
+          <span aria-hidden="true">·</span>
+          <Link to="/privacy" className="hover:text-ink-secondary">
+            Privacy
+          </Link>
+        </div>
       </div>
     </aside>
   );
 }
 
 function AppShell() {
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  // First-run only: a brand-new session landing on the default /niches entry gets sent to
+  // the welcome tour once. Onboarding sets ONBOARDING_STORAGE_KEY on every exit action, so
+  // this never re-fires and never touches a direct/deep link (only the canonical /niches
+  // entry point is redirected).
+  useEffect(() => {
+    if (location.pathname === "/niches" && !window.localStorage.getItem(ONBOARDING_STORAGE_KEY)) {
+      navigate("/welcome", { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <div className="flex h-full bg-page">
       <Sidebar />
@@ -305,6 +366,8 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<Landing />} />
+      <Route path="/terms" element={<Terms />} />
+      <Route path="/privacy" element={<Privacy />} />
       <Route element={<AppShell />}>
         <Route path="/niches" element={<NicheFinder />} />
         <Route path="/benchmarks" element={<MarketBenchmarks />} />
@@ -316,6 +379,13 @@ export default function App() {
         <Route path="/watchlist" element={<WatchlistPage />} />
         <Route path="/explorer" element={<Explorer />} />
         <Route path="/chat" element={<Chat />} />
+        <Route path="/welcome" element={<Onboarding />} />
+        <Route path="/settings" element={<Settings />} />
+        <Route path="/settings/views" element={<Settings />} />
+        <Route path="/settings/api-keys" element={<Settings />} />
+        <Route path="/settings/usage" element={<Settings />} />
+        <Route path="/docs" element={<Docs />} />
+        <Route path="/docs/:slug" element={<Docs />} />
       </Route>
     </Routes>
   );

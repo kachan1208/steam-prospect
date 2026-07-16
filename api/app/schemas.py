@@ -579,3 +579,75 @@ class ChatRequest(BaseModel):
 class ChatStatus(BaseModel):
     ready: bool
     model: str
+
+
+# ---- account / settings (Track G2 — profile, saved-view/API-key management, usage) ----
+class AccountOrg(BaseModel):
+    name: str
+    slug: str
+    plan: str
+
+
+class AccountUser(BaseModel):
+    email: str
+    display_name: Optional[str] = None
+    member_since: str
+
+
+class AccountSubscription(BaseModel):
+    plan: str
+    status: str
+    current_period_end: Optional[str] = None
+
+
+class AccountEntitlements(BaseModel):
+    plan: str
+    can_export: bool
+    api_access: bool
+    max_saved_views: Optional[int] = None
+    max_watchlist_items: Optional[int] = None
+    max_niche_rows: Optional[int] = None
+
+
+class AccountCounts(BaseModel):
+    saved_views: int
+    watchlist_items: int
+    api_keys_active: int
+
+
+class AccountOut(BaseModel):
+    org: AccountOrg
+    user: AccountUser
+    subscription: AccountSubscription
+    entitlements: AccountEntitlements
+    counts: AccountCounts
+
+
+class ApiKeyIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class ApiKeyOut(BaseModel):
+    id: int
+    name: str
+    prefix: str
+    active: bool
+    created_at: str
+    last_used_at: Optional[str] = None
+
+
+class ApiKeyCreated(ApiKeyOut):
+    # Only ever populated on the creation response — the plaintext secret is never stored
+    # (only its hash is) and cannot be retrieved again after this response.
+    secret: str
+
+
+class UsageOut(BaseModel):
+    # Real counts, read straight from the control-plane tables.
+    saved_views: int
+    watchlist_items: int
+    api_keys_active: int
+    # Per-query/export/chat-message activity needs a request-level usage log (Track O5,
+    # not built yet) — surfaced honestly rather than faked; see `note`.
+    tracking_available: bool
+    note: str
