@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "prospect-market-intel": {
+      "command": "/Users/maximbaginskiy/hobby/prospect-wt-c/mcp/.venv/bin/python3",
+      "args": ["/Users/maximbaginskiy/hobby/prospect-wt-c/mcp/prospect_mcp.py"]
+    }
+  }
+}
