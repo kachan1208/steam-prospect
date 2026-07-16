@@ -12,6 +12,7 @@ import GameProfile from "./pages/GameProfile";
 import Press from "./pages/Press";
 import WatchlistPage from "./pages/Watchlist";
 import Explorer from "./pages/Explorer";
+import Chat from "./pages/Chat";
 
 const NAV_ITEMS = [
   { to: "/", label: "Niche Finder", end: true },
@@ -22,6 +23,7 @@ const NAV_ITEMS = [
   { to: "/press", label: "Press" },
   { to: "/watchlist", label: "Watchlist" },
   { to: "/explorer", label: "Explorer" },
+  { to: "/chat", label: "Chat" },
 ];
 
 function ThemeToggle() {
@@ -107,6 +109,7 @@ export default function App() {
           <Route path="/press" element={<Press />} />
           <Route path="/watchlist" element={<WatchlistPage />} />
           <Route path="/explorer" element={<Explorer />} />
+          <Route path="/chat" element={<Chat />} />
         </Routes>
       </main>
     </div>
