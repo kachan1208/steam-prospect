@@ -25,12 +25,32 @@ const MEASURES: { key: Measure; label: string }[] = [
 export function ChannelMixChart({ rows }: { rows: ChannelMixRow[] }) {
   const [measure, setMeasure] = useState<Measure>("share_reach_weighted");
 
+  // Aggregate by channel so one bar/legend entry per channel — robust whether we're handed a
+  // single genre's rows or the all-genres response (which carries one row per channel PER
+  // genre). Copies rows (never mutates the query cache); shares are recomputed on the totals.
+  const byChannel = useMemo(() => {
+    const m = new Map<string, ChannelMixRow>();
+    for (const r of rows) {
+      const cur = m.get(r.channel);
+      if (!cur) m.set(r.channel, { ...r });
+      else {
+        cur.n_mentions += r.n_mentions;
+        cur.reach_weighted += r.reach_weighted;
+      }
+    }
+    const agg = [...m.values()];
+    const totMentions = agg.reduce((s, r) => s + r.n_mentions, 0) || 1;
+    const totReach = agg.reduce((s, r) => s + r.reach_weighted, 0) || 1;
+    for (const r of agg) {
+      r.share_mentions = r.n_mentions / totMentions;
+      r.share_reach_weighted = r.reach_weighted / totReach;
+    }
+    return agg;
+  }, [rows]);
+
   const data = useMemo(
-    () =>
-      [...rows]
-        .filter((r) => r[measure] !== null)
-        .sort((a, b) => (b[measure] ?? 0) - (a[measure] ?? 0)),
-    [rows, measure],
+    () => byChannel.filter((r) => r[measure] !== null).sort((a, b) => (b[measure] ?? 0) - (a[measure] ?? 0)),
+    [byChannel, measure],
   );
 
   if (rows.length === 0) {
@@ -104,7 +124,7 @@ export function ChannelMixChart({ rows }: { rows: ChannelMixRow[] }) {
         </BarChart>
       </ResponsiveContainer>
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[10px] text-ink-muted">
-        {[...rows].sort((a, b) => channelSortOrder(a.channel) - channelSortOrder(b.channel)).map((r) => (
+        {[...byChannel].sort((a, b) => channelSortOrder(a.channel) - channelSortOrder(b.channel)).map((r) => (
           <span key={r.channel} className="inline-flex items-center gap-1.5">
             <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: channelColor(r.channel) }} />
             {channelLabel(r.channel)}
