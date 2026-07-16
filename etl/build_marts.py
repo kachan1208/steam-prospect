@@ -41,6 +41,14 @@ MARKET_MIN_REVIEWS = 1           # market distribution floor: >=1 review = measu
                                  # (deliberately lower than the niche floor so the long tail
                                  #  and the cited $249 / $100K benchmark marks stay visible)
 
+# Review-count reconciliation (SteamSpy vs. the actual scraped `reviews` table). SteamSpy
+# lags badly for new releases -- it can sit at total_reviews=0 for weeks/months after
+# launch while our own scraper already holds real, current review data for the same game.
+# See stg_game in create_staging() below for the reconciliation itself.
+BOXLEITER_OWNERS_PER_REVIEW_MIN = 20   # mirrors api/app/benchmarks.py's "New Boxleiter"
+BOXLEITER_OWNERS_PER_REVIEW_MID = 30   # 20-55 owners/review band -- used here to floor
+BOXLEITER_OWNERS_PER_REVIEW_MAX = 55   # owners_mid when SteamSpy reports zero. Keep in sync.
+
 # Opportunity score weights (also documented in benchmarks.py).
 W_DEMAND = 0.50
 W_COMPETITION = 0.35
@@ -184,6 +192,9 @@ def build_params() -> dict[str, str]:
         "TOP_GAMES_PER_NICHE": TOP_GAMES_PER_NICHE,
         "MARKET_MIN_GENRE_GAMES": MARKET_MIN_GENRE_GAMES,
         "MARKET_MIN_REVIEWS": MARKET_MIN_REVIEWS,
+        "BOXLEITER_MIN": BOXLEITER_OWNERS_PER_REVIEW_MIN,
+        "BOXLEITER_MID": BOXLEITER_OWNERS_PER_REVIEW_MID,
+        "BOXLEITER_MAX": BOXLEITER_OWNERS_PER_REVIEW_MAX,
         "W_DEMAND": W_DEMAND,
         "W_COMPETITION": W_COMPETITION,
         "W_QUALITY": W_QUALITY,
@@ -237,24 +248,6 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
 
     staging_sql = render(
         """
-        CREATE TEMP TABLE stg_game AS
-        SELECT
-            ag.appid, ag.name, ag.release_year,
-            TRY_CAST(ag.release_date_iso AS DATE) AS release_date,
-            (TRY_CAST(ag.release_date_iso AS DATE) IS NOT NULL
-                AND TRY_CAST(ag.release_date_iso AS DATE) <= CURRENT_DATE
-                AND TRY_CAST(ag.release_date_iso AS DATE) >= DATE '1997-01-01') AS release_valid,
-            (TRY_CAST(ag.release_date_iso AS DATE) IS NOT NULL
-                AND TRY_CAST(ag.release_date_iso AS DATE) <= CURRENT_DATE
-                AND TRY_CAST(ag.release_date_iso AS DATE) >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH) AS is_recent,
-            ag.price_initial, ag.is_free, ag.developers, ag.publishers,
-            ag.self_published, ag.dev_game_count, ag.is_indie,
-            ag.metacritic_score, ag.achievements_count,
-            ag.owners_mid, ag.total_reviews, ag.positive_reviews, ag.negative_reviews,
-            ag.positive_ratio, ag.est_rev_reviews, ag.est_rev_owners,
-            ag.avg_playtime_forever, ag.ccu, ag.tag_count
-        FROM src.analysis_games ag;
-
         CREATE TEMP TABLE stg_tag_membership AS
         SELECT DISTINCT gt.appid, gt.tag
         FROM src.game_tags gt
@@ -267,6 +260,7 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         FROM src.game_genres gg
         WHERE gg.genre NOT IN (SELECT genre FROM denylist_genre);
 
+        -- Moved ahead of stg_game (below needs it for the owners-floor genre lookup).
         CREATE TEMP TABLE stg_primary_genre AS
         WITH g AS (
             SELECT gg.appid, gg.genre,
@@ -278,6 +272,178 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
             WHERE gg.genre NOT IN (SELECT genre FROM denylist_genre)
         )
         SELECT appid, genre AS primary_genre FROM g WHERE rn = 1;
+
+        -- Review-count reconciliation source: per-appid counts from the actual scraped
+        -- `reviews` table (already deduped at scrape time -- recommendationid PK / unique
+        -- content_hash), independent of stg_game so it can seed the reconciliation below.
+        CREATE TEMP TABLE stg_reviews_agg AS
+        SELECT
+            r.appid,
+            COUNT(*) AS reviews_table_count,
+            SUM(CASE WHEN r.voted_up = 1 THEN 1 ELSE 0 END) AS reviews_table_positive,
+            SUM(CASE WHEN r.voted_up = 0 THEN 1 ELSE 0 END) AS reviews_table_negative
+        FROM src.reviews r
+        GROUP BY r.appid;
+
+        -- Pass 1: reconcile SteamSpy's review counts (analysis_games.total_reviews /
+        -- positive_reviews / negative_reviews / positive_ratio) against stg_reviews_agg.
+        -- SteamSpy is a third-party aggregator that lags badly for new releases -- it can
+        -- sit at total_reviews=0 for weeks/months after launch while our own scraper
+        -- (which hits Steam's review API directly) already holds hundreds of real reviews
+        -- for the same game. total_reviews = GREATEST(steamspy, reviews-table) so we never
+        -- regress below whichever source has seen more. Whenever the reviews-table count
+        -- is the one GREATEST picked, positive/negative/positive_ratio are derived from the
+        -- reviews table too (so positive+negative always sums to total_reviews instead of a
+        -- stale SteamSpy split hanging off a bumped total); otherwise SteamSpy's own numbers
+        -- pass through untouched. review_count_source records which happened:
+        --   'steamspy'       SteamSpy's count >= the reviews-table count (the common case,
+        --                     esp. older/popular titles where our scraper only holds a
+        --                     bounded sample) -> nothing changed.
+        --   'reviews_sample' SteamSpy reported 0/NULL but the reviews table has rows ->
+        --                     total/positive/negative/ratio are entirely reviews-table-derived.
+        --   'reconciled'     SteamSpy had SOME reviews but the reviews table has more (a
+        --                     partial lag) -> same reviews-table derivation as above, just
+        --                     starting from a nonzero SteamSpy baseline.
+        -- These reviews-derived counts are an honest LOWER BOUND, same caveat as stg_review
+        -- elsewhere: the reviews table is a per-game sample, not Steam's full review set.
+        --
+        -- est_rev_reviews (Boxleiter gross = total_reviews * 30 * price_initial) is
+        -- recomputed here from the reconciled total_reviews -- leaving it at
+        -- analysis_games' stale value would strand a $0 revenue estimate on every game
+        -- this fixes, which is exactly the bug. est_rev_owners is untouched here; see the
+        -- owners floor in stg_game below, which only overwrites the true SteamSpy zeros.
+        CREATE TEMP TABLE _stg_game_reconciled AS
+        WITH base AS (
+            SELECT
+                ag.appid, ag.name, ag.release_year,
+                TRY_CAST(ag.release_date_iso AS DATE) AS release_date,
+                ag.price_initial, ag.is_free, ag.developers, ag.publishers,
+                ag.self_published, ag.dev_game_count, ag.is_indie,
+                ag.metacritic_score, ag.achievements_count,
+                ag.owners_mid AS owners_mid_steamspy,
+                ag.est_rev_owners AS est_rev_owners_steamspy,
+                ag.avg_playtime_forever, ag.ccu, ag.tag_count,
+                COALESCE(ag.total_reviews, 0) AS ss_total_reviews,
+                ag.positive_reviews AS ss_positive_reviews,
+                ag.negative_reviews AS ss_negative_reviews,
+                ag.positive_ratio AS ss_positive_ratio,
+                COALESCE(ra.reviews_table_count, 0) AS reviews_table_count,
+                COALESCE(ra.reviews_table_positive, 0) AS reviews_table_positive,
+                COALESCE(ra.reviews_table_negative, 0) AS reviews_table_negative
+            FROM src.analysis_games ag
+            LEFT JOIN stg_reviews_agg ra ON ra.appid = ag.appid
+        )
+        SELECT
+            appid, name, release_year, release_date,
+            price_initial, is_free, developers, publishers,
+            self_published, dev_game_count, is_indie,
+            metacritic_score, achievements_count,
+            owners_mid_steamspy, est_rev_owners_steamspy,
+            avg_playtime_forever, ccu, tag_count,
+            CASE
+                WHEN reviews_table_count <= ss_total_reviews THEN 'steamspy'
+                WHEN ss_total_reviews = 0 THEN 'reviews_sample'
+                ELSE 'reconciled'
+            END AS review_count_source,
+            GREATEST(ss_total_reviews, reviews_table_count) AS total_reviews,
+            CASE WHEN reviews_table_count > ss_total_reviews THEN reviews_table_positive
+                 ELSE ss_positive_reviews END AS positive_reviews,
+            CASE WHEN reviews_table_count > ss_total_reviews THEN reviews_table_negative
+                 ELSE ss_negative_reviews END AS negative_reviews,
+            CASE WHEN reviews_table_count > ss_total_reviews
+                 THEN CASE WHEN reviews_table_positive + reviews_table_negative > 0
+                           THEN reviews_table_positive * 1.0 / (reviews_table_positive + reviews_table_negative)
+                           ELSE NULL END
+                 ELSE ss_positive_ratio END AS positive_ratio,
+            GREATEST(ss_total_reviews, reviews_table_count) * 30 * price_initial AS est_rev_reviews
+        FROM base;
+
+        -- Genre Boxleiter multiplier (owners per review), computed ONCE here -- pre-floor,
+        -- so every input row is a REAL SteamSpy owners_mid observation, never a value this
+        -- same ETL estimated (that would self-reinforce: a floored row's owners_mid is
+        -- total_reviews * this multiplier by construction, so feeding it back into the fit
+        -- would just pull the "official" slope toward whatever it already was). Same
+        -- population shape as the original mart_market_boxleiter query (stg_genre_membership
+        -- -- a game trains every genre it belongs to -- plus an '__all__' pooled row), just
+        -- using the review-count-reconciled total_reviews from _stg_game_reconciled above.
+        -- mart_market.sql's mart_market_boxleiter materializes straight from this table
+        -- (no recomputation), so there is exactly one definition of "the genre Boxleiter
+        -- multiplier the app already computes" -- used both to floor owners below AND as
+        -- the api/app/routers/estimate.py-facing mart.
+        CREATE TEMP TABLE stg_genre_boxleiter AS
+        WITH fit AS (
+            SELECT '__all__' AS genre, g.owners_mid_steamspy AS owners_mid, g.total_reviews
+            FROM _stg_game_reconciled g
+            WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@ AND g.owners_mid_steamspy > 0
+            UNION ALL
+            SELECT gm.genre, g.owners_mid_steamspy, g.total_reviews
+            FROM stg_genre_membership gm
+            JOIN _stg_game_reconciled g ON g.appid = gm.appid
+            WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@ AND g.owners_mid_steamspy > 0
+        )
+        SELECT genre,
+            COUNT(*) AS n,
+            median(owners_mid * 1.0 / total_reviews) AS owners_per_review_median,
+            quantile_cont(owners_mid * 1.0 / total_reviews, 0.25) AS owners_per_review_p25,
+            quantile_cont(owners_mid * 1.0 / total_reviews, 0.75) AS owners_per_review_p75,
+            regr_slope(owners_mid, total_reviews) AS slope,
+            regr_intercept(owners_mid, total_reviews) AS intercept,
+            -- Clamped to the app's cited "New Boxleiter" band before use as a flooring
+            -- multiplier -- guards against a noisy/degenerate per-genre fit (sparse genre,
+            -- a NULL slope) producing an absurd owners estimate. Internal to the ETL only;
+            -- mart_market_boxleiter below still exposes the raw unclamped slope.
+            LEAST(@BOXLEITER_MAX@, GREATEST(@BOXLEITER_MIN@,
+                COALESCE(regr_slope(owners_mid, total_reviews), @BOXLEITER_MID@))) AS owners_multiplier
+        FROM fit
+        GROUP BY genre
+        HAVING COUNT(*) >= @MARKET_MIN_GENRE_GAMES@ OR genre = '__all__';
+
+        -- Pass 2: floor owners_mid/est_rev_owners where SteamSpy reports zero owners but
+        -- the reconciled review count (above) is > 0 -- i.e. a game SteamSpy hasn't
+        -- surfaced owner data for at all, but that demonstrably has real players/reviews.
+        -- owners_mid ~= total_reviews * (this game's genre Boxleiter multiplier, falling
+        -- back to '__all__' then the literal MID constant); revenue = owners * price.
+        -- Only the true zeros are touched -- any row with existing SteamSpy owners_mid
+        -- passes through unchanged (owners_is_floor_estimate = FALSE), so this never
+        -- overwrites good SteamSpy owner data. owners_is_floor_estimate is internal
+        -- plumbing (not exposed on any mart) that keeps mart_market_boxleiter's regression
+        -- fit -- see above -- from training on its own output; the appid-grain marts
+        -- (mart_game, mart_niche_top) instead expose review_count_source, which -- given
+        -- owners=0/NULL only ever coincides with SteamSpy also reporting 0 reviews in this
+        -- catalog -- is 'reviews_sample' for every row this floor touches.
+        CREATE TEMP TABLE stg_game AS
+        WITH genre_pick AS (
+            SELECT g.appid,
+                ((g.owners_mid_steamspy IS NULL OR g.owners_mid_steamspy = 0)
+                    AND g.total_reviews > 0) AS owners_is_floor_estimate,
+                COALESCE(gb.owners_multiplier, ab.owners_multiplier, @BOXLEITER_MID@) AS owners_multiplier
+            FROM _stg_game_reconciled g
+            LEFT JOIN stg_primary_genre pg ON pg.appid = g.appid
+            LEFT JOIN stg_genre_boxleiter gb ON gb.genre = pg.primary_genre
+            LEFT JOIN stg_genre_boxleiter ab ON ab.genre = '__all__'
+        )
+        SELECT
+            g.appid, g.name, g.release_year, g.release_date,
+            (g.release_date IS NOT NULL
+                AND g.release_date <= CURRENT_DATE
+                AND g.release_date >= DATE '1997-01-01') AS release_valid,
+            (g.release_date IS NOT NULL
+                AND g.release_date <= CURRENT_DATE
+                AND g.release_date >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH) AS is_recent,
+            g.price_initial, g.is_free, g.developers, g.publishers,
+            g.self_published, g.dev_game_count, g.is_indie,
+            g.metacritic_score, g.achievements_count,
+            g.total_reviews, g.positive_reviews, g.negative_reviews, g.positive_ratio,
+            g.review_count_source,
+            gp.owners_is_floor_estimate,
+            CASE WHEN gp.owners_is_floor_estimate THEN g.total_reviews * gp.owners_multiplier
+                 ELSE g.owners_mid_steamspy END AS owners_mid,
+            CASE WHEN gp.owners_is_floor_estimate THEN (g.total_reviews * gp.owners_multiplier) * g.price_initial
+                 ELSE g.est_rev_owners_steamspy END AS est_rev_owners,
+            g.est_rev_reviews,
+            g.avg_playtime_forever, g.ccu, g.tag_count
+        FROM _stg_game_reconciled g
+        JOIN genre_pick gp ON gp.appid = g.appid;
 
         CREATE TEMP TABLE stg_review_dsr AS
         SELECT r.appid,
@@ -343,9 +509,13 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
         "SELECT median(est_rev_reviews) FROM stg_game "
         "WHERE total_reviews >= 1 AND price_initial > 0 AND est_rev_reviews IS NOT NULL"
     ).fetchone()[0]
+    # Read straight from stg_genre_boxleiter (computed pre-owners-floor -- see
+    # create_staging()) rather than recomputing regr_slope() over stg_game directly: the
+    # latter would now include floor-estimated owners_mid rows, whose owners_mid/
+    # total_reviews ratio is exactly the flooring multiplier by construction, quietly
+    # pulling this headline slope toward whatever it already was.
     boxleiter_slope = con.execute(
-        "SELECT regr_slope(owners_mid, total_reviews) FROM stg_game "
-        "WHERE total_reviews >= ? AND owners_mid > 0", [MIN_REVIEWS_DEFAULT]
+        "SELECT slope FROM stg_genre_boxleiter WHERE genre = '__all__'"
     ).fetchone()[0]
 
     rows = {

@@ -105,23 +105,15 @@ SELECT tier,
 FROM o
 GROUP BY tier;
 
+-- Materialized straight from stg_genre_boxleiter (build_marts.py's create_staging()) --
+-- NOT recomputed here. That table is deliberately built pre-owners-floor, over real
+-- SteamSpy owners_mid observations only: some games now get owners_mid/est_rev_owners
+-- floor-estimated from total_reviews x this very multiplier (see stg_game), and feeding
+-- those manufactured rows back into this regression would partly fit it to itself. Same
+-- population/formula as before this reconciliation shipped (stg_genre_membership joined
+-- to games with total_reviews >= @MIN_REVIEWS_DEFAULT@ and owners_mid > 0), just with
+-- total_reviews now reconciled against the actual `reviews` table -- see stg_game.
 CREATE TABLE mart_market_boxleiter AS
-WITH base AS (
-    SELECT '__all__' AS genre, owners_mid, total_reviews
-    FROM stg_game WHERE total_reviews >= @MIN_REVIEWS_DEFAULT@ AND owners_mid > 0
-    UNION ALL
-    SELECT gm.genre, g.owners_mid, g.total_reviews
-    FROM stg_genre_membership gm
-    JOIN stg_game g ON g.appid = gm.appid
-    WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@ AND g.owners_mid > 0
-)
-SELECT genre,
-    COUNT(*) AS n,
-    median(owners_mid * 1.0 / total_reviews) AS owners_per_review_median,
-    quantile_cont(owners_mid * 1.0 / total_reviews, 0.25) AS owners_per_review_p25,
-    quantile_cont(owners_mid * 1.0 / total_reviews, 0.75) AS owners_per_review_p75,
-    regr_slope(owners_mid, total_reviews) AS slope,
-    regr_intercept(owners_mid, total_reviews) AS intercept
-FROM base
-GROUP BY genre
-HAVING COUNT(*) >= @MARKET_MIN_GENRE_GAMES@ OR genre = '__all__';
+SELECT genre, n, owners_per_review_median, owners_per_review_p25, owners_per_review_p75,
+    slope, intercept
+FROM stg_genre_boxleiter;
