@@ -330,9 +330,15 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
                 ag.positive_ratio AS ss_positive_ratio,
                 COALESCE(ra.reviews_table_count, 0) AS reviews_table_count,
                 COALESCE(ra.reviews_table_positive, 0) AS reviews_table_positive,
-                COALESCE(ra.reviews_table_negative, 0) AS reviews_table_negative
+                COALESCE(ra.reviews_table_negative, 0) AS reviews_table_negative,
+                -- Ground truth: Steam's own review-summary totals (backfill_review_summary.py).
+                -- Present -> authoritative (exact counts, not SteamSpy and not our sample cap).
+                rs.total_reviews AS api_total_reviews,
+                rs.total_positive AS api_positive,
+                rs.total_negative AS api_negative
             FROM src.analysis_games ag
             LEFT JOIN stg_reviews_agg ra ON ra.appid = ag.appid
+            LEFT JOIN src.review_summary rs ON rs.appid = ag.appid
         )
         SELECT
             appid, name, release_year, release_date,
@@ -342,21 +348,28 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
             owners_mid_steamspy, est_rev_owners_steamspy,
             avg_playtime_forever, ccu, tag_count,
             CASE
+                WHEN api_total_reviews IS NOT NULL THEN 'steam_api'
                 WHEN reviews_table_count <= ss_total_reviews THEN 'steamspy'
                 WHEN ss_total_reviews = 0 THEN 'reviews_sample'
                 ELSE 'reconciled'
             END AS review_count_source,
-            GREATEST(ss_total_reviews, reviews_table_count) AS total_reviews,
-            CASE WHEN reviews_table_count > ss_total_reviews THEN reviews_table_positive
+            COALESCE(api_total_reviews, GREATEST(ss_total_reviews, reviews_table_count)) AS total_reviews,
+            CASE WHEN api_total_reviews IS NOT NULL THEN api_positive
+                 WHEN reviews_table_count > ss_total_reviews THEN reviews_table_positive
                  ELSE ss_positive_reviews END AS positive_reviews,
-            CASE WHEN reviews_table_count > ss_total_reviews THEN reviews_table_negative
+            CASE WHEN api_total_reviews IS NOT NULL THEN api_negative
+                 WHEN reviews_table_count > ss_total_reviews THEN reviews_table_negative
                  ELSE ss_negative_reviews END AS negative_reviews,
-            CASE WHEN reviews_table_count > ss_total_reviews
-                 THEN CASE WHEN reviews_table_positive + reviews_table_negative > 0
-                           THEN reviews_table_positive * 1.0 / (reviews_table_positive + reviews_table_negative)
-                           ELSE NULL END
-                 ELSE ss_positive_ratio END AS positive_ratio,
-            GREATEST(ss_total_reviews, reviews_table_count) * 30 * price_initial AS est_rev_reviews
+            CASE
+                WHEN api_total_reviews IS NOT NULL
+                     THEN CASE WHEN api_positive + api_negative > 0
+                               THEN api_positive * 1.0 / (api_positive + api_negative) ELSE NULL END
+                WHEN reviews_table_count > ss_total_reviews
+                     THEN CASE WHEN reviews_table_positive + reviews_table_negative > 0
+                               THEN reviews_table_positive * 1.0 / (reviews_table_positive + reviews_table_negative)
+                               ELSE NULL END
+                ELSE ss_positive_ratio END AS positive_ratio,
+            COALESCE(api_total_reviews, GREATEST(ss_total_reviews, reviews_table_count)) * 30 * price_initial AS est_rev_reviews
         FROM base;
 
         -- Genre Boxleiter multiplier (owners per review), computed ONCE here -- pre-floor,
