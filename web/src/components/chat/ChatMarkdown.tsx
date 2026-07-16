@@ -59,6 +59,12 @@ export function ChatMarkdown({ text }: { text: string }) {
   let i = 0;
   let blockKey = 0;
 
+  // A line begins a table only if it's a "| … |" row immediately followed by a "|---|"
+  // separator row. Mid-stream, a header row often arrives BEFORE its separator — such a line
+  // is not (yet) a table and must fall through to the paragraph branch.
+  const isTableStart = (n: number) =>
+    lines[n].trim().startsWith("|") && n + 1 < lines.length && isTableSeparator(lines[n + 1]);
+
   while (i < lines.length) {
     const line = lines[i];
 
@@ -68,7 +74,7 @@ export function ChatMarkdown({ text }: { text: string }) {
     }
 
     // Table: a "| ... |" row followed by a "| --- | --- |" separator row.
-    if (line.trim().startsWith("|") && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+    if (isTableStart(i)) {
       const header = splitRow(line);
       i += 2;
       const rows: string[][] = [];
@@ -151,18 +157,22 @@ export function ChatMarkdown({ text }: { text: string }) {
     }
 
     // Paragraph: consume consecutive plain lines, joining with <br /> for soft line breaks.
+    // do/while (not while) so it ALWAYS consumes the current line and advances `i`. A line
+    // starting with "|" that isn't a completed table (a header row that streamed in before its
+    // separator) reaches here; the old `while` skipped it without advancing `i`, looping
+    // forever and growing blocks[] until the renderer ran out of memory ("Aw, Snap!").
     const paraLines: string[] = [];
-    while (
+    do {
+      paraLines.push(lines[i]);
+      i += 1;
+    } while (
       i < lines.length &&
       lines[i].trim() !== "" &&
-      !lines[i].trim().startsWith("|") &&
+      !isTableStart(i) &&
       !HEADING_RE.test(lines[i]) &&
       !BULLET_RE.test(lines[i]) &&
       !NUMBERED_RE.test(lines[i])
-    ) {
-      paraLines.push(lines[i]);
-      i += 1;
-    }
+    );
     blockKey += 1;
     blocks.push(
       <p key={`b${blockKey}`} className="my-1 leading-relaxed text-ink-secondary first:mt-0">
