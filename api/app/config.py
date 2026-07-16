@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # app -> api -> prospect
@@ -31,6 +32,13 @@ class Settings(BaseSettings):
 
     api_title: str = "Prospect API"
     api_version: str = "0.1.0"
+
+    # Analytics Chat (LLM tool-use over the marts, api/app/routers/chat.py). The API key
+    # intentionally has NO PROSPECT_ prefix (validation_alias overrides it) so it matches
+    # the Anthropic SDK's own env var name and api/.env can use the same key ChatGPT-style
+    # tools expect. chat_model still follows the normal prefix, i.e. PROSPECT_CHAT_MODEL.
+    anthropic_api_key: str | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
+    chat_model: str = "claude-haiku-4-5-20251001"
 
 
 settings = Settings()

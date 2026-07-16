@@ -5,3 +5,4 @@ sqlalchemy>=2.0
 pydantic>=2.7
 pydantic-settings>=2.3
 python-multipart>=0.0.9
+anthropic>=0.40

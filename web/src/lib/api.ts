@@ -1,3 +1,4 @@
+import { useCallback, useRef, useState } from "react";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 /**
@@ -868,4 +869,210 @@ export function useRemoveWatchlist() {
       qc.invalidateQueries({ queryKey: ["game-profile", appid] });
     },
   });
+}
+
+// ---- chat (Analytics Chat — Claude tool-use assistant over the marts) -------------------
+export interface ChatStatus {
+  ready: boolean;
+  model: string;
+}
+
+/** Cheap readiness probe — never calls the Anthropic API itself. Drives the Chat page's
+ * empty/no-key state so the user isn't shown a live composer that will just error out. */
+export function useChatStatus() {
+  return useQuery({
+    queryKey: ["chat-status"],
+    queryFn: () => request<ChatStatus>("/chat/status"),
+    staleTime: 30_000,
+    retry: 1,
+  });
+}
+
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface ChatStreamHandlers {
+  onText: (delta: string) => void;
+  onToolCall: (name: string, input: Record<string, unknown>) => void;
+  onToolResult: (name: string) => void;
+  onError: (message: string, code?: string) => void;
+  onDone: () => void;
+}
+
+/** Parse one `event: ...\ndata: ...` SSE record and dispatch it to the matching handler.
+ * Unknown event types or malformed JSON are ignored rather than thrown — a single bad
+ * chunk shouldn't kill the stream. */
+function dispatchSseRecord(record: string, handlers: ChatStreamHandlers): void {
+  let eventType = "message";
+  const dataLines: string[] = [];
+  for (const line of record.split("\n")) {
+    if (line.startsWith("event:")) eventType = line.slice("event:".length).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice("data:".length).trim());
+  }
+  if (dataLines.length === 0) return;
+
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(dataLines.join("\n")) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+
+  switch (eventType) {
+    case "text":
+      if (typeof payload.text === "string") handlers.onText(payload.text);
+      break;
+    case "tool_call":
+      if (typeof payload.name === "string") {
+        handlers.onToolCall(payload.name, (payload.input as Record<string, unknown>) ?? {});
+      }
+      break;
+    case "tool_result":
+      if (typeof payload.name === "string") handlers.onToolResult(payload.name);
+      break;
+    case "error":
+      handlers.onError(
+        typeof payload.message === "string" ? payload.message : "Chat error.",
+        typeof payload.code === "string" ? payload.code : undefined,
+      );
+      break;
+    case "done":
+      handlers.onDone();
+      break;
+    default:
+      break;
+  }
+}
+
+/** POST /api/chat and stream the SSE response, invoking `handlers` as events arrive.
+ * Fire-and-forget: kicks off the fetch/read loop and returns immediately with an
+ * AbortController the caller can use to cancel mid-stream. */
+function streamChatRequest(messages: ChatTurn[], handlers: ChatStreamHandlers): AbortController {
+  const controller = new AbortController();
+
+  void (async () => {
+    try {
+      const res = await fetch(`${API_BASE}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages }),
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) {
+        handlers.onError(`Chat request failed (HTTP ${res.status}).`);
+        handlers.onDone();
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE records are separated by a blank line.
+        let sep = buffer.indexOf("\n\n");
+        while (sep !== -1) {
+          const record = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          if (record.trim()) dispatchSseRecord(record, handlers);
+          sep = buffer.indexOf("\n\n");
+        }
+      }
+      if (buffer.trim()) dispatchSseRecord(buffer, handlers);
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      handlers.onError(err instanceof Error ? err.message : "Chat stream failed.");
+      handlers.onDone();
+    }
+  })();
+
+  return controller;
+}
+
+function appendToLastAssistant(prev: ChatTurn[], delta: string): ChatTurn[] {
+  if (prev.length === 0) return prev;
+  const next = prev.slice();
+  const last = next[next.length - 1];
+  next[next.length - 1] = { ...last, content: last.content + delta };
+  return next;
+}
+
+export interface UseChatStream {
+  turns: ChatTurn[];
+  isStreaming: boolean;
+  /** Name of the tool currently executing (drives the "calling find_niches…" indicator), or null. */
+  activeTool: string | null;
+  error: string | null;
+  send: (text: string) => void;
+  stop: () => void;
+  reset: () => void;
+}
+
+/** Streaming client hook for POST /api/chat. Owns the conversation array and drives the
+ * SSE tool-use loop — the Chat page just renders whatever this returns. The API is
+ * stateless, so `send` resends the full turn history (including the new user message)
+ * on every call, matching the Claude Messages API's own multi-turn convention. */
+export function useChatStream(): UseChatStream {
+  const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [activeTool, setActiveTool] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const controllerRef = useRef<AbortController | null>(null);
+  const isStreamingRef = useRef(false);
+  // Mirrors `turns` so `send` can read the latest value without depending on `turns`
+  // (which would otherwise force starting the fetch from inside a setState updater —
+  // React/StrictMode may invoke updater functions twice, which would double-fire it).
+  const turnsRef = useRef<ChatTurn[]>([]);
+  turnsRef.current = turns;
+
+  const send = useCallback((text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || isStreamingRef.current) return;
+
+    // Drop empty assistant turns (a prior send that errored before any text streamed) —
+    // the Anthropic API rejects messages with empty content, so these must never be resent.
+    const priorTurns = turnsRef.current.filter((t) => !(t.role === "assistant" && t.content.trim() === ""));
+    const outgoing: ChatTurn[] = [...priorTurns, { role: "user", content: trimmed }];
+    isStreamingRef.current = true;
+    setIsStreaming(true);
+    setActiveTool(null);
+    setError(null);
+    setTurns([...outgoing, { role: "assistant", content: "" }]);
+
+    controllerRef.current = streamChatRequest(outgoing, {
+      onText: (delta) => setTurns((cur) => appendToLastAssistant(cur, delta)),
+      onToolCall: (name) => setActiveTool(name),
+      onToolResult: () => setActiveTool(null),
+      onError: (message) => setError(message),
+      onDone: () => {
+        isStreamingRef.current = false;
+        setIsStreaming(false);
+        setActiveTool(null);
+        controllerRef.current = null;
+      },
+    });
+  }, []);
+
+  const stop = useCallback(() => {
+    controllerRef.current?.abort();
+    controllerRef.current = null;
+    isStreamingRef.current = false;
+    setIsStreaming(false);
+    setActiveTool(null);
+  }, []);
+
+  const reset = useCallback(() => {
+    controllerRef.current?.abort();
+    controllerRef.current = null;
+    isStreamingRef.current = false;
+    setTurns([]);
+    setIsStreaming(false);
+    setActiveTool(null);
+    setError(null);
+  }, []);
+
+  return { turns, isStreaming, activeTool, error, send, stop, reset };
 }

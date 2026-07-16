@@ -500,3 +500,20 @@ class WatchlistOut(BaseModel):
     positive_ratio: Optional[float] = None
     est_rev_reviews: Optional[float] = None
     velocity_sparkline: list[int] = Field(default_factory=list)
+
+
+# ---- chat (Analytics Chat — Claude tool-use assistant over the marts) -----------------
+class ChatMessageIn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class ChatRequest(BaseModel):
+    # Full conversation so far, oldest first, ending with the new user turn — the API is
+    # stateless, so the client resends history on every call (see web/src/lib/api.ts).
+    messages: list[ChatMessageIn] = Field(default_factory=list)
+
+
+class ChatStatus(BaseModel):
+    ready: bool
+    model: str
