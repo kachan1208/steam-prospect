@@ -20,3 +20,5 @@ web/dist
 # Editor / OS cruft
 .DS_Store
 web/*.tsbuildinfo
+*.tsbuildinfo
+.claude/
