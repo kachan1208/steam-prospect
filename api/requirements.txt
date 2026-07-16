@@ -6,3 +6,7 @@ pydantic>=2.7
 pydantic-settings>=2.3
 python-multipart>=0.0.9
 anthropic>=0.40
+
+# O3 observability: /metrics (VictoriaMetrics/Prometheus scrape) + env-gated Sentry.
+prometheus-fastapi-instrumentator>=7.0
+sentry-sdk>=2.0

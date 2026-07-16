@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_org, get_entitlements
 from ..control_db import get_db
-from ..entitlements import Entitlements
+from ..entitlements import Entitlements, enforce_org_scope
 from ..models import Org, SavedView
 from ..schemas import SavedViewIn, SavedViewOut
 
@@ -27,10 +27,27 @@ def _to_out(v: SavedView) -> SavedViewOut:
 
 
 @router.get("", response_model=list[SavedViewOut])
-def list_views(org: Org = Depends(get_current_org), db: Session = Depends(get_db)):
+def list_views(
+    response: Response,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    org: Org = Depends(get_current_org),
+    db: Session = Depends(get_db),
+):
+    """O4: bounded (previously returned every saved view for the org, unbounded). Keeps the
+    existing bare-array response shape — web/src/lib/api.ts's useSavedViews() expects
+    SavedView[] — and surfaces the total count via an `X-Total-Count` header (GitHub-API
+    style) instead of a breaking response-shape change; a future paginated UI can read that
+    header without another contract change here."""
+    total = db.scalar(select(func.count()).select_from(SavedView).where(SavedView.org_id == org.id))
     views = db.scalars(
-        select(SavedView).where(SavedView.org_id == org.id).order_by(SavedView.created_at.desc())
+        select(SavedView)
+        .where(SavedView.org_id == org.id)
+        .order_by(SavedView.created_at.desc())
+        .limit(limit)
+        .offset(offset)
     ).all()
+    response.headers["X-Total-Count"] = str(int(total or 0))
     return [_to_out(v) for v in views]
 
 
@@ -60,7 +77,9 @@ def create_view(
 @router.delete("/{view_id}", status_code=204)
 def delete_view(view_id: int, org: Org = Depends(get_current_org), db: Session = Depends(get_db)):
     view = db.get(SavedView, view_id)
-    if view is None or view.org_id != org.id:
-        raise HTTPException(status_code=404, detail="View not found.")
+    # O4: shared cross-tenant guard (entitlements.py::enforce_org_scope) — 404 if the view
+    # doesn't exist, 403 if it exists but belongs to a different org. Unreachable 403 branch
+    # in solo mode (only one org exists); activates once multi-tenant auth lands.
+    enforce_org_scope(view, org, not_found_detail="View not found.")
     db.delete(view)
     db.commit()
