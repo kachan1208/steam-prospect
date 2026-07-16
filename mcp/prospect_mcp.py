@@ -136,7 +136,8 @@ mcp = FastMCP(
     instructions=(
         "Steam market-intelligence tools over Prospect's curated DuckDB marts: find "
         "under-served niches, benchmark the market, estimate revenue, check launch "
-        "timing, look up/compare games, and find press pitch targets. Read the "
+        "timing, look up/compare games, and find press/creator pitch targets across every "
+        "marketing channel (Press, YouTube, Reddit, Twitch, X). Read the "
         "prospect-data-dictionary resource first."
     ),
 )
@@ -214,6 +215,18 @@ games clearing the review floor).
   coverage, precomputed pitch-list source. -> `press_pitch_list`.
 - **mart_buzz_trends / mart_buzz_trends_summary** — rising/cooling game-concept bigrams
   mined from journalist article titles. -> `buzz_trends`.
+- **mart_creator_pitch** — per (genre, platform, creator): reach x recent-activity ranked
+  creator pitch list, for YouTube/Reddit/Twitch/X (the creator-platform analogue of
+  mart_press_author). -> `creator_pitch_list`.
+- **mart_channel_mix** — per (genre, channel): share of marketing attention (raw mention
+  count AND reach-weighted) across Press/YouTube/Reddit/Twitch/X — "where does this genre
+  actually get attention." -> `channel_mix`.
+- **mart_channel_buzz / mart_channel_buzz_summary** — reach-weighted trending game-concept
+  bigrams across EVERY channel (press + creator platforms combined), the multi-channel,
+  audience-weighted sequel to mart_buzz_trends. -> `channel_buzz`.
+  All three are empty until the channel scrapers (steam-scraper's creator/
+  game_creator_mention/creator_reach_snapshot tables) have been run — degrades to zero rows,
+  never an error.
 
 ## Caveats that apply broadly (also repeated per-tool where most relevant)
 
@@ -984,6 +997,153 @@ def buzz_trends(
             "Restricted to Steam's tag/genre vocabulary (word-level match) so this reads as "
             "game concepts, not franchise names or sale events; an occasional edge case can "
             "still slip through.",
+        ],
+    }
+
+
+# ==========================================================================================
+# Marketing / multi-channel tools (Track M — Press · YouTube · Reddit · Twitch · X)
+# ==========================================================================================
+_MARKETING_PLATFORMS = {"youtube", "reddit", "twitch", "x"}
+
+
+@mcp.tool()
+def creator_pitch_list(genre: str, platform: Literal["youtube", "reddit", "twitch", "x"], limit: int = 15) -> dict:
+    """Who to pitch on ONE creator platform (YouTube channels, Reddit communities/posters,
+    Twitch streamers, or X accounts) for one Steam genre (exact label — see game_profile /
+    market_benchmarks for valid labels). For press/journalist pitching use press_pitch_list
+    instead — this tool is creator-platform only.
+
+    Ranked by reach x recent activity (pitch_score = latest known reach x (1 + mentions in
+    the last 24 months)) — a creator with no reach snapshot yet still appears, ranked by
+    recent activity alone (reach shows as null, not zero — a null means "no snapshot
+    captured yet," not "no audience"). Each row includes an example mention
+    (title/url/date) to sanity-check before pitching.
+
+    Empty results is a real, honest answer — either no scraper has been run for this
+    platform yet, or genuinely no confidence-filtered coverage exists for this genre on it.
+    """
+    if platform not in _MARKETING_PLATFORMS:
+        return {"error": f"platform must be one of {sorted(_MARKETING_PLATFORMS)}"}
+    limit = max(1, min(limit, 50))
+    rows = query(
+        "SELECT platform, creator_id, handle, display_name, creator_url, n_mentions, "
+        "n_mentions_recent, n_games_covered, reach, reach_captured_at, pitch_score, "
+        "example_title, example_url, example_published_at "
+        "FROM mart_creator_pitch WHERE genre = ? AND platform = ? ORDER BY pitch_score DESC LIMIT ?",
+        [genre, platform, limit],
+    )
+    caveats = [
+        "Selection bias: these creators already chose to cover this genre — descriptive, not a "
+        "guarantee of future coverage.",
+        "reach is a SNAPSHOT, not live — check reach_captured_at before citing it.",
+        "Fuzzy-matched to games and confidence-filtered — not proof of a correct match.",
+    ]
+    if not rows:
+        caveats.insert(
+            0,
+            f"No {platform} coverage found for genre '{genre}' — run the {platform} channel "
+            "scraper to start collecting data, or this genre may genuinely have none yet.",
+        )
+    return {"genre": genre, "platform": platform, "n_returned": len(rows), "creators": clean_rows(rows), "caveats": caveats}
+
+
+@mcp.tool()
+def channel_mix(genre: str | None = None) -> dict:
+    """Share of marketing "attention" by channel (Press vs YouTube vs Reddit vs Twitch vs X)
+    for one genre, or the full genre x channel matrix if genre is omitted. Two parallel
+    measures per channel: n_mentions (raw coverage volume) and reach_weighted (mentions
+    weighted by audience size — press = 1/mention since outlets carry no audience-size
+    figure here; creator mentions = reach at the time of the mention, falling back to the
+    latest known snapshot, then 1). share_reach_weighted is usually the more decision-
+    relevant number ("where do the eyeballs actually come from"), but a single very-large
+    channel can dominate it — compare both before deciding where to spend effort. Before any
+    channel scraper has run, every genre's mix reads 100% press — a real snapshot of today's
+    coverage, not an error.
+    """
+    where = ""
+    params: list = []
+    if genre:
+        where = "WHERE genre = ?"
+        params.append(genre)
+    rows = query(
+        f"SELECT genre, channel, n_mentions, reach_weighted, share_mentions, share_reach_weighted "
+        f"FROM mart_channel_mix {where} ORDER BY genre, share_reach_weighted DESC",
+        params,
+    )
+    if not rows:
+        return {
+            "genre": genre,
+            "items": [],
+            "note": "No channel-mix data yet for this genre — either the genre label is "
+            "wrong/unrecognized, or no marketing data (press or creator scrapers) has been "
+            "collected yet.",
+        }
+    return {"genre": genre, "n_returned": len(rows), "items": clean_rows(rows)}
+
+
+@mcp.tool()
+def channel_buzz(direction: Literal["rising", "cooling"] = "rising", limit: int = 15, include_series: bool = False) -> dict:
+    """Reach-WEIGHTED trending game-concepts across every marketing channel (press + YouTube +
+    Reddit + Twitch + X combined) — the multi-channel sequel to buzz_trends (which is press-
+    title-only and unweighted). Same bigram/concept-allowlist mining as buzz_trends, but each
+    mention is weighted by its audience size (a mega-channel's coverage moves this more than
+    a tiny one) instead of counted equally — see total_weighted vs total_mentions (raw count)
+    per term, and by_channel for which channel(s) are actually driving a term.
+
+    direction="rising"/"cooling" sorts by steepest recent-vs-prior weighted-average change.
+    include_series=True adds each term's per-period (n_mentions, reach_weighted_score) —
+    leave False for a compact summary.
+    """
+    order = "DESC" if direction == "rising" else "ASC"
+    limit = max(1, min(limit, 50))
+    rows = query(
+        f"SELECT term, total_mentions, total_weighted, recent_avg_weighted, prior_avg_weighted, "
+        f"slope_weighted FROM mart_channel_buzz_summary WHERE direction = ? "
+        f"ORDER BY slope_weighted {order} LIMIT ?",
+        [direction, limit],
+    )
+    items = clean_rows(rows)
+
+    if items:
+        terms = [item["term"] for item in items]
+        placeholders = ",".join("?" for _ in terms)
+        detail_rows = query(
+            f"SELECT term, channel, period, n_mentions, reach_weighted_score FROM mart_channel_buzz "
+            f"WHERE term IN ({placeholders}) ORDER BY term, period",
+            terms,
+        )
+        breakdown: dict[str, dict[str, dict]] = {t: {} for t in terms}
+        series: dict[str, dict[str, dict]] = {t: {} for t in terms}
+        for r in detail_rows:
+            t, ch, per = r["term"], r["channel"], r["period"]
+            cb = breakdown[t].setdefault(ch, {"n_mentions": 0, "reach_weighted_score": 0.0})
+            cb["n_mentions"] += r["n_mentions"]
+            cb["reach_weighted_score"] += r["reach_weighted_score"]
+            sp = series[t].setdefault(per, {"n_mentions": 0, "reach_weighted_score": 0.0})
+            sp["n_mentions"] += r["n_mentions"]
+            sp["reach_weighted_score"] += r["reach_weighted_score"]
+        for item in items:
+            item["by_channel"] = clean_rows(
+                [
+                    {"channel": ch, **v}
+                    for ch, v in sorted(breakdown[item["term"]].items(), key=lambda kv: -kv[1]["reach_weighted_score"])
+                ]
+            )
+            if include_series:
+                item["series"] = clean_rows([{"period": per, **v} for per, v in sorted(series[item["term"]].items())])
+
+    return {
+        "direction": direction,
+        "n_returned": len(items),
+        "terms": items,
+        "caveats": [
+            "Weighting: press = 1/mention (no audience-size data); creator mentions = reach at "
+            "time of mention, falling back to the latest known snapshot, then 1 — a single very-"
+            "large channel can dominate total_weighted.",
+            "Compares the last 3 complete months to the 3 before that; the current in-progress "
+            "month is excluded.",
+            "Restricted to Steam's tag/genre vocabulary (word-level match), same as buzz_trends.",
         ],
     }
 

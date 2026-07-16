@@ -10,7 +10,7 @@ from . import analytics_db
 from .config import settings
 from .control_db import init_db
 from .observability import setup_observability
-from .routers import alerts, chat, estimate, explore, games, health, market, niches, press, seasonality, views, watchlist
+from .routers import alerts, chat, estimate, explore, games, health, market, marketing, niches, press, seasonality, views, watchlist
 
 
 @asynccontextmanager
@@ -52,6 +52,7 @@ app.include_router(views.router)
 app.include_router(games.router)
 app.include_router(watchlist.router)
 app.include_router(press.router)
+app.include_router(marketing.router)
 app.include_router(explore.router)
 app.include_router(chat.router)
 app.include_router(alerts.router)

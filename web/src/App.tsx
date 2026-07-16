@@ -11,6 +11,7 @@ import Estimator from "./pages/Estimator";
 import GameSearch from "./pages/GameSearch";
 import GameProfile from "./pages/GameProfile";
 import Press from "./pages/Press";
+import Marketing from "./pages/Marketing";
 import WatchlistPage from "./pages/Watchlist";
 import Explorer from "./pages/Explorer";
 import Chat from "./pages/Chat";
@@ -109,7 +110,7 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: str
   },
   {
     label: "Marketing",
-    items: [{ to: "/press", label: "Press", icon: "megaphone" }],
+    items: [{ to: "/marketing", label: "Marketing", icon: "megaphone" }],
   },
   {
     label: "Workspace",
@@ -313,6 +314,7 @@ export default function App() {
         <Route path="/games" element={<GameSearch />} />
         <Route path="/games/:appid" element={<GameProfile />} />
         <Route path="/press" element={<Press />} />
+        <Route path="/marketing" element={<Marketing />} />
         <Route path="/watchlist" element={<WatchlistPage />} />
         <Route path="/explorer" element={<Explorer />} />
         <Route path="/chat" element={<Chat />} />
