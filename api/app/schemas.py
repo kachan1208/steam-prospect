@@ -480,6 +480,86 @@ class BuzzTrendsResponse(BaseModel):
     caveats: list[str]
 
 
+# ---- marketing (Track M — multi-channel: Press · YouTube · Reddit · Twitch · X) --------
+# Mirrors the press schemas above but for CREATOR platforms (see etl/marts/
+# mart_creator_pitch.sql / mart_channel_mix.sql / mart_channel_buzz.sql). Source data comes
+# from the scraper's creator/game_creator_mention/creator_reach_snapshot tables, which may
+# not have any collectors run yet — every list here can legitimately be empty; that's a
+# "connect a channel" empty state, not an error.
+class CreatorPitchRow(BaseModel):
+    genre: str
+    platform: str
+    creator_id: int
+    handle: Optional[str] = None
+    display_name: Optional[str] = None
+    creator_url: Optional[str] = None
+    n_mentions: int
+    n_mentions_recent: int
+    n_games_covered: int
+    # Latest known reach SNAPSHOT (nullable — a creator with no snapshot yet shows None,
+    # which is NOT the same as zero audience; check reach_captured_at before citing it).
+    reach: Optional[int] = None
+    reach_captured_at: Optional[str] = None
+    pitch_score: Optional[float] = None
+    example_title: Optional[str] = None
+    example_url: Optional[str] = None
+    example_published_at: Optional[str] = None
+
+
+class CreatorPitchListResponse(BaseModel):
+    genre: str
+    platform: str
+    items: list[CreatorPitchRow]
+    caveats: list[str]
+
+
+class ChannelMixRow(BaseModel):
+    genre: str
+    channel: str
+    n_mentions: int
+    reach_weighted: float
+    share_mentions: Optional[float] = None
+    share_reach_weighted: Optional[float] = None
+
+
+class ChannelMixResponse(BaseModel):
+    genre: Optional[str] = None
+    items: list[ChannelMixRow]
+    genres: list[str]     # all distinct genres present in mart_channel_mix
+    channels: list[str]   # all distinct channels present ('press' + any creator platforms)
+
+
+class ChannelBuzzPoint(BaseModel):
+    period: str
+    n_mentions: int
+    reach_weighted_score: float
+
+
+class ChannelBuzzChannelBreakdown(BaseModel):
+    channel: str
+    n_mentions: int
+    reach_weighted_score: float
+
+
+class ChannelBuzzRow(BaseModel):
+    term: str
+    total_mentions: int
+    total_weighted: float
+    recent_avg_weighted: float
+    prior_avg_weighted: float
+    slope_weighted: float
+    direction: Literal["rising", "cooling", "flat"]
+    # Which channel(s) are actually driving this term, sorted by weighted contribution desc.
+    by_channel: list[ChannelBuzzChannelBreakdown]
+    series: list[ChannelBuzzPoint]
+
+
+class ChannelBuzzResponse(BaseModel):
+    direction: Literal["rising", "cooling"]
+    items: list[ChannelBuzzRow]
+    caveats: list[str]
+
+
 # ---- watchlist (Phase 2) ----------------------------------------------------------------
 class WatchlistIn(BaseModel):
     appid: int

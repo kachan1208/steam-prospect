@@ -96,3 +96,44 @@ export function tierColor(tier: string, theme: Theme): string {
   const steps = theme === "dark" ? TIER_STEPS_DARK : TIER_STEPS_LIGHT;
   return steps[idx >= 0 ? idx : 0];
 }
+
+// Marketing channel categorical order (Track M) — fixed order, reuses the app's existing
+// validated series slots (never a generated/ad-hoc hue) rather than each platform's own
+// brand color, per the dataviz skill's "assign categorical hues in fixed order" rule. Slots
+// chosen loosely toward each platform's brand hue family where the app's own ramp has one
+// (YouTube/red -> series-6, Reddit/orange -> series-8, Twitch/purple -> series-5) purely as
+// a mnemonic; validated as a 5-slot set with scripts/validate_palette.js (both modes: ALL
+// PASS; light mode's amber "press" slot carries the same sub-3:1 contrast WARN as the
+// existing qualityGap slot, mitigated the same documented way — never on text, only on a
+// mark with an adjacent neutral-ink label).
+const CHANNEL_ORDER = ["press", "youtube", "reddit", "twitch", "x"] as const;
+export type MarketingChannel = (typeof CHANNEL_ORDER)[number];
+
+const CHANNEL_COLOR_LIGHT: Record<MarketingChannel, string> = {
+  press: "var(--series-3)",
+  youtube: "var(--series-6)",
+  reddit: "var(--series-8)",
+  twitch: "var(--series-5)",
+  x: "var(--series-4)",
+};
+
+export function channelColor(channel: string): string {
+  return CHANNEL_COLOR_LIGHT[channel as MarketingChannel] ?? "var(--text-muted)";
+}
+
+const CHANNEL_LABELS: Record<MarketingChannel, string> = {
+  press: "Press",
+  youtube: "YouTube",
+  reddit: "Reddit",
+  twitch: "Twitch",
+  x: "X",
+};
+
+export function channelLabel(channel: string): string {
+  return CHANNEL_LABELS[channel as MarketingChannel] ?? channel.charAt(0).toUpperCase() + channel.slice(1);
+}
+
+export function channelSortOrder(channel: string): number {
+  const idx = CHANNEL_ORDER.indexOf(channel as MarketingChannel);
+  return idx === -1 ? CHANNEL_ORDER.length : idx;
+}

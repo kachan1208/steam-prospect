@@ -1154,3 +1154,103 @@ export function useChatStream(): UseChatStream {
 
   return { turns, isStreaming, activeTool, error, send, stop, reset };
 }
+
+// ---- marketing (Track M — multi-channel: Press · YouTube · Reddit · Twitch · X) --------
+export type MarketingPlatform = "youtube" | "reddit" | "twitch" | "x";
+
+export interface CreatorPitchRow {
+  genre: string;
+  platform: string;
+  creator_id: number;
+  handle: string | null;
+  display_name: string | null;
+  creator_url: string | null;
+  n_mentions: number;
+  n_mentions_recent: number;
+  n_games_covered: number;
+  reach: number | null;
+  reach_captured_at: string | null;
+  pitch_score: number | null;
+  example_title: string | null;
+  example_url: string | null;
+  example_published_at: string | null;
+}
+
+export interface CreatorPitchListResponse {
+  genre: string;
+  platform: string;
+  items: CreatorPitchRow[];
+  caveats: string[];
+}
+
+export function useCreatorPitchList(genre: string | null, platform: MarketingPlatform, limit = 25) {
+  return useQuery({
+    queryKey: ["creator-pitch-list", genre, platform, limit],
+    queryFn: () => request<CreatorPitchListResponse>(`/marketing/creator-pitch-list${qs({ genre: genre ?? "", platform, limit })}`),
+    enabled: genre !== null && genre !== "",
+    placeholderData: keepPreviousData,
+  });
+}
+
+export interface ChannelMixRow {
+  genre: string;
+  channel: string;
+  n_mentions: number;
+  reach_weighted: number;
+  share_mentions: number | null;
+  share_reach_weighted: number | null;
+}
+
+export interface ChannelMixResponse {
+  genre: string | null;
+  items: ChannelMixRow[];
+  genres: string[];
+  channels: string[];
+}
+
+export function useChannelMix(genre?: string | null) {
+  return useQuery({
+    queryKey: ["channel-mix", genre ?? null],
+    queryFn: () => request<ChannelMixResponse>(`/marketing/channel-mix${qs({ genre })}`),
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000,
+  });
+}
+
+export interface ChannelBuzzPoint {
+  period: string;
+  n_mentions: number;
+  reach_weighted_score: number;
+}
+
+export interface ChannelBuzzChannelBreakdown {
+  channel: string;
+  n_mentions: number;
+  reach_weighted_score: number;
+}
+
+export interface ChannelBuzzRow {
+  term: string;
+  total_mentions: number;
+  total_weighted: number;
+  recent_avg_weighted: number;
+  prior_avg_weighted: number;
+  slope_weighted: number;
+  direction: "rising" | "cooling" | "flat";
+  by_channel: ChannelBuzzChannelBreakdown[];
+  series: ChannelBuzzPoint[];
+}
+
+export interface ChannelBuzzResponse {
+  direction: "rising" | "cooling";
+  items: ChannelBuzzRow[];
+  caveats: string[];
+}
+
+export function useChannelBuzz(direction: "rising" | "cooling", limit = 20) {
+  return useQuery({
+    queryKey: ["channel-buzz", direction, limit],
+    queryFn: () => request<ChannelBuzzResponse>(`/marketing/channel-buzz${qs({ direction, limit })}`),
+    staleTime: 5 * 60_000,
+  });
+}
