@@ -1,0 +1,97 @@
+name: CI
+
+# Track O2 (prospect-production-and-marketing-plan.md): stop shipping blind. Three
+# independent jobs (disjoint concerns, same split the codebase itself uses: web / api /
+# mcp) so a failure in one doesn't hide the others' signal. Nothing here needs the real
+# ~176MB data/current.duckdb or the 4GB source catalog: api/tests/conftest.py builds its
+# own tiny synthetic mart at test time, and mcp/smoke_test.py runs against a small,
+# curated, REAL-data-derived fixture committed at .github/fixtures/mcp_smoke_mart.db (see
+# .github/scripts/build_mcp_fixture.py for how it was produced and why it's real rows,
+# not synthetic ones).
+"on":
+  push:
+  pull_request:
+
+jobs:
+  web:
+    name: Web (typecheck, build, vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Typecheck (tsc -b --noEmit)
+        working-directory: web
+        # KNOWN PRE-EXISTING FAILURE, unrelated to this workflow: tsconfig.node.json is a
+        # composite referenced project with no explicit `noEmit`, and `tsc -b --noEmit`
+        # (TS6310) refuses to build a referenced project that "may not disable emit" in
+        # that combination. Verified present on main before this CI existed (`tsc -b`
+        # WITHOUT --noEmit — i.e. the first half of `npm run build`, below — already
+        # type-checks the whole project successfully, so this is specifically a
+        # --noEmit + project-references interaction, not a real type error). Fix is one
+        # line in tsconfig.node.json (add `"noEmit": false`) or dropping --noEmit from the
+        # `typecheck` script — both out of this change's ownership scope (api/tests/,
+        # web/src/**/*.test.*, vitest.config.*, .github/, + additive deps only). Left
+        # non-blocking (continue-on-error) so this one known issue doesn't hide the rest
+        # of CI's signal; unset continue-on-error here once it's fixed.
+        continue-on-error: true
+        run: npm run typecheck
+
+      - name: Build (tsc -b + vite build)
+        working-directory: web
+        run: npm run build
+
+      - name: Vitest
+        working-directory: web
+        run: npm run test
+
+  api:
+    name: API (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install API dependencies
+        working-directory: api
+        run: pip install -r requirements.txt
+
+      - name: Run pytest
+        working-directory: api
+        # cwd must be `api/` (not `api/tests/`) so `from app...` imports resolve — `python
+        # -m pytest` puts the current directory on sys.path; see api/tests/conftest.py's
+        # module docstring for the full ordering story (env vars + fixture mart must exist
+        # before app.main is ever imported).
+        run: python -m pytest tests/ -v
+
+  mcp-smoke:
+    name: MCP smoke test (curated real-data fixture)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install MCP dependencies
+        working-directory: mcp
+        run: pip install -r requirements.txt
+
+      - name: Run MCP smoke test
+        working-directory: mcp
+        env:
+          PROSPECT_ANALYTICS_DB_PATH: ${{ github.workspace }}/.github/fixtures/mcp_smoke_mart.db
+        run: python smoke_test.py

@@ -10,3 +10,7 @@ anthropic>=0.40
 # O3 observability: /metrics (VictoriaMetrics/Prometheus scrape) + env-gated Sentry.
 prometheus-fastapi-instrumentator>=7.0
 sentry-sdk>=2.0
+
+# Test-only (api/tests/) — see Track O2 in the production/marketing plan.
+pytest>=8.0
+httpx>=0.27
