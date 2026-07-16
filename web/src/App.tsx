@@ -3,7 +3,7 @@ import clsx from "clsx";
 import type { ReactNode } from "react";
 
 import { useHealth } from "./lib/api";
-import { useTheme } from "./lib/theme";
+import { useTheme, ACCENTS } from "./lib/theme";
 import NicheFinder from "./pages/NicheFinder";
 import MarketBenchmarks from "./pages/MarketBenchmarks";
 import LaunchTiming from "./pages/LaunchTiming";
@@ -153,6 +153,36 @@ function ThemeToggle() {
   );
 }
 
+function AccentPicker() {
+  const { accent, setAccent } = useTheme();
+  return (
+    <div className="mt-2.5 flex items-center gap-2 px-1">
+      <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">Accent</span>
+      <div className="flex items-center gap-1.5">
+        {ACCENTS.map((a) => {
+          const active = accent === a.id;
+          return (
+            <button
+              key={a.id}
+              type="button"
+              onClick={() => setAccent(a.id)}
+              title={a.name}
+              aria-label={`Accent color: ${a.name}`}
+              aria-pressed={active}
+              className="h-4 w-4 rounded-full transition-transform hover:scale-110"
+              style={{
+                backgroundColor: a.swatch,
+                outline: active ? `2px solid ${a.swatch}` : "2px solid transparent",
+                outlineOffset: "2px",
+              }}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function HealthRow() {
   const { data, isError, isLoading } = useHealth();
   const ok = !!data && data.status === "ok";
@@ -216,7 +246,8 @@ function Sidebar() {
 
       <div className="border-t border-chartborder p-3">
         <HealthRow />
-        <div className="mt-2 flex items-center gap-2.5 px-1 py-1">
+        <AccentPicker />
+        <div className="mt-2.5 flex items-center gap-2.5 px-1 py-1">
           <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand text-[11px] font-semibold text-brand-fg">
             S
           </div>
