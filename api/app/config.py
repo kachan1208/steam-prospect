@@ -33,12 +33,13 @@ class Settings(BaseSettings):
     api_title: str = "Prospect API"
     api_version: str = "0.1.0"
 
-    # Analytics Chat (LLM tool-use over the marts, api/app/routers/chat.py). The API key
-    # intentionally has NO PROSPECT_ prefix (validation_alias overrides it) so it matches
-    # the Anthropic SDK's own env var name and api/.env can use the same key ChatGPT-style
-    # tools expect. chat_model still follows the normal prefix, i.e. PROSPECT_CHAT_MODEL.
+    # Analytics Chat (api/app/routers/chat.py) runs on the local Claude Code CLI + the user's
+    # subscription — no API key needed. chat_model is an OPTIONAL override passed to
+    # `claude --model` (PROSPECT_CHAT_MODEL); left unset, the chat uses the subscription's
+    # default model. anthropic_api_key is retained (unused by chat now) for a possible future
+    # API-billed path; validation_alias keeps the Anthropic SDK's own env var name.
     anthropic_api_key: str | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
-    chat_model: str = "claude-haiku-4-5-20251001"
+    chat_model: str | None = None
 
 
 settings = Settings()

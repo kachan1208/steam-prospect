@@ -48,17 +48,18 @@ function EmptyNoKeyState({ unreachable }: { unreachable?: boolean }) {
         </>
       ) : (
         <>
-          <h2 className="text-sm font-semibold text-ink-primary">Add your Anthropic API key to api/.env to start chatting</h2>
+          <h2 className="text-sm font-semibold text-ink-primary">Sign in to Claude Code to start chatting</h2>
           <p className="max-w-sm text-xs text-ink-muted">
-            Analytics Chat answers questions using real numbers from your marts, but it needs a Claude API key to run the model.
+            Analytics Chat answers questions using real numbers from your marts. It runs on your Claude Code subscription — no API key needed.
           </p>
           <div className="mt-1 w-full max-w-md rounded-md border border-chartborder bg-page p-3 text-left text-[11px] text-ink-secondary">
             <ol className="list-decimal space-y-1.5 pl-4">
               <li>
-                Create <code className="rounded bg-surface px-1 py-0.5 text-ink-primary">api/.env</code> with:
-                <pre className="mt-1 overflow-x-auto rounded bg-surface p-2 text-ink-primary">
-                  {"ANTHROPIC_API_KEY=sk-ant-...\nPROSPECT_CHAT_MODEL=claude-haiku-4-5-20251001  # optional"}
-                </pre>
+                Install{" "}
+                <a className="text-series-1 underline" href="https://claude.com/claude-code" target="_blank" rel="noreferrer">
+                  Claude Code
+                </a>{" "}
+                if you haven&apos;t, then run <code className="rounded bg-surface px-1 py-0.5 text-ink-primary">claude</code> once to sign in with your subscription.
               </li>
               <li>Restart the API.</li>
               <li>Reload this page.</li>
