@@ -15,12 +15,12 @@ export function Card({
   action?: ReactNode;
 }) {
   return (
-    <div className={clsx("rounded-card border border-chartborder bg-surface p-4", className)}>
+    <div className={clsx("rounded-card border border-chartborder bg-surface shadow-sm p-5", className)}>
       {(title || action) && (
-        <div className="mb-3 flex items-start justify-between gap-2">
+        <div className="mb-4 flex items-start justify-between gap-3">
           <div>
             {title && <h3 className="text-sm font-semibold text-ink-primary">{title}</h3>}
-            {subtitle && <p className="mt-0.5 text-xs text-ink-muted">{subtitle}</p>}
+            {subtitle && <p className="mt-1 text-xs leading-relaxed text-ink-muted">{subtitle}</p>}
           </div>
           {action}
         </div>

@@ -6,6 +6,7 @@ export default {
     extend: {
       colors: {
         surface: "var(--surface-1)",
+        surface2: "var(--surface-2)",
         page: "var(--page-plane)",
         ink: {
           primary: "var(--text-primary)",
@@ -17,6 +18,13 @@ export default {
           axis: "var(--baseline)",
         },
         chartborder: "var(--border)",
+        borderstrong: "var(--border-strong)",
+        brand: {
+          DEFAULT: "var(--brand)",
+          hover: "var(--brand-hover)",
+          tint: "var(--brand-tint)",
+          fg: "var(--brand-fg)",
+        },
         series: {
           1: "var(--series-1)",
           2: "var(--series-2)",
@@ -35,10 +43,18 @@ export default {
         },
       },
       fontFamily: {
-        sans: ["system-ui", "-apple-system", "Segoe UI", "sans-serif"],
+        sans: ['"Inter Variable"', "Inter", "system-ui", "-apple-system", "Segoe UI", "sans-serif"],
       },
       borderRadius: {
-        card: "10px",
+        card: "12px",
+        lg: "10px",
+        xl: "16px",
+      },
+      boxShadow: {
+        xs: "var(--shadow-xs)",
+        sm: "var(--shadow-sm)",
+        md: "var(--shadow-md)",
+        lg: "var(--shadow-lg)",
       },
     },
   },

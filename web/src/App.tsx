@@ -1,5 +1,6 @@
 import { NavLink, Route, Routes } from "react-router-dom";
 import clsx from "clsx";
+import type { ReactNode } from "react";
 
 import { useHealth } from "./lib/api";
 import { useTheme } from "./lib/theme";
@@ -14,17 +15,119 @@ import WatchlistPage from "./pages/Watchlist";
 import Explorer from "./pages/Explorer";
 import Chat from "./pages/Chat";
 
-const NAV_ITEMS = [
-  { to: "/", label: "Niche Finder", end: true },
-  { to: "/benchmarks", label: "Market Benchmarks" },
-  { to: "/timing", label: "Launch & Timing" },
-  { to: "/estimator", label: "Estimator" },
-  { to: "/games", label: "Games" },
-  { to: "/press", label: "Press" },
-  { to: "/watchlist", label: "Watchlist" },
-  { to: "/explorer", label: "Explorer" },
-  { to: "/chat", label: "Chat" },
+const ICONS: Record<string, ReactNode> = {
+  compass: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <polygon points="15.5 8.5 13.5 13.5 8.5 15.5 10.5 10.5" />
+    </>
+  ),
+  bars: (
+    <>
+      <line x1="6" y1="20" x2="6" y2="13" />
+      <line x1="12" y1="20" x2="12" y2="7" />
+      <line x1="18" y1="20" x2="18" y2="11" />
+    </>
+  ),
+  calendar: (
+    <>
+      <rect x="3.5" y="5" width="17" height="15.5" rx="2" />
+      <line x1="3.5" y1="9.5" x2="20.5" y2="9.5" />
+      <line x1="8" y1="3" x2="8" y2="6.5" />
+      <line x1="16" y1="3" x2="16" y2="6.5" />
+    </>
+  ),
+  grid: (
+    <>
+      <rect x="3.5" y="3.5" width="7" height="7" rx="1.5" />
+      <rect x="13.5" y="3.5" width="7" height="7" rx="1.5" />
+      <rect x="3.5" y="13.5" width="7" height="7" rx="1.5" />
+      <rect x="13.5" y="13.5" width="7" height="7" rx="1.5" />
+    </>
+  ),
+  calculator: (
+    <>
+      <rect x="5" y="3" width="14" height="18" rx="2" />
+      <line x1="8" y1="7" x2="16" y2="7" />
+      <line x1="8" y1="12" x2="16" y2="12" />
+      <line x1="8" y1="16" x2="13" y2="16" />
+    </>
+  ),
+  sliders: (
+    <>
+      <line x1="4" y1="8" x2="20" y2="8" />
+      <circle cx="9" cy="8" r="2.3" />
+      <line x1="4" y1="16" x2="20" y2="16" />
+      <circle cx="15" cy="16" r="2.3" />
+    </>
+  ),
+  megaphone: (
+    <>
+      <path d="M4 9v6h3l7 4V5L7 9H4Z" />
+      <path d="M17.5 8.5a5 5 0 0 1 0 7" />
+    </>
+  ),
+  bookmark: <path d="M6 3.5h12a1 1 0 0 1 1 1V21l-7-4-7 4V4.5a1 1 0 0 1 1-1Z" />,
+  chat: (
+    <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5Z" />
+  ),
+};
+
+function Icon({ name }: { name: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-[18px] w-[18px] shrink-0"
+    >
+      {ICONS[name]}
+    </svg>
+  );
+}
+
+const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: string; end?: boolean }[] }[] = [
+  {
+    label: "Discover",
+    items: [
+      { to: "/", label: "Niche Finder", icon: "compass", end: true },
+      { to: "/benchmarks", label: "Market Benchmarks", icon: "bars" },
+      { to: "/timing", label: "Launch & Timing", icon: "calendar" },
+    ],
+  },
+  {
+    label: "Analyze",
+    items: [
+      { to: "/games", label: "Games", icon: "grid" },
+      { to: "/estimator", label: "Estimator", icon: "calculator" },
+      { to: "/explorer", label: "Explorer", icon: "sliders" },
+    ],
+  },
+  {
+    label: "Marketing",
+    items: [{ to: "/press", label: "Press", icon: "megaphone" }],
+  },
+  {
+    label: "Workspace",
+    items: [
+      { to: "/watchlist", label: "Watchlist", icon: "bookmark" },
+      { to: "/chat", label: "Chat", icon: "chat" },
+    ],
+  },
 ];
+
+function Logo() {
+  return (
+    <div className="flex h-8 w-8 items-center justify-center rounded-[9px] bg-brand shadow-sm">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.4" strokeLinecap="round">
+        <path d="M5 19v-6M12 19V6M19 19v-9" />
+      </svg>
+    </div>
+  );
+}
 
 function ThemeToggle() {
   const { theme, toggle } = useTheme();
@@ -32,17 +135,17 @@ function ThemeToggle() {
     <button
       type="button"
       onClick={toggle}
-      className="flex h-8 w-8 items-center justify-center rounded-md border border-chartborder text-ink-secondary transition-colors hover:text-ink-primary"
+      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-surface2 hover:text-ink-primary"
       aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
       title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
     >
       {theme === "dark" ? (
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
           <circle cx="12" cy="12" r="4" />
           <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
         </svg>
       ) : (
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z" />
         </svg>
       )}
@@ -50,7 +153,7 @@ function ThemeToggle() {
   );
 }
 
-function HealthIndicator() {
+function HealthRow() {
   const { data, isError, isLoading } = useHealth();
   const ok = !!data && data.status === "ok";
   const color = isLoading ? "var(--text-muted)" : isError || !ok ? "var(--status-critical)" : "var(--status-good)";
@@ -59,58 +162,94 @@ function HealthIndicator() {
     ? `${label}${data.mart_version ? ` — mart ${data.mart_version}` : ""}${data.built_at ? ` (built ${data.built_at})` : ""}`
     : label;
   return (
-    <div className="flex items-center gap-1.5 text-xs text-ink-muted" title={title}>
-      <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: color }} />
-      <span className="hidden sm:inline">{label}</span>
+    <div
+      className="flex items-center gap-2 rounded-lg bg-surface2 px-2.5 py-1.5 text-[11px] font-medium text-ink-secondary"
+      title={title}
+    >
+      <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+      <span className="truncate">{label}</span>
+      {data?.mart_version && <span className="ml-auto shrink-0 text-ink-muted">mart {data.mart_version}</span>}
     </div>
+  );
+}
+
+function Sidebar() {
+  return (
+    <aside className="flex w-60 shrink-0 flex-col border-r border-chartborder bg-surface">
+      <div className="flex items-center gap-2.5 px-5 py-[18px]">
+        <Logo />
+        <div className="leading-tight">
+          <div className="text-sm font-semibold tracking-tight text-ink-primary">Prospect</div>
+          <div className="text-[11px] text-ink-muted">Steam market intel</div>
+        </div>
+      </div>
+
+      <nav className="flex-1 overflow-y-auto px-3 pb-3">
+        {NAV_GROUPS.map((group) => (
+          <div key={group.label} className="mb-5">
+            <div className="px-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-ink-muted">
+              {group.label}
+            </div>
+            <div className="flex flex-col gap-0.5">
+              {group.items.map((item) => (
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  end={item.end}
+                  className={({ isActive }) =>
+                    clsx(
+                      "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] font-medium transition-colors",
+                      isActive
+                        ? "bg-brand-tint text-brand"
+                        : "text-ink-secondary hover:bg-surface2 hover:text-ink-primary",
+                    )
+                  }
+                >
+                  <Icon name={item.icon} />
+                  <span className="truncate">{item.label}</span>
+                </NavLink>
+              ))}
+            </div>
+          </div>
+        ))}
+      </nav>
+
+      <div className="border-t border-chartborder p-3">
+        <HealthRow />
+        <div className="mt-2 flex items-center gap-2.5 px-1 py-1">
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand text-[11px] font-semibold text-brand-fg">
+            S
+          </div>
+          <div className="min-w-0 flex-1 leading-tight">
+            <div className="truncate text-[12px] font-semibold text-ink-primary">Solo Studio</div>
+            <div className="truncate text-[10px] text-ink-muted">Solo plan · unlimited</div>
+          </div>
+          <ThemeToggle />
+        </div>
+      </div>
+    </aside>
   );
 }
 
 export default function App() {
   return (
-    <div className="flex min-h-full flex-col bg-page">
-      <header className="border-b border-chartborder bg-surface">
-        <div className="mx-auto flex max-w-[1400px] items-center gap-6 px-4 py-3 sm:px-6">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold tracking-tight text-ink-primary">Prospect</span>
-            <span className="hidden text-xs text-ink-muted sm:inline">Steam market intelligence</span>
-          </div>
-          <nav className="flex flex-1 items-center gap-1">
-            {NAV_ITEMS.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                className={({ isActive }) =>
-                  clsx(
-                    "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-                    isActive
-                      ? "bg-page text-ink-primary"
-                      : "text-ink-secondary hover:bg-page hover:text-ink-primary",
-                  )
-                }
-              >
-                {item.label}
-              </NavLink>
-            ))}
-          </nav>
-          <HealthIndicator />
-          <ThemeToggle />
+    <div className="flex h-full bg-page">
+      <Sidebar />
+      <main className="min-w-0 flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-[1320px] px-6 py-8 lg:px-10">
+          <Routes>
+            <Route path="/" element={<NicheFinder />} />
+            <Route path="/benchmarks" element={<MarketBenchmarks />} />
+            <Route path="/timing" element={<LaunchTiming />} />
+            <Route path="/estimator" element={<Estimator />} />
+            <Route path="/games" element={<GameSearch />} />
+            <Route path="/games/:appid" element={<GameProfile />} />
+            <Route path="/press" element={<Press />} />
+            <Route path="/watchlist" element={<WatchlistPage />} />
+            <Route path="/explorer" element={<Explorer />} />
+            <Route path="/chat" element={<Chat />} />
+          </Routes>
         </div>
-      </header>
-      <main className="mx-auto w-full max-w-[1400px] flex-1 px-4 py-6 sm:px-6">
-        <Routes>
-          <Route path="/" element={<NicheFinder />} />
-          <Route path="/benchmarks" element={<MarketBenchmarks />} />
-          <Route path="/timing" element={<LaunchTiming />} />
-          <Route path="/estimator" element={<Estimator />} />
-          <Route path="/games" element={<GameSearch />} />
-          <Route path="/games/:appid" element={<GameProfile />} />
-          <Route path="/press" element={<Press />} />
-          <Route path="/watchlist" element={<WatchlistPage />} />
-          <Route path="/explorer" element={<Explorer />} />
-          <Route path="/chat" element={<Chat />} />
-        </Routes>
       </main>
     </div>
   );

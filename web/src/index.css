@@ -3,23 +3,43 @@
 @tailwind utilities;
 
 /* ---------------------------------------------------------------------------------
- * Prospect palette — validated with the dataviz skill's palette validator
- * (scripts/validate_palette.js), both modes, categorical (3-hue + scatter pair) and
- * status. Light is the reference instance; dark is the same eight hues stepped for
- * the dark surface (see references/palette.md). Default theme is dark (data-tool
- * aesthetic); `.dark` on <html> is toggled by src/lib/theme.tsx.
+ * Prospect palette. The categorical --series-* and --status-* hues are validated with
+ * the dataviz skill's palette validator (both modes) and are UNCHANGED. The surface /
+ * ink / border / shadow / brand tokens define a clean, light-first SaaS aesthetic
+ * (Stripe/Notion): white cards on a soft cool-gray page, hairline borders, soft
+ * elevation, one confident blue accent. Default theme is light; `.dark` on <html> is
+ * toggled by lib/theme.tsx.
  * ------------------------------------------------------------------------------- */
 :root {
-  --surface-1: #fcfcfb;
-  --page-plane: #f9f9f7;
-  --text-primary: #0b0b0b;
-  --text-secondary: #52514e;
-  --text-muted: #898781;
-  --gridline: #e1e0d9;
-  --baseline: #c3c2b7;
-  --border: rgba(11, 11, 11, 0.1);
+  /* surfaces */
+  --surface-1: #ffffff;   /* cards, sidebar, popovers */
+  --surface-2: #f4f6f8;   /* subtle raised / hover / inset fills */
+  --page-plane: #f6f7f9;  /* app background */
 
-  /* categorical, fixed order — slot 1 blue, 2 aqua, 3 yellow, ... */
+  /* ink */
+  --text-primary: #1a1f36;
+  --text-secondary: #4b5566;
+  --text-muted: #8a94a6;
+
+  /* lines & borders */
+  --gridline: #edeff2;
+  --baseline: #d5d9e0;
+  --border: #e6e8ec;
+  --border-strong: #d7dbe2;
+
+  /* brand accent — UI actions: primary buttons, active nav, links, focus */
+  --brand: #2563eb;
+  --brand-hover: #1d4ed8;
+  --brand-tint: #eef3ff;
+  --brand-fg: #ffffff;
+
+  /* elevation */
+  --shadow-xs: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --shadow-sm: 0 1px 3px rgba(16, 24, 40, 0.08), 0 1px 2px rgba(16, 24, 40, 0.04);
+  --shadow-md: 0 4px 12px -2px rgba(16, 24, 40, 0.10), 0 2px 6px -2px rgba(16, 24, 40, 0.05);
+  --shadow-lg: 0 16px 40px -12px rgba(16, 24, 40, 0.18);
+
+  /* categorical, fixed order — validated, do not change */
   --series-1: #2a78d6;
   --series-2: #1baf7a;
   --series-3: #eda100;
@@ -34,7 +54,7 @@
   --status-serious: #ec835a;
   --status-critical: #d03b3b;
 
-  /* sequential (blue), steps 100 (near-surface/low) -> 700 (high), light mode */
+  /* sequential (blue), steps 100 (low) -> 700 (high) */
   --seq-100: #cde2fb;
   --seq-150: #b7d3f6;
   --seq-200: #9ec5f4;
@@ -55,14 +75,26 @@
 }
 
 .dark {
-  --surface-1: #1a1a19;
-  --page-plane: #0d0d0d;
-  --text-primary: #ffffff;
-  --text-secondary: #c3c2b7;
-  --text-muted: #898781;
-  --gridline: #2c2c2a;
-  --baseline: #383835;
-  --border: rgba(255, 255, 255, 0.1);
+  --surface-1: #17181c;
+  --surface-2: #202228;
+  --page-plane: #0e0f11;
+  --text-primary: #f2f3f5;
+  --text-secondary: #b3b8c2;
+  --text-muted: #7c8493;
+  --gridline: #26282e;
+  --baseline: #363941;
+  --border: #26282e;
+  --border-strong: #33363e;
+
+  --brand: #4f83f0;
+  --brand-hover: #6b98f3;
+  --brand-tint: rgba(79, 131, 240, 0.14);
+  --brand-fg: #ffffff;
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 6px 16px -4px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 20px 48px -12px rgba(0, 0, 0, 0.6);
 
   --series-1: #3987e5;
   --series-2: #199e70;
@@ -92,12 +124,11 @@ body,
 body {
   background-color: var(--page-plane);
   color: var(--text-primary);
-  font-family:
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    sans-serif;
+  font-family: "Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   font-variant-numeric: proportional-nums;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 /* Tabular figures only where columns must align vertically. */
@@ -105,8 +136,7 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* Recharts renders its own inline SVG text; make sure it inherits chart ink tokens
-   instead of the library defaults. */
+/* Recharts renders its own inline SVG text; keep it on the ink tokens. */
 .recharts-cartesian-axis-tick text {
   fill: var(--text-muted);
   font-size: 11px;
@@ -124,12 +154,20 @@ body {
 }
 
 ::selection {
-  background: var(--series-1);
-  color: white;
+  background: var(--brand);
+  color: #fff;
 }
 
-/* Thin scrollbars that stay on-theme in the drawer / table overflow panes. */
+/* Thin scrollbars that stay on-theme in drawers / table overflow panes. */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--baseline) transparent;
+}
+
+/* Consistent keyboard focus ring across interactive elements. */
+@layer base {
+  *:focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
 }

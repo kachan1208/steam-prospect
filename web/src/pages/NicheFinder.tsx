@@ -21,6 +21,9 @@ import { useTheme } from "../lib/theme";
 
 const LIMIT = 50;
 
+const INPUT_CLS =
+  "rounded-lg border border-chartborder bg-surface text-xs text-ink-primary outline-none transition-colors placeholder:text-ink-muted focus:border-brand focus:shadow-[0_0_0_3px_var(--brand-tint)]";
+
 const legColor = (needle: string) =>
   OPPORTUNITY_LEGEND.find((l) => l.label.toLowerCase().includes(needle))?.color;
 
@@ -46,7 +49,7 @@ function SortLabel({
       onClick={() => onSort(col)}
       title={`Sort by ${label}`}
       className={clsx(
-        "group inline-flex items-center gap-1 font-medium",
+        "group inline-flex items-center gap-1 font-semibold uppercase tracking-wide transition-colors",
         active ? "text-ink-primary" : "text-ink-muted hover:text-ink-secondary",
       )}
     >
@@ -54,15 +57,16 @@ function SortLabel({
       {label}
       <span
         aria-hidden
-        className={clsx(
-          "text-[10px] leading-none",
-          active ? "opacity-100" : "opacity-0 group-hover:opacity-40",
-        )}
+        className={clsx("text-[10px] leading-none", active ? "opacity-100" : "opacity-0 group-hover:opacity-40")}
       >
         {active ? (order === "desc" ? "↓" : "↑") : "↕"}
       </span>
     </button>
   );
+}
+
+function Segmented({ children }: { children: React.ReactNode }) {
+  return <div className="flex items-center gap-0.5 rounded-lg bg-surface2 p-0.5">{children}</div>;
 }
 
 function SegButton({
@@ -79,8 +83,8 @@ function SegButton({
       type="button"
       onClick={onClick}
       className={clsx(
-        "rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
-        active ? "bg-page text-ink-primary" : "text-ink-muted hover:text-ink-secondary",
+        "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+        active ? "bg-surface text-ink-primary shadow-xs" : "text-ink-muted hover:text-ink-secondary",
       )}
     >
       {children}
@@ -138,7 +142,7 @@ export default function NicheFinder() {
           <button
             type="button"
             onClick={() => setSelected(info.row.original)}
-            className="text-left font-medium text-ink-primary hover:text-series-1 hover:underline"
+            className="text-left font-medium text-ink-primary transition-colors hover:text-brand"
           >
             {info.getValue()}
           </button>
@@ -148,34 +152,34 @@ export default function NicheFinder() {
         header: () => (
           <SortLabel label="Games" col="n_games" active={sort === "n_games"} order={order} onSort={toggleSort} />
         ),
-        cell: (info) => <span className="tabular">{fmtInt(info.getValue())}</span>,
+        cell: (info) => <span className="tabular text-ink-secondary">{fmtInt(info.getValue())}</span>,
       }),
       columnHelper.accessor("n_recent", {
         header: () => (
           <SortLabel label="Recent 24m" col="n_recent" active={sort === "n_recent"} order={order} onSort={toggleSort} />
         ),
-        cell: (info) => <span className="tabular">{fmtInt(info.getValue())}</span>,
+        cell: (info) => <span className="tabular text-ink-secondary">{fmtInt(info.getValue())}</span>,
       }),
       columnHelper.accessor("median_rev", {
         header: () => (
           <SortLabel label="Median rev" col="median_rev" active={sort === "median_rev"} order={order} onSort={toggleSort} />
         ),
-        cell: (info) => <span className="tabular">{fmtUsd(info.getValue())}</span>,
+        cell: (info) => <span className="tabular text-ink-secondary">{fmtUsd(info.getValue())}</span>,
       }),
       columnHelper.accessor("median_price", {
         header: () => (
           <SortLabel label="Median price" col="median_price" active={sort === "median_price"} order={order} onSort={toggleSort} />
         ),
-        cell: (info) => <span className="tabular">{fmtUsd(info.getValue())}</span>,
+        cell: (info) => <span className="tabular text-ink-secondary">{fmtUsd(info.getValue())}</span>,
       }),
       columnHelper.display({
         id: "opportunity_bars",
         header: () => (
           <span className="flex items-center gap-1.5 whitespace-nowrap">
             <SortLabel label="Demand" col="demand" color={legColor("demand")} active={sort === "demand"} order={order} onSort={toggleSort} />
-            <span className="text-ink-muted/50">/</span>
-            <SortLabel label="Competition" col="competition" color={legColor("competition")} active={sort === "competition"} order={order} onSort={toggleSort} />
-            <span className="text-ink-muted/50">/</span>
+            <span className="text-ink-muted/40">/</span>
+            <SortLabel label="Comp." col="competition" color={legColor("competition")} active={sort === "competition"} order={order} onSort={toggleSort} />
+            <span className="text-ink-muted/40">/</span>
             <SortLabel label="Quality gap" col="quality_gap" color={legColor("quality")} active={sort === "quality_gap"} order={order} onSort={toggleSort} />
           </span>
         ),
@@ -206,13 +210,13 @@ export default function NicheFinder() {
         header: () => (
           <SortLabel label="Hit ≥$200K" col="hit_rate_200k" active={sort === "hit_rate_200k"} order={order} onSort={toggleSort} />
         ),
-        cell: (info) => <span className="tabular">{fmtPct(info.getValue())}</span>,
+        cell: (info) => <span className="tabular text-ink-secondary">{fmtPct(info.getValue())}</span>,
       }),
       columnHelper.accessor("saturation_yoy", {
         header: () => (
           <SortLabel label="Saturation YoY" col="saturation_yoy" active={sort === "saturation_yoy"} order={order} onSort={toggleSort} />
         ),
-        cell: (info) => <span className="tabular">{fmtSigned(info.getValue())}</span>,
+        cell: (info) => <span className="tabular text-ink-secondary">{fmtSigned(info.getValue())}</span>,
       }),
     ],
     [columnHelper, theme, sort, order, toggleSort],
@@ -256,33 +260,40 @@ export default function NicheFinder() {
   });
 
   return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <h1 className="text-lg font-semibold text-ink-primary">Niche Finder</h1>
-        <p className="mt-0.5 text-sm text-ink-muted">
-          Rank tags and genres by opportunity — demand vs. competition vs. quality gap in the existing catalog.
-        </p>
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight text-ink-primary">Niche Finder</h1>
+          <p className="mt-1 max-w-2xl text-sm text-ink-secondary">
+            Rank tags and genres by opportunity — demand vs. competition vs. quality gap across the catalog.
+          </p>
+        </div>
+        {total > 0 && (
+          <span className="shrink-0 rounded-full border border-chartborder bg-surface px-3 py-1 text-xs font-medium text-ink-secondary shadow-xs">
+            {total.toLocaleString()} niches
+          </span>
+        )}
       </div>
 
-      <Card className="!p-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-0.5 rounded-md border border-chartborder p-0.5">
+      <Card className="!p-3.5">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <Segmented>
             <SegButton active={dimension === "tag"} onClick={() => setDimension("tag")}>
               Tags
             </SegButton>
             <SegButton active={dimension === "genre"} onClick={() => setDimension("genre")}>
               Genres
             </SegButton>
-          </div>
-          <div className="flex items-center gap-0.5 rounded-md border border-chartborder p-0.5">
+          </Segmented>
+          <Segmented>
             <SegButton active={windowParam === "all"} onClick={() => setWindowParam("all")}>
               All-time
             </SegButton>
             <SegButton active={windowParam === "24m"} onClick={() => setWindowParam("24m")}>
               Last 24 months
             </SegButton>
-          </div>
-          <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
+          </Segmented>
+          <label className="flex items-center gap-1.5 text-xs font-medium text-ink-secondary">
             Min reviews
             <input
               type="number"
@@ -290,7 +301,7 @@ export default function NicheFinder() {
               step={10}
               value={minReviews}
               onChange={(e) => setMinReviews(Math.max(0, Number(e.target.value) || 0))}
-              className="w-16 rounded-md border border-chartborder bg-page px-2 py-1 text-xs text-ink-primary outline-none focus:border-series-1"
+              className={clsx(INPUT_CLS, "w-16 px-2 py-1.5")}
             />
           </label>
           <input
@@ -298,48 +309,48 @@ export default function NicheFinder() {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="Search niches…"
-            className="w-40 rounded-md border border-chartborder bg-page px-2.5 py-1.5 text-xs text-ink-primary outline-none placeholder:text-ink-muted focus:border-series-1"
+            className={clsx(INPUT_CLS, "w-44 px-3 py-1.5")}
           />
-          <span className="hidden text-[11px] text-ink-muted sm:inline">Click a column header to sort</span>
           <div className="ml-auto flex items-center gap-2">
             <SavedViewsMenu current={currentConfig} onApply={applyView} />
             <a
               href={csvUrl}
-              className="rounded-md border border-chartborder px-3 py-1.5 text-xs font-medium text-ink-secondary hover:text-ink-primary"
+              className="rounded-lg border border-chartborder bg-surface px-3 py-1.5 text-xs font-medium text-ink-secondary shadow-xs transition-colors hover:bg-surface2 hover:text-ink-primary"
             >
               Export CSV
             </a>
           </div>
         </div>
-        <div className="mt-2 flex items-center gap-3 text-[11px] text-ink-muted">
-          <span>Fixed color key:</span>
+        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-chartborder pt-2.5 text-[11px] text-ink-muted">
+          <span className="font-medium">Color key</span>
           {OPPORTUNITY_LEGEND.map((l) => (
-            <span key={l.label} className="flex items-center gap-1">
+            <span key={l.label} className="flex items-center gap-1.5">
               <span className="h-2 w-2 rounded-full" style={{ backgroundColor: l.color }} />
               {l.label}
             </span>
           ))}
+          <span className="ml-auto hidden sm:inline">Click a column header to sort</span>
         </div>
       </Card>
 
-      <Card className={clsx("!p-0", isFetching && "opacity-90 transition-opacity")}>
-        {isLoading && <div className="p-6 text-sm text-ink-muted">Loading niches…</div>}
+      <Card className={clsx("overflow-hidden !p-0", isFetching && "opacity-90 transition-opacity")}>
+        {isLoading && <div className="p-8 text-center text-sm text-ink-muted">Loading niches…</div>}
         {isError && (
-          <div className="p-6 text-sm text-status-serious">
+          <div className="p-8 text-center text-sm text-status-serious">
             Failed to load niches{error instanceof Error ? `: ${error.message}` : "."}
           </div>
         )}
         {data && data.items.length === 0 && (
-          <div className="p-6 text-sm text-ink-muted">No niches match these filters.</div>
+          <div className="p-8 text-center text-sm text-ink-muted">No niches match these filters.</div>
         )}
         {data && data.items.length > 0 && (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[860px] border-collapse text-sm">
+            <table className="w-full min-w-[880px] border-collapse text-sm">
               <thead>
                 {table.getHeaderGroups().map((hg) => (
-                  <tr key={hg.id} className="border-b border-chartborder text-left text-xs text-ink-muted">
+                  <tr key={hg.id} className="border-b border-chartborder bg-surface2/50 text-left text-[11px]">
                     {hg.headers.map((h) => (
-                      <th key={h.id} className="whitespace-nowrap px-3 py-2 font-medium">
+                      <th key={h.id} className="whitespace-nowrap px-4 py-2.5">
                         {flexRender(h.column.columnDef.header, h.getContext())}
                       </th>
                     ))}
@@ -348,9 +359,12 @@ export default function NicheFinder() {
               </thead>
               <tbody>
                 {table.getRowModel().rows.map((row) => (
-                  <tr key={row.id} className="border-b border-chartborder/60 hover:bg-page">
+                  <tr
+                    key={row.id}
+                    className="border-b border-chartborder/70 transition-colors last:border-0 hover:bg-surface2/60"
+                  >
                     {row.getVisibleCells().map((cell) => (
-                      <td key={cell.id} className="whitespace-nowrap px-3 py-2 align-middle">
+                      <td key={cell.id} className="whitespace-nowrap px-4 py-2.5 align-middle">
                         {flexRender(cell.column.columnDef.cell, cell.getContext())}
                       </td>
                     ))}
@@ -361,16 +375,18 @@ export default function NicheFinder() {
           </div>
         )}
         {data && (
-          <div className="flex items-center justify-between border-t border-chartborder px-3 py-2 text-xs text-ink-muted">
+          <div className="flex items-center justify-between border-t border-chartborder px-4 py-2.5 text-xs text-ink-muted">
             <span>
-              {total > 0 ? `${rangeStart.toLocaleString()}–${rangeEnd.toLocaleString()} of ${total.toLocaleString()}` : "0 results"}
+              {total > 0
+                ? `${rangeStart.toLocaleString()}–${rangeEnd.toLocaleString()} of ${total.toLocaleString()}`
+                : "0 results"}
             </span>
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 disabled={offset === 0}
                 onClick={() => setOffset((o) => Math.max(0, o - LIMIT))}
-                className="rounded-md border border-chartborder px-2.5 py-1 font-medium text-ink-secondary disabled:opacity-40"
+                className="rounded-lg border border-chartborder bg-surface px-3 py-1 font-medium text-ink-secondary shadow-xs transition-colors hover:text-ink-primary disabled:pointer-events-none disabled:opacity-40"
               >
                 Prev
               </button>
@@ -378,7 +394,7 @@ export default function NicheFinder() {
                 type="button"
                 disabled={offset + LIMIT >= total}
                 onClick={() => setOffset((o) => o + LIMIT)}
-                className="rounded-md border border-chartborder px-2.5 py-1 font-medium text-ink-secondary disabled:opacity-40"
+                className="rounded-lg border border-chartborder bg-surface px-3 py-1 font-medium text-ink-secondary shadow-xs transition-colors hover:text-ink-primary disabled:pointer-events-none disabled:opacity-40"
               >
                 Next
               </button>

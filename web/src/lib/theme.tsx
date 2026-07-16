@@ -2,14 +2,16 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 
 export type Theme = "light" | "dark";
 
-const STORAGE_KEY = "prospect-theme";
+// Bumped to -2 so the light-first redesign ignores any dark preference stored under
+// the old key (existing users land on the new default, then can toggle if they want).
+const STORAGE_KEY = "prospect-theme-2";
 
 function initialTheme(): Theme {
-  if (typeof window === "undefined") return "dark";
+  if (typeof window === "undefined") return "light";
   const stored = window.localStorage.getItem(STORAGE_KEY);
   if (stored === "light" || stored === "dark") return stored;
-  // Prospect defaults to a dark data-tool aesthetic regardless of OS preference.
-  return "dark";
+  // Prospect defaults to the clean light SaaS aesthetic regardless of OS preference.
+  return "light";
 }
 
 interface ThemeCtx {
