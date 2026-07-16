@@ -1,0 +1,22 @@
+version: "3"
+
+tasks:
+  etl:
+    desc: Build the DuckDB analytics marts from the read-only Steam source DB (writes data/prospect_<date>.duckdb, repoints data/current.duckdb).
+    dir: etl
+    cmds:
+      - .venv/bin/python build_marts.py
+
+  api:
+    desc: Run the FastAPI backend on :8000 (auto-reload).
+    dir: api
+    cmds:
+      - .venv/bin/uvicorn --app-dir . app.main:app --reload --port 8000
+
+  web:
+    desc: Run the Vite dev server on :5173 (proxies /api to the :8000 API above).
+    dir: web
+    env:
+      VITE_API_PROXY_TARGET: http://127.0.0.1:8000
+    cmds:
+      - npm run dev

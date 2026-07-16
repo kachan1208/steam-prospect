@@ -1,0 +1,21 @@
+# Analytics data & databases (rebuildable via `task etl`, or read-only source — never committed)
+data/
+*.duckdb
+prospect_control.db
+steam_games.db*
+**/steam_games.db*
+
+# Python / Node dependency & virtual env directories
+**/.venv
+**/node_modules
+__pycache__/
+*.pyc
+
+# Build output
+web/dist
+
+# Env files (secrets / machine-specific overrides)
+.env
+
+# Editor / OS cruft
+.DS_Store
