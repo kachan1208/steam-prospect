@@ -1,4 +1,4 @@
-import { NavLink, Route, Routes } from "react-router-dom";
+import { Link, NavLink, Outlet, Route, Routes } from "react-router-dom";
 import clsx from "clsx";
 import type { ReactNode } from "react";
 
@@ -14,6 +14,7 @@ import Press from "./pages/Press";
 import WatchlistPage from "./pages/Watchlist";
 import Explorer from "./pages/Explorer";
 import Chat from "./pages/Chat";
+import Landing from "./pages/Landing";
 
 const ICONS: Record<string, ReactNode> = {
   compass: (
@@ -93,7 +94,7 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: str
   {
     label: "Discover",
     items: [
-      { to: "/", label: "Niche Finder", icon: "compass", end: true },
+      { to: "/niches", label: "Niche Finder", icon: "compass" },
       { to: "/benchmarks", label: "Market Benchmarks", icon: "bars" },
       { to: "/timing", label: "Launch & Timing", icon: "calendar" },
     ],
@@ -230,13 +231,13 @@ function HealthRow() {
 function Sidebar() {
   return (
     <aside className="flex w-60 shrink-0 flex-col border-r border-chartborder bg-surface">
-      <div className="flex items-center gap-2.5 px-5 py-[18px]">
+      <Link to="/niches" className="flex items-center gap-2.5 px-5 py-[18px]">
         <Logo />
         <div className="leading-tight">
           <div className="text-sm font-semibold tracking-tight text-ink-primary">Prospect</div>
           <div className="text-[11px] text-ink-muted">Steam market intel</div>
         </div>
-      </div>
+      </Link>
 
       <nav className="flex-1 overflow-y-auto px-3 pb-3">
         {NAV_GROUPS.map((group) => (
@@ -287,26 +288,35 @@ function Sidebar() {
   );
 }
 
-export default function App() {
+function AppShell() {
   return (
     <div className="flex h-full bg-page">
       <Sidebar />
       <main className="min-w-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-[1320px] px-6 py-8 lg:px-10">
-          <Routes>
-            <Route path="/" element={<NicheFinder />} />
-            <Route path="/benchmarks" element={<MarketBenchmarks />} />
-            <Route path="/timing" element={<LaunchTiming />} />
-            <Route path="/estimator" element={<Estimator />} />
-            <Route path="/games" element={<GameSearch />} />
-            <Route path="/games/:appid" element={<GameProfile />} />
-            <Route path="/press" element={<Press />} />
-            <Route path="/watchlist" element={<WatchlistPage />} />
-            <Route path="/explorer" element={<Explorer />} />
-            <Route path="/chat" element={<Chat />} />
-          </Routes>
+          <Outlet />
         </div>
       </main>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <Routes>
+      <Route path="/" element={<Landing />} />
+      <Route element={<AppShell />}>
+        <Route path="/niches" element={<NicheFinder />} />
+        <Route path="/benchmarks" element={<MarketBenchmarks />} />
+        <Route path="/timing" element={<LaunchTiming />} />
+        <Route path="/estimator" element={<Estimator />} />
+        <Route path="/games" element={<GameSearch />} />
+        <Route path="/games/:appid" element={<GameProfile />} />
+        <Route path="/press" element={<Press />} />
+        <Route path="/watchlist" element={<WatchlistPage />} />
+        <Route path="/explorer" element={<Explorer />} />
+        <Route path="/chat" element={<Chat />} />
+      </Route>
+    </Routes>
   );
 }
