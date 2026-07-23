@@ -29,8 +29,9 @@ WORKDIR /app
 COPY api/requirements.txt ./api/requirements.txt
 RUN pip install --no-cache-dir -r api/requirements.txt
 
-# API source, then the built frontend from stage 1.
+# API source + the standalone MCP server (served at /mcp), then the built frontend.
 COPY api/ ./api/
+COPY mcp/ ./mcp/
 COPY --from=web /web/dist ./web_dist
 
 # Entrypoint: fetch the analytics DB (if needed) then launch uvicorn.
@@ -42,6 +43,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV PROSPECT_STATIC_DIR=/app/web_dist \
     PROSPECT_ANALYTICS_DB_PATH=/app/data/current.duckdb \
     PROSPECT_CONTROL_DSN=sqlite:////app/data/prospect_control.db \
+    PROSPECT_ENABLE_MCP=true \
     PYTHONUNBUFFERED=1 \
     PORT=8080
 

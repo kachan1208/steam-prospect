@@ -18,6 +18,12 @@ from .routers import (
     account, alerts, chat, estimate, explore, games, health, inputs, market, marketing,
     niches, outreach, press, projects, radar, seasonality, trends, views, watchlist,
 )
+from .mcp_mount import load_prospect_mcp
+
+# Optionally load the standalone Prospect MCP (mcp/prospect_mcp.py) as a Streamable-HTTP app
+# so hosted users can add Prospect to their own Claude. (None, None) when disabled/unavailable
+# — the API is unaffected. Mounted below; its session manager is driven in the lifespan.
+_prospect_mcp, _mcp_asgi = load_prospect_mcp()
 
 
 @asynccontextmanager
@@ -30,7 +36,13 @@ async def lifespan(app: FastAPI):
     except FileNotFoundError as exc:
         # Keep the app up so /docs and a clear error are reachable; endpoints will 503.
         print(f"[api] WARNING: {exc}")
-    yield
+    # The mounted MCP's Streamable-HTTP transport needs its session manager running for the
+    # whole app lifetime; drive it here when the MCP is enabled.
+    if _prospect_mcp is not None:
+        async with _prospect_mcp.session_manager.run():
+            yield
+    else:
+        yield
     analytics_db.close()
 
 
@@ -80,6 +92,12 @@ app.add_api_route(
 )
 
 
+# Mount the Prospect MCP (Streamable HTTP) at /mcp so users can add it to their own Claude.
+# Registered before the SPA catch-all below so /mcp routes to the MCP, not to index.html.
+if _mcp_asgi is not None:
+    app.mount("/mcp", _mcp_asgi)
+
+
 # ---- Serve the built SPA when running as a single hosted service -------------------------
 # In the container image PROSPECT_STATIC_DIR points at the Vite build (web/dist), so this
 # service also serves the frontend from the same origin (no CORS, one deployable). Unset in
@@ -114,7 +132,7 @@ if _SERVE_SPA:
     # (/home, /outreach, …) survive a hard refresh.
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_fallback(full_path: str):
-        if full_path.startswith(("api", "docs", "redoc", "openapi.json", "metrics")):
+        if full_path.startswith(("api", "docs", "redoc", "openapi.json", "metrics", "mcp")):
             raise HTTPException(status_code=404)
         candidate = _STATIC_DIR / full_path
         if full_path and candidate.is_file():

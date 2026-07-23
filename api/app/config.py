@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     # from its own origin — one deployable, no CORS. Empty in local dev (Vite serves it).
     static_dir: str | None = None
 
+    # Mount the Prospect MCP server (mcp/prospect_mcp.py) at /mcp over Streamable HTTP, so
+    # hosted users can add Prospect to their own Claude. Off by default so local dev (Vite +
+    # the stdio MCP via .mcp.json) is untouched; the container image turns it on.
+    enable_mcp: bool = False
+
     # Solo mode: one seeded org with unlimited entitlements; no login required.
     solo_mode: bool = True
     solo_org_name: str = "Solo Studio"

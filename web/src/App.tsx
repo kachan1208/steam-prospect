@@ -188,7 +188,7 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: str
       { to: "/watchlist", label: "Watchlist", icon: "bookmark" },
       { to: "/alerts", label: "Alerts", icon: "bell" },
       { to: "/devlog", label: "Dev log", icon: "book" },
-      { to: "/chat", label: "Chat", icon: "chat" },
+      { to: "/chat", label: "Use in Claude", icon: "chat" },
     ],
   },
   {

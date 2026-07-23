@@ -7,6 +7,9 @@ pydantic-settings>=2.3
 python-multipart>=0.0.9
 anthropic>=0.40
 
+# Hosted MCP: serve mcp/prospect_mcp.py at /mcp over Streamable HTTP (PROSPECT_ENABLE_MCP).
+mcp>=1.2
+
 # O3 observability: /metrics (VictoriaMetrics/Prometheus scrape) + env-gated Sentry.
 prometheus-fastapi-instrumentator>=7.0
 sentry-sdk>=2.0
