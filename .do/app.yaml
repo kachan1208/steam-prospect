@@ -14,7 +14,7 @@ services:
   - name: web
     # --- source: build from your GitHub repo, redeploy automatically on push ---
     github:
-      repo: YOUR_GITHUB_USERNAME/prospect   # ⬅ change to your repo (owner/name)
+      repo: kachan1208/steam-prospect
       branch: main
       deploy_on_push: true
     dockerfile_path: Dockerfile
@@ -32,7 +32,7 @@ services:
       # The API downloads the analytics DB from here on boot (a GitHub Release asset, ≤2GB).
       - key: PROSPECT_DUCKDB_URL
         scope: RUN_TIME
-        value: https://github.com/YOUR_GITHUB_USERNAME/prospect/releases/download/data-latest/current.duckdb  # ⬅ change
+        value: https://github.com/kachan1208/steam-prospect/releases/download/data-latest/current.duckdb
       # These match the Dockerfile defaults; listed so they're visible/overridable in the UI.
       - key: PROSPECT_STATIC_DIR
         scope: RUN_TIME

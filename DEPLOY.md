@@ -24,7 +24,7 @@ branch) but has no remote yet.
 2. Back in this folder, connect and push:
    ```bash
    cd /Users/maximbaginskiy/hobby/prospect
-   git remote add origin https://github.com/YOUR_USERNAME/prospect.git
+   git remote add origin https://github.com/kachan1208/steam-prospect.git
    git add -A && git commit -m "Add DigitalOcean deploy config"
    git branch -M main
    git push -u origin main
@@ -47,7 +47,7 @@ gh release create data-latest "$(readlink -f data/current.duckdb)#current.duckdb
   --title "Analytics data" --notes "DuckDB marts for Prospect"
 ```
 The asset URL will be:
-`https://github.com/YOUR_USERNAME/prospect/releases/download/data-latest/current.duckdb`
+`https://github.com/kachan1208/steam-prospect/releases/download/data-latest/current.duckdb`
 
 > No CLI? Create a release named `data-latest` in the GitHub UI and drag the real file
 > (`data/prospect_YYYYMMDD.duckdb`, ~384MB) in, renaming the upload to `current.duckdb`.
