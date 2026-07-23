@@ -40,17 +40,21 @@ branch) but has no remote yet.
 
 The container fetches `current.duckdb` on boot. GitHub Releases host files up to 2GB for free.
 
-With the GitHub CLI (easiest — resolves the symlink and uploads the real file):
+The download URL uses the asset's real filename, so the uploaded file must literally be named
+`current.duckdb`. `data/current.duckdb` is a symlink, so hardlink it to a real file of that
+name first (a hardlink avoids copying 369MB):
 ```bash
 cd /Users/maximbaginskiy/hobby/prospect
-gh release create data-latest "$(readlink -f data/current.duckdb)#current.duckdb" \
+ln -f "$(readlink -f data/current.duckdb)" /tmp/current.duckdb
+gh release create data-latest /tmp/current.duckdb \
+  --repo kachan1208/steam-prospect \
   --title "Analytics data" --notes "DuckDB marts for Prospect"
 ```
-The asset URL will be:
+The asset URL is then:
 `https://github.com/kachan1208/steam-prospect/releases/download/data-latest/current.duckdb`
 
-> No CLI? Create a release named `data-latest` in the GitHub UI and drag the real file
-> (`data/prospect_YYYYMMDD.duckdb`, ~384MB) in, renaming the upload to `current.duckdb`.
+> No CLI? Create a release tagged `data-latest` in the GitHub UI and drag in a file named
+> exactly `current.duckdb` (make one first: `cp "$(readlink -f data/current.duckdb)" /tmp/current.duckdb`).
 
 ---
 
