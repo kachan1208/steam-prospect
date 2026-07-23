@@ -8,6 +8,7 @@ import { LaunchShapeBars } from "../components/charts/LaunchShapeBars";
 import { PressBySourceChart, sourceLabel } from "../components/charts/PressBySourceChart";
 import { PressTimelineChart } from "../components/charts/PressTimelineChart";
 import { ReviewsTimelineChart } from "../components/charts/ReviewsTimelineChart";
+import { GameTrendsChart } from "../components/charts/GameTrendsChart";
 import { Badge } from "../components/ui/Badge";
 import { Card } from "../components/ui/Card";
 import { Meter, BulletMeter } from "../components/ui/Meter";
@@ -172,6 +173,15 @@ export default function GameProfile() {
           value={fmtPct(profile.positive_ratio)}
           sub={profile.metacritic_score ? `Metacritic ${profile.metacritic_score}` : undefined}
         />
+        <StatTile
+          label="Live players (now)"
+          value={profile.live_players != null ? fmtCompact(profile.live_players) : "—"}
+          sub={
+            profile.twitch_viewers
+              ? `${fmtCompact(profile.twitch_viewers)} watching on Twitch`
+              : undefined
+          }
+        />
       </div>
 
       <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Game profile sections">
@@ -284,6 +294,13 @@ export default function GameProfile() {
       >
         {reviewsQ.isLoading && <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading…</div>}
         {reviewsQ.data && <ReviewsTimelineChart points={reviewsQ.data.timeline} />}
+      </Card>
+
+      <Card
+        title="Momentum over time"
+        subtitle="Monthly review velocity, live players, Twitch viewers, and creator mentions — the signals Prospect tracks over time (CCU/Twitch thicken as snapshots accumulate)"
+      >
+        <GameTrendsChart appid={profile.appid} />
       </Card>
 
       <Card title="Language split" subtitle="Share of sampled reviews by language — a localization reference">

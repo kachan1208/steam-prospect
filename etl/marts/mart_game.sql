@@ -53,6 +53,21 @@ velocity AS (
         quantile_cont(playtime_forever, 0.75) FILTER (WHERE playtime_forever IS NOT NULL AND playtime_forever > 0) AS playtime_p75
     FROM stg_review
     GROUP BY appid
+),
+ccu AS (
+    -- Live concurrent players (steam_players_bulk.py -> player_counts, latest snapshot).
+    SELECT appid, live_players FROM stg_player_count_latest
+),
+twitch AS (
+    -- Current Twitch footprint per game from the twitch collector's mentions: total live
+    -- viewers (sum of per-stream reach_at_time — the viewer count when each streamer was seen
+    -- on this game) and the live stream count. Reflects the latest sweep.
+    SELECT appid,
+        SUM(COALESCE(reach_at_time, 0)) AS twitch_viewers,
+        COUNT(*) AS twitch_streams
+    FROM stg_game_creator_mention
+    WHERE platform = 'twitch'
+    GROUP BY appid
 )
 SELECT
     g.appid, g.name, g.release_year,
@@ -71,10 +86,15 @@ SELECT
     COALESCE(v.n_reviews_first_90d, 0) AS n_reviews_first_90d,
     COALESCE(v.n_reviews_first_365d, 0) AS n_reviews_first_365d,
     COALESCE(v.n_reviews_trailing_30d, 0) AS n_reviews_trailing_30d,
-    v.playtime_p25, v.playtime_p50, v.playtime_p75
+    v.playtime_p25, v.playtime_p50, v.playtime_p75,
+    cc.live_players,
+    COALESCE(tw.twitch_viewers, 0) AS twitch_viewers,
+    COALESCE(tw.twitch_streams, 0) AS twitch_streams
 FROM stg_game g
 LEFT JOIN stg_primary_genre pg ON pg.appid = g.appid
 LEFT JOIN pct_ranks pr ON pr.appid = g.appid
 LEFT JOIN top_tags_agg tt ON tt.appid = g.appid
 LEFT JOIN velocity v ON v.appid = g.appid
+LEFT JOIN ccu cc ON cc.appid = g.appid
+LEFT JOIN twitch tw ON tw.appid = g.appid
 LEFT JOIN src.games gh ON gh.appid = g.appid;

@@ -1,0 +1,298 @@
+{
+  "_meta": {
+    "description": "Curated, best-guess calendar of indie-relevant Steam and marketing opportunities for 2026-2027. Future editions of recurring events do not have confirmed dates until Valve/organizers announce them, so most future dates here are APPROXIMATE (patterned off prior years) and flagged 'approx' in each note. Verify the exact window on the official page before you commit demo/submission work.",
+    "last_curated": "2026-07-20"
+  },
+  "events": [
+    {
+      "id": "next-fest-2026-02",
+      "name": "Steam Next Fest — February 2026",
+      "type": "next_fest",
+      "start_date": "2026-02-23",
+      "end_date": "2026-03-02",
+      "submission_deadline": "2026-02-02",
+      "url": "https://store.steampowered.com/sale/nextfest",
+      "note": "Week-long multiplayer demo festival. Approx dates (Valve runs one each Feb/Jun/Oct). Prep: a polished, bug-free demo build, a trailer, and a wishlist call-to-action — the demo page's wishlists are what carry over to launch."
+    },
+    {
+      "id": "next-fest-2026-06",
+      "name": "Steam Next Fest — June 2026",
+      "type": "next_fest",
+      "start_date": "2026-06-08",
+      "end_date": "2026-06-15",
+      "submission_deadline": "2026-05-18",
+      "url": "https://store.steampowered.com/sale/nextfest",
+      "note": "Approx dates. You can only appear in ONE Next Fest per game (before launch), so pick the edition where your demo will be most finished. Line up streamers and a Reddit/Discord push for the opening day spike."
+    },
+    {
+      "id": "next-fest-2026-10",
+      "name": "Steam Next Fest — October 2026",
+      "type": "next_fest",
+      "start_date": "2026-10-12",
+      "end_date": "2026-10-19",
+      "submission_deadline": "2026-09-21",
+      "url": "https://store.steampowered.com/sale/nextfest",
+      "note": "Approx dates (~1 week). The autumn edition is heavily attended ahead of the holiday season. Opt in via Steamworks well before the start — you must have a live demo and the event selected. Deadline shown is an approximate opt-in cutoff; confirm in Steamworks."
+    },
+    {
+      "id": "next-fest-2027-02",
+      "name": "Steam Next Fest — February 2027",
+      "type": "next_fest",
+      "start_date": "2027-02-22",
+      "end_date": "2027-03-01",
+      "submission_deadline": "2027-02-01",
+      "url": "https://store.steampowered.com/sale/nextfest",
+      "note": "Approx dates. Good slot if you're targeting a spring/summer 2027 launch — gives you months to convert Next Fest wishlists. Have your capsule art and short trailer finalized before opting in."
+    },
+    {
+      "id": "next-fest-2027-06",
+      "name": "Steam Next Fest — June 2027",
+      "type": "next_fest",
+      "start_date": "2027-06-14",
+      "end_date": "2027-06-21",
+      "submission_deadline": "2027-05-24",
+      "url": "https://store.steampowered.com/sale/nextfest",
+      "note": "Approx dates. June overlaps the Summer Game Fest news cycle — lots of eyes on demos, but also lots of competition. A distinctive capsule and a demo that hooks in the first 2 minutes matter most."
+    },
+    {
+      "id": "next-fest-2027-10",
+      "name": "Steam Next Fest — October 2027",
+      "type": "next_fest",
+      "start_date": "2027-10-11",
+      "end_date": "2027-10-18",
+      "submission_deadline": "2027-09-20",
+      "url": "https://store.steampowered.com/sale/nextfest",
+      "note": "Approx dates. Autumn edition ahead of the holiday season. Plan the demo build freeze ~2 weeks out so you're fixing content, not crashes, during the event."
+    },
+    {
+      "id": "steam-spring-sale-2026",
+      "name": "Steam Spring Sale 2026",
+      "type": "steam_sale",
+      "start_date": "2026-03-12",
+      "end_date": "2026-03-19",
+      "submission_deadline": null,
+      "url": null,
+      "note": "Approx dates (Valve usually runs a mid-March sale). Set your discount in Steamworks ~1 week before the sale locks; a first-ever discount can't be changed once the sale starts. Refresh your store capsule and 'what's new' before the traffic bump."
+    },
+    {
+      "id": "steam-summer-sale-2026",
+      "name": "Steam Summer Sale 2026",
+      "type": "steam_sale",
+      "start_date": "2026-06-25",
+      "end_date": "2026-07-09",
+      "submission_deadline": null,
+      "url": null,
+      "note": "Approx dates (the biggest sale of the year, ~2 weeks, late Jun into Jul). Discount config typically locks a week prior. Queue a small price cut even if modest — visibility during Summer Sale dwarfs a normal week."
+    },
+    {
+      "id": "steam-autumn-sale-2026",
+      "name": "Steam Autumn Sale 2026",
+      "type": "steam_sale",
+      "start_date": "2026-11-25",
+      "end_date": "2026-12-02",
+      "submission_deadline": null,
+      "url": null,
+      "note": "Approx dates (late Nov, around US Thanksgiving/Black Friday). High-intent buyers. Have your discount approved in Steamworks and a fresh trailer/screenshots ready to convert the extra store visits."
+    },
+    {
+      "id": "steam-winter-sale-2026",
+      "name": "Steam Winter Sale 2026",
+      "type": "steam_sale",
+      "start_date": "2026-12-18",
+      "end_date": "2027-01-05",
+      "submission_deadline": null,
+      "url": null,
+      "note": "Approx dates (~3 weeks spanning the holidays into early Jan). Peak concurrent users of the year. Set the discount early — many devs are away over the holidays, so lock it in before you take time off."
+    },
+    {
+      "id": "steam-spring-sale-2027",
+      "name": "Steam Spring Sale 2027",
+      "type": "steam_sale",
+      "start_date": "2027-03-11",
+      "end_date": "2027-03-18",
+      "submission_deadline": null,
+      "url": null,
+      "note": "Approx dates (mid-March). Often overlaps GDC week press attention. Configure your discount ~1 week ahead and consider timing a small content update to it."
+    },
+    {
+      "id": "steam-summer-sale-2027",
+      "name": "Steam Summer Sale 2027",
+      "type": "steam_sale",
+      "start_date": "2027-06-24",
+      "end_date": "2027-07-08",
+      "submission_deadline": null,
+      "url": null,
+      "note": "Approx dates (late Jun, ~2 weeks). The year's marquee sale. Lock discount config the week before; a launch-adjacent title can pair the sale with a Next Fest demo from earlier in June."
+    },
+    {
+      "id": "steam-autumn-sale-2027",
+      "name": "Steam Autumn Sale 2027",
+      "type": "steam_sale",
+      "start_date": "2027-11-24",
+      "end_date": "2027-12-01",
+      "submission_deadline": null,
+      "url": null,
+      "note": "Approx dates (late Nov, Black Friday window). Strong buyer intent heading into the holidays. Approve your discount in Steamworks and refresh store assets beforehand."
+    },
+    {
+      "id": "steam-winter-sale-2027",
+      "name": "Steam Winter Sale 2027",
+      "type": "steam_sale",
+      "start_date": "2027-12-17",
+      "end_date": "2028-01-04",
+      "submission_deadline": null,
+      "url": null,
+      "note": "Approx dates (~3 weeks over the holidays). Highest traffic of the year. Set your discount before the break and schedule any social posts in advance."
+    },
+    {
+      "id": "steam-scream-fest-2026",
+      "name": "Steam Scream Fest 2026 (Halloween)",
+      "type": "festival",
+      "start_date": "2026-10-27",
+      "end_date": "2026-11-02",
+      "submission_deadline": "2026-10-06",
+      "url": null,
+      "note": "Approx dates. Valve's Halloween-themed sale/curated event for horror and spooky games. If your game qualifies thematically, opt in via Steamworks and lead with atmospheric screenshots/trailer. Deadline is an approximate opt-in cutoff."
+    },
+    {
+      "id": "steam-scream-fest-2027",
+      "name": "Steam Scream Fest 2027 (Halloween)",
+      "type": "festival",
+      "start_date": "2027-10-26",
+      "end_date": "2027-11-01",
+      "submission_deadline": "2027-10-05",
+      "url": null,
+      "note": "Approx dates. Halloween-themed Steam event for horror/spooky titles. Themed Steam fests (Scream, Racing, Farming, Puzzle, etc.) are free extra visibility if your genre matches — watch Steamworks for the opt-in form."
+    },
+    {
+      "id": "ludonarracon-2026",
+      "name": "LudoNarraCon 2026",
+      "type": "festival",
+      "start_date": "2026-04-30",
+      "end_date": "2026-05-04",
+      "submission_deadline": "2026-01-16",
+      "url": "https://ludonarracon.com",
+      "note": "Approx dates. A curated digital festival for narrative-driven games (run by Fellow Traveller) hosted on Steam, with panels and demos. Curated — you apply months ahead. Best fit for story-rich, VN, and narrative-adventure games."
+    },
+    {
+      "id": "ludonarracon-2027",
+      "name": "LudoNarraCon 2027",
+      "type": "festival",
+      "start_date": "2027-04-29",
+      "end_date": "2027-05-03",
+      "submission_deadline": "2027-01-15",
+      "url": "https://ludonarracon.com",
+      "note": "Approx dates. Narrative-games festival on Steam (Fellow Traveller). Curated application typically opens in the winter before — have a demo, trailer, and a short pitch on your story hook ready. Deadline is approximate."
+    },
+    {
+      "id": "wholesome-direct-2026",
+      "name": "Wholesome Direct 2026",
+      "type": "festival",
+      "start_date": "2026-06-06",
+      "end_date": "2026-06-06",
+      "submission_deadline": "2026-03-06",
+      "url": "https://wholesomegames.com",
+      "note": "Approx date (single-day showcase in the June Summer Game Fest window). Curated broadcast for cozy/wholesome games. Submit via the Wholesome Games open call (usually opens late winter). A short, bright, feel-good clip is what gets picked."
+    },
+    {
+      "id": "wholesome-direct-2027",
+      "name": "Wholesome Direct 2027",
+      "type": "festival",
+      "start_date": "2027-06-05",
+      "end_date": "2027-06-05",
+      "submission_deadline": "2027-03-05",
+      "url": "https://wholesomegames.com",
+      "note": "Approx date. Annual cozy-games showcase during the June news cycle. Curated — watch wholesomegames.com for the submission form (~late winter). Getting featured drives a big single-day wishlist spike for cozy titles. Deadline is approximate."
+    },
+    {
+      "id": "day-of-the-devs-2026",
+      "name": "Day of the Devs — Summer 2026",
+      "type": "festival",
+      "start_date": "2026-06-07",
+      "end_date": "2026-06-07",
+      "submission_deadline": "2026-03-13",
+      "url": "https://www.dayofthedevs.com",
+      "note": "Approx date. Curated indie showcase (Double Fine + iam8bit), usually a Summer Game Fest-adjacent broadcast. Free to submit via their form. Selection favors distinctive art/hooks that read in a short sizzle clip."
+    },
+    {
+      "id": "day-of-the-devs-2027",
+      "name": "Day of the Devs — Summer 2027",
+      "type": "festival",
+      "start_date": "2027-06-06",
+      "end_date": "2027-06-06",
+      "submission_deadline": "2027-03-12",
+      "url": "https://www.dayofthedevs.com",
+      "note": "Approx date. Long-running curated indie showcase during the June season. Submit early via the open call; a strong 10-15 second clip of your most eye-catching moment is the whole pitch. Deadline is approximate."
+    },
+    {
+      "id": "guerrilla-collective-2026",
+      "name": "Guerrilla Collective 2026",
+      "type": "festival",
+      "start_date": "2026-06-13",
+      "end_date": "2026-06-15",
+      "submission_deadline": "2026-03-27",
+      "url": "https://guerrillacollective.gg",
+      "note": "Approx dates. Multi-day indie showcase in the June Summer Game Fest cluster. Paid/curated slots plus a broader Indie House presence. Good for reveals and demo pushes; apply in spring."
+    },
+    {
+      "id": "guerrilla-collective-2027",
+      "name": "Guerrilla Collective 2027",
+      "type": "festival",
+      "start_date": "2027-06-12",
+      "end_date": "2027-06-14",
+      "submission_deadline": "2027-03-26",
+      "url": "https://guerrillacollective.gg",
+      "note": "Approx dates. June indie showcase week. Slots are limited and often paid — budget for it and have a trailer plus press/preview build ready. Deadline is approximate."
+    },
+    {
+      "id": "wishlist-games-festival-autumn-2026",
+      "name": "Wishlist Games Festival — Autumn 2026",
+      "type": "festival",
+      "start_date": "2026-09-14",
+      "end_date": "2026-09-21",
+      "submission_deadline": "2026-08-17",
+      "url": null,
+      "note": "Approx dates (this curated Steam wishlist-driving festival runs a few editions a year; exact windows vary). Aimed squarely at building wishlists pre-launch. Confirm the edition and opt-in form before relying on this date."
+    },
+    {
+      "id": "the-mix-next-autumn-2026",
+      "name": "The MIX Next — Autumn 2026",
+      "type": "festival",
+      "start_date": "2026-10-01",
+      "end_date": "2026-10-01",
+      "submission_deadline": "2026-08-21",
+      "url": "https://www.themixgames.com",
+      "note": "Approx date. The MIX (Media Indie Exchange) runs curated indie showcase broadcasts and events through the year. Good for a polished vertical slice + trailer. Apply via themixgames.com; dates and format vary per edition."
+    },
+    {
+      "id": "igf-awards-2027",
+      "name": "Independent Games Festival (IGF) 2027 — GDC",
+      "type": "awards",
+      "start_date": "2027-03-16",
+      "end_date": "2027-03-16",
+      "submission_deadline": "2026-10-07",
+      "url": "https://igf.com",
+      "note": "Approx dates. The IGF is the marquee indie awards, held at GDC. The submission deadline (approx early October the year before) is the date that matters — miss it and you wait a full year. A finalist nod is a real credibility and wishlist boost."
+    },
+    {
+      "id": "the-game-awards-2026",
+      "name": "The Game Awards 2026",
+      "type": "awards",
+      "start_date": "2026-12-10",
+      "end_date": "2026-12-10",
+      "submission_deadline": null,
+      "url": "https://thegameawards.com",
+      "note": "Approx date (typically the second Thursday of December). Not indie-specific and jury/committee-selected (no open submission), but it has a Best Debut Indie / Fresh Indie category and its 100M+ viewership can spike wishlists overnight. Worth timing announcements around."
+    },
+    {
+      "id": "the-game-awards-2027",
+      "name": "The Game Awards 2027",
+      "type": "awards",
+      "start_date": "2027-12-09",
+      "end_date": "2027-12-09",
+      "submission_deadline": null,
+      "url": "https://thegameawards.com",
+      "note": "Approx date (~second Thursday of December). Huge live audience and a dedicated indie category. Committee-selected rather than open-entry — focus on shipping/press coverage that puts you on their radar earlier in the year."
+    }
+  ]
+}

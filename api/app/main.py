@@ -2,15 +2,22 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import analytics_db
 from .config import settings
 from .control_db import init_db
 from .observability import setup_observability
-from .routers import account, alerts, chat, estimate, explore, games, health, market, marketing, niches, press, seasonality, views, watchlist
+from . import alert_models, input_models, outreach_models, project_models  # noqa: F401 — register watchtower tables on Base.metadata before init_db()
+from .routers import (
+    account, alerts, chat, estimate, explore, games, health, inputs, market, marketing,
+    niches, outreach, press, projects, radar, seasonality, trends, views, watchlist,
+)
 
 
 @asynccontextmanager
@@ -56,6 +63,11 @@ app.include_router(marketing.router)
 app.include_router(explore.router)
 app.include_router(chat.router)
 app.include_router(alerts.router)
+app.include_router(projects.router)
+app.include_router(outreach.router)
+app.include_router(inputs.router)
+app.include_router(radar.router)
+app.include_router(trends.router)
 app.include_router(account.router)
 
 # Alias the plan's canonical CSV export path to the niches export handler.
@@ -68,11 +80,43 @@ app.add_api_route(
 )
 
 
-@app.get("/", tags=["health"])
-def root() -> dict:
+# ---- Serve the built SPA when running as a single hosted service -------------------------
+# In the container image PROSPECT_STATIC_DIR points at the Vite build (web/dist), so this
+# service also serves the frontend from the same origin (no CORS, one deployable). Unset in
+# local dev — Vite serves the SPA and proxies /api — leaving everything below inert.
+_STATIC_DIR = Path(settings.static_dir) if settings.static_dir else None
+_INDEX_HTML = (_STATIC_DIR / "index.html") if _STATIC_DIR else None
+_SERVE_SPA = bool(_STATIC_DIR and _INDEX_HTML and _INDEX_HTML.exists())
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    # Hosted mode: the root path is the app itself. Local/dev: a small JSON pointer.
+    if _SERVE_SPA:
+        return FileResponse(str(_INDEX_HTML))
     return {
         "name": settings.api_title,
         "version": settings.api_version,
         "docs": "/docs",
         "health": "/api/health",
     }
+
+
+if _SERVE_SPA:
+    # Hashed JS/CSS/images emitted by Vite live under /assets.
+    _assets_dir = _STATIC_DIR / "assets"
+    if _assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="assets")
+
+    # SPA fallback — registered LAST so it never shadows /api/*, /docs, /openapi.json,
+    # /metrics (each matched by its own route above). Any other path returns a real static
+    # file if one exists (favicon, etc.), otherwise index.html so client-side routes
+    # (/home, /outreach, …) survive a hard refresh.
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa_fallback(full_path: str):
+        if full_path.startswith(("api", "docs", "redoc", "openapi.json", "metrics")):
+            raise HTTPException(status_code=404)
+        candidate = _STATIC_DIR / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(str(candidate))
+        return FileResponse(str(_INDEX_HTML))

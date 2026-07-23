@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from .. import analytics_db
 from ..auth import get_current_org
@@ -59,6 +60,169 @@ _CHANNEL_BUZZ_CAVEATS = [
     "Terms are restricted to Steam's own tag/genre vocabulary (a word-level allowlist), so this "
     "reads as game concepts/mechanics/genres, not franchise names or sale events.",
 ]
+
+# Display labels for the channels that can appear in mart_channel_mix.
+_CHANNEL_LABELS = {"press": "Press", "youtube": "YouTube", "reddit": "Reddit", "twitch": "Twitch", "x": "X"}
+# Channels that are worked as creator outreach (vs. press, which has its own pitch flow).
+_CREATOR_CHANNELS = {"youtube", "reddit", "twitch", "x"}
+
+_RECOMMENDATION_CAVEATS = [
+    "Advice is derived from the same reach-weighted channel mix shown below — a single very-large "
+    "channel can dominate the reach share, so weigh it against raw mention counts before reallocating "
+    "your whole plan.",
+    "Rising concepts are mined across ALL genres and channels (not just this one) — a cheap leading "
+    "indicator to sanity-check against your own niche, not a genre-specific signal.",
+]
+
+
+def _channel_label(channel: str) -> str:
+    return _CHANNEL_LABELS.get(channel, channel.capitalize())
+
+
+def _pct(x: float | None) -> int:
+    """Share (0..1) -> whole percent, clamped to [0, 100]."""
+    return max(0, min(100, int(round((x or 0.0) * 100))))
+
+
+class Recommendation(BaseModel):
+    kind: str
+    text: str
+    cta_path: str | None = None
+    cta_label: str | None = None
+
+
+class RecommendationsResponse(BaseModel):
+    genre: str
+    items: list[Recommendation]
+    caveats: list[str]
+
+
+@router.get("/recommendations", response_model=RecommendationsResponse)
+def recommendations(
+    genre: str = Query(..., description="Exact genre label, e.g. 'RPG' (see /api/marketing/channel-mix for the list)."),
+    org: Org = Depends(get_current_org),
+) -> RecommendationsResponse:
+    """Turn the channel-mix and cross-channel buzz marts into a short list of actionable,
+    genre-specific recommendations — "what to do", not just "here's the data". Each item deep-links
+    (cta_path) into the surface where you'd act on it (creator Outreach, the Press pitch list, Games).
+    Honest by construction: before any channel scrapers have run a genre reads as ~100% press, and the
+    endpoint says so rather than inventing advice.
+    """
+    rows = analytics_db.query(
+        "SELECT channel, n_mentions, reach_weighted, share_mentions, share_reach_weighted "
+        "FROM mart_channel_mix WHERE genre = ? ORDER BY share_reach_weighted DESC NULLS LAST",
+        [genre],
+    )
+
+    items: list[Recommendation] = []
+
+    if not rows:
+        items.append(
+            Recommendation(
+                kind="channel_mix",
+                text=(
+                    f"No channel-mix data yet for {genre} — until the YouTube / Reddit / Twitch / X "
+                    "scrapers run, every genre reads as ~100% press. Start from your press pitch list."
+                ),
+                cta_path="/press",
+                cta_label="See press pitch list",
+            )
+        )
+    else:
+        # (1) Where attention actually is — the reach-dominant channel (rows are reach-sorted).
+        top = rows[0]
+        top_ch = top["channel"]
+        top_share = _pct(top["share_reach_weighted"])
+        if top_ch == "press":
+            items.append(
+                Recommendation(
+                    kind="channel_focus",
+                    text=(
+                        f"Attention in {genre} is {top_share}% Press by reach-weighted share — lead with "
+                        "your outlet/byline pitch list here before spending on creators."
+                    ),
+                    cta_path="/press",
+                    cta_label="See press pitch list",
+                )
+            )
+        else:
+            items.append(
+                Recommendation(
+                    kind="channel_focus",
+                    text=(
+                        f"Attention in {genre} is {top_share}% {_channel_label(top_ch)} by reach — "
+                        "prioritise creator outreach over press."
+                    ),
+                    cta_path=f"/outreach?genre={genre}",
+                    cta_label="Open creator outreach",
+                )
+            )
+
+        # (2) Mention-count vs reach mismatch — press earns coverage but not the audience.
+        press = next((r for r in rows if r["channel"] == "press"), None)
+        if (
+            top_ch != "press"
+            and press is not None
+            and (press["share_mentions"] or 0.0) >= 0.15
+            and (press["share_reach_weighted"] or 0.0) < 0.10
+        ):
+            reach_pct = _pct(press["share_reach_weighted"])
+            reach_phrase = "under 1%" if reach_pct == 0 else f"{reach_pct}%"
+            items.append(
+                Recommendation(
+                    kind="channel_balance",
+                    text=(
+                        f"Press is {_pct(press['share_mentions'])}% of {genre} mentions but {reach_phrase} of "
+                        "reach-weighted attention — worth it for launch-day credibility, but creators are what "
+                        "move the wishlist numbers here."
+                    ),
+                    cta_path="/press",
+                    cta_label="See press pitch list",
+                )
+            )
+
+        # (3) An under-used, high-reach lever — a non-dominant channel that punches above its weight.
+        for r in rows[1:]:
+            sm = r["share_mentions"] or 0.0
+            sr = r["share_reach_weighted"] or 0.0
+            if sr >= 0.05 and sm > 0.0 and sr >= 1.3 * sm:
+                ch = r["channel"]
+                is_creator = ch in _CREATOR_CHANNELS
+                items.append(
+                    Recommendation(
+                        kind="channel_upside",
+                        text=(
+                            f"{_channel_label(ch)} punches above its weight in {genre}: {_pct(sm)}% of mentions "
+                            f"but {_pct(sr)}% of reach — a shorter list of {_channel_label(ch)} accounts can "
+                            "deliver outsized audience for the effort."
+                        ),
+                        cta_path=f"/outreach?genre={genre}" if is_creator else "/press",
+                        cta_label="Open creator outreach" if is_creator else "See press pitch list",
+                    )
+                )
+                break  # one upside nudge is enough — keep the card scannable
+
+    # (4) Rising concepts to fold into store copy & tags — from the cross-channel buzz mart.
+    buzz = analytics_db.query(
+        "SELECT term FROM mart_channel_buzz_summary WHERE direction = 'rising' "
+        "ORDER BY slope_weighted DESC LIMIT 5"
+    )
+    terms = [b["term"] for b in buzz]
+    if terms:
+        items.append(
+            Recommendation(
+                kind="buzz",
+                text=(
+                    "Concepts rising across every marketing channel right now: "
+                    f"{', '.join(terms)} — weave the ones that genuinely fit into your Steam capsule "
+                    "copy, short description, and tags."
+                ),
+                cta_path=f"/games?genre={genre}",
+                cta_label=f"Scout {genre} games",
+            )
+        )
+
+    return RecommendationsResponse(genre=genre, items=items, caveats=_RECOMMENDATION_CAVEATS)
 
 
 @router.get("/creator-pitch-list", response_model=CreatorPitchListResponse)

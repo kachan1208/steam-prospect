@@ -211,6 +211,7 @@ class GameSearchRow(BaseModel):
     total_reviews: Optional[int] = None
     positive_ratio: Optional[float] = None
     est_rev_reviews: Optional[float] = None
+    live_players: Optional[int] = None
     header_image: Optional[str] = None
     top_tags: list[str] = Field(default_factory=list)
 
@@ -259,6 +260,10 @@ class GameProfile(BaseModel):
     playtime_p25: Optional[float] = None
     playtime_p50: Optional[float] = None
     playtime_p75: Optional[float] = None
+    # Live traction / reach — CCU snapshot (steam_players_bulk.py) + current Twitch footprint.
+    live_players: Optional[int] = None
+    twitch_viewers: Optional[int] = None
+    twitch_streams: Optional[int] = None
     in_watchlist: bool = False
 
 
@@ -579,6 +584,9 @@ class WatchlistOut(BaseModel):
     total_reviews: Optional[int] = None
     positive_ratio: Optional[float] = None
     est_rev_reviews: Optional[float] = None
+    live_players: Optional[int] = None
+    twitch_viewers: Optional[int] = None
+    n_reviews_trailing_30d: Optional[int] = None
     velocity_sparkline: list[int] = Field(default_factory=list)
 
 

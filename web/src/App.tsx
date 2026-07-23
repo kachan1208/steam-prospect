@@ -15,6 +15,12 @@ import Marketing from "./pages/Marketing";
 import WatchlistPage from "./pages/Watchlist";
 import Explorer from "./pages/Explorer";
 import Chat from "./pages/Chat";
+import Alerts from "./pages/Alerts";
+import Outreach from "./pages/Outreach";
+import DevLog from "./pages/DevLog";
+import Radar from "./pages/Radar";
+import Home from "./pages/Home";
+import MyGame from "./pages/MyGame";
 import Landing from "./pages/Landing";
 import Onboarding, { ONBOARDING_STORAGE_KEY } from "./pages/Onboarding";
 import Settings from "./pages/Settings";
@@ -96,6 +102,32 @@ const ICONS: Record<string, ReactNode> = {
       <path d="M20 5.5c0-1-.9-1.8-2-1.8h-5.5v15.6H18c1.1 0 2 .3 2 1.2V5.5Z" />
     </>
   ),
+  bell: (
+    <>
+      <path d="M18 8.5a6 6 0 0 0-12 0c0 6.5-2.5 8.5-2.5 8.5h17S18 15 18 8.5" />
+      <path d="M13.7 20.5a2 2 0 0 1-3.4 0" />
+    </>
+  ),
+  target: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <circle cx="12" cy="12" r="4.5" />
+      <circle cx="12" cy="12" r="1" />
+    </>
+  ),
+  home: (
+    <>
+      <path d="M3.5 11.5 12 4l8.5 7.5" />
+      <path d="M5.5 10v9.5h13V10" />
+    </>
+  ),
+  rocket: (
+    <>
+      <path d="M12 3.2c2.8 1.6 4.3 4.9 4.3 7.8l-1.8 1.9H9.5L7.7 11C7.7 8.1 9.2 4.8 12 3.2Z" />
+      <circle cx="12" cy="9" r="1.4" />
+      <path d="M9.7 14.3 8 18M14.3 14.3 16 18" />
+    </>
+  ),
 };
 
 function Icon({ name }: { name: string }) {
@@ -116,6 +148,13 @@ function Icon({ name }: { name: string }) {
 
 const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: string; end?: boolean }[] }[] = [
   {
+    label: "Watchtower",
+    items: [
+      { to: "/home", label: "Home", icon: "home" },
+      { to: "/project", label: "My Game", icon: "rocket" },
+    ],
+  },
+  {
     label: "Guide",
     items: [{ to: "/welcome", label: "Getting Started", icon: "flag" }],
   },
@@ -125,6 +164,7 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: str
       { to: "/niches", label: "Niche Finder", icon: "compass" },
       { to: "/benchmarks", label: "Market Benchmarks", icon: "bars" },
       { to: "/timing", label: "Launch & Timing", icon: "calendar" },
+      { to: "/radar", label: "Opportunity Radar", icon: "target" },
     ],
   },
   {
@@ -137,12 +177,17 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: str
   },
   {
     label: "Marketing",
-    items: [{ to: "/marketing", label: "Marketing", icon: "megaphone" }],
+    items: [
+      { to: "/marketing", label: "Marketing", icon: "megaphone" },
+      { to: "/outreach", label: "Outreach", icon: "chat" },
+    ],
   },
   {
     label: "Workspace",
     items: [
       { to: "/watchlist", label: "Watchlist", icon: "bookmark" },
+      { to: "/alerts", label: "Alerts", icon: "bell" },
+      { to: "/devlog", label: "Dev log", icon: "book" },
       { to: "/chat", label: "Chat", icon: "chat" },
     ],
   },
@@ -154,6 +199,9 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: str
     ],
   },
 ];
+
+// Pages added in the watchtower build — flagged "New" in the sidebar so they're easy to spot.
+const NEW_PATHS = new Set(["/home", "/project", "/alerts", "/devlog", "/outreach", "/radar"]);
 
 function Logo() {
   return (
@@ -296,7 +344,12 @@ function Sidebar() {
                   }
                 >
                   <Icon name={item.icon} />
-                  <span className="truncate">{item.label}</span>
+                  <span className="truncate min-w-0">{item.label}</span>
+                  {NEW_PATHS.has(item.to) && (
+                    <span className="ml-auto shrink-0 rounded-full bg-brand-tint px-1.5 py-[3px] text-[9px] font-semibold uppercase leading-none tracking-[0.06em] text-brand">
+                      New
+                    </span>
+                  )}
                 </NavLink>
               ))}
             </div>
@@ -378,7 +431,13 @@ export default function App() {
         <Route path="/games/:appid" element={<GameProfile />} />
         <Route path="/press" element={<Press />} />
         <Route path="/marketing" element={<Marketing />} />
+        <Route path="/home" element={<Home />} />
+        <Route path="/project" element={<MyGame />} />
         <Route path="/watchlist" element={<WatchlistPage />} />
+        <Route path="/alerts" element={<Alerts />} />
+        <Route path="/outreach" element={<Outreach />} />
+        <Route path="/devlog" element={<DevLog />} />
+        <Route path="/radar" element={<Radar />} />
         <Route path="/explorer" element={<Explorer />} />
         <Route path="/chat" element={<Chat />} />
         <Route path="/welcome" element={<Onboarding />} />

@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     # Control plane: SQLAlchemy DSN. Local default = SQLite file; set to a Postgres URL later.
     control_dsn: str = f"sqlite:///{REPO_ROOT / 'prospect_control.db'}"
 
+    # Hosted mode: point at the built Vite frontend (web/dist) so the API serves the SPA
+    # from its own origin — one deployable, no CORS. Empty in local dev (Vite serves it).
+    static_dir: str | None = None
+
     # Solo mode: one seeded org with unlimited entitlements; no login required.
     solo_mode: bool = True
     solo_org_name: str = "Solo Studio"

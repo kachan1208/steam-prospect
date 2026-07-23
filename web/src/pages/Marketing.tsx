@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
 
 import { ChannelBuzzList } from "../components/charts/ChannelBuzzList";
 import { ChannelMixChart } from "../components/charts/ChannelMixChart";
 import { CreatorPitchList } from "../components/CreatorPitchList";
 import { Card } from "../components/ui/Card";
-import { useChannelBuzz, useChannelMix, useGenres, type GenreOption, type MarketingPlatform } from "../lib/api";
+import { request, useChannelBuzz, useChannelMix, useGenres, type GenreOption, type MarketingPlatform } from "../lib/api";
 import { channelLabel } from "../lib/palette";
 import Press from "./Press";
 
@@ -44,6 +46,41 @@ function GenreSelect({
   );
 }
 
+// ---- recommendations ("For your genre — what to do") -------------------------------------
+// Mirrors api/app/routers/marketing.py's RecommendationsResponse. The shared request<T> helper
+// is exported from lib/api, and the /recommendations endpoint is owned by this track, so its
+// tiny client lives here rather than in that shared file.
+interface Recommendation {
+  kind: string;
+  text: string;
+  cta_path: string | null;
+  cta_label: string | null;
+}
+interface RecommendationsResponse {
+  genre: string;
+  items: Recommendation[];
+  caveats: string[];
+}
+
+function useRecommendations(genre: string | null) {
+  return useQuery({
+    queryKey: ["marketing-recommendations", genre],
+    queryFn: () =>
+      request<RecommendationsResponse>(`/marketing/recommendations?genre=${encodeURIComponent(genre ?? "")}`),
+    enabled: genre !== null && genre !== "",
+    staleTime: 5 * 60_000,
+  });
+}
+
+// Friendly short tag per recommendation kind (the pill shown on each card).
+const REC_KIND_LABEL: Record<string, string> = {
+  channel_focus: "Focus",
+  channel_balance: "Balance",
+  channel_upside: "Upside",
+  buzz: "Trends",
+  channel_mix: "Setup",
+};
+
 /**
  * Marketing — the multi-channel evolution of the old Press page: a genre selector + channel
  * tabs (Press · YouTube · Reddit · Twitch · X), each a pitch/target list, plus a channel-mix
@@ -64,6 +101,8 @@ export default function Marketing() {
     if (firstReal) setGenre(firstReal.value);
   }, [genres, genre]);
 
+  const navigate = useNavigate();
+  const recsQ = useRecommendations(genre);
   const mixQ = useChannelMix(genre);
   const risingQ = useChannelBuzz("rising", 12);
   const coolingQ = useChannelBuzz("cooling", 12);
@@ -78,6 +117,67 @@ export default function Marketing() {
           attention.
         </p>
       </div>
+
+      <Card
+        title="For your genre — what to do"
+        subtitle={
+          genre
+            ? `Actionable reads for ${genre}, derived from the channel mix and cross-channel buzz below`
+            : "Pick a genre"
+        }
+        action={<GenreSelect genre={genre} genres={genres} onChange={setGenre} />}
+      >
+        {recsQ.isLoading && (
+          <div className="flex h-20 items-center justify-center text-xs text-ink-muted">Loading recommendations…</div>
+        )}
+        {recsQ.isError && (
+          <div className="text-xs text-status-serious">
+            Failed to load recommendations{recsQ.error instanceof Error ? `: ${recsQ.error.message}` : "."}
+          </div>
+        )}
+        {recsQ.data && recsQ.data.items.length === 0 && (
+          <div className="text-xs text-ink-muted">No recommendations yet for {genre}.</div>
+        )}
+        {recsQ.data && recsQ.data.items.length > 0 && (
+          <div className="flex flex-col gap-2.5">
+            {recsQ.data.items.map((rec, i) => (
+              <div
+                key={i}
+                className="flex items-start justify-between gap-3 rounded-lg border border-chartborder bg-page p-3"
+              >
+                <div className="min-w-0">
+                  <span className="mb-1.5 inline-block rounded-full bg-brand-tint px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-brand">
+                    {REC_KIND_LABEL[rec.kind] ?? rec.kind}
+                  </span>
+                  <p className="text-sm leading-relaxed text-ink-secondary">{rec.text}</p>
+                </div>
+                {rec.cta_path && (
+                  <button
+                    type="button"
+                    onClick={() => navigate(rec.cta_path!)}
+                    className="shrink-0 rounded-md bg-brand-tint px-3 py-1.5 text-xs font-medium text-brand transition-colors hover:bg-brand hover:text-brand-fg"
+                  >
+                    {rec.cta_label ?? "Open"}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {recsQ.data && recsQ.data.items.length > 0 && recsQ.data.caveats.length > 0 && (
+          <div className="mt-4 rounded-md border border-chartborder bg-page p-3">
+            <div className="mb-1.5 text-xs font-semibold text-ink-primary">Read this with caveats</div>
+            <ul className="flex flex-col gap-1.5 text-xs text-ink-secondary">
+              {recsQ.data.caveats.map((c, i) => (
+                <li key={i} className="flex gap-2">
+                  <span className="shrink-0 text-ink-muted">·</span>
+                  <span>{c}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </Card>
 
       <Card
         title="Pitch / target list"

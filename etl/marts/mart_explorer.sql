@@ -53,6 +53,9 @@ SELECT
     reviews_pct_in_genre,
     owners_pct_in_genre,
     header_image,
+    live_players,
+    twitch_viewers,
+    twitch_streams,
 
     -- Released in the last RECENT_MONTHS (24) months — mirrors stg_game.is_recent /
     -- the niches "24m" window elsewhere in the app. release_date here is already the
@@ -105,5 +108,17 @@ SELECT
         WHEN positive_ratio >= 0.70 THEN 'Mostly Positive'
         WHEN positive_ratio >= 0.40 THEN 'Mixed'
         ELSE 'Mostly Negative'
-    END AS rating_tier
+    END AS rating_tier,
+
+    -- Live concurrent-players band (latest CCU snapshot) — coarse bucket for group-by;
+    -- raw live_players kept above for filters/metrics/sort.
+    CASE
+        WHEN live_players IS NULL THEN NULL
+        WHEN live_players = 0 THEN '0 (idle)'
+        WHEN live_players < 10 THEN '1-9'
+        WHEN live_players < 100 THEN '10-99'
+        WHEN live_players < 1000 THEN '100-999'
+        WHEN live_players < 10000 THEN '1K-9.9K'
+        ELSE '10K+'
+    END AS live_players_bucket
 FROM mart_game;

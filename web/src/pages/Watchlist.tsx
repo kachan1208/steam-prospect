@@ -42,6 +42,8 @@ export default function WatchlistPage() {
                   <th className="px-3 py-2 font-medium">Game</th>
                   <th className="px-3 py-2 font-medium">Price</th>
                   <th className="px-3 py-2 font-medium">Owners</th>
+                  <th className="px-3 py-2 font-medium">Live players</th>
+                  <th className="px-3 py-2 font-medium">Twitch</th>
                   <th className="px-3 py-2 font-medium">Reviews</th>
                   <th className="px-3 py-2 font-medium">Positive</th>
                   <th className="px-3 py-2 font-medium">Est. revenue</th>
@@ -72,7 +74,18 @@ export default function WatchlistPage() {
                     </td>
                     <td className="tabular px-3 py-2 align-middle">{fmtPrice(w.price_initial)}</td>
                     <td className="tabular px-3 py-2 align-middle">{fmtCompact(w.owners_mid)}</td>
-                    <td className="tabular px-3 py-2 align-middle">{fmtInt(w.total_reviews)}</td>
+                    <td className="tabular px-3 py-2 align-middle">
+                      {w.live_players != null ? fmtCompact(w.live_players) : "—"}
+                    </td>
+                    <td className="tabular px-3 py-2 align-middle">
+                      {w.twitch_viewers ? fmtCompact(w.twitch_viewers) : "—"}
+                    </td>
+                    <td className="tabular px-3 py-2 align-middle">
+                      {fmtInt(w.total_reviews)}
+                      {w.n_reviews_trailing_30d ? (
+                        <span className="ml-1 text-[11px] text-status-good">+{fmtInt(w.n_reviews_trailing_30d)}/30d</span>
+                      ) : null}
+                    </td>
                     <td className="tabular px-3 py-2 align-middle">{fmtPct(w.positive_ratio)}</td>
                     <td className="tabular px-3 py-2 align-middle">{fmtUsd(w.est_rev_reviews)}</td>
                     <td className="px-3 py-2 align-middle">

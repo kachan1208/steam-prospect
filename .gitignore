@@ -1,5 +1,6 @@
-# Analytics data & databases (rebuildable via `task etl`, or read-only source — never committed)
-data/
+# Analytics data & databases (rebuildable via `task etl`, or read-only source — never committed).
+# Anchored to the repo root so nested source dirs like api/app/data/ (seed JSON) stay tracked.
+/data/
 *.duckdb
 prospect_control.db
 steam_games.db*

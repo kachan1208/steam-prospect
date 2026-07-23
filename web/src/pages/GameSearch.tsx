@@ -140,6 +140,15 @@ export default function GameSearch() {
         ),
         cell: (info) => <span className="tabular">{fmtCompact(info.getValue())}</span>,
       }),
+      columnHelper.accessor("live_players", {
+        header: () => (
+          <SortLabel label="Live" col="live_players" active={sort === "live_players"} order={order} onSort={toggleSort} />
+        ),
+        cell: (info) => {
+          const v = info.getValue();
+          return <span className="tabular">{v != null ? fmtCompact(v) : "—"}</span>;
+        },
+      }),
       columnHelper.accessor("total_reviews", {
         header: () => (
           <SortLabel label="Reviews" col="total_reviews" active={sort === "total_reviews"} order={order} onSort={toggleSort} />

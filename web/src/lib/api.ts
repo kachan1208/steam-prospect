@@ -20,7 +20,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
@@ -455,6 +455,7 @@ export interface GameSearchRow {
   total_reviews: number | null;
   positive_ratio: number | null;
   est_rev_reviews: number | null;
+  live_players: number | null;
   header_image: string | null;
   top_tags: string[];
 }
@@ -478,7 +479,8 @@ export type GameSortKey =
   | "rev_pct_in_genre"
   | "reviews_pct_in_genre"
   | "owners_pct_in_genre"
-  | "n_reviews_trailing_30d";
+  | "n_reviews_trailing_30d"
+  | "live_players";
 
 export interface GameSearchParams {
   q?: string;
@@ -533,6 +535,9 @@ export interface GameProfile {
   playtime_p25: number | null;
   playtime_p50: number | null;
   playtime_p75: number | null;
+  live_players: number | null;
+  twitch_viewers: number | null;
+  twitch_streams: number | null;
   in_watchlist: boolean;
 }
 
@@ -841,6 +846,9 @@ export interface WatchlistItem {
   total_reviews: number | null;
   positive_ratio: number | null;
   est_rev_reviews: number | null;
+  live_players: number | null;
+  twitch_viewers: number | null;
+  n_reviews_trailing_30d: number | null;
   velocity_sparkline: number[];
 }
 

@@ -1,0 +1,32 @@
+# Keep the build context small & the image clean. The frontend is rebuilt inside the
+# image (stage 1) and the analytics DB is fetched at boot — neither belongs in the context.
+
+# Data & databases (huge; fetched at runtime or never needed on the server)
+data/
+*.duckdb
+prospect_control.db
+steam_games.db*
+**/steam_games.db*
+
+# Dependencies / virtualenvs (reinstalled inside the image)
+**/node_modules
+**/.venv
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# Prebuilt frontend (stage 1 rebuilds it)
+web/dist
+**/*.tsbuildinfo
+
+# VCS / tooling / local cruft
+.git
+.github
+.claude
+.mcp.json
+.env
+**/.env
+.DS_Store
+
+# Tests & docs not needed at runtime
+api/tests

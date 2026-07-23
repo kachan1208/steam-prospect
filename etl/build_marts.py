@@ -180,6 +180,7 @@ MART_FILES = [
     "mart_seasonality.sql",
     "mart_launch_curve.sql",
     "mart_game_reviews.sql",
+    "mart_game_trends.sql",
     "mart_lang.sql",
     "mart_game_teardown.sql",
     "mart_game_aspect_reviews.sql",
@@ -622,6 +623,28 @@ def create_marketing_staging(con: duckdb.DuckDBPyConnection) -> bool:
     return have_all
 
 
+def create_ccu_staging(con: duckdb.DuckDBPyConnection) -> bool:
+    """Latest live concurrent-player count per game from the scraper's `player_counts` table
+    (steam_players_bulk.py — keyless GetNumberOfCurrentPlayers snapshots). Guarded exactly like
+    create_marketing_staging(): builds stg_player_count_latest from the newest snapshot per game
+    when the table exists, else an empty typed table so mart_game never crashes on an older source
+    DB. This is REAL live traction, distinct from SteamSpy's stale daily-peak stg_game.ccu."""
+    if _sqlite_table_exists(con, "player_counts"):
+        con.execute(
+            """
+            CREATE TEMP TABLE stg_player_count_latest AS
+            SELECT appid, live_players, captured_at FROM (
+                SELECT appid, player_count AS live_players, captured_at,
+                    row_number() OVER (PARTITION BY appid ORDER BY captured_at DESC) AS rn
+                FROM src.player_counts
+            ) WHERE rn = 1;
+            """
+        )
+        return True
+    con.execute("CREATE TEMP TABLE stg_player_count_latest (appid INTEGER, live_players INTEGER, captured_at TIMESTAMP)")
+    return False
+
+
 def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str) -> None:
     med_rev = con.execute(
         "SELECT median(est_rev_reviews) FROM stg_game WHERE total_reviews >= ? AND est_rev_reviews IS NOT NULL",
@@ -708,6 +731,10 @@ def main() -> int:
             "[etl] marketing source tables (creator/game_creator_mention/creator_reach_snapshot): "
             + ("found" if have_marketing else "ABSENT or not yet migrated — building empty marketing marts")
         )
+
+        have_ccu = create_ccu_staging(con)
+        print("[etl] player_counts (live CCU): "
+              + ("found" if have_ccu else "ABSENT — live_players will be NULL"))
 
         for fname in MART_FILES:
             sql_path = HERE / "marts" / fname

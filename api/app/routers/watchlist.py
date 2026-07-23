@@ -21,7 +21,8 @@ def _enrich(w: Watchlist) -> WatchlistOut:
     game = (
         analytics_db.query_one(
             "SELECT name, header_image, primary_genre, price_initial, owners_mid, "
-            "total_reviews, positive_ratio, est_rev_reviews FROM mart_game WHERE appid = ?",
+            "total_reviews, positive_ratio, est_rev_reviews, "
+            "live_players, twitch_viewers, n_reviews_trailing_30d FROM mart_game WHERE appid = ?",
             [appid],
         )
         or {}
@@ -46,6 +47,9 @@ def _enrich(w: Watchlist) -> WatchlistOut:
         total_reviews=game.get("total_reviews"),
         positive_ratio=game.get("positive_ratio"),
         est_rev_reviews=game.get("est_rev_reviews"),
+        live_players=game.get("live_players"),
+        twitch_viewers=game.get("twitch_viewers"),
+        n_reviews_trailing_30d=game.get("n_reviews_trailing_30d"),
         velocity_sparkline=sparkline,
     )
 

@@ -84,6 +84,10 @@ DIMENSIONS: dict[str, Dim] = {
     "metacritic_score": Dim("Metacritic score", "metacritic_score", "integer"),
     "achievements_count": Dim("Achievements", "achievements_count", "integer"),
     "avg_playtime_forever": Dim("Avg playtime (min)", "avg_playtime_forever", "integer"),
+    "live_players": Dim("Live players (CCU)", "live_players", "integer"),
+    "live_players_bucket": Dim("Live-players band", "live_players_bucket", "string", groupable=True),
+    "twitch_viewers": Dim("Twitch viewers (live)", "twitch_viewers", "integer"),
+    "twitch_streams": Dim("Twitch streams (live)", "twitch_streams", "integer"),
     "n_reviews_trailing_30d": Dim("Reviews, trailing 30d", "n_reviews_trailing_30d", "integer"),
     "rev_pct_in_genre": Dim("Revenue percentile in genre", "rev_pct_in_genre", "number"),
     "top_tags": Dim("Tags", "top_tags", "list"),
@@ -103,6 +107,9 @@ METRICS: dict[str, str] = {
     "sum_est_rev": "sum(est_rev_reviews)",
     "max_est_rev": "max(est_rev_reviews)",
     "min_price": "min(price_initial)",
+    "median_live_players": "median(live_players)",
+    "sum_live_players": "sum(live_players)",
+    "sum_twitch_viewers": "sum(twitch_viewers)",
 }
 
 METRIC_LABELS: dict[str, str] = {
@@ -117,6 +124,9 @@ METRIC_LABELS: dict[str, str] = {
     "sum_est_rev": "Total est. revenue",
     "max_est_rev": "Max est. revenue",
     "min_price": "Min price",
+    "median_live_players": "Median live players",
+    "sum_live_players": "Total live players",
+    "sum_twitch_viewers": "Total Twitch viewers",
 }
 
 _OPS_BY_KIND: dict[str, list[str]] = {
