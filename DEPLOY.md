@@ -99,3 +99,22 @@ The asset URL is then:
   which doesn't exist on the server — the chat panel will just report unavailable. To enable it,
   set `PROSPECT_CHAT_MODE=api` + `ANTHROPIC_API_KEY` (metered API billing).
 - **Cost:** ~$5/mo for the basic-xxs instance. The GitHub repo + Release hosting is free.
+
+---
+
+## Live deployment (already created)
+
+- **URL:** <https://prospect-vkqdh.ondigitalocean.app>
+- **App ID:** `f069bc96-4278-4765-aef7-fb967bd9aafa` · plan `basic-xxs` · region `nyc`
+- **Created from** `.do/app.git.yaml` (a `git:` public-clone source — no GitHub-authorize step).
+
+**Redeploy after a `git push`** (git source has no auto-deploy):
+```bash
+doctl apps create-deployment f069bc96-4278-4765-aef7-fb967bd9aafa
+```
+**Change config** (env/size): edit `.do/app.git.yaml`, then
+`doctl apps update f069bc96-4278-4765-aef7-fb967bd9aafa --spec .do/app.git.yaml`.
+
+**Refresh data**: re-run `task etl`, then
+`ln -f "$(readlink -f data/current.duckdb)" /tmp/current.duckdb && gh release upload data-latest /tmp/current.duckdb --clobber`,
+then redeploy (command above) so the new DB is fetched.
