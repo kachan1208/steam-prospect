@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import clsx from "clsx";
 
 import { AspectDivergingBars } from "../components/charts/AspectDivergingBars";
+import { GameMetricDrilldown, DRILLDOWN_META, type DrilldownMetric, type OwnersPerReview } from "../components/charts/GameMetricDrilldown";
 import { LanguageSplitChart } from "../components/charts/LanguageSplitChart";
 import { LaunchShapeBars } from "../components/charts/LaunchShapeBars";
 import { PressBySourceChart, sourceLabel } from "../components/charts/PressBySourceChart";
@@ -41,6 +42,7 @@ export default function GameProfile() {
   const appid = appidParam ? Number(appidParam) : NaN;
   const validAppid = Number.isFinite(appid);
   const [tab, setTab] = useState<TabKey>("overview");
+  const [selectedMetric, setSelectedMetric] = useState<DrilldownMetric | null>(null);
 
   const profileQ = useGameProfile(validAppid ? appid : null);
   const comparablesQ = useGameComparables(validAppid ? appid : null);
@@ -58,6 +60,22 @@ export default function GameProfile() {
     const p = profile.price_initial;
     return { low: r * bx.min * p, mid: profile.est_rev_reviews ?? r * bx.mid * p, high: r * bx.max * p };
   }, [profile, benchmarksQ.data]);
+
+  // Owners-per-review ratio for the Owners/Revenue drilldowns — same source + fallback the
+  // Owners/Revenue stat tiles themselves imply: the cited Boxleiter mid when benchmarks are
+  // loaded, else this game's own owners_mid/total_reviews ratio if both are known.
+  const ownersPerReview = useMemo<OwnersPerReview | null>(() => {
+    const bx = benchmarksQ.data?.cited.boxleiter_owners_per_review;
+    if (bx) return { value: bx.mid, source: "benchmark" };
+    if (profile?.owners_mid != null && profile.total_reviews) {
+      return { value: profile.owners_mid / profile.total_reviews, source: "game" };
+    }
+    return null;
+  }, [profile, benchmarksQ.data]);
+
+  function toggleMetric(metric: DrilldownMetric) {
+    setSelectedMetric((cur) => (cur === metric ? null : metric));
+  }
 
   if (!validAppid) {
     return (
@@ -138,12 +156,21 @@ export default function GameProfile() {
           label="Est. revenue (Boxleiter range)"
           value={revenueRange ? fmtUsd(revenueRange.mid) : fmtUsd(profile.est_rev_reviews)}
           sub={revenueRange ? `${fmtUsd(revenueRange.low)} – ${fmtUsd(revenueRange.high)}` : undefined}
+          onClick={() => toggleMetric("revenue")}
+          active={selectedMetric === "revenue"}
         />
-        <StatTile label="Owners (est.)" value={fmtCompact(profile.owners_mid)} />
+        <StatTile
+          label="Owners (est.)"
+          value={fmtCompact(profile.owners_mid)}
+          onClick={() => toggleMetric("owners")}
+          active={selectedMetric === "owners"}
+        />
         <StatTile
           label="Total reviews"
           value={fmtInt(profile.total_reviews)}
           sub={`${fmtInt(profile.n_reviews_trailing_30d)} sampled in trailing 30d`}
+          onClick={() => toggleMetric("reviews")}
+          active={selectedMetric === "reviews"}
         />
         <StatTile
           label="Positive rating"
@@ -158,8 +185,42 @@ export default function GameProfile() {
               ? `${fmtCompact(profile.twitch_viewers)} watching on Twitch`
               : undefined
           }
+          onClick={() => toggleMetric("live_players")}
+          active={selectedMetric === "live_players"}
         />
       </div>
+
+      {selectedMetric && (
+        <Card
+          title={DRILLDOWN_META[selectedMetric].title}
+          subtitle={DRILLDOWN_META[selectedMetric].subtitle}
+          action={
+            <button
+              type="button"
+              onClick={() => setSelectedMetric(null)}
+              aria-label="Close drilldown"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-secondary hover:bg-page hover:text-ink-primary"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </button>
+          }
+        >
+          <GameMetricDrilldown
+            appid={profile.appid}
+            metric={selectedMetric}
+            profile={{
+              price_initial: profile.price_initial,
+              total_reviews: profile.total_reviews,
+              owners_mid: profile.owners_mid,
+              live_players: profile.live_players,
+              twitch_viewers: profile.twitch_viewers,
+            }}
+            ownersPerReview={ownersPerReview}
+          />
+        </Card>
+      )}
 
       <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Game profile sections">
         {TABS.map((t) => (
