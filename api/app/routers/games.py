@@ -273,7 +273,8 @@ def game_teardown(appid: int, org: Org = Depends(get_current_org)) -> GameTeardo
         [appid],
     )
     notable = analytics_db.query(
-        "SELECT source, title, author, published_at, match_confidence, is_earliest "
+        "SELECT source, title, author, published_at, match_confidence, is_earliest, "
+        "url, sentiment_compound, sentiment "
         "FROM mart_game_press_notable WHERE appid = ? ORDER BY published_at",
         [appid],
     )

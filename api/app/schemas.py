@@ -383,6 +383,17 @@ class PressNotableArticle(BaseModel):
     published_at: Optional[str] = None
     match_confidence: float
     is_earliest: bool
+    # Source article URL (articles.url) — lets the client link the title out to the original
+    # coverage. Optional: null for marts built before this field was added, or if the scraper
+    # never captured a URL for that article.
+    url: Optional[str] = None
+    # Per-article coverage-tone sentiment — same VADER-over-headline+summary scoring as
+    # GamePress's aggregate (n_pos_articles/press_pos_share/mean_compound), just unaggregated.
+    # compound is the raw VADER compound (-1..1); sentiment buckets it with the identical ±0.05
+    # neutral band the aggregate counts use (see mart_game_teardown.sql). Both null when this
+    # article wasn't scored (pre-sentiment-pass mart, or no headline/summary text to score).
+    sentiment_compound: Optional[float] = None
+    sentiment: Optional[Literal["positive", "negative", "neutral"]] = None
 
 
 class GamePress(BaseModel):
