@@ -17,7 +17,7 @@ function dateOnly(s: string | null): string {
 function toneSummary(press: GamePress): { dotColor: string | null; label: string; detail: string } | null {
   if (press.n_scored_articles === 0) return null;
   const s = press.press_pos_share;
-  if (s === null) {
+  if (s == null) {
     return { dotColor: null, label: "Neutral coverage", detail: `${fmtInt(press.n_scored_articles)} scored, no clear lean` };
   }
   const label = s >= 0.66 ? "Mostly positive" : s <= 0.34 ? "Mostly negative" : "Mixed tone";
@@ -74,7 +74,7 @@ function NotableRow({ item }: { item: PressNotableArticle }) {
   const tone = item.sentiment;
   const toneColor = tone === "positive" ? CSS_VAR.praise : tone === "negative" ? CSS_VAR.complaint : null;
   const toneTitle =
-    tone && item.sentiment_compound !== null
+    tone && typeof item.sentiment_compound === "number"
       ? `${tone === "positive" ? "Positive" : tone === "negative" ? "Negative" : "Neutral"} tone — VADER compound ${
           item.sentiment_compound >= 0 ? "+" : ""
         }${item.sentiment_compound.toFixed(2)} (headline/summary)`

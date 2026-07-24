@@ -497,7 +497,7 @@ export default function GameProfile() {
             )}
             {teardownQ.data && teardownQ.data.press.total_mentions > 0 && (
               <>
-                {teardownQ.data.press.press_pos_share !== null &&
+                {teardownQ.data.press.press_pos_share != null &&
                   (() => {
                     const p = teardownQ.data.press;
                     const posPct = (p.press_pos_share as number) * 100;
@@ -527,7 +527,7 @@ export default function GameProfile() {
                         <div className="mt-1 text-[11px] text-ink-muted">
                           {fmtInt(p.n_pos_articles)} positive · {fmtInt(p.n_neg_articles)} negative
                           {p.n_neutral_articles > 0 && <> · {fmtInt(p.n_neutral_articles)} neutral</>}
-                          {mc !== null && (
+                          {typeof mc === "number" && (
                             <>
                               {" · "}mean <span className="tabular">{mc >= 0 ? "+" : ""}{mc.toFixed(2)}</span>
                             </>
