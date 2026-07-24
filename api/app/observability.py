@@ -151,9 +151,9 @@ class RequestContextMiddleware:
 # O3(a): metrics (VictoriaMetrics/Prometheus scrape target)
 # ==========================================================================================
 def _setup_metrics(app: Any) -> None:
-    from prometheus_fastapi_instrumentator import Instrumentator
+    from prometheus_fastapi_instrumentator import Instrumentator, metrics
 
-    Instrumentator(
+    inst = Instrumentator(
         should_group_status_codes=True,
         should_ignore_untemplated=True,
         # The chat SSE stream can run for tens of seconds; excluding streaming duration
@@ -161,7 +161,19 @@ def _setup_metrics(app: Any) -> None:
         # of getting skewed by long-lived connections (request COUNT is still tracked).
         should_exclude_streaming_duration=True,
         excluded_handlers=["/metrics"],
-    ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+    )
+    # Explicit metrics so the latency histogram has FINE buckets. The instrumentator default
+    # is only 0.1/0.5/1s, which clamps p95/p99 for a fast API where nearly everything finishes
+    # under 100ms (why every endpoint looked ~50-95ms). Adding our own metrics also replaces
+    # the coarse default set. Names (http_requests_total / http_request_duration_seconds) are
+    # unchanged, so existing dashboards keep working — just with real percentile resolution.
+    inst.add(metrics.requests())
+    inst.add(
+        metrics.latency(
+            buckets=(0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 10.0),
+        )
+    )
+    inst.instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 
 # ==========================================================================================

@@ -48,6 +48,26 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
         server.settings.transport_security = TransportSecuritySettings(
             enable_dns_rebinding_protection=False,
         )
+        # Per-tool usage counter → the default Prometheus registry, so it shows at the app's
+        # existing /metrics. Wraps ToolManager.call_tool — the single choke point every tool
+        # invocation passes through. Best-effort; never let metrics break the MCP.
+        try:
+            from prometheus_client import Counter as _Counter
+
+            _tool_calls = _Counter("mcp_tool_calls_total", "MCP tool calls by tool name", ["tool"])
+            _orig_call = server._tool_manager.call_tool
+
+            async def _counted_call(name, arguments, *a, **kw):
+                try:
+                    _tool_calls.labels(tool=name).inc()
+                except Exception:
+                    pass
+                return await _orig_call(name, arguments, *a, **kw)
+
+            server._tool_manager.call_tool = _counted_call
+            print("[api] MCP: per-tool metrics on (mcp_tool_calls_total).")
+        except Exception as _exc:  # noqa: BLE001
+            print(f"[api] MCP: per-tool metrics off ({_exc!r}).")
         asgi_app = server.streamable_http_app()  # also lazily creates server.session_manager
 
         print("[api] MCP: mounted 'prospect-market-intel' at /mcp (Streamable HTTP, stateless).")
