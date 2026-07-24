@@ -720,6 +720,12 @@ def main() -> int:
 
     con = duckdb.connect(str(versioned))
     try:
+        # On memory-constrained hosts (e.g. a small Droplet) cap DuckDB's memory so it spills
+        # to its on-disk temp dir instead of being OOM-killed. Env-driven; unset = default.
+        _mem = os.environ.get("PROSPECT_DUCKDB_MEMORY_LIMIT")
+        if _mem:
+            con.execute(f"SET memory_limit='{_mem}'")
+            print(f"[etl] duckdb memory_limit={_mem}")
         con.execute("INSTALL sqlite; LOAD sqlite;")
         con.execute(f"ATTACH '{source_db}' AS src (TYPE sqlite, READ_ONLY)")
 
