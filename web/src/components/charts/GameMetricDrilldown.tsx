@@ -32,8 +32,8 @@ import type { GameTrendPoint } from "./GameTrendsChart";
  *
  * Four of the five stat cards open here (see DrilldownMetric) — each derived client-side from
  * the trends endpoint's monthly `points`, per its docstring caveats:
- *   reviews      cumulative sum of n_reviews (the sampled review series — recency-biased for
- *                older/popular titles, NOT Steam's true review count).
+ *   reviews      cumulative sum of n_reviews (Steam's full-history monthly review counts from
+ *                its store review graph; a per-appid sample fallback for un-backfilled titles).
  *   owners       that same cumulative-reviews curve x an owners-per-review ratio (the cited
  *                Boxleiter mid, falling back to this game's own owners_mid/total_reviews).
  *   revenue      the owners curve x price_initial — same Boxleiter method as the "Est. revenue"
@@ -50,17 +50,16 @@ import type { GameTrendPoint } from "./GameTrendsChart";
  * reopen that exact chart under a second name, so the card stays a plain (non-clickable) tile
  * rather than manufacture a redundant click target.
  *
- * Every derived (owners/revenue) chart is captioned as an estimate, and notes that it is built
- * on the SAMPLED review curve, so its running total can sit below the headline stat for titles
- * with a long pre-collector review history — the same honesty caveat GameTrendsChart/
- * ReviewsTimelineChart already apply to n_reviews elsewhere on this page.
+ * Every derived (owners/revenue) chart is captioned as an estimate, built on the full-history
+ * review curve so its running total tracks toward the headline stat rather than a fraction of
+ * it — the review_histogram backfill is what makes that full-history curve possible.
  */
 export type DrilldownMetric = "reviews" | "owners" | "revenue" | "live_players";
 
 export const DRILLDOWN_META: Record<DrilldownMetric, { title: string; subtitle: string }> = {
   reviews: {
     title: "Total reviews — growth over time",
-    subtitle: "Cumulative sampled reviews by month, with the monthly count alongside it.",
+    subtitle: "Cumulative reviews by month, with the monthly count alongside it.",
   },
   owners: {
     title: "Owners (est.) — growth over time",
@@ -258,16 +257,16 @@ function ReviewsDrilldown({
     <div className="flex flex-col gap-4">
       <GrowthPanels
         data={series}
-        cumulativeLabel="Cumulative sampled reviews"
+        cumulativeLabel="Cumulative reviews"
         monthlyLabel="Reviews added / month"
         color={CSS_VAR.competition}
         formatter={fmtCompact}
       />
       <p className="text-[11px] italic text-ink-muted">
-        From Prospect's sampled reviews table (recency-biased for older/popular titles) — not Steam's full review
-        count. This chart covers {fmtInt(lastCum)} sampled review{lastCum === 1 ? "" : "s"} across {points.length}{" "}
+        From Steam's full-history review graph — monthly review counts over the game's whole life. This chart covers{" "}
+        {fmtInt(lastCum)} review{lastCum === 1 ? "" : "s"} across {points.length}{" "}
         charted month{points.length === 1 ? "" : "s"}
-        {totalReviews != null ? `, vs. ${fmtInt(totalReviews)} total reviews Steam reports for this title` : ""}.
+        {totalReviews != null ? `, vs. ${fmtInt(totalReviews)} Steam reports total today (the small gap is reviews since removed or not yet bucketed)` : ""}.
         <ThinDataNote thin={thin} />
       </p>
     </div>
@@ -309,9 +308,8 @@ function OwnersDrilldown({
         formatter={fmtCompact}
       />
       <p className="text-[11px] italic text-ink-muted">
-        Estimate, not a measured count: cumulative sampled reviews × {ratioNote}. Built on the sampled review growth
-        curve above, so it trends toward — and for titles with a long pre-collector review history, may sit below —
-        the {fmtCompact(ownersMid)} headline estimate.
+        Estimate, not a measured count: cumulative reviews × {ratioNote}. Built on the full-history review growth
+        curve above, so it trends toward the {fmtCompact(ownersMid)} headline estimate.
         <ThinDataNote thin={thin} />
       </p>
     </div>
@@ -361,11 +359,10 @@ function RevenueDrilldown({
         formatter={fmtUsd}
       />
       <p className="text-[11px] italic text-ink-muted">
-        Estimate, not measured sales: cumulative sampled reviews × owners-per-review × this title's {fmtPrice(price)}{" "}
-        list price — the same Boxleiter method as the Est. revenue card above, walked out over the sampled review
+        Estimate, not measured sales: cumulative reviews × owners-per-review × this title's {fmtPrice(price)}{" "}
+        list price — the same Boxleiter method as the Est. revenue card above, walked out over the full-history review
         growth curve instead of collapsed to one number. That card shows the full low/mid/high range; this curve
-        tracks the mid case only, and like the owners curve it's built on, may undercount titles with a long
-        pre-collector review history.
+        tracks the mid case only.
         <ThinDataNote thin={thin} />
       </p>
     </div>

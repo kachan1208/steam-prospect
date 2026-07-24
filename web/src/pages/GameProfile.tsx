@@ -323,7 +323,7 @@ export default function GameProfile() {
               profile.primary_genre !== "__all__"
               ? profile.primary_genre
               : ""}{" "}
-            titles. This older/popular title's own review sample is too recency-biased to chart its individual shape.
+            titles — a benchmark for this title's own month-by-month trajectory, shown on the Momentum card below.
           </p>
         )}
       </Card>
