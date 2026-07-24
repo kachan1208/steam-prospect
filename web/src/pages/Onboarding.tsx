@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { Card } from "../components/ui/Card";
@@ -6,21 +6,49 @@ import { useHealth, useMarketBenchmarks } from "../lib/api";
 import { fmtCompact } from "../lib/format";
 
 /** Read by App.tsx's AppShell to decide whether to redirect a brand-new session's default
- * `/niches` landing to this tour once. Every exit action on this page sets it, so the
- * redirect never fires twice and never touches a direct/deep link. */
+ * `/niches` landing to this tour once. Every exit action here sets it, so the redirect never
+ * fires twice and never hijacks a deep link. */
 export const ONBOARDING_STORAGE_KEY = "prospect_onboarded_v1";
+/** Which step the visitor is on — so leaving via "Try it" and coming back resumes the tour. */
+const STEP_KEY = "prospect_onboarding_step_v1";
 
 function markSeen() {
   try {
     window.localStorage.setItem(ONBOARDING_STORAGE_KEY, "1");
   } catch {
-    // Private-browsing / storage-disabled: non-fatal, the tour just may re-offer next visit.
+    /* private browsing: non-fatal, the tour may just re-offer next visit */
+  }
+}
+function storeStep(i: number) {
+  try {
+    window.localStorage.setItem(STEP_KEY, String(i));
+  } catch {
+    /* ignore */
+  }
+}
+function readStep(): number {
+  try {
+    const n = parseInt(window.localStorage.getItem(STEP_KEY) || "0", 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+function clearStep() {
+  try {
+    window.localStorage.removeItem(STEP_KEY);
+  } catch {
+    /* ignore */
   }
 }
 
-// Small local icon set matching the sidebar's stroke-based style (App.tsx's ICONS aren't
-// exported, so these are self-contained copies of the same path data for visual parity).
+// Stroke-based icons matching the sidebar (App.tsx's ICONS aren't exported).
 const PATHS: Record<string, ReactNode> = {
+  spark: (
+    <>
+      <path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M18 6l-2.5 2.5M8.5 15.5 6 18" />
+    </>
+  ),
   compass: (
     <>
       <circle cx="12" cy="12" r="9" />
@@ -43,152 +71,262 @@ const PATHS: Record<string, ReactNode> = {
       <rect x="13.5" y="13.5" width="7" height="7" rx="1.5" />
     </>
   ),
-  megaphone: (
+  plug: (
     <>
-      <path d="M4 9v6h3l7 4V5L7 9H4Z" />
-      <path d="M17.5 8.5a5 5 0 0 1 0 7" />
+      <path d="M9 3v5M15 3v5" />
+      <path d="M6 8h12v3a6 6 0 0 1-12 0V8Z" />
+      <path d="M12 17v4" />
     </>
   ),
+  check: <path d="M20 6 9 17l-5-5" />,
 };
 
-function SurfaceIcon({ name }: { name: string }) {
+function StepIcon({ name }: { name: string }) {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="h-[18px] w-[18px] shrink-0">
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-5 w-5 shrink-0"
+    >
       {PATHS[name]}
     </svg>
   );
 }
 
-interface Surface {
-  to: string;
-  icon: string;
-  title: string;
-  description: string;
-  cta: string;
+const MCP_URL = `${window.location.origin}/mcp/`;
+
+function McpConnect() {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(MCP_URL);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard blocked — the text is selectable anyway */
+    }
+  };
+  return (
+    <div className="mt-3 flex flex-col gap-2">
+      <div className="flex items-stretch gap-2">
+        <code className="flex-1 overflow-x-auto whitespace-nowrap rounded-md border border-chartborder bg-page px-3 py-2 text-xs text-ink-primary">
+          {MCP_URL}
+        </code>
+        <button
+          type="button"
+          onClick={copy}
+          className="shrink-0 rounded-md bg-series-1 px-3 py-2 text-[11px] font-semibold text-white transition-opacity hover:opacity-90"
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <p className="text-xs text-ink-muted">
+        In Claude Code: <code className="rounded bg-page px-1 py-0.5 text-ink-secondary">claude mcp add --transport http prospect {MCP_URL}</code>
+        {" "}· or add it as a custom connector in claude.ai. Full steps live on the <b>Use in Claude</b> page.
+      </p>
+    </div>
+  );
 }
 
-const SURFACES: Surface[] = [
-  {
-    to: "/niches",
-    icon: "compass",
-    title: "Find your niche",
-    description: "Rank every Steam tag and genre by opportunity — demand minus competition, plus how beatable the incumbents are.",
-    cta: "Open Niche Finder",
-  },
-  {
-    to: "/estimator",
-    icon: "calculator",
-    title: "Estimate the payoff",
-    description: "Turn a review or wishlist count into an owners and revenue range with the Boxleiter method, fitted per genre.",
-    cta: "Open Estimator",
-  },
-  {
-    to: "/games",
-    icon: "grid",
-    title: "Learn why hits win",
-    description: "Mine a game's reviews into praise/complaint themes measured against its genre baseline — correlational, honestly labeled.",
-    cta: "Open Games",
-  },
-  {
-    to: "/press",
-    icon: "megaphone",
-    title: "Find your press",
-    description: "Rank the outlets and named journalists actually covering your genre, each with a recent example and an active-or-quiet signal.",
-    cta: "Open Press",
-  },
-];
-
-const STEPS = [
-  "Open Niche Finder and sort by Opportunity — filter by a minimum review count so you're reading a real sample.",
-  "Take a niche's median reviews into the Estimator for an owners/revenue range.",
-  "Save the view so you can find your way back to it.",
-];
-
-function SurfaceCard({ surface, onGo }: { surface: Surface; onGo: (to: string) => void }) {
-  return (
-    <button
-      type="button"
-      onClick={() => onGo(surface.to)}
-      className="flex flex-col items-start gap-2 rounded-card border border-chartborder bg-surface p-4 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-borderstrong hover:shadow-md"
-    >
-      <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-tint text-brand">
-        <SurfaceIcon name={surface.icon} />
-      </span>
-      <span className="text-sm font-semibold text-ink-primary">{surface.title}</span>
-      <span className="text-xs leading-relaxed text-ink-muted">{surface.description}</span>
-      <span className="mt-1 text-xs font-medium text-series-1">{surface.cta} →</span>
-    </button>
-  );
+interface Step {
+  icon: string;
+  eyebrow: string;
+  title: string;
+  body: ReactNode;
+  to?: string;
+  cta?: string;
 }
 
 export default function Onboarding() {
   const navigate = useNavigate();
   const { data: health } = useHealth();
   const { data: benchmarks } = useMarketBenchmarks();
+  const [step, setStep] = useState<number>(() => readStep());
 
-  function goTo(to: string) {
-    markSeen();
+  const total = benchmarks?.computed.n_games_total;
+  const asOf = health?.built_at?.slice(0, 10);
+
+  const STEPS: Step[] = [
+    {
+      icon: "spark",
+      eyebrow: "Welcome",
+      title: "Let's find your next game.",
+      body: (
+        <>
+          Prospect reads all of Steam — the whole catalog, player reviews, and press coverage — and turns it into the
+          few decisions a solo dev actually has to make: <b>what to build</b>, <b>what it could earn</b>, and{" "}
+          <b>why the hits win</b>. Every number is a range, never fake precision.
+          {total ? (
+            <span className="mt-2 block text-xs text-ink-muted">
+              Scoring {fmtCompact(total)} games{asOf ? ` · data as of ${asOf}` : ""}. This 60-second tour is optional —
+              skip any time.
+            </span>
+          ) : null}
+        </>
+      ),
+    },
+    {
+      icon: "compass",
+      eyebrow: "Step 1 · Find a gap",
+      title: "Rank every niche by opportunity",
+      body: (
+        <>
+          The <b>Niche Finder</b> scores every Steam tag and genre by <i>demand − competition</i>, plus how beatable the
+          incumbents are. Sort by Opportunity and set a minimum review count so you're reading a real sample, not noise.
+        </>
+      ),
+      to: "/niches",
+      cta: "Try the Niche Finder",
+    },
+    {
+      icon: "calculator",
+      eyebrow: "Step 2 · Size the payoff",
+      title: "Turn reviews into a revenue range",
+      body: (
+        <>
+          Take a niche's median review count into the <b>Estimator</b>. It converts reviews (or wishlists) into an
+          owners and revenue <i>range</i> using the Boxleiter method, fitted per genre — so you know if the upside is
+          worth it before you build.
+        </>
+      ),
+      to: "/estimator",
+      cta: "Try the Estimator",
+    },
+    {
+      icon: "grid",
+      eyebrow: "Step 3 · Learn from hits",
+      title: "See why the winners win",
+      body: (
+        <>
+          Open any game in <b>Games</b> for a teardown: its review themes (praise vs. complaints) measured against the
+          genre baseline, plus its press footprint. Correlational and honestly labeled — evidence, not a promise.
+        </>
+      ),
+      to: "/games",
+      cta: "Try a game teardown",
+    },
+    {
+      icon: "plug",
+      eyebrow: "Step 4 · Take it with you",
+      title: "Ask Prospect inside your own Claude",
+      body: (
+        <>
+          Connect Prospect's analytics as an <b>MCP server</b> to your own Claude (Code, Desktop, or claude.ai) and just
+          ask — “what's an under-served co-op niche under 500 reviews?” — grounded in the same data, no copy-paste.
+          <McpConnect />
+        </>
+      ),
+    },
+    {
+      icon: "check",
+      eyebrow: "You're set",
+      title: "That's the loop.",
+      body: (
+        <>
+          Find a gap → size it → learn from the winners → take it to your Claude. Everything's read-only and free — poke
+          around. You can reopen this tour any time from <b>Settings</b>, or read the deeper <b>Docs</b>.
+        </>
+      ),
+    },
+  ];
+
+  const isLast = step === STEPS.length - 1;
+  const cur = STEPS[step];
+
+  function go(next: number) {
+    const clamped = Math.max(0, Math.min(STEPS.length - 1, next));
+    setStep(clamped);
+    storeStep(clamped);
+  }
+  function tryIt(to: string) {
+    markSeen(); // prevents the /niches → /welcome redirect from looping us back
+    storeStep(step + 1); // resume on the next step when they return via "Getting Started"
     navigate(to);
+  }
+  function finish() {
+    markSeen();
+    clearStep();
+    navigate("/niches");
   }
 
   return (
-    <div className="flex flex-col gap-6">
-      <Card className="flex flex-col items-start gap-3 !p-7">
-        <span className="rounded-full border border-chartborder bg-page px-2.5 py-1 text-[11px] font-medium uppercase tracking-wide text-ink-muted">
-          Welcome
-        </span>
-        <h1 className="text-2xl font-semibold tracking-tight text-ink-primary">Let's find your next game.</h1>
-        <p className="max-w-2xl text-sm leading-relaxed text-ink-secondary">
-          Prospect reads all of Steam — the whole catalog, player reviews, and press coverage — and turns it into four
-          decisions a solo dev actually has to make: what to build, what it could earn, why the hits win, and who to
-          pitch. Every estimate below is a range, never fake precision.
-        </p>
-        {benchmarks?.computed.n_games_total && (
-          <p className="text-xs text-ink-muted">
-            Scoring {fmtCompact(benchmarks.computed.n_games_total)} games right now
-            {health?.built_at ? ` · data as of ${health.built_at.slice(0, 10)}` : ""}.
-          </p>
-        )}
-        <div className="mt-1 flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            onClick={() => goTo("/niches")}
-            className="rounded-md bg-series-1 px-4 py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90"
-          >
-            Go to Niche Finder →
-          </button>
-          <button type="button" onClick={() => goTo("/niches")} className="text-xs font-medium text-ink-muted hover:text-ink-primary">
-            Skip for now
-          </button>
-        </div>
-      </Card>
-
-      <div>
-        <h2 className="mb-3 text-sm font-semibold text-ink-primary">The four surfaces</h2>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {SURFACES.map((s) => (
-            <SurfaceCard key={s.to} surface={s} onGo={goTo} />
+    <div className="mx-auto flex max-w-2xl flex-col gap-5 py-2">
+      {/* progress */}
+      <div className="flex items-center gap-3">
+        <div className="flex flex-1 items-center gap-1.5">
+          {STEPS.map((s, i) => (
+            <button
+              key={i}
+              type="button"
+              aria-label={`Go to step ${i + 1}: ${s.title}`}
+              onClick={() => go(i)}
+              className={`h-1.5 flex-1 rounded-full transition-colors ${
+                i < step ? "bg-brand" : i === step ? "bg-brand" : "bg-surface2"
+              } ${i <= step ? "opacity-100" : "opacity-60 hover:opacity-100"}`}
+            />
           ))}
         </div>
+        <span className="shrink-0 text-[11px] font-medium tabular-nums text-ink-muted">
+          {step + 1} / {STEPS.length}
+        </span>
+        <button type="button" onClick={finish} className="shrink-0 text-[11px] font-medium text-ink-muted hover:text-ink-primary">
+          Skip
+        </button>
       </div>
 
-      <Card title="A simple first pass" subtitle="Optional — a three-step route through the product if you're not sure where to start.">
-        <ol className="flex flex-col gap-2.5">
-          {STEPS.map((step, i) => (
-            <li key={i} className="flex gap-3 text-sm text-ink-secondary">
-              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-page text-[11px] font-semibold text-ink-secondary">
-                {i + 1}
-              </span>
-              <span className="leading-relaxed">{step}</span>
-            </li>
-          ))}
-        </ol>
+      <Card className="flex flex-col gap-4 !p-7">
+        <div className="flex items-center gap-3">
+          <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-brand-tint text-brand">
+            <StepIcon name={cur.icon} />
+          </span>
+          <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">{cur.eyebrow}</span>
+        </div>
+        <h1 className="text-xl font-semibold tracking-tight text-ink-primary">{cur.title}</h1>
+        <div className="text-sm leading-relaxed text-ink-secondary">{cur.body}</div>
+
+        {cur.to && (
+          <button
+            type="button"
+            onClick={() => tryIt(cur.to!)}
+            className="mt-1 inline-flex w-fit items-center gap-1.5 rounded-md border border-brand/40 bg-brand-tint px-3.5 py-2 text-sm font-semibold text-brand transition-colors hover:bg-brand hover:text-white"
+          >
+            {cur.cta} →
+          </button>
+        )}
       </Card>
 
-      <p className="text-center text-xs text-ink-muted">
-        You can reopen this guide any time from Settings → Profile &amp; preferences, or read the longer reference
-        guides under Docs.
-      </p>
+      {/* footer nav */}
+      <div className="flex items-center justify-between">
+        <button
+          type="button"
+          onClick={() => go(step - 1)}
+          disabled={step === 0}
+          className="rounded-md px-3 py-2 text-sm font-medium text-ink-muted transition-colors hover:text-ink-primary disabled:invisible"
+        >
+          ← Back
+        </button>
+        {isLast ? (
+          <button
+            type="button"
+            onClick={finish}
+            className="rounded-md bg-series-1 px-4 py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90"
+          >
+            Start exploring →
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => go(step + 1)}
+            className="rounded-md bg-series-1 px-4 py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90"
+          >
+            Next →
+          </button>
+        )}
+      </div>
     </div>
   );
 }
