@@ -187,7 +187,7 @@ export default function Estimator() {
                 </div>
               </Card>
 
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3" data-tour="tour-estimator-range">
                 <RangeRow
                   label="Estimated owners"
                   low={result.owners.low}

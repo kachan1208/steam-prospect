@@ -212,6 +212,7 @@ export default function GameSearch() {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="Search by name…"
+            data-tour="tour-games-search"
             className="w-56 rounded-md border border-chartborder bg-page px-2.5 py-1.5 text-xs text-ink-primary outline-none placeholder:text-ink-muted focus:border-series-1"
           />
           <select

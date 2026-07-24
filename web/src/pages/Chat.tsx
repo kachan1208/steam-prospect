@@ -80,13 +80,15 @@ export default function Chat() {
       </div>
 
       {/* Server URL */}
-      <Card className="flex flex-col gap-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-ink-primary">MCP server URL</h2>
-          <span className="text-[11px] text-ink-muted">Streamable HTTP · read-only · no auth</span>
-        </div>
-        <CopyField value={MCP_URL} label="Copy URL" />
-      </Card>
+      <div data-tour="tour-chat-mcp">
+        <Card className="flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-ink-primary">MCP server URL</h2>
+            <span className="text-[11px] text-ink-muted">Streamable HTTP · read-only · no auth</span>
+          </div>
+          <CopyField value={MCP_URL} label="Copy URL" />
+        </Card>
+      </div>
 
       {/* What you can ask */}
       <Card className="flex flex-col gap-3">
