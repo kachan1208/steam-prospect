@@ -47,9 +47,18 @@ const DELTA_FIELDS: { key: keyof Counts; label: string }[] = [
   { key: "players", label: "player updates" },
 ];
 
-function DeltaChips({ deltas }: { deltas?: Counts }) {
+function DeltaSummary({ deltas }: { deltas?: Counts }) {
+  // An empty deltas object means there was no previous run to diff against — this is the
+  // baseline snapshot, NOT a no-op refresh. A populated deltas that's all-zero is a real
+  // "nothing changed" run.
+  const hasPrior = deltas != null && Object.keys(deltas).length > 0;
   const active = DELTA_FIELDS.filter((f) => (deltas?.[f.key] ?? 0) !== 0);
-  if (active.length === 0) return <span className="text-xs text-ink-muted">No new data this run.</span>;
+  if (!hasPrior) {
+    return <span className="text-xs text-ink-muted">Baseline snapshot — first recorded run (totals below).</span>;
+  }
+  if (active.length === 0) {
+    return <span className="text-xs text-ink-muted">No changes since the previous run.</span>;
+  }
   return (
     <div className="flex flex-wrap gap-1.5">
       {active.map((f) => {
@@ -124,7 +133,7 @@ export default function DataLog() {
                   </span>
                 </div>
 
-                <DeltaChips deltas={r.deltas} />
+                <DeltaSummary deltas={r.deltas} />
 
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-muted">
                   {r.mart_version && (
