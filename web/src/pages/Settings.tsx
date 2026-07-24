@@ -184,7 +184,7 @@ function SavedViewsTab() {
       {data && data.length === 0 && (
         <EmptyState
           title="No saved views yet"
-          description="Save a filter/sort combination from the Niche Finder or Explorer to get back to it in one click."
+          description="Save a filter/sort combination from the Niche Finder to get back to it in one click."
           action={
             <Link to="/niches" className="text-xs font-medium text-series-1 hover:underline">
               Open Niche Finder →
@@ -428,9 +428,8 @@ function UsageTab() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <StatTile label="Saved views" value={data ? fmtInt(data.saved_views) : "—"} />
-        <StatTile label="Watchlist items" value={data ? fmtInt(data.watchlist_items) : "—"} />
         <StatTile label="Active API keys" value={data ? fmtInt(data.api_keys_active) : "—"} />
       </div>
       {isLoading && <Card className="py-6 text-center text-sm text-ink-muted">Loading usage…</Card>}

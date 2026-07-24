@@ -8,9 +8,8 @@ straight off api/app/analytics_db.py + the router SQL it's paired with (see the 
 above each CREATE TABLE) — not the full ETL schema, just what's actually queried.
 
 Ordering matters a lot in this file: api/app/config.py's `Settings` (env_prefix="PROSPECT_")
-is instantiated once at import time as a module-level singleton, and both
-api/app/analytics_db.py (opened in main.py's lifespan) and api/app/routers/explore.py (its
-own separate lazily-opened connection — see that module's docstring) key off
+is instantiated once at import time as a module-level singleton, and
+api/app/analytics_db.py (opened in main.py's lifespan) keys off
 `settings.analytics_db_path`. So the env vars below MUST be set, and the fixture mart file
 MUST already exist on disk, before `app.main` (or anything importing `app.config`) is
 imported anywhere in this process. That's why the env/DB setup happens at module level in
@@ -39,10 +38,8 @@ os.environ.setdefault("PROSPECT_SOLO_MODE", "true")  # already the default; expl
 # values they seeded, instead of guessing at what conftest put in the DB.
 # =============================================================================================
 
-# One synthetic catalog of 6 games shared by mart_game and mart_explorer (kept consistent
-# between the two, though production derives mart_explorer FROM mart_game — here they're
-# built independently since the fixture only needs to satisfy the API layer, not replicate
-# the ETL). Columns: appid, name, primary_genre, primary_tag, release_year, release_date,
+# One synthetic catalog of 6 games backing mart_game. Columns: appid, name, primary_genre,
+# primary_tag, release_year, release_date,
 # price_initial, is_free, is_indie, self_published, developers, publishers, owners_mid,
 # total_reviews, positive_ratio, est_rev_reviews, est_rev_owners, metacritic_score,
 # achievements_count, avg_playtime_forever, top_tags, header_image.
@@ -107,99 +104,12 @@ GAMES = [
 def _build_fixture_mart(path: Path) -> None:
     con = duckdb.connect(str(path))
     try:
-        _create_mart_explorer(con)
         _create_mart_game(con)
         _create_mart_niche(con)
         _create_mart_market_boxleiter(con)
         _create_mart_meta(con)
     finally:
-        con.close()  # MUST close before analytics_db/explore.py open their own read_only connections
-
-
-def _create_mart_explorer(con: duckdb.DuckDBPyConnection) -> None:
-    """Columns = exactly api/app/routers/explore.py's DIMENSIONS whitelist (the `expr` side,
-    i.e. mart_explorer's real column names) — see that file's DIMENSIONS dict."""
-    con.execute("""
-        CREATE TABLE mart_explorer (
-            appid INTEGER, name VARCHAR, primary_genre VARCHAR, primary_tag VARCHAR,
-            release_year INTEGER, is_recent BOOLEAN, price_initial DOUBLE, price_bucket VARCHAR,
-            is_free BOOLEAN, is_indie BOOLEAN, self_published BOOLEAN, developers VARCHAR,
-            publishers VARCHAR, owners_mid DOUBLE, dev_tier VARCHAR, total_reviews INTEGER,
-            review_bucket VARCHAR, positive_ratio DOUBLE, rating_tier VARCHAR,
-            est_rev_reviews DOUBLE, est_rev_owners DOUBLE, metacritic_score INTEGER,
-            achievements_count INTEGER, avg_playtime_forever INTEGER,
-            n_reviews_trailing_30d INTEGER, rev_pct_in_genre DOUBLE, top_tags VARCHAR[],
-            header_image VARCHAR
-        )
-    """)
-
-    def price_bucket(p: float) -> str:
-        if p == 0:
-            return "Free"
-        if p < 5:
-            return "$0.01-4.99"
-        if p < 10:
-            return "$5-9.99"
-        if p < 20:
-            return "$10-19.99"
-        if p < 30:
-            return "$20-29.99"
-        return "$30+"
-
-    def review_bucket(n: int) -> str:
-        if n < 10:
-            return "Under 10"
-        if n < 50:
-            return "10-49"
-        if n < 200:
-            return "50-199"
-        if n < 1000:
-            return "200-999"
-        if n < 5000:
-            return "1K-4.9K"
-        return "5K+"
-
-    def dev_tier(owners: float) -> str | None:
-        if owners <= 0:
-            return None
-        if owners < 2000:
-            return "Below Hobby"
-        if owners < 20000:
-            return "Hobby"
-        if owners < 200000:
-            return "Small"
-        if owners < 1000000:
-            return "Middle"
-        return "Triple-I"
-
-    def rating_tier(n_reviews: int, positive_ratio: float) -> str:
-        if n_reviews < 10:
-            return "Insufficient reviews"
-        if positive_ratio >= 0.95:
-            return "Overwhelmingly Positive"
-        if positive_ratio >= 0.80:
-            return "Very Positive"
-        if positive_ratio >= 0.70:
-            return "Mostly Positive"
-        if positive_ratio >= 0.40:
-            return "Mixed"
-        return "Mostly Negative"
-
-    rows = []
-    for g in GAMES:
-        rows.append((
-            g["appid"], g["name"], g["primary_genre"], g["primary_tag"], g["release_year"],
-            g["is_recent"],
-            g["price_initial"], price_bucket(g["price_initial"]),
-            bool(g["is_free"]), bool(g["is_indie"]), bool(g["self_published"]),
-            g["developers"], g["publishers"], g["owners_mid"], dev_tier(g["owners_mid"]),
-            g["total_reviews"], review_bucket(g["total_reviews"]), g["positive_ratio"],
-            rating_tier(g["total_reviews"], g["positive_ratio"]),
-            g["est_rev_reviews"], g["est_rev_owners"], g["metacritic_score"],
-            g["achievements_count"], g["avg_playtime_forever"], g["total_reviews"] // 10,
-            65.0, g["top_tags"], g["header_image"],
-        ))
-    con.executemany(f"INSERT INTO mart_explorer VALUES ({', '.join(['?'] * 28)})", rows)
+        con.close()  # MUST close before analytics_db opens its own read_only connection
 
 
 def _create_mart_game(con: duckdb.DuckDBPyConnection) -> None:

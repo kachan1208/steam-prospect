@@ -103,10 +103,11 @@ def recommendations(
     org: Org = Depends(get_current_org),
 ) -> RecommendationsResponse:
     """Turn the channel-mix and cross-channel buzz marts into a short list of actionable,
-    genre-specific recommendations — "what to do", not just "here's the data". Each item deep-links
-    (cta_path) into the surface where you'd act on it (creator Outreach, the Press pitch list, Games).
-    Honest by construction: before any channel scrapers have run a genre reads as ~100% press, and the
-    endpoint says so rather than inventing advice.
+    genre-specific recommendations — "what to do", not just "here's the data". Items about a
+    press-dominant channel deep-link (cta_path) into the Press pitch list; creator-channel
+    reads carry no deep link (no in-app creator-outreach surface). Honest by construction:
+    before any channel scrapers have run a genre reads as ~100% press, and the endpoint says
+    so rather than inventing advice.
     """
     rows = analytics_db.query(
         "SELECT channel, n_mentions, reach_weighted, share_mentions, share_reach_weighted "
@@ -153,8 +154,6 @@ def recommendations(
                         f"Attention in {genre} is {top_share}% {_channel_label(top_ch)} by reach — "
                         "prioritise creator outreach over press."
                     ),
-                    cta_path=f"/outreach?genre={genre}",
-                    cta_label="Open creator outreach",
                 )
             )
 
@@ -196,8 +195,8 @@ def recommendations(
                             f"but {_pct(sr)}% of reach — a shorter list of {_channel_label(ch)} accounts can "
                             "deliver outsized audience for the effort."
                         ),
-                        cta_path=f"/outreach?genre={genre}" if is_creator else "/press",
-                        cta_label="Open creator outreach" if is_creator else "See press pitch list",
+                        cta_path=None if is_creator else "/press",
+                        cta_label=None if is_creator else "See press pitch list",
                     )
                 )
                 break  # one upside nudge is enough — keep the card scannable

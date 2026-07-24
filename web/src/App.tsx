@@ -12,15 +12,9 @@ import GameSearch from "./pages/GameSearch";
 import GameProfile from "./pages/GameProfile";
 import Press from "./pages/Press";
 import Marketing from "./pages/Marketing";
-import WatchlistPage from "./pages/Watchlist";
-import Explorer from "./pages/Explorer";
 import Chat from "./pages/Chat";
 import Alerts from "./pages/Alerts";
-import Outreach from "./pages/Outreach";
 import DevLog from "./pages/DevLog";
-import Radar from "./pages/Radar";
-import Home from "./pages/Home";
-import MyGame from "./pages/MyGame";
 import DataLog from "./pages/DataLog";
 import Landing from "./pages/Landing";
 import Onboarding, { ONBOARDING_STORAGE_KEY } from "./pages/Onboarding";
@@ -67,21 +61,12 @@ const ICONS: Record<string, ReactNode> = {
       <line x1="8" y1="16" x2="13" y2="16" />
     </>
   ),
-  sliders: (
-    <>
-      <line x1="4" y1="8" x2="20" y2="8" />
-      <circle cx="9" cy="8" r="2.3" />
-      <line x1="4" y1="16" x2="20" y2="16" />
-      <circle cx="15" cy="16" r="2.3" />
-    </>
-  ),
   megaphone: (
     <>
       <path d="M4 9v6h3l7 4V5L7 9H4Z" />
       <path d="M17.5 8.5a5 5 0 0 1 0 7" />
     </>
   ),
-  bookmark: <path d="M6 3.5h12a1 1 0 0 1 1 1V21l-7-4-7 4V4.5a1 1 0 0 1 1-1Z" />,
   chat: (
     <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5Z" />
   ),
@@ -107,26 +92,6 @@ const ICONS: Record<string, ReactNode> = {
     <>
       <path d="M18 8.5a6 6 0 0 0-12 0c0 6.5-2.5 8.5-2.5 8.5h17S18 15 18 8.5" />
       <path d="M13.7 20.5a2 2 0 0 1-3.4 0" />
-    </>
-  ),
-  target: (
-    <>
-      <circle cx="12" cy="12" r="8.5" />
-      <circle cx="12" cy="12" r="4.5" />
-      <circle cx="12" cy="12" r="1" />
-    </>
-  ),
-  home: (
-    <>
-      <path d="M3.5 11.5 12 4l8.5 7.5" />
-      <path d="M5.5 10v9.5h13V10" />
-    </>
-  ),
-  rocket: (
-    <>
-      <path d="M12 3.2c2.8 1.6 4.3 4.9 4.3 7.8l-1.8 1.9H9.5L7.7 11C7.7 8.1 9.2 4.8 12 3.2Z" />
-      <circle cx="12" cy="9" r="1.4" />
-      <path d="M9.7 14.3 8 18M14.3 14.3 16 18" />
     </>
   ),
   history: (
@@ -156,13 +121,6 @@ function Icon({ name }: { name: string }) {
 
 const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: string; end?: boolean }[] }[] = [
   {
-    label: "Watchtower",
-    items: [
-      { to: "/home", label: "Home", icon: "home" },
-      { to: "/project", label: "My Game", icon: "rocket" },
-    ],
-  },
-  {
     label: "Guide",
     items: [{ to: "/welcome", label: "Getting Started", icon: "flag" }],
   },
@@ -172,7 +130,6 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: str
       { to: "/niches", label: "Niche Finder", icon: "compass" },
       { to: "/benchmarks", label: "Market Benchmarks", icon: "bars" },
       { to: "/timing", label: "Launch & Timing", icon: "calendar" },
-      { to: "/radar", label: "Opportunity Radar", icon: "target" },
     ],
   },
   {
@@ -180,20 +137,15 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: str
     items: [
       { to: "/games", label: "Games", icon: "grid" },
       { to: "/estimator", label: "Estimator", icon: "calculator" },
-      { to: "/explorer", label: "Explorer", icon: "sliders" },
     ],
   },
   {
     label: "Marketing",
-    items: [
-      { to: "/marketing", label: "Marketing", icon: "megaphone" },
-      { to: "/outreach", label: "Outreach", icon: "chat" },
-    ],
+    items: [{ to: "/marketing", label: "Marketing", icon: "megaphone" }],
   },
   {
     label: "Workspace",
     items: [
-      { to: "/watchlist", label: "Watchlist", icon: "bookmark" },
       { to: "/alerts", label: "Alerts", icon: "bell" },
       { to: "/devlog", label: "Dev log", icon: "book" },
       { to: "/datalog", label: "Data log", icon: "history" },
@@ -210,7 +162,7 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: str
 ];
 
 // Pages added in the watchtower build — flagged "New" in the sidebar so they're easy to spot.
-const NEW_PATHS = new Set(["/home", "/project", "/alerts", "/devlog", "/outreach", "/radar", "/datalog"]);
+const NEW_PATHS = new Set(["/alerts", "/devlog", "/datalog"]);
 
 function Logo() {
   return (
@@ -440,14 +392,8 @@ export default function App() {
         <Route path="/games/:appid" element={<GameProfile />} />
         <Route path="/press" element={<Press />} />
         <Route path="/marketing" element={<Marketing />} />
-        <Route path="/home" element={<Home />} />
-        <Route path="/project" element={<MyGame />} />
-        <Route path="/watchlist" element={<WatchlistPage />} />
         <Route path="/alerts" element={<Alerts />} />
-        <Route path="/outreach" element={<Outreach />} />
         <Route path="/devlog" element={<DevLog />} />
-        <Route path="/radar" element={<Radar />} />
-        <Route path="/explorer" element={<Explorer />} />
         <Route path="/chat" element={<Chat />} />
         <Route path="/datalog" element={<DataLog />} />
         <Route path="/welcome" element={<Onboarding />} />

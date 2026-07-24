@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { Badge } from "../components/ui/Badge";
 import { Card } from "../components/ui/Card";
-import { API_BASE, ApiError } from "../lib/api";
+import { API_BASE, ApiError, useGameSearch } from "../lib/api";
 import { fmtInt } from "../lib/format";
 
 // ---- local fetch helper -----------------------------------------------------------------
@@ -29,14 +29,8 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-// ---- types ------------------------------------------------------------------------------
-interface GamePick {
-  appid: number;
-  name: string | null;
-  header_image: string | null;
-  primary_genre: string | null;
-}
-
+// ---- server-side types (mirror api/app/routers/inputs.py — events + the read-only
+// wishlist benchmark are the only pieces still server-side; goals/milestones are local) ----
 type EventKind = "trailer" | "festival" | "press" | "update" | "other";
 
 interface MarketingEvent {
@@ -48,36 +42,11 @@ interface MarketingEvent {
   created_at: string;
 }
 
-interface WishlistMilestone {
-  id: number;
-  appid: number;
-  on_date: string;
-  wishlists: number | null;
-  followers: number | null;
-  source: string;
-  created_at: string;
-}
-
 interface WishlistBenchmark {
   appid: number;
   primary_genre: string | null;
   suggested_target: number;
   basis: string[];
-  latest_wishlists: number | null;
-  pct_to_target: number | null;
-}
-
-interface WishlistGoal {
-  appid: number;
-  target: number;
-  note: string | null;
-  updated_at: string;
-}
-
-interface ImportResult {
-  imported: number;
-  skipped: number;
-  errors: string[];
 }
 
 const KIND_OPTIONS: { value: EventKind; label: string }[] = [
@@ -100,11 +69,198 @@ const KIND_COLOR: Record<string, string> = {
   other: "var(--text-muted)",
 };
 
-// ---- hooks ------------------------------------------------------------------------------
-function useDevGames() {
-  return useQuery({ queryKey: ["inputs", "games"], queryFn: () => req<GamePick[]>("/inputs/games") });
+// ---- browser-local goals/milestones (no server writes) -----------------------------------
+// The control-plane WishlistGoal/WishlistMilestone tables were removed in the minimal-tool
+// trim — everything the dev types about wishlist targets/history now lives ONLY here, in
+// localStorage. Marketing events (above) stay server-side: the trends chart's event overlay
+// reads them back from the API, not the browser.
+const STORAGE_KEY = "prospect.devlog.v1";
+const MAX_RECENT_GAMES = 8;
+
+interface StoredGoal {
+  target: number;
+  note: string | null;
+  updated_at: string;
 }
 
+interface StoredMilestone {
+  id: string;
+  on_date: string;
+  wishlists: number | null;
+  followers: number | null;
+  source: "manual" | "csv";
+  created_at: string;
+}
+
+interface StoredGameMeta {
+  appid: number;
+  name: string | null;
+  header_image: string | null;
+  primary_genre: string | null;
+}
+
+interface DevLogState {
+  recentGames: StoredGameMeta[]; // most-recently-used first, capped at MAX_RECENT_GAMES
+  goals: Record<string, StoredGoal>; // keyed by String(appid)
+  milestones: Record<string, StoredMilestone[]>; // keyed by String(appid), oldest -> newest
+}
+
+const EMPTY_STATE: DevLogState = { recentGames: [], goals: {}, milestones: {} };
+
+function loadState(): DevLogState {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return EMPTY_STATE;
+    const parsed = JSON.parse(raw) as Partial<DevLogState>;
+    return {
+      recentGames: Array.isArray(parsed.recentGames) ? parsed.recentGames : [],
+      goals: parsed.goals && typeof parsed.goals === "object" ? parsed.goals : {},
+      milestones: parsed.milestones && typeof parsed.milestones === "object" ? parsed.milestones : {},
+    };
+  } catch {
+    return EMPTY_STATE; // private-browsing / storage-disabled / corrupt JSON — start fresh
+  }
+}
+
+function saveState(state: DevLogState): void {
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // Storage disabled or quota exceeded — non-fatal, edits just won't persist this session.
+  }
+}
+
+function newId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** Owns the whole localStorage blob as React state (one instance for the page) so every
+ * panel re-renders on edits, persisting to storage on every change. */
+function useDevLogStore() {
+  const [state, setState] = useState<DevLogState>(() => loadState());
+
+  function update(fn: (prev: DevLogState) => DevLogState) {
+    setState((prev) => {
+      const next = fn(prev);
+      saveState(next);
+      return next;
+    });
+  }
+
+  function touchGame(meta: StoredGameMeta) {
+    update((prev) => ({
+      ...prev,
+      recentGames: [meta, ...prev.recentGames.filter((g) => g.appid !== meta.appid)].slice(0, MAX_RECENT_GAMES),
+    }));
+  }
+
+  function setGoal(appid: number, target: number, note?: string) {
+    update((prev) => ({
+      ...prev,
+      goals: {
+        ...prev.goals,
+        [appid]: { target, note: note?.trim() || null, updated_at: new Date().toISOString() },
+      },
+    }));
+  }
+
+  function clearGoal(appid: number) {
+    update((prev) => {
+      const goals = { ...prev.goals };
+      delete goals[String(appid)];
+      return { ...prev, goals };
+    });
+  }
+
+  function addMilestones(appid: number, rows: Omit<StoredMilestone, "id" | "created_at">[]) {
+    if (rows.length === 0) return;
+    update((prev) => {
+      const key = String(appid);
+      const createdAt = new Date().toISOString();
+      const added = rows.map((m) => ({ ...m, id: newId(), created_at: createdAt }));
+      const next = [...(prev.milestones[key] ?? []), ...added].sort((a, b) => a.on_date.localeCompare(b.on_date));
+      return { ...prev, milestones: { ...prev.milestones, [key]: next } };
+    });
+  }
+
+  function deleteMilestone(appid: number, id: string) {
+    update((prev) => {
+      const key = String(appid);
+      return {
+        ...prev,
+        milestones: { ...prev.milestones, [key]: (prev.milestones[key] ?? []).filter((m) => m.id !== id) },
+      };
+    });
+  }
+
+  return { state, touchGame, setGoal, clearGoal, addMilestones, deleteMilestone };
+}
+
+// ---- client-side CSV parsing (ported from the removed backend import_wishlist) -----------
+interface ParsedImport {
+  rows: Omit<StoredMilestone, "id" | "created_at">[];
+  skipped: number;
+  errors: string[];
+}
+
+function parseIsoDate(s: string): string | null {
+  const t = s.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(t)) return null;
+  const d = new Date(`${t}T00:00:00`);
+  return Number.isNaN(d.getTime()) ? null : t;
+}
+
+function parseCount(s: string): number | null {
+  const t = s.trim().replace(/,/g, "").replace(/_/g, "");
+  if (t === "") return null;
+  const n = Math.floor(Number(t));
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+/** Bulk-parse pasted CSV: 'YYYY-MM-DD,wishlists[,followers]'. Blank lines and an optional
+ * header row (a first line whose first field isn't a date) are ignored; malformed rows are
+ * skipped and counted (with a reason) rather than failing the whole import. */
+function parseWishlistCsv(csv: string): ParsedImport {
+  const rows: ParsedImport["rows"] = [];
+  let skipped = 0;
+  const errors: string[] = [];
+  let firstContent = true;
+
+  csv.split(/\r?\n/).forEach((raw, i) => {
+    const line = raw.trim();
+    if (!line) return;
+    const parts = line.split(",").map((p) => p.trim());
+
+    if (firstContent) {
+      firstContent = false;
+      if (parseIsoDate(parts[0]) === null) return; // treat a non-date first line as a header
+    }
+
+    if (parts.length < 2) {
+      skipped += 1;
+      errors.push(`line ${i + 1}: expected at least date,wishlists`);
+      return;
+    }
+    const onDate = parseIsoDate(parts[0]);
+    if (onDate === null) {
+      skipped += 1;
+      errors.push(`line ${i + 1}: invalid date '${parts[0]}'`);
+      return;
+    }
+    const wishlists = parseCount(parts[1]);
+    if (wishlists === null) {
+      skipped += 1;
+      errors.push(`line ${i + 1}: invalid wishlists '${parts[1]}'`);
+      return;
+    }
+    const followers = parts.length >= 3 ? parseCount(parts[2]) : null;
+    rows.push({ on_date: onDate, wishlists, followers, source: "csv" });
+  });
+
+  return { rows, skipped, errors: errors.slice(0, 20) };
+}
+
+// ---- server hooks (events + the read-only benchmark) -------------------------------------
 function useEvents(appid: number | null) {
   return useQuery({
     queryKey: ["inputs", "events", appid],
@@ -130,82 +286,11 @@ function useDeleteEvent(appid: number | null) {
   });
 }
 
-function useMilestones(appid: number | null) {
-  return useQuery({
-    queryKey: ["inputs", "wishlist", appid],
-    queryFn: () => req<WishlistMilestone[]>(`/inputs/wishlist?appid=${appid}`),
-    enabled: appid !== null,
-  });
-}
-
-function useAddMilestone(appid: number | null) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: { appid: number; on_date: string; wishlists?: number; followers?: number }) =>
-      req<WishlistMilestone>("/inputs/wishlist", { method: "POST", body: JSON.stringify(body) }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["inputs", "wishlist", appid] }),
-  });
-}
-
-function useDeleteMilestone(appid: number | null) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: number) => req<void>(`/inputs/wishlist/${id}`, { method: "DELETE" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["inputs", "wishlist", appid] }),
-  });
-}
-
 function useBenchmark(appid: number | null) {
   return useQuery({
     queryKey: ["inputs", "benchmark", appid],
     queryFn: () => req<WishlistBenchmark>(`/inputs/wishlist/benchmark?appid=${appid}`),
     enabled: appid !== null,
-  });
-}
-
-function useGoal(appid: number | null) {
-  return useQuery({
-    queryKey: ["inputs", "goal", appid],
-    queryFn: () => req<WishlistGoal | null>(`/inputs/wishlist/goal?appid=${appid}`),
-    enabled: appid !== null,
-  });
-}
-
-function useSetGoal(appid: number | null) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: { appid: number; target: number; note?: string }) =>
-      req<WishlistGoal>("/inputs/wishlist/goal", { method: "POST", body: JSON.stringify(body) }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["inputs", "goal", appid] });
-      qc.invalidateQueries({ queryKey: ["inputs", "benchmark", appid] });
-    },
-  });
-}
-
-function useClearGoal(appid: number | null) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: () => req<void>(`/inputs/wishlist/goal?appid=${appid}`, { method: "DELETE" }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["inputs", "goal", appid] });
-      qc.invalidateQueries({ queryKey: ["inputs", "benchmark", appid] });
-    },
-  });
-}
-
-function useImportCsv(appid: number | null) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (csv: string) =>
-      req<ImportResult>("/inputs/wishlist/import", {
-        method: "POST",
-        body: JSON.stringify({ appid, csv }),
-      }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["inputs", "wishlist", appid] });
-      qc.invalidateQueries({ queryKey: ["inputs", "benchmark", appid] });
-    },
   });
 }
 
@@ -242,6 +327,7 @@ function WishlistSpark({ values }: { values: number[] }) {
   const line = coords.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
   const area = `${pad},${height - pad} ${line} ${(width - pad).toFixed(1)},${height - pad}`;
   const [lastX, lastY] = coords[coords.length - 1];
+  const latest = values[values.length - 1];
   return (
     <svg
       viewBox={`0 0 ${width} ${height}`}
@@ -249,7 +335,7 @@ function WishlistSpark({ values }: { values: number[] }) {
       height={height}
       preserveAspectRatio="none"
       role="img"
-      aria-label={`Wishlist trend across ${values.length} recorded milestones, latest ${values[values.length - 1]}`}
+      aria-label={`Wishlist trend across ${values.length} recorded milestones, latest ${latest}`}
     >
       <polygon points={area} fill="var(--series-1)" opacity={0.08} />
       <polyline points={line} fill="none" stroke="var(--series-1)" strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" />
@@ -258,7 +344,98 @@ function WishlistSpark({ values }: { values: number[] }) {
   );
 }
 
-// ---- marketing timeline panel -----------------------------------------------------------
+// ---- game picker (search-based — the Dev Log no longer has a watchlist to pick from) -----
+function GamePicker({ recent, onPick }: { recent: StoredGameMeta[]; onPick: (g: StoredGameMeta) => void }) {
+  const [text, setText] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const [focused, setFocused] = useState(false);
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebounced(text), 250);
+    return () => window.clearTimeout(t);
+  }, [text]);
+
+  useEffect(() => {
+    function onDoc(e: MouseEvent) {
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setFocused(false);
+    }
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, []);
+
+  const searchQ = useGameSearch({
+    q: debounced || undefined,
+    sort: "total_reviews",
+    order: "desc",
+    limit: 8,
+    offset: 0,
+  });
+  const showResults = focused && debounced.trim().length >= 2;
+
+  return (
+    <div className="flex flex-col gap-2.5">
+      {recent.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] text-ink-muted">Recent</span>
+          {recent.map((g) => (
+            <button
+              key={g.appid}
+              type="button"
+              onClick={() => onPick(g)}
+              className="rounded-full border border-chartborder px-2.5 py-1 text-xs font-medium text-ink-secondary transition-colors hover:border-series-1 hover:text-series-1"
+            >
+              {g.name ?? `App ${g.appid}`}
+            </button>
+          ))}
+        </div>
+      )}
+      <div ref={boxRef} className="relative">
+        <input
+          type="text"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onFocus={() => setFocused(true)}
+          placeholder="Search for a game to log against…"
+          className={`${INPUT_CLS} w-full min-w-[260px]`}
+        />
+        {showResults && (
+          <div className="absolute z-20 mt-1 w-full min-w-[280px] overflow-hidden rounded-lg border border-chartborder bg-surface shadow-lg">
+            {searchQ.isLoading && <div className="px-3 py-2 text-xs text-ink-muted">Searching…</div>}
+            {searchQ.data && searchQ.data.items.length === 0 && (
+              <div className="px-3 py-2 text-xs text-ink-muted">No games match “{debounced}”.</div>
+            )}
+            {searchQ.data &&
+              searchQ.data.items.slice(0, 8).map((g) => (
+                <button
+                  key={g.appid}
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault(); // fires before the input's blur closes the list
+                    onPick({ appid: g.appid, name: g.name, header_image: g.header_image, primary_genre: g.primary_genre });
+                    setText("");
+                    setDebounced("");
+                    setFocused(false);
+                  }}
+                  className="flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-page"
+                >
+                  {g.header_image && (
+                    <img src={g.header_image} alt="" loading="lazy" className="h-8 w-14 shrink-0 rounded-sm object-cover" />
+                  )}
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-medium text-ink-primary">{g.name ?? `App ${g.appid}`}</span>
+                    <span className="block truncate text-[11px] text-ink-muted">{g.primary_genre ?? "—"}</span>
+                  </span>
+                </button>
+              ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---- marketing timeline panel (server-backed — unchanged) --------------------------------
 function MarketingPanel({ appid }: { appid: number }) {
   const { data, isLoading, isError, error } = useEvents(appid);
   const addEvent = useAddEvent(appid);
@@ -353,23 +530,28 @@ function MarketingPanel({ appid }: { appid: number }) {
   );
 }
 
-// ---- wishlist goal + benchmark ----------------------------------------------------------
-function GoalBenchmark({ appid }: { appid: number }) {
+// ---- wishlist goal + benchmark (goal is local; suggested_target is the read-only server
+// benchmark call) --------------------------------------------------------------------------
+function GoalBenchmark({
+  appid,
+  goal,
+  latest,
+  onSetGoal,
+  onClearGoal,
+}: {
+  appid: number;
+  goal: StoredGoal | null;
+  latest: number | null;
+  onSetGoal: (target: number, note?: string) => void;
+  onClearGoal: () => void;
+}) {
   const benchmark = useBenchmark(appid);
-  const goalQuery = useGoal(appid);
-  const setGoal = useSetGoal(appid);
-  const clearGoal = useClearGoal(appid);
-
   const [goalInput, setGoalInput] = useState("");
   const [showBasis, setShowBasis] = useState(false);
 
   const bench = benchmark.data;
-  const goal = goalQuery.data ?? null;
-
-  // Active target = the dev's own goal if they've set one, else the heuristic suggestion.
   const suggested = bench?.suggested_target ?? null;
   const target = goal?.target ?? suggested;
-  const latest = bench?.latest_wishlists ?? null;
   const pct = target && latest != null ? (latest / target) * 100 : null;
   const barPct = pct == null ? 0 : Math.max(0, Math.min(100, pct));
   const reached = pct != null && pct >= 100;
@@ -378,7 +560,8 @@ function GoalBenchmark({ appid }: { appid: number }) {
     e.preventDefault();
     const n = Math.floor(Number(goalInput.trim()));
     if (!Number.isFinite(n) || n <= 0) return;
-    setGoal.mutate({ appid, target: n }, { onSuccess: () => setGoalInput("") });
+    onSetGoal(n);
+    setGoalInput("");
   }
 
   if (benchmark.isLoading) {
@@ -437,14 +620,13 @@ function GoalBenchmark({ appid }: { appid: number }) {
             className={`${INPUT_CLS} w-32`}
           />
         </label>
-        <button type="submit" disabled={setGoal.isPending || goalInput.trim() === ""} className={BTN_CLS}>
-          {setGoal.isPending ? "Saving…" : goal ? "Update goal" : "Set goal"}
+        <button type="submit" disabled={goalInput.trim() === ""} className={BTN_CLS}>
+          {goal ? "Update goal" : "Set goal"}
         </button>
         {goal && (
           <button
             type="button"
-            onClick={() => clearGoal.mutate()}
-            disabled={clearGoal.isPending}
+            onClick={onClearGoal}
             className="rounded-md px-2 py-2 text-xs text-ink-muted hover:text-status-critical disabled:opacity-40"
           >
             Clear
@@ -456,26 +638,23 @@ function GoalBenchmark({ appid }: { appid: number }) {
           Tracking your goal of {fmtInt(goal.target)} · heuristic suggestion is {fmtInt(suggested)}.
         </div>
       )}
+      <div className="mt-2 text-[10px] text-ink-muted">Saved in this browser only — not synced to an account.</div>
     </div>
   );
 }
 
-// ---- CSV bulk import --------------------------------------------------------------------
-function CsvImport({ appid }: { appid: number }) {
-  const importCsv = useImportCsv(appid);
+// ---- CSV bulk import (parsed client-side, saved to localStorage) -------------------------
+function CsvImport({ onImport }: { onImport: (csv: string) => { imported: number; skipped: number; errors: string[] } }) {
   const [open, setOpen] = useState(false);
   const [csv, setCsv] = useState("");
-  const [result, setResult] = useState<ImportResult | null>(null);
+  const [result, setResult] = useState<{ imported: number; skipped: number; errors: string[] } | null>(null);
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
     if (csv.trim() === "") return;
-    importCsv.mutate(csv, {
-      onSuccess: (r) => {
-        setResult(r);
-        if (r.imported > 0) setCsv("");
-      },
-    });
+    const r = onImport(csv);
+    setResult(r);
+    if (r.imported > 0) setCsv("");
   }
 
   if (!open) {
@@ -507,14 +686,9 @@ function CsvImport({ appid }: { appid: number }) {
         className={`${INPUT_CLS} mt-2 w-full font-mono text-xs`}
       />
       <div className="mt-2 flex flex-wrap items-center gap-3">
-        <button type="submit" disabled={importCsv.isPending || csv.trim() === ""} className={BTN_CLS}>
-          {importCsv.isPending ? "Importing…" : "Import"}
+        <button type="submit" disabled={csv.trim() === ""} className={BTN_CLS}>
+          Import
         </button>
-        {importCsv.isError && (
-          <span className="text-xs text-status-serious">
-            {importCsv.error instanceof Error ? importCsv.error.message : "Import failed."}
-          </span>
-        )}
         {result && (
           <span className="text-xs text-ink-secondary">
             Imported {result.imported}
@@ -534,50 +708,64 @@ function CsvImport({ appid }: { appid: number }) {
   );
 }
 
-// ---- wishlist milestones panel ----------------------------------------------------------
-function WishlistPanel({ appid }: { appid: number }) {
-  const { data, isLoading, isError, error } = useMilestones(appid);
-  const addMilestone = useAddMilestone(appid);
-  const deleteMilestone = useDeleteMilestone(appid);
-
+// ---- wishlist milestones panel (local) ----------------------------------------------------
+function WishlistPanel({
+  appid,
+  goal,
+  milestones,
+  onSetGoal,
+  onClearGoal,
+  onAddMilestones,
+  onDeleteMilestone,
+}: {
+  appid: number;
+  goal: StoredGoal | null;
+  milestones: StoredMilestone[];
+  onSetGoal: (target: number, note?: string) => void;
+  onClearGoal: () => void;
+  onAddMilestones: (rows: Omit<StoredMilestone, "id" | "created_at">[]) => void;
+  onDeleteMilestone: (id: string) => void;
+}) {
   const [onDate, setOnDate] = useState(todayIso());
   const [wishlists, setWishlists] = useState("");
   const [followers, setFollowers] = useState("");
 
-  function parseCount(raw: string): number | undefined {
-    const t = raw.trim();
-    if (t === "") return undefined;
-    const n = Math.floor(Number(t));
-    return Number.isFinite(n) && n >= 0 ? n : undefined;
+  function parseFieldCount(raw: string): number | undefined {
+    const n = parseCount(raw);
+    return n === null ? undefined : n;
   }
 
-  const wl = parseCount(wishlists);
-  const fl = parseCount(followers);
+  const wl = parseFieldCount(wishlists);
+  const fl = parseFieldCount(followers);
   const canSubmit = !!onDate && (wl !== undefined || fl !== undefined);
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!canSubmit) return;
-    addMilestone.mutate(
-      { appid, on_date: onDate, wishlists: wl, followers: fl },
-      {
-        onSuccess: () => {
-          setWishlists("");
-          setFollowers("");
-        },
-      },
-    );
+    onAddMilestones([{ on_date: onDate, wishlists: wl ?? null, followers: fl ?? null, source: "manual" }]);
+    setWishlists("");
+    setFollowers("");
   }
 
-  // API returns milestones oldest -> newest; sparkline follows that order.
+  function importCsv(csv: string) {
+    const parsed = parseWishlistCsv(csv);
+    onAddMilestones(parsed.rows);
+    return { imported: parsed.rows.length, skipped: parsed.skipped, errors: parsed.errors };
+  }
+
+  const latest = useMemo(() => {
+    const withCounts = milestones.filter((m) => m.wishlists != null);
+    return withCounts.length > 0 ? (withCounts[withCounts.length - 1].wishlists as number) : null;
+  }, [milestones]);
+
   const sparkValues = useMemo(
-    () => (data ?? []).filter((m) => m.wishlists != null).map((m) => m.wishlists as number),
-    [data],
+    () => milestones.filter((m) => m.wishlists != null).map((m) => m.wishlists as number),
+    [milestones],
   );
 
   return (
-    <Card title="Wishlist milestones" subtitle="Manual wishlist / follower counts — the fallback log until an automated Steamworks ingest lands.">
-      <GoalBenchmark appid={appid} />
+    <Card title="Wishlist milestones" subtitle="Manual wishlist / follower counts, saved in this browser — no account sync yet.">
+      <GoalBenchmark appid={appid} goal={goal} latest={latest} onSetGoal={onSetGoal} onClearGoal={onClearGoal} />
       <form onSubmit={submit} className="flex flex-col gap-3">
         <div className="flex flex-wrap gap-2">
           <label className="flex flex-col gap-1 text-xs text-ink-secondary">
@@ -594,18 +782,13 @@ function WishlistPanel({ appid }: { appid: number }) {
           </label>
         </div>
         <div className="flex items-center gap-3">
-          <button type="submit" disabled={addMilestone.isPending || !canSubmit} className={BTN_CLS}>
-            {addMilestone.isPending ? "Adding…" : "Add milestone"}
+          <button type="submit" disabled={!canSubmit} className={BTN_CLS}>
+            Add milestone
           </button>
-          {addMilestone.isError && (
-            <span className="text-xs text-status-serious">
-              {addMilestone.error instanceof Error ? addMilestone.error.message : "Failed to add milestone."}
-            </span>
-          )}
         </div>
       </form>
 
-      <CsvImport appid={appid} />
+      <CsvImport onImport={importCsv} />
 
       {sparkValues.length >= 2 && (
         <div className="mt-4">
@@ -615,14 +798,8 @@ function WishlistPanel({ appid }: { appid: number }) {
       )}
 
       <div className="mt-4 border-t border-chartborder pt-3">
-        {isLoading && <div className="py-4 text-sm text-ink-muted">Loading milestones…</div>}
-        {isError && (
-          <div className="py-4 text-sm text-status-serious">
-            Failed to load milestones{error instanceof Error ? `: ${error.message}` : "."}
-          </div>
-        )}
-        {data && data.length === 0 && <div className="py-4 text-sm text-ink-muted">No milestones recorded yet.</div>}
-        {data && data.length > 0 && (
+        {milestones.length === 0 && <div className="py-4 text-sm text-ink-muted">No milestones recorded yet.</div>}
+        {milestones.length > 0 && (
           <div className="overflow-x-auto">
             <table className="w-full border-collapse text-sm">
               <thead>
@@ -634,7 +811,7 @@ function WishlistPanel({ appid }: { appid: number }) {
                 </tr>
               </thead>
               <tbody>
-                {data.map((m) => (
+                {milestones.map((m) => (
                   <tr key={m.id} className="border-b border-chartborder/60 hover:bg-page">
                     <td className="tabular px-2 py-1.5">{fmtDate(m.on_date)}</td>
                     <td className="tabular px-2 py-1.5 text-right">{m.wishlists != null ? fmtInt(m.wishlists) : "—"}</td>
@@ -642,8 +819,7 @@ function WishlistPanel({ appid }: { appid: number }) {
                     <td className="px-2 py-1.5 text-right">
                       <button
                         type="button"
-                        onClick={() => deleteMilestone.mutate(m.id)}
-                        disabled={deleteMilestone.isPending}
+                        onClick={() => onDeleteMilestone(m.id)}
                         aria-label="Delete milestone"
                         className="rounded-md px-2 py-0.5 text-ink-muted hover:text-status-critical disabled:opacity-40"
                       >
@@ -663,16 +839,31 @@ function WishlistPanel({ appid }: { appid: number }) {
 
 // ---- page -------------------------------------------------------------------------------
 export default function DevLog() {
-  const { data: games, isLoading, isError, error } = useDevGames();
+  const store = useDevLogStore();
   const [appid, setAppid] = useState<number | null>(null);
 
-  // Default to the first watched game once the list arrives (and keep the selection valid).
+  // Default to the most recently used game once the store loads (and keep the selection valid).
   useEffect(() => {
-    if (!games || games.length === 0) return;
-    setAppid((cur) => (cur !== null && games.some((g) => g.appid === cur) ? cur : games[0].appid));
-  }, [games]);
+    if (store.state.recentGames.length === 0) return;
+    setAppid((cur) =>
+      cur !== null && store.state.recentGames.some((g) => g.appid === cur) ? cur : store.state.recentGames[0].appid,
+    );
+    // Only re-derive the default on the recent-games list changing, not every store update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.state.recentGames]);
 
-  const selected = useMemo(() => games?.find((g) => g.appid === appid) ?? null, [games, appid]);
+  const selected = useMemo(
+    () => store.state.recentGames.find((g) => g.appid === appid) ?? null,
+    [store.state.recentGames, appid],
+  );
+  const appidKey = appid !== null ? String(appid) : null;
+  const goal = appidKey ? store.state.goals[appidKey] ?? null : null;
+  const milestones = appidKey ? store.state.milestones[appidKey] ?? [] : [];
+
+  function pickGame(g: StoredGameMeta) {
+    store.touchGame(g);
+    setAppid(g.appid);
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -680,67 +871,52 @@ export default function DevLog() {
         <h1 className="text-lg font-semibold text-ink-primary">Dev log</h1>
         <p className="mt-0.5 text-sm text-ink-muted">
           Record your own marketing beats and wishlist milestones for a game you're tracking, then read them back together.
+          Wishlist goals and milestones are saved in this browser only; marketing events sync to your account.
         </p>
       </div>
 
-      {isLoading && <Card><div className="py-6 text-sm text-ink-muted">Loading your games…</div></Card>}
-      {isError && (
-        <Card>
-          <div className="py-6 text-sm text-status-serious">
-            Failed to load games{error instanceof Error ? `: ${error.message}` : "."}
-          </div>
-        </Card>
-      )}
+      <Card className="!p-4">
+        <GamePicker recent={store.state.recentGames} onPick={pickGame} />
+      </Card>
 
-      {games && games.length === 0 && (
+      {store.state.recentGames.length === 0 && (
         <Card>
           <div className="flex flex-col items-center gap-2 py-10 text-center text-sm text-ink-muted">
-            <span>No games to log against yet — the dev log tracks games on your watchlist.</span>
-            <Link to="/watchlist" className="text-series-1 hover:underline">
-              Go to your watchlist
+            <span>No games logged yet — search above for a game to start tracking it.</span>
+            <Link to="/games" className="text-series-1 hover:underline">
+              Browse the game catalog
             </Link>
           </div>
         </Card>
       )}
 
-      {games && games.length > 0 && (
+      {selected && appid !== null && (
         <>
-          <Card className="!p-4">
-            <div className="flex flex-wrap items-center gap-3">
-              <label className="flex flex-col gap-1 text-xs text-ink-secondary">
-                Game
-                <select
-                  value={appid ?? ""}
-                  onChange={(e) => setAppid(Number(e.target.value))}
-                  className={`${INPUT_CLS} min-w-[240px]`}
-                >
-                  {games.map((g) => (
-                    <option key={g.appid} value={g.appid}>
-                      {g.name ?? `App ${g.appid}`}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {selected && (
-                <div className="flex items-center gap-2.5">
-                  {selected.header_image && (
-                    <img src={selected.header_image} alt="" loading="lazy" className="h-9 w-16 shrink-0 rounded-sm object-cover" />
-                  )}
-                  <div className="leading-tight">
-                    <div className="text-sm font-medium text-ink-primary">{selected.name ?? `App ${selected.appid}`}</div>
-                    <div className="text-[11px] text-ink-muted">{selected.primary_genre ?? "—"}</div>
-                  </div>
-                </div>
+          <Card className="!p-3">
+            <div className="flex items-center gap-2.5">
+              {selected.header_image && (
+                <img src={selected.header_image} alt="" loading="lazy" className="h-9 w-16 shrink-0 rounded-sm object-cover" />
               )}
+              <div className="leading-tight">
+                <div className="text-sm font-medium text-ink-primary">{selected.name ?? `App ${selected.appid}`}</div>
+                <div className="text-[11px] text-ink-muted">{selected.primary_genre ?? "—"}</div>
+              </div>
             </div>
           </Card>
 
-          {appid !== null && (
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              <MarketingPanel key={`m-${appid}`} appid={appid} />
-              <WishlistPanel key={`w-${appid}`} appid={appid} />
-            </div>
-          )}
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <MarketingPanel key={`m-${appid}`} appid={appid} />
+            <WishlistPanel
+              key={`w-${appid}`}
+              appid={appid}
+              goal={goal}
+              milestones={milestones}
+              onSetGoal={(target, note) => store.setGoal(appid, target, note)}
+              onClearGoal={() => store.clearGoal(appid)}
+              onAddMilestones={(rows) => store.addMilestones(appid, rows)}
+              onDeleteMilestone={(id) => store.deleteMilestone(appid, id)}
+            />
+          </div>
         </>
       )}
     </div>

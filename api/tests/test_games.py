@@ -71,7 +71,6 @@ def test_game_profile_happy_path(client):
     body = r.json()
     assert body["name"] == "Rogue Cellar"
     assert body["primary_genre"] == "Roguelike"
-    assert body["in_watchlist"] is False
     assert body["top_tags"] == ["Deckbuilder", "Roguelike", "Indie"]
 
 

@@ -538,7 +538,6 @@ export interface GameProfile {
   live_players: number | null;
   twitch_viewers: number | null;
   twitch_streams: number | null;
-  in_watchlist: boolean;
 }
 
 export function useGameProfile(appid: number | null) {
@@ -830,131 +829,6 @@ export function useBuzzTrends(direction: "rising" | "cooling", limit = 20) {
     queryFn: () => request<BuzzTrendsResponse>(`/press/buzz-trends${qs({ direction, limit })}`),
     staleTime: 5 * 60_000,
   });
-}
-
-// ---- watchlist (Phase 2) ------------------------------------------------------------------
-export interface WatchlistItem {
-  id: number;
-  appid: number;
-  note: string | null;
-  created_at: string;
-  name: string | null;
-  header_image: string | null;
-  primary_genre: string | null;
-  price_initial: number | null;
-  owners_mid: number | null;
-  total_reviews: number | null;
-  positive_ratio: number | null;
-  est_rev_reviews: number | null;
-  live_players: number | null;
-  twitch_viewers: number | null;
-  n_reviews_trailing_30d: number | null;
-  velocity_sparkline: number[];
-}
-
-export function useWatchlist() {
-  return useQuery({ queryKey: ["watchlist"], queryFn: () => request<WatchlistItem[]>("/watchlist") });
-}
-
-export function useAddWatchlist() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: { appid: number; note?: string }) =>
-      request<WatchlistItem>("/watchlist", { method: "POST", body: JSON.stringify(body) }),
-    onSuccess: (_data, vars) => {
-      qc.invalidateQueries({ queryKey: ["watchlist"] });
-      qc.invalidateQueries({ queryKey: ["game-profile", vars.appid] });
-    },
-  });
-}
-
-export function useRemoveWatchlist() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (appid: number) => request<void>(`/watchlist/${appid}`, { method: "DELETE" }),
-    onSuccess: (_data, appid) => {
-      qc.invalidateQueries({ queryKey: ["watchlist"] });
-      qc.invalidateQueries({ queryKey: ["game-profile", appid] });
-    },
-  });
-}
-
-// ---- explorer (Phase 4 — safe query/filter/chart builder) -------------------------------
-// Mirrors api/app/routers/explore.py's DIMENSIONS/METRICS whitelists — but the actual
-// vocabulary (which names exist) is fetched at runtime via useExploreSchema(), never
-// hardcoded here, so the UI never drifts from the server's whitelist.
-export type ExploreColumnKind = "string" | "number" | "integer" | "boolean" | "list";
-
-export interface ExploreColumnMeta {
-  name: string;
-  label: string;
-  kind: ExploreColumnKind;
-  groupable: boolean;
-  ops: string[];
-}
-
-export interface ExploreMetricMeta {
-  name: string;
-  label: string;
-}
-
-export interface ExploreSchemaResponse {
-  dimensions: ExploreColumnMeta[];
-  metrics: ExploreMetricMeta[];
-  max_limit: number;
-  max_filters: number;
-  max_select: number;
-  max_group_by: number;
-  timeout_seconds: number;
-}
-
-export function useExploreSchema() {
-  return useQuery({
-    queryKey: ["explore-schema"],
-    queryFn: () => request<ExploreSchemaResponse>("/explore/schema"),
-    staleTime: 10 * 60_000,
-  });
-}
-
-export type ExploreFilterOp = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "like" | "contains" | "is_null" | "not_null";
-
-export interface ExploreFilter {
-  col: string;
-  op: ExploreFilterOp;
-  val?: string | number | boolean | (string | number)[] | null;
-}
-
-export interface ExploreQuery {
-  select: string[];
-  filters: ExploreFilter[];
-  group_by: string[];
-  sort?: string | null;
-  order: "asc" | "desc";
-  limit: number;
-}
-
-export interface ExploreResult {
-  columns: string[];
-  rows: Record<string, unknown>[];
-  row_count: number;
-  truncated: boolean;
-  grouped: boolean;
-  elapsed_ms: number;
-  sql_preview: string;
-}
-
-export function useRunExplore() {
-  return useMutation({
-    mutationFn: (query: ExploreQuery) =>
-      request<ExploreResult>("/explore", { method: "POST", body: JSON.stringify(query) }),
-  });
-}
-
-/** Build a download URL for the explorer CSV export (GET, triggered via <a download>). The
- * query travels as a single URL-encoded JSON param — the API re-validates it against the
- * same whitelist as POST /explore, so this is exactly as safe as the interactive query. */
-export function exploreExportCsvUrl(query: ExploreQuery): string {
-  return `${API_BASE}/explore/export.csv${qs({ query: JSON.stringify(query) })}`;
 }
 
 // ---- chat (Analytics Chat — Claude tool-use assistant over the marts) -------------------
@@ -1287,13 +1161,11 @@ export interface AccountEntitlements {
   can_export: boolean;
   api_access: boolean;
   max_saved_views: number | null;
-  max_watchlist_items: number | null;
   max_niche_rows: number | null;
 }
 
 export interface AccountCounts {
   saved_views: number;
-  watchlist_items: number;
   api_keys_active: number;
 }
 
@@ -1353,7 +1225,6 @@ export function useRevokeApiKey() {
 
 export interface UsageSummary {
   saved_views: number;
-  watchlist_items: number;
   api_keys_active: number;
   tracking_available: boolean;
   note: string;

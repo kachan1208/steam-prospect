@@ -13,10 +13,10 @@ from . import analytics_db
 from .config import settings
 from .control_db import init_db
 from .observability import setup_observability
-from . import alert_models, input_models, outreach_models, project_models  # noqa: F401 — register watchtower tables on Base.metadata before init_db()
+from . import alert_models, input_models  # noqa: F401 — register watchtower tables on Base.metadata before init_db()
 from .routers import (
-    account, alerts, chat, estimate, explore, games, health, inputs, market, marketing,
-    niches, outreach, press, projects, radar, refresh, seasonality, trends, views, watchlist,
+    account, alerts, chat, estimate, games, health, inputs, market, marketing,
+    niches, press, refresh, seasonality, trends, views,
 )
 from .mcp_mount import load_prospect_mcp
 
@@ -69,16 +69,11 @@ app.include_router(seasonality.router)
 app.include_router(estimate.router)
 app.include_router(views.router)
 app.include_router(games.router)
-app.include_router(watchlist.router)
 app.include_router(press.router)
 app.include_router(marketing.router)
-app.include_router(explore.router)
 app.include_router(chat.router)
 app.include_router(alerts.router)
-app.include_router(projects.router)
-app.include_router(outreach.router)
 app.include_router(inputs.router)
-app.include_router(radar.router)
 app.include_router(refresh.router)
 app.include_router(trends.router)
 app.include_router(account.router)
@@ -130,7 +125,7 @@ if _SERVE_SPA:
     # SPA fallback — registered LAST so it never shadows /api/*, /docs, /openapi.json,
     # /metrics (each matched by its own route above). Any other path returns a real static
     # file if one exists (favicon, etc.), otherwise index.html so client-side routes
-    # (/home, /outreach, …) survive a hard refresh.
+    # (/niches, /devlog, …) survive a hard refresh.
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_fallback(full_path: str):
         if full_path.startswith(("api", "docs", "redoc", "openapi.json", "metrics", "mcp")):

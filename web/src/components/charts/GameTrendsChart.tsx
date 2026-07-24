@@ -1,6 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
 import {
-  Area,
   Bar,
   CartesianGrid,
   ComposedChart,
@@ -28,15 +27,11 @@ import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
  *   Panel 1  sampled reviews / month (aqua bars) + avg live players (blue line, 2nd axis)
  *   Panel 2  Twitch viewers / month (purple bars) + creator mentions (yellow line, 2nd axis)
  *
- * "My game vs. its comps, with my marketing events on the timeline" — two opt-in overlays
- * ride on Panel 1 (the review-velocity backbone), the one series deep enough to compare:
- *   • comps  — pass `comps={[appid,…]}` and the fetch asks for ?comps=…; the response's
- *     per-period cohort MEDIAN review velocity draws as a muted dashed line, wrapped in a
- *     faint p25–p75 band, so "am I above/below comparable games?" reads at a glance without
- *     spaghetti. Degrades to nothing when no comp has trend history.
- *   • events — the org's own marketing log (GET /api/inputs/events?appid=…) drops a vertical
- *     marker at each event's month, labelled with its kind, with the note in the tooltip.
- *     Months with no charted trend row (no signal) are skipped so markers never float.
+ * "My marketing events on the timeline" — one opt-in overlay rides on Panel 1 (the
+ * review-velocity backbone): the org's own marketing log (GET /api/inputs/events?appid=…)
+ * drops a vertical marker at each event's month, labelled with its kind, with the note in
+ * the tooltip. Months with no charted trend row (no signal) are skipped so markers never
+ * float.
  *
  * Reviews are the real multi-month backbone; the player-count / Twitch / mention series
  * are only as deep as the collectors have run (today typically a single current month),
@@ -45,8 +40,8 @@ import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
  * connectNulls keeps a single reading visible as a dot.
  *
  * Self-fetches by `appid` (via react-query + the exported `request`) unless `points` is
- * passed in, so it can be embedded as just <GameTrendsChart appid={appid} />. The comps
- * and event overlays are only wired in that self-fetching mode.
+ * passed in, so it can be embedded as just <GameTrendsChart appid={appid} />. The event
+ * overlay is only wired in that self-fetching mode.
  */
 export interface GameTrendPoint {
   period: string; // 'YYYY-MM'
@@ -56,29 +51,10 @@ export interface GameTrendPoint {
   n_mentions: number;
 }
 
-interface CohortTrendPoint {
-  period: string;
-  n_comps: number;
-  n_reviews: number; // MEDIAN across comps
-  n_reviews_p25: number;
-  n_reviews_p75: number;
-  ccu_avg: number | null;
-  twitch_viewers: number;
-  n_mentions: number;
-}
-
-interface GameTrendsComps {
-  requested: number[];
-  matched: number[];
-  series: { appid: number; points: GameTrendPoint[] }[];
-  cohort: CohortTrendPoint[];
-}
-
 interface GameTrendsResponse {
   appid: number;
   eligible: boolean;
   points: GameTrendPoint[];
-  comps?: GameTrendsComps | null;
 }
 
 interface MarketingEvent {
@@ -89,16 +65,9 @@ interface MarketingEvent {
   note: string | null;
 }
 
-// The subject game's monthly point, augmented with the cohort overlay for that month.
-interface TrendRow extends GameTrendPoint {
-  cohort_reviews?: number; // cohort median review velocity (dashed line)
-  cohort_band?: [number, number]; // cohort p25–p75 review velocity (faint band)
-}
-
 // "My marketing events" are user milestones, not a data series — brand-toned so they read
-// as annotations distinct from the aqua review bars, blue player line, and muted cohort.
+// as annotations distinct from the aqua review bars and blue player line.
 const EVENT_COLOR = "var(--brand)";
-const COHORT_COLOR = "var(--text-muted)";
 
 const XAXIS_PROPS = {
   dataKey: "period",
@@ -113,18 +82,6 @@ function LegendDot({ color, label }: { color: string; label: string }) {
   return (
     <span className="inline-flex items-center gap-1.5">
       <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-      {label}
-    </span>
-  );
-}
-
-function LegendDash({ color, label }: { color: string; label: string }) {
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span
-        className="h-0 w-3.5 shrink-0"
-        style={{ borderTop: `1.5px dashed ${color}` }}
-      />
       {label}
     </span>
   );
@@ -150,21 +107,15 @@ function eventMarkerLabel(evts: MarketingEvent[]): string {
 export function GameTrendsChart({
   appid,
   points,
-  comps,
 }: {
   appid: number;
   points?: GameTrendPoint[];
-  comps?: number[];
 }) {
   const selfFetch = points === undefined && Number.isFinite(appid);
-  const compsKey = comps && comps.length ? comps.join(",") : "";
 
   const trendsQuery = useQuery({
-    queryKey: ["game-trends", appid, compsKey],
-    queryFn: () =>
-      request<GameTrendsResponse>(
-        `/games/${appid}/trends${compsKey ? `?comps=${encodeURIComponent(compsKey)}` : ""}`,
-      ),
+    queryKey: ["game-trends", appid],
+    queryFn: () => request<GameTrendsResponse>(`/games/${appid}/trends`),
     enabled: selfFetch,
     staleTime: 5 * 60_000,
   });
@@ -204,16 +155,7 @@ export function GameTrendsChart({
     );
   }
 
-  // ---- merge the cohort overlay onto the subject game's own periods -----------------------
-  const cohort = trendsQuery.data?.comps?.cohort ?? [];
-  const matchedComps = trendsQuery.data?.comps?.matched ?? [];
-  const compsRequested = (comps?.length ?? 0) > 0;
-  const cohortByPeriod = new Map(cohort.map((c) => [c.period, c]));
-  const data: TrendRow[] = basePoints.map((p) => {
-    const c = cohortByPeriod.get(p.period);
-    return c ? { ...p, cohort_reviews: c.n_reviews, cohort_band: [c.n_reviews_p25, c.n_reviews_p75] } : { ...p };
-  });
-  const hasCohort = data.some((d) => d.cohort_reviews !== undefined);
+  const data: GameTrendPoint[] = basePoints;
 
   // ---- group marketing events onto charted months (drop months not on the axis) ----------
   const periodSet = new Set(data.map((d) => d.period));
@@ -236,7 +178,7 @@ export function GameTrendsChart({
   return (
     <div className="flex flex-col gap-4">
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        {/* Panel 1 — review velocity + live players (+ comps cohort + event markers) */}
+        {/* Panel 1 — review velocity + live players (+ event markers) */}
         <div>
           <div className="mb-1 text-xs text-ink-muted">Sampled reviews &amp; live players / month</div>
           <ResponsiveContainer width="100%" height={168}>
@@ -265,7 +207,7 @@ export function GameTrendsChart({
                 cursor={{ fill: "var(--gridline)", opacity: 0.5 }}
                 content={({ active, payload, label }) => {
                   if (!active || !payload || payload.length === 0) return null;
-                  const p = payload[0].payload as TrendRow;
+                  const p = payload[0].payload as GameTrendPoint;
                   const rows: TooltipRow[] = [
                     { label: "Reviews (sampled)", value: fmtCompact(p.n_reviews), color: CSS_VAR.competition },
                     {
@@ -274,13 +216,6 @@ export function GameTrendsChart({
                       color: CSS_VAR.demand,
                     },
                   ];
-                  if (hasCohort && p.cohort_reviews !== undefined) {
-                    rows.push({
-                      label: "Comps median (reviews)",
-                      value: fmtCompact(p.cohort_reviews),
-                      color: COHORT_COLOR,
-                    });
-                  }
                   for (const e of eventsByMonth.get(String(label)) ?? []) {
                     const note = e.note ? (e.note.length > 60 ? `${e.note.slice(0, 57)}…` : e.note) : "—";
                     rows.push({ label: capitalize(e.kind), value: note, color: EVENT_COLOR });
@@ -288,20 +223,6 @@ export function GameTrendsChart({
                   return <TooltipPanel title={String(label)} rows={rows} />;
                 }}
               />
-              {/* faint cohort p25–p75 band behind the bars — context, not a hero mark */}
-              {hasCohort && (
-                <Area
-                  yAxisId="reviews"
-                  type="monotone"
-                  dataKey="cohort_band"
-                  stroke="none"
-                  fill={COHORT_COLOR}
-                  fillOpacity={0.14}
-                  connectNulls
-                  isAnimationActive={false}
-                  activeDot={false}
-                />
-              )}
               <Bar yAxisId="reviews" dataKey="n_reviews" fill={CSS_VAR.competition} radius={[4, 4, 0, 0]} maxBarSize={20} />
               <Line
                 yAxisId="ccu"
@@ -312,20 +233,6 @@ export function GameTrendsChart({
                 dot={{ r: 3, fill: CSS_VAR.demand, strokeWidth: 0 }}
                 connectNulls
               />
-              {/* cohort median review velocity — muted dashed benchmark on the reviews axis */}
-              {hasCohort && (
-                <Line
-                  yAxisId="reviews"
-                  type="monotone"
-                  dataKey="cohort_reviews"
-                  stroke={COHORT_COLOR}
-                  strokeWidth={1.5}
-                  strokeDasharray="4 3"
-                  dot={false}
-                  connectNulls
-                  isAnimationActive={false}
-                />
-              )}
               {/* my marketing events — a labelled plumb line at each event's month */}
               {eventMonths.map((month, i) => (
                 <ReferenceLine
@@ -349,7 +256,6 @@ export function GameTrendsChart({
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-ink-muted">
             <LegendDot color={CSS_VAR.competition} label="Reviews / mo" />
             <LegendDot color={CSS_VAR.demand} label="Live players (avg)" />
-            {hasCohort && <LegendDash color={COHORT_COLOR} label={`Comps median (${matchedComps.length})`} />}
             {hasEvents && <LegendTick color={EVENT_COLOR} label="Marketing event" />}
           </div>
         </div>
@@ -384,7 +290,7 @@ export function GameTrendsChart({
                 cursor={{ fill: "var(--gridline)", opacity: 0.5 }}
                 content={({ active, payload, label }) => {
                   if (!active || !payload || payload.length === 0) return null;
-                  const p = payload[0].payload as TrendRow;
+                  const p = payload[0].payload as GameTrendPoint;
                   return (
                     <TooltipPanel
                       title={String(label)}
@@ -415,17 +321,6 @@ export function GameTrendsChart({
         </div>
       </div>
 
-      {hasCohort && (
-        <p className="text-[11px] italic text-ink-muted">
-          Dashed line and band = the median (and p25–p75 spread) sampled-review velocity across{" "}
-          {matchedComps.length} comparable {matchedComps.length === 1 ? "game" : "games"}, so you can read whether this
-          title runs above or below its cohort. The cohort leans on fewer games in the earliest/most-recent months (not
-          every comp has a row every month).
-        </p>
-      )}
-      {compsRequested && !hasCohort && (
-        <p className="text-[11px] italic text-ink-muted">No monthly trend history for the selected comparables yet.</p>
-      )}
       {(!hasCcu || !hasTwitch || !hasMentions) && (
         <p className="text-[11px] italic text-ink-muted">
           Reviews/month is the real multi-month history (from the sampled reviews table — recency-biased for

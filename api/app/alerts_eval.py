@@ -63,7 +63,7 @@ from .email import (
     get_email_provider,
     render_alert_digest,
 )
-from .models import Alert, Membership, Org, User, Watchlist
+from .models import Alert, Membership, Org, User
 
 logger = logging.getLogger("prospect.alerts_eval")
 
@@ -258,12 +258,10 @@ def _eval_watchlist_velocity(db: Session, alert: Alert, state: dict) -> tuple[li
                 f"alert {alert.id}: kind='watchlist_velocity' target must be an appid, '*', or empty"
             ) from exc
     else:
-        appids = [
-            int(k)
-            for k in db.scalars(
-                select(Watchlist.key).where(Watchlist.org_id == alert.org_id, Watchlist.kind == "game")
-            ).all()
-        ]
+        # "*" / empty used to mean "every game on the org's watchlist" — that control-plane
+        # table was removed in the minimal-tool trim, so this convenience fallback now yields
+        # no appids instead. An alert with an explicit numeric target still works as before.
+        appids = []
 
     if not appids:
         return [], state

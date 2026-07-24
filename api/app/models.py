@@ -41,7 +41,6 @@ class Org(Base):
     subscriptions: Mapped[list["Subscription"]] = relationship(back_populates="org")
     api_keys: Mapped[list["ApiKey"]] = relationship(back_populates="org")
     saved_views: Mapped[list["SavedView"]] = relationship(back_populates="org")
-    watchlist: Mapped[list["Watchlist"]] = relationship(back_populates="org")
     alerts: Mapped[list["Alert"]] = relationship(back_populates="org")
 
 
@@ -112,20 +111,6 @@ class SavedView(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     org: Mapped["Org"] = relationship(back_populates="saved_views")
-
-
-class Watchlist(Base):
-    __tablename__ = "watchlist"
-    __table_args__ = (UniqueConstraint("org_id", "kind", "key", name="uq_watch"),)
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id"), index=True)
-    kind: Mapped[str] = mapped_column(String(20))   # 'niche' | 'game'
-    key: Mapped[str] = mapped_column(String(200))    # tag/genre key or appid
-    note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-
-    org: Mapped["Org"] = relationship(back_populates="watchlist")
 
 
 class Alert(Base):

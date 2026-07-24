@@ -101,7 +101,7 @@ const SURFACES: Surface[] = [
 const STEPS = [
   "Open Niche Finder and sort by Opportunity — filter by a minimum review count so you're reading a real sample.",
   "Take a niche's median reviews into the Estimator for an owners/revenue range.",
-  "Save the view or add a comparable game to your Watchlist so you can find your way back to it.",
+  "Save the view so you can find your way back to it.",
 ];
 
 function SurfaceCard({ surface, onGo }: { surface: Surface; onGo: (to: string) => void }) {
