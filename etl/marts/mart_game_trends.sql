@@ -4,10 +4,12 @@
 -- creator mentions) can be charted over time. Powers GET /api/games/{appid}/trends.
 --
 -- Columns (grain = one row per appid per 'YYYY-MM' that has ANY signal):
---   n_reviews       count of src.reviews created that month (bucketed on timestamp_created,
---                    unix seconds). This is a per-game SAMPLE of Steam's reviews (recency-
---                    biased for older/popular titles — see build_marts.py's stg_review note),
---                    so it describes review velocity in the sample, not the true full history.
+--   n_reviews       reviews created that month. Sourced from src.review_histogram (Steam's
+--                    store review-graph: full-history monthly up+down counts, uncapped) when
+--                    the game has been backfilled — the TRUE review velocity over the game's
+--                    whole life. Falls back per-appid to bucketing src.reviews.timestamp_created
+--                    (the recency-biased ~2k-per-side SAMPLE — see build_marts.py's stg_review
+--                    note) only for appids not yet in review_histogram.
 --   ccu_avg         average live concurrent players that month from src.player_counts
 --                    (GetNumberOfCurrentPlayers snapshots). Left NULL when no snapshot landed
 --                    that month — a gauge we did not measure, NOT zero players (0 would draw a
@@ -39,13 +41,34 @@
 DROP TABLE IF EXISTS mart_game_trends;
 
 CREATE TABLE mart_game_trends AS
-WITH rev AS (
+WITH hist AS (
+    -- Full-history monthly review counts from Steam's store review graph
+    -- (src.review_histogram, filled by the scraper's `review-histogram` command).
+    -- up+down = reviews created that month across the game's whole life — the
+    -- true review velocity, uncapped, no recency bias.
+    SELECT rh.appid,
+        rh.period AS period,
+        SUM(COALESCE(rh.recommendations_up, 0) + COALESCE(rh.recommendations_down, 0)) AS n_reviews
+    FROM src.review_histogram rh
+    WHERE rh.period IS NOT NULL
+    GROUP BY 1, 2
+),
+sample_rev AS (
+    -- Per-appid fallback for games NOT yet backfilled into review_histogram:
+    -- bucket the recency-biased ~2k-per-side `reviews` sample by timestamp. Kept
+    -- so nothing regresses before the histogram backfill reaches the long tail.
     SELECT r.appid,
         strftime(date_trunc('month', make_timestamp(r.timestamp_created * 1000000)), '%Y-%m') AS period,
         COUNT(*) AS n_reviews
     FROM src.reviews r
     WHERE r.timestamp_created IS NOT NULL
+      AND r.appid NOT IN (SELECT DISTINCT appid FROM src.review_histogram)
     GROUP BY 1, 2
+),
+rev AS (
+    SELECT appid, period, n_reviews FROM hist
+    UNION ALL
+    SELECT appid, period, n_reviews FROM sample_rev
 ),
 elig AS (
     -- Appids in mart_game that have at least some reviews (bounds table size).
