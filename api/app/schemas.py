@@ -338,6 +338,9 @@ class ReviewAspect(BaseModel):
     n_pos_mentions: int
     n_neg_mentions: int
     total_mentions: int
+    # VOTE-based split: share of aspect-mentioning reviews that were thumbs-up OVERALL. Coarse
+    # by construction (a thumbs-up review trashing this aspect still counts as praise here) —
+    # kept for continuity/comparison; the text-sentiment fields below are the honest signal.
     pos_share: Optional[float] = None
     n_reviews_sampled: int
     # Genre-differential: baseline_genre is the game's own primary_genre when it has
@@ -347,6 +350,20 @@ class ReviewAspect(BaseModel):
     baseline_genre: Optional[str] = None
     n_games_in_baseline: Optional[int] = None
     delta_vs_genre: Optional[float] = None
+    # TEXT sentiment (VADER over the local window around the aspect keyword — see
+    # mart_game_teardown.sql / etl/build_marts.py compute_aspect_sentiment). This reflects what
+    # reviewers actually SAY about the aspect, not their overall thumbs-up/down. Coarse:
+    # lexicon-based, English-only, sarcasm-blind, domain-blind. text_pos_share = positive /
+    # (positive + negative), excluding the neutral band; mean_compound is the mean VADER
+    # compound (-1..1) over all scored mentions. text_delta_vs_genre is text_pos_share minus
+    # the pooled genre baseline (genre_text_pos_share).
+    n_text_pos: int = 0
+    n_text_neg: int = 0
+    n_text_neutral: int = 0
+    text_pos_share: Optional[float] = None
+    mean_compound: Optional[float] = None
+    genre_text_pos_share: Optional[float] = None
+    text_delta_vs_genre: Optional[float] = None
 
 
 class PressBySource(BaseModel):
@@ -376,6 +393,17 @@ class GamePress(BaseModel):
     by_source: list[PressBySource]
     timeline: list[PressTimelinePoint]
     notable: list[PressNotableArticle]
+    # Coverage-tone sentiment (VADER over each matched article's headline+summary — see
+    # mart_game_teardown.sql / etl/build_marts.py compute_press_sentiment). press_pos_share =
+    # positive / (positive + negative), neutrals excluded; mean_compound is the mean VADER
+    # compound (-1..1) across scored articles. Coarse: headline/summary-level, English-only, and
+    # an article's overall tone only proxies its stance on the matched game.
+    n_pos_articles: int = 0
+    n_neg_articles: int = 0
+    n_neutral_articles: int = 0
+    n_scored_articles: int = 0
+    press_pos_share: Optional[float] = None
+    mean_compound: Optional[float] = None
 
 
 class GameTeardown(BaseModel):

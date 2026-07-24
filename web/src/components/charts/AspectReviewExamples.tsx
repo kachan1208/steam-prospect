@@ -79,7 +79,7 @@ function SentimentColumn({
       )}
       {q.data && q.data.items.length === 0 && (
         <div className="rounded-card border border-dashed border-chartborder p-3 text-center text-[11px] italic text-ink-muted">
-          No sampled reviews mention this aspect as {sentiment === "praise" ? "praise" : "a complaint"}.
+          No sampled reviews read {sentiment === "praise" ? "positive" : "negative"} about this aspect.
         </div>
       )}
       {q.data && q.data.items.length > 0 && (
@@ -95,22 +95,35 @@ function SentimentColumn({
 
 /**
  * The aspect drill-down panel — rendered under a clicked aspect row in AspectDivergingBars.
- * Two lazy-loaded columns (praise / complaint), each backed by its own
+ * Two lazy-loaded columns (positive / negative about the aspect), each backed by its own
  * `useAspectReviews(appid, aspect, sentiment)` call so the query only fires once this panel
  * actually mounts (i.e. once the row is expanded — see AspectDivergingBars' `expanded`
- * state), not on initial teardown load.
+ * state), not on initial teardown load. Excerpts are grouped by the TEXT sentiment of the shown
+ * passage (VADER), matching the bar above — a thumbs-up review can appear under "Negative" here.
  */
 export function AspectReviewExamples({ appid, aspect }: { appid: number; aspect: string }) {
   return (
-    <div className="grid grid-cols-1 gap-4 pt-1 sm:grid-cols-2">
-      <SentimentColumn appid={appid} aspect={aspect} sentiment="praise" label="Praise examples" color={CSS_VAR.praise} />
-      <SentimentColumn
-        appid={appid}
-        aspect={aspect}
-        sentiment="complaint"
-        label="Complaint examples"
-        color={CSS_VAR.complaint}
-      />
+    <div>
+      <div className="grid grid-cols-1 gap-4 pt-1 sm:grid-cols-2">
+        <SentimentColumn
+          appid={appid}
+          aspect={aspect}
+          sentiment="praise"
+          label="Positive about this aspect"
+          color={CSS_VAR.praise}
+        />
+        <SentimentColumn
+          appid={appid}
+          aspect={aspect}
+          sentiment="complaint"
+          label="Negative about this aspect"
+          color={CSS_VAR.complaint}
+        />
+      </div>
+      <p className="mt-2.5 text-[11px] italic text-ink-muted">
+        Grouped by the sentiment of the highlighted text (VADER), not the reviewer’s overall thumbs-up/down — so a
+        broadly positive review can still show up on the negative side for this specific aspect.
+      </p>
     </div>
   );
 }

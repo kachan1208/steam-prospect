@@ -1,1 +1,5 @@
 duckdb>=1.5
+# Aspect- & press-level text sentiment for the Game Teardown (etl/build_marts.py
+# compute_aspect_sentiment / compute_press_sentiment). Tiny, pure-Python lexicon scorer —
+# no network, no API/LLM, ships its own lexicon. See the ASPECT_LEXICON block in build_marts.py.
+vaderSentiment>=3.3
