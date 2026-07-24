@@ -18,6 +18,7 @@ import {
 } from "../lib/api";
 import { fmtInt } from "../lib/format";
 import { ACCENTS, PRESETS, useTheme } from "../lib/theme";
+import { useTour } from "../lib/tour";
 
 type Tab = "profile" | "views" | "api-keys" | "usage";
 
@@ -63,6 +64,7 @@ function PreferenceRow({ label, children }: { label: string; children: ReactNode
 function ProfileTab() {
   const { data, isLoading, isError, error } = useAccount();
   const { theme, setTheme, accent, setAccent, preset, setPreset } = useTheme();
+  const { startTour } = useTour();
 
   return (
     <div className="flex flex-col gap-4">
@@ -158,10 +160,17 @@ function ProfileTab() {
 
       <Card title="Getting started">
         <div className="flex items-center justify-between gap-3">
-          <p className="text-xs text-ink-secondary">Revisit the four-surface welcome tour any time.</p>
-          <Link to="/welcome" className="shrink-0 text-xs font-medium text-series-1 hover:underline">
-            Reopen the welcome guide →
-          </Link>
+          <p className="text-xs text-ink-secondary">
+            Replay the guided tour — a spotlight walkthrough across Niche Finder, Benchmarks, Timing, Games, the
+            Estimator, and Use in Claude.
+          </p>
+          <button
+            type="button"
+            onClick={startTour}
+            className="shrink-0 text-xs font-medium text-series-1 hover:underline"
+          >
+            Replay onboarding tour →
+          </button>
         </div>
       </Card>
     </div>

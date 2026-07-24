@@ -105,7 +105,7 @@ export default function LaunchTiming() {
           Bars show the median share of a genre&apos;s first-year reviews landing in each window after launch.
         </p>
         {curveGenres.length === 0 && <div className="text-xs text-ink-muted">Pick at least one genre above.</div>}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4" data-tour="tour-timing-launch-shape">
           {curveGenres.map((g, i) => {
             const result = curveResults[i];
             const label = genres.find((opt) => opt.value === g)?.label ?? g;

@@ -4,6 +4,8 @@ import { useEffect, type ReactNode } from "react";
 
 import { useHealth } from "./lib/api";
 import { useTheme, ACCENTS, PRESETS } from "./lib/theme";
+import { hasInProgressTourStep, ONBOARDING_STORAGE_KEY, TourProvider } from "./lib/tour";
+import { TourOverlay } from "./components/TourOverlay";
 import NicheFinder from "./pages/NicheFinder";
 import MarketBenchmarks from "./pages/MarketBenchmarks";
 import LaunchTiming from "./pages/LaunchTiming";
@@ -15,7 +17,7 @@ import Marketing from "./pages/Marketing";
 import Chat from "./pages/Chat";
 import DevLog from "./pages/DevLog";
 import DataLog from "./pages/DataLog";
-import Onboarding, { ONBOARDING_STORAGE_KEY } from "./pages/Onboarding";
+import Onboarding from "./pages/Onboarding";
 import Settings from "./pages/Settings";
 import Docs from "./pages/Docs";
 import Terms from "./pages/Terms";
@@ -352,11 +354,17 @@ function AppShell() {
   const navigate = useNavigate();
 
   // First-run only: a brand-new session landing on the default /niches entry gets sent to
-  // the welcome tour once. Onboarding sets ONBOARDING_STORAGE_KEY on every exit action, so
-  // this never re-fires and never touches a direct/deep link (only the canonical /niches
-  // entry point is redirected).
+  // /welcome, which starts the guided tour (see lib/tour.tsx). Finishing, skipping, or Esc-ing
+  // the tour sets ONBOARDING_STORAGE_KEY, so this never re-fires and never touches a direct/
+  // deep link (only the canonical /niches entry point is redirected). Also skipped when a tour
+  // is already mid-progress (e.g. this is a reload) — /welcome would otherwise restart it from
+  // step 0 out from under a visitor lib/tour.tsx is already resuming in place.
   useEffect(() => {
-    if (location.pathname === "/niches" && !window.localStorage.getItem(ONBOARDING_STORAGE_KEY)) {
+    if (
+      location.pathname === "/niches" &&
+      !window.localStorage.getItem(ONBOARDING_STORAGE_KEY) &&
+      !hasInProgressTourStep()
+    ) {
       navigate("/welcome", { replace: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -376,30 +384,33 @@ function AppShell() {
 
 export default function App() {
   return (
-    <Routes>
-      <Route path="/" element={<Navigate to="/niches" replace />} />
-      <Route path="/terms" element={<Terms />} />
-      <Route path="/privacy" element={<Privacy />} />
-      <Route element={<AppShell />}>
-        <Route path="/niches" element={<NicheFinder />} />
-        <Route path="/benchmarks" element={<MarketBenchmarks />} />
-        <Route path="/timing" element={<LaunchTiming />} />
-        <Route path="/estimator" element={<Estimator />} />
-        <Route path="/games" element={<GameSearch />} />
-        <Route path="/games/:appid" element={<GameProfile />} />
-        <Route path="/press" element={<Press />} />
-        <Route path="/marketing" element={<Marketing />} />
-        <Route path="/devlog" element={<DevLog />} />
-        <Route path="/chat" element={<Chat />} />
-        <Route path="/datalog" element={<DataLog />} />
-        <Route path="/welcome" element={<Onboarding />} />
-        <Route path="/settings" element={<Settings />} />
-        <Route path="/settings/views" element={<Settings />} />
-        <Route path="/settings/api-keys" element={<Settings />} />
-        <Route path="/settings/usage" element={<Settings />} />
-        <Route path="/docs" element={<Docs />} />
-        <Route path="/docs/:slug" element={<Docs />} />
-      </Route>
-    </Routes>
+    <TourProvider>
+      <Routes>
+        <Route path="/" element={<Navigate to="/niches" replace />} />
+        <Route path="/terms" element={<Terms />} />
+        <Route path="/privacy" element={<Privacy />} />
+        <Route element={<AppShell />}>
+          <Route path="/niches" element={<NicheFinder />} />
+          <Route path="/benchmarks" element={<MarketBenchmarks />} />
+          <Route path="/timing" element={<LaunchTiming />} />
+          <Route path="/estimator" element={<Estimator />} />
+          <Route path="/games" element={<GameSearch />} />
+          <Route path="/games/:appid" element={<GameProfile />} />
+          <Route path="/press" element={<Press />} />
+          <Route path="/marketing" element={<Marketing />} />
+          <Route path="/devlog" element={<DevLog />} />
+          <Route path="/chat" element={<Chat />} />
+          <Route path="/datalog" element={<DataLog />} />
+          <Route path="/welcome" element={<Onboarding />} />
+          <Route path="/settings" element={<Settings />} />
+          <Route path="/settings/views" element={<Settings />} />
+          <Route path="/settings/api-keys" element={<Settings />} />
+          <Route path="/settings/usage" element={<Settings />} />
+          <Route path="/docs" element={<Docs />} />
+          <Route path="/docs/:slug" element={<Docs />} />
+        </Route>
+      </Routes>
+      <TourOverlay />
+    </TourProvider>
   );
 }

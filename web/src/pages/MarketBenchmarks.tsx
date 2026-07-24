@@ -133,7 +133,7 @@ export default function MarketBenchmarks() {
       >
         {distLoading && !dist && <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading…</div>}
         {dist && (
-          <>
+          <div data-tour="tour-benchmarks-distribution">
             <Histogram
               buckets={dist.buckets}
               color={CSS_VAR.demand}
@@ -148,7 +148,7 @@ export default function MarketBenchmarks() {
                 </span>
               ))}
             </div>
-          </>
+          </div>
         )}
       </Card>
 

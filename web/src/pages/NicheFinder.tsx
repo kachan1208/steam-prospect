@@ -142,6 +142,7 @@ export default function NicheFinder() {
           <button
             type="button"
             onClick={() => setSelected(info.row.original)}
+            data-tour={info.row.index === 0 ? "tour-niches-row0-key" : undefined}
             className="text-left font-medium text-ink-primary transition-colors hover:text-brand"
           >
             {info.getValue()}
@@ -293,7 +294,10 @@ export default function NicheFinder() {
               Last 24 months
             </SegButton>
           </Segmented>
-          <label className="flex items-center gap-1.5 text-xs font-medium text-ink-secondary">
+          <label
+            className="flex items-center gap-1.5 text-xs font-medium text-ink-secondary"
+            data-tour="tour-niches-min-reviews"
+          >
             Min reviews
             <input
               type="number"
@@ -350,7 +354,11 @@ export default function NicheFinder() {
                 {table.getHeaderGroups().map((hg) => (
                   <tr key={hg.id} className="border-b border-chartborder bg-surface2/50 text-left text-[11px]">
                     {hg.headers.map((h) => (
-                      <th key={h.id} className="whitespace-nowrap px-4 py-2.5">
+                      <th
+                        key={h.id}
+                        className="whitespace-nowrap px-4 py-2.5"
+                        data-tour={h.column.id === "opportunity" ? "tour-niches-opportunity-sort" : undefined}
+                      >
                         {flexRender(h.column.columnDef.header, h.getContext())}
                       </th>
                     ))}
@@ -364,7 +372,13 @@ export default function NicheFinder() {
                     className="border-b border-chartborder/70 transition-colors last:border-0 hover:bg-surface2/60"
                   >
                     {row.getVisibleCells().map((cell) => (
-                      <td key={cell.id} className="whitespace-nowrap px-4 py-2.5 align-middle">
+                      <td
+                        key={cell.id}
+                        className="whitespace-nowrap px-4 py-2.5 align-middle"
+                        data-tour={
+                          row.index === 0 && cell.column.id === "opportunity_bars" ? "tour-niches-bars-row0" : undefined
+                        }
+                      >
                         {flexRender(cell.column.columnDef.cell, cell.getContext())}
                       </td>
                     ))}
