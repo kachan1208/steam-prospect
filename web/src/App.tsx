@@ -321,14 +321,8 @@ function Sidebar() {
         <HealthRow />
         <ThemePresetPicker />
         <AccentPicker />
-        <div className="mt-2.5 flex items-center gap-2.5 px-1 py-1">
-          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand text-[11px] font-semibold text-brand-fg">
-            S
-          </div>
-          <div className="min-w-0 flex-1 leading-tight">
-            <div className="truncate text-[12px] font-semibold text-ink-primary">Solo Studio</div>
-            <div className="truncate text-[10px] text-ink-muted">Solo plan · unlimited</div>
-          </div>
+        <div className="mt-2.5 flex items-center justify-between gap-2.5 px-1 py-1">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">Mode</span>
           <ThemeToggle />
         </div>
         <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-[10px] text-ink-muted">
@@ -403,9 +397,6 @@ export default function App() {
           <Route path="/datalog" element={<DataLog />} />
           <Route path="/welcome" element={<Onboarding />} />
           <Route path="/settings" element={<Settings />} />
-          <Route path="/settings/views" element={<Settings />} />
-          <Route path="/settings/api-keys" element={<Settings />} />
-          <Route path="/settings/usage" element={<Settings />} />
           <Route path="/docs" element={<Docs />} />
           <Route path="/docs/:slug" element={<Docs />} />
         </Route>
