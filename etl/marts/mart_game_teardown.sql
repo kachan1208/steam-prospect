@@ -34,7 +34,10 @@
 --   mart_game_press_notable     per appid: up to @PRESS_NOTABLE_N@ (+1) "notable"
 --                                articles — top by match_confidence, always including
 --                                the earliest even if it didn't make the confidence cut
---                                — the PR "angle".
+--                                — the PR "angle". Carries the source article's url (for the
+--                                client to link the title out) and its own per-article
+--                                sentiment_compound/sentiment (same VADER-over-headline+summary
+--                                scoring as mart_game_press_summary's aggregate, unaggregated).
 --
 -- Press excludes source='steam_news' (dev-authored patch notes/announcements — a
 -- separate cadence lane from journalist coverage, not press) and filters
@@ -188,12 +191,17 @@ HAVING COUNT(DISTINCT appid) >= @TEARDOWN_MIN_GENRE_GAMES@ OR genre = '__all__';
 -- ------------------------------------------------------------------------------------
 -- Press footprint (journalist coverage only — steam_news excluded, see file header).
 -- ------------------------------------------------------------------------------------
+-- LEFT JOINs stg_press_article_sentiment (precomputed just above, in build_marts.py's
+-- compute_press_sentiment — same table mart_game_press_summary's aggregate already reads) so
+-- every downstream press mart, including mart_game_press_notable below, can carry each
+-- article's own url + VADER compound alongside the aggregate.
 CREATE TEMP TABLE _press_base AS
-SELECT m.appid, a.id AS article_id, a.source, a.title, a.author,
+SELECT m.appid, a.id AS article_id, a.source, a.title, a.author, a.url,
     TRY_CAST(a.published_at AS TIMESTAMP) AS published_at,
-    m.match_confidence
+    m.match_confidence, ps.compound AS sentiment_compound
 FROM src.article_game_mentions m
 JOIN src.articles a ON a.id = m.article_id
+LEFT JOIN stg_press_article_sentiment ps ON ps.article_id = a.id
 WHERE a.source != 'steam_news'
   AND m.match_confidence >= @PRESS_MIN_CONFIDENCE@;
 
@@ -239,12 +247,20 @@ ORDER BY appid, period;
 
 CREATE TABLE mart_game_press_notable AS
 WITH ranked AS (
-    SELECT appid, source, title, author, published_at, match_confidence,
+    SELECT appid, source, title, author, url, published_at, match_confidence, sentiment_compound,
         row_number() OVER (PARTITION BY appid ORDER BY match_confidence DESC, published_at ASC) AS conf_rank,
         row_number() OVER (PARTITION BY appid ORDER BY published_at ASC NULLS LAST) AS date_rank
     FROM _press_base
 )
-SELECT appid, source, title, author, CAST(published_at AS VARCHAR) AS published_at, match_confidence,
+SELECT appid, source, title, author, url, CAST(published_at AS VARCHAR) AS published_at, match_confidence,
+    sentiment_compound,
+    -- Same ±0.05 VADER neutral band as mart_game_press_summary's n_pos/n_neg/n_neutral_articles,
+    -- just classifying this one article instead of aggregating — keeps the per-row dot and the
+    -- card-level counts unable to drift apart.
+    CASE WHEN sentiment_compound IS NULL THEN NULL
+         WHEN sentiment_compound >= @SENTIMENT_POS_THRESHOLD@ THEN 'positive'
+         WHEN sentiment_compound <= @SENTIMENT_NEG_THRESHOLD@ THEN 'negative'
+         ELSE 'neutral' END AS sentiment,
     (date_rank = 1) AS is_earliest
 FROM ranked
 WHERE conf_rank <= @PRESS_NOTABLE_N@ OR date_rank = 1

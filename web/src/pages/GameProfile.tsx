@@ -6,10 +6,11 @@ import { AspectDivergingBars } from "../components/charts/AspectDivergingBars";
 import { GameMetricDrilldown, DRILLDOWN_META, type DrilldownMetric, type OwnersPerReview } from "../components/charts/GameMetricDrilldown";
 import { LanguageSplitChart } from "../components/charts/LanguageSplitChart";
 import { LaunchShapeBars } from "../components/charts/LaunchShapeBars";
-import { PressBySourceChart, sourceLabel } from "../components/charts/PressBySourceChart";
+import { PressBySourceChart } from "../components/charts/PressBySourceChart";
 import { PressTimelineChart } from "../components/charts/PressTimelineChart";
 import { ReviewsTimelineChart } from "../components/charts/ReviewsTimelineChart";
 import { GameTrendsChart } from "../components/charts/GameTrendsChart";
+import { NotableCoverageCard } from "../components/NotableCoverageCard";
 import { Badge } from "../components/ui/Badge";
 import { Card } from "../components/ui/Card";
 import { Meter, BulletMeter } from "../components/ui/Meter";
@@ -550,31 +551,7 @@ export default function GameProfile() {
           </Card>
 
           {teardownQ.data && teardownQ.data.press.notable.length > 0 && (
-            <Card
-              title="Notable coverage"
-              subtitle="The angle — earliest coverage found, plus the most on-topic matches by title-match confidence"
-            >
-              <div className="flex flex-col gap-2.5">
-                {teardownQ.data.press.notable.map((n, i) => (
-                  <div
-                    key={`${n.source}-${n.published_at}-${i}`}
-                    className="flex items-start gap-2.5 border-b border-chartborder/60 pb-2.5 text-xs last:border-0 last:pb-0"
-                  >
-                    <span className="mt-0.5 shrink-0 rounded-full border border-chartborder px-2 py-0.5 text-[10px] text-ink-secondary">
-                      {sourceLabel(n.source)}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate font-medium text-ink-primary">{n.title ?? "Untitled"}</div>
-                      <div className="mt-0.5 text-[11px] text-ink-muted">
-                        {n.author ? `${n.author} · ` : ""}
-                        {dateOnly(n.published_at)}
-                        {n.is_earliest && " · Earliest coverage found"}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </Card>
+            <NotableCoverageCard press={teardownQ.data.press} />
           )}
 
           {teardownQ.data && teardownQ.data.caveats.length > 0 && (

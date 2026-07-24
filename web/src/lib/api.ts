@@ -674,6 +674,14 @@ export interface PressNotableArticle {
   published_at: string | null;
   match_confidence: number;
   is_earliest: boolean;
+  // Source article URL (articles.url) — lets the client link the title out. Null on marts built
+  // before this field existed, or when the scraper never captured a URL for that article.
+  url: string | null;
+  // Per-article coverage tone — same VADER-over-headline+summary scoring as GamePress's
+  // aggregate (press_pos_share/mean_compound), unaggregated. Both null when this article wasn't
+  // scored (pre-sentiment-pass mart, or no headline/summary text).
+  sentiment_compound: number | null;
+  sentiment: "positive" | "negative" | "neutral" | null;
 }
 
 export interface GamePress {
