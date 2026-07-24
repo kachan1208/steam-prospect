@@ -16,7 +16,7 @@ from .observability import setup_observability
 from . import alert_models, input_models, outreach_models, project_models  # noqa: F401 — register watchtower tables on Base.metadata before init_db()
 from .routers import (
     account, alerts, chat, estimate, explore, games, health, inputs, market, marketing,
-    niches, outreach, press, projects, radar, seasonality, trends, views, watchlist,
+    niches, outreach, press, projects, radar, refresh, seasonality, trends, views, watchlist,
 )
 from .mcp_mount import load_prospect_mcp
 
@@ -79,6 +79,7 @@ app.include_router(projects.router)
 app.include_router(outreach.router)
 app.include_router(inputs.router)
 app.include_router(radar.router)
+app.include_router(refresh.router)
 app.include_router(trends.router)
 app.include_router(account.router)
 

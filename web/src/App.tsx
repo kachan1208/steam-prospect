@@ -21,6 +21,7 @@ import DevLog from "./pages/DevLog";
 import Radar from "./pages/Radar";
 import Home from "./pages/Home";
 import MyGame from "./pages/MyGame";
+import DataLog from "./pages/DataLog";
 import Landing from "./pages/Landing";
 import Onboarding, { ONBOARDING_STORAGE_KEY } from "./pages/Onboarding";
 import Settings from "./pages/Settings";
@@ -128,6 +129,13 @@ const ICONS: Record<string, ReactNode> = {
       <path d="M9.7 14.3 8 18M14.3 14.3 16 18" />
     </>
   ),
+  history: (
+    <>
+      <path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />
+      <path d="M3 4.5V9h4.5" />
+      <path d="M12 7.8v4.4l2.9 1.7" />
+    </>
+  ),
 };
 
 function Icon({ name }: { name: string }) {
@@ -188,6 +196,7 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: str
       { to: "/watchlist", label: "Watchlist", icon: "bookmark" },
       { to: "/alerts", label: "Alerts", icon: "bell" },
       { to: "/devlog", label: "Dev log", icon: "book" },
+      { to: "/datalog", label: "Data log", icon: "history" },
       { to: "/chat", label: "Use in Claude", icon: "chat" },
     ],
   },
@@ -201,7 +210,7 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: str
 ];
 
 // Pages added in the watchtower build — flagged "New" in the sidebar so they're easy to spot.
-const NEW_PATHS = new Set(["/home", "/project", "/alerts", "/devlog", "/outreach", "/radar"]);
+const NEW_PATHS = new Set(["/home", "/project", "/alerts", "/devlog", "/outreach", "/radar", "/datalog"]);
 
 function Logo() {
   return (
@@ -440,6 +449,7 @@ export default function App() {
         <Route path="/radar" element={<Radar />} />
         <Route path="/explorer" element={<Explorer />} />
         <Route path="/chat" element={<Chat />} />
+        <Route path="/datalog" element={<DataLog />} />
         <Route path="/welcome" element={<Onboarding />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/settings/views" element={<Settings />} />

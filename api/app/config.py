@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     # the stdio MCP via .mcp.json) is untouched; the container image turns it on.
     enable_mcp: bool = False
 
+    # Data-refresh changelog: newline-delimited JSON written by the Droplet's refresh cron
+    # (one record per run, with data deltas). Served read-only by /api/refresh/history and
+    # rendered on the in-app "Data log" page. Default sits in the (mounted) data dir.
+    refresh_history_path: str = str(REPO_ROOT / "data" / "refresh_history.json")
+
     # Solo mode: one seeded org with unlimited entitlements; no login required.
     solo_mode: bool = True
     solo_org_name: str = "Solo Studio"
