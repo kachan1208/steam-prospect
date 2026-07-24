@@ -13,9 +13,9 @@ from . import analytics_db
 from .config import settings
 from .control_db import init_db
 from .observability import setup_observability
-from . import alert_models, input_models  # noqa: F401 — register watchtower tables on Base.metadata before init_db()
+from . import input_models  # noqa: F401 — register watchtower tables on Base.metadata before init_db()
 from .routers import (
-    account, alerts, chat, estimate, games, health, inputs, market, marketing,
+    account, chat, estimate, games, health, inputs, market, marketing,
     niches, press, refresh, seasonality, trends, views,
 )
 from .mcp_mount import load_prospect_mcp
@@ -72,7 +72,6 @@ app.include_router(games.router)
 app.include_router(press.router)
 app.include_router(marketing.router)
 app.include_router(chat.router)
-app.include_router(alerts.router)
 app.include_router(inputs.router)
 app.include_router(refresh.router)
 app.include_router(trends.router)

@@ -41,7 +41,6 @@ class Org(Base):
     subscriptions: Mapped[list["Subscription"]] = relationship(back_populates="org")
     api_keys: Mapped[list["ApiKey"]] = relationship(back_populates="org")
     saved_views: Mapped[list["SavedView"]] = relationship(back_populates="org")
-    alerts: Mapped[list["Alert"]] = relationship(back_populates="org")
 
 
 class User(Base):

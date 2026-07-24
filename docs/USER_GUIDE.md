@@ -223,21 +223,6 @@ volume, so always check the example date and the "last 24mo" count before pitchi
 fuzzy-matched, English-skewed, and reflects selection bias (these outlets already chose to
 cover the genre).
 
----
-
-## Alerts
-
-**What it answers:** tell me when something changes instead of me checking.
-
-Standing rules that watch the games and niches you're tracking. Add rules one-click from
-presets or the dropdown — e.g. a review-velocity surge, a strong new release in a genre you
-follow, or a genre's median revenue crossing a threshold; plus "on change" rules like a
-momentum shift, a tracked game hitting a review milestone (a launch / traction signal), or a
-sentiment drop. "Run now" evaluates immediately; matches land in the feed and roll up into a
-weekly digest you can preview.
-
-In the current build the weekly digest is a preview only — it's logged, not emailed to a real
-inbox.
 
 ---
 

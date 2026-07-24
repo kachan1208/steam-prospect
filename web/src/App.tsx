@@ -1,4 +1,4 @@
-import { Link, NavLink, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Link, NavLink, Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import { useEffect, type ReactNode } from "react";
 
@@ -13,10 +13,8 @@ import GameProfile from "./pages/GameProfile";
 import Press from "./pages/Press";
 import Marketing from "./pages/Marketing";
 import Chat from "./pages/Chat";
-import Alerts from "./pages/Alerts";
 import DevLog from "./pages/DevLog";
 import DataLog from "./pages/DataLog";
-import Landing from "./pages/Landing";
 import Onboarding, { ONBOARDING_STORAGE_KEY } from "./pages/Onboarding";
 import Settings from "./pages/Settings";
 import Docs from "./pages/Docs";
@@ -146,7 +144,6 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: str
   {
     label: "Workspace",
     items: [
-      { to: "/alerts", label: "Alerts", icon: "bell" },
       { to: "/devlog", label: "Dev log", icon: "book" },
       { to: "/datalog", label: "Data log", icon: "history" },
       { to: "/chat", label: "Use in Claude", icon: "chat" },
@@ -162,7 +159,7 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: str
 ];
 
 // Pages added in the watchtower build — flagged "New" in the sidebar so they're easy to spot.
-const NEW_PATHS = new Set(["/alerts", "/devlog", "/datalog"]);
+const NEW_PATHS = new Set(["/devlog", "/datalog"]);
 
 function Logo() {
   return (
@@ -380,7 +377,7 @@ function AppShell() {
 export default function App() {
   return (
     <Routes>
-      <Route path="/" element={<Landing />} />
+      <Route path="/" element={<Navigate to="/niches" replace />} />
       <Route path="/terms" element={<Terms />} />
       <Route path="/privacy" element={<Privacy />} />
       <Route element={<AppShell />}>
@@ -392,7 +389,6 @@ export default function App() {
         <Route path="/games/:appid" element={<GameProfile />} />
         <Route path="/press" element={<Press />} />
         <Route path="/marketing" element={<Marketing />} />
-        <Route path="/alerts" element={<Alerts />} />
         <Route path="/devlog" element={<DevLog />} />
         <Route path="/chat" element={<Chat />} />
         <Route path="/datalog" element={<DataLog />} />

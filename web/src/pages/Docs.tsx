@@ -128,7 +128,6 @@ const TOC: { group: string; items: [string, string][] }[] = [
   {
     group: "Your workspace",
     items: [
-      ["alerts", "Alerts"],
       ["devlog", "Dev log"],
     ],
   },
@@ -236,10 +235,6 @@ export default function Docs() {
                 [
                   "Marketing",
                   <>Who to pitch and where to post — press outlets and named journalists covering your genre (plus creator channels where data exists).</>,
-                ],
-                [
-                  "Alerts",
-                  <>Get pinged when a game or niche you track surges, stalls, or shifts — rules, a feed, and a weekly digest.</>,
                 ],
                 [
                   "Dev log",
@@ -512,27 +507,6 @@ export default function Docs() {
       </Section>
 
       {/* ============================ WORKSPACE ============================ */}
-      <Section id="alerts" kicker="Your workspace" title="Alerts">
-        <Feature
-          id="alerts-card"
-          name="Alerts"
-          where="Sidebar “Alerts”"
-          to="/alerts"
-          question="Tell me when something changes instead of me checking."
-        >
-          <p>
-            Standing rules that watch the games and niches you're tracking. Add rules one-click from presets or the
-            dropdown — e.g. a review-velocity surge, a strong new release in a genre you follow, or a genre's median
-            revenue crossing a threshold; plus "on change" rules like a momentum shift, a tracked game hitting a review
-            milestone (a launch / traction signal), or a sentiment drop. "Run now" evaluates immediately; matches land in
-            the feed and roll up into a weekly digest you can preview.
-          </p>
-          <p className="text-xs text-ink-muted">
-            In the current build the weekly digest is a preview only — it's logged, not emailed to a real inbox.
-          </p>
-        </Feature>
-      </Section>
-
       <Section id="devlog" kicker="Your workspace" title="Dev log">
         <Feature
           id="devlog-card"
