@@ -41,6 +41,13 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
         # hitting one instance. Inner route at "/" so, mounted at "/mcp", the endpoint is /mcp.
         server.settings.stateless_http = True
         server.settings.streamable_http_path = "/"
+        # The SDK's DNS-rebinding guard defaults to localhost-only Host/Origin and 421s every
+        # other Host — including our public DO hostname behind its proxy. Disable it: this is a
+        # public, read-only, REMOTE server, and DNS rebinding is a localhost-targeting attack.
+        from mcp.server.transport_security import TransportSecuritySettings
+        server.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False,
+        )
         asgi_app = server.streamable_http_app()  # also lazily creates server.session_manager
 
         print("[api] MCP: mounted 'prospect-market-intel' at /mcp (Streamable HTTP, stateless).")
