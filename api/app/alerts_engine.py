@@ -1,8 +1,8 @@
 """Read-only evaluation of alert rules.
 
-Pure functions: each ``eval_*`` takes a control-plane ``Session`` (to read the org's
-Watchlist), an ``org_id`` and the rule's already-parsed ``params`` dict, reads the analytics
-marts read-only, and returns a list of *candidate* AlertEvent dicts::
+Pure functions: each ``eval_*`` takes a control-plane ``Session``, an ``org_id`` and the
+rule's already-parsed ``params`` dict, reads the analytics marts read-only, and returns a
+list of *candidate* AlertEvent dicts::
 
     {"kind": str, "title": str, "body": str, "appid": int | None}
 
@@ -59,12 +59,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import analytics_db
 from .alert_models import AlertState
-from .models import Watchlist
 
 # ---- defaults ---------------------------------------------------------------------------
 _VELOCITY_HIGH = 100
@@ -157,34 +155,18 @@ def _observe(db: Session, org_id: int, rule_id: int | None, metric_key: str, val
 
 
 # ---- watchlist introspection ------------------------------------------------------------
+# The Watchlist control-plane table (and the page that managed it) was removed in the
+# minimal-tool trim. Every rule kind below was designed around "the org's watched games/
+# genres", and there is no replacement org-level roster to source that from — these two
+# helpers now defensively return [] so every evaluator degrades to "no candidates" (a safe,
+# already-defensive no-op per the module's own philosophy above) instead of raising.
 
 def _watched_appids(db: Session, org_id: int) -> list[int]:
-    try:
-        keys = db.scalars(
-            select(Watchlist.key).where(Watchlist.org_id == org_id, Watchlist.kind == "game")
-        ).all()
-    except Exception:
-        return []
-    out: list[int] = []
-    for k in keys:
-        try:
-            out.append(int(k))
-        except (TypeError, ValueError):
-            continue
-    return out
+    return []
 
 
 def _watched_genres(db: Session, org_id: int) -> list[str]:
-    appids = _watched_appids(db, org_id)
-    if not appids:
-        return []
-    placeholders = ",".join("?" for _ in appids)
-    rows = _safe_query(
-        f"SELECT DISTINCT primary_genre FROM mart_game "
-        f"WHERE appid IN ({placeholders}) AND primary_genre IS NOT NULL",
-        appids,
-    )
-    return [r["primary_genre"] for r in rows if r.get("primary_genre")]
+    return []
 
 
 # ---- rule evaluators --------------------------------------------------------------------

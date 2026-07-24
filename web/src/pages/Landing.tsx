@@ -193,8 +193,7 @@ export default function Landing() {
             </div>
           </div>
           <p className="sec-sub" style={{ marginTop: "22px" }}>
-            Plus a whitelisted <b style={{ color: "var(--ink)", fontWeight: 650 }}>Data Explorer</b> for your own cuts,
-            and an in-app <b style={{ color: "var(--ink)", fontWeight: 650 }}>Analytics Chat</b> that answers questions
+            Plus an in-app <b style={{ color: "var(--ink)", fontWeight: 650 }}>Analytics Chat</b> that answers questions
             straight from the marts.
           </p>
         </div>

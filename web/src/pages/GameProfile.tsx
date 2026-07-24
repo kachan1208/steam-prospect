@@ -14,14 +14,12 @@ import { Card } from "../components/ui/Card";
 import { Meter, BulletMeter } from "../components/ui/Meter";
 import { StatTile } from "../components/ui/StatTile";
 import {
-  useAddWatchlist,
   useGameComparables,
   useGameProfile,
   useGameReviewsSummary,
   useGameTeardown,
   useLaunchCurve,
   useMarketBenchmarks,
-  useRemoveWatchlist,
 } from "../lib/api";
 import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtUsd } from "../lib/format";
 import { CSS_VAR } from "../lib/palette";
@@ -50,8 +48,6 @@ export default function GameProfile() {
   const genreCurveQ = useLaunchCurve(profileQ.data?.primary_genre ?? "__all__");
   const benchmarksQ = useMarketBenchmarks();
   const teardownQ = useGameTeardown(validAppid ? appid : null);
-  const addWatchlist = useAddWatchlist();
-  const removeWatchlist = useRemoveWatchlist();
 
   const profile = profileQ.data;
 
@@ -90,12 +86,6 @@ export default function GameProfile() {
     );
   }
 
-  const onToggleWatchlist = () => {
-    if (profile.in_watchlist) removeWatchlist.mutate(profile.appid);
-    else addWatchlist.mutate({ appid: profile.appid });
-  };
-  const watchlistPending = addWatchlist.isPending || removeWatchlist.isPending;
-
   return (
     <div className="flex flex-col gap-4">
       <Link to="/games" className="text-xs text-ink-muted hover:text-ink-primary">
@@ -128,19 +118,6 @@ export default function GameProfile() {
                   {profile.publishers && profile.publishers !== profile.developers ? ` · ${profile.publishers}` : ""}
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={onToggleWatchlist}
-                disabled={watchlistPending}
-                className={clsx(
-                  "shrink-0 rounded-md px-3 py-2 text-sm font-semibold transition-opacity disabled:opacity-50",
-                  profile.in_watchlist
-                    ? "border border-chartborder text-ink-secondary hover:text-ink-primary"
-                    : "bg-series-1 text-white hover:opacity-90",
-                )}
-              >
-                {profile.in_watchlist ? "★ On watchlist" : "+ Add to watchlist"}
-              </button>
             </div>
             {profile.short_description && (
               <p className="mt-3 line-clamp-2 text-xs text-ink-secondary">{profile.short_description}</p>

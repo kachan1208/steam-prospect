@@ -3,13 +3,10 @@ from __future__ import annotations
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 
 from .. import analytics_db
 from ..auth import get_current_org
-from ..control_db import get_db
-from ..models import Org, Watchlist
+from ..models import Org
 from ..schemas import (
     AspectReviewExcerpt,
     AspectReviewsResponse,
@@ -104,23 +101,11 @@ def search_games(
 def game_profile(
     appid: int,
     org: Org = Depends(get_current_org),
-    db: Session = Depends(get_db),
 ) -> GameProfile:
     row = analytics_db.query_one(f"SELECT {_PROFILE_COLS} FROM mart_game WHERE appid = ?", [appid])
     if row is None:
         raise HTTPException(status_code=404, detail=f"game not found: {appid}")
-
-    in_watchlist = (
-        db.scalar(
-            select(Watchlist.id).where(
-                Watchlist.org_id == org.id,
-                Watchlist.kind == "game",
-                Watchlist.key == str(appid),
-            )
-        )
-        is not None
-    )
-    return GameProfile(**row, in_watchlist=in_watchlist)
+    return GameProfile(**row)
 
 
 @router.get("/{appid}/comparables", response_model=GameComparablesResponse)

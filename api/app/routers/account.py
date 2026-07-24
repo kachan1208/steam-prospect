@@ -2,13 +2,13 @@
 and a usage summary.
 
 Self-contained — reads only the control-plane tables that already exist in models.py (Org,
-User, Membership, SavedView, Watchlist, ApiKey). No schema migration needed: ApiKey has
+User, Membership, SavedView, ApiKey). No schema migration needed: ApiKey has
 been defined since the control-plane schema landed but had no router until now.
 
 `usage` intentionally does NOT fabricate query/export/chat-message activity — there is no
 request-level usage log yet (that's Track O5's job, gated on the scheduled-refresh/chat
 productionization work). It reports the real, currently-derivable counts (saved views,
-watchlist items, active API keys) and labels the rest "coming soon" rather than inventing
+active API keys) and labels the rest "coming soon" rather than inventing
 numbers — consistent with the product's own "never fake precision" ethos.
 """
 from __future__ import annotations
@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from ..auth import get_current_org, get_entitlements
 from ..control_db import get_db
 from ..entitlements import Entitlements
-from ..models import ApiKey, Membership, Org, SavedView, Subscription, User, Watchlist
+from ..models import ApiKey, Membership, Org, SavedView, Subscription, User
 from ..schemas import (
     AccountCounts,
     AccountEntitlements,
@@ -54,11 +54,10 @@ def _solo_user(org: Org, db: Session) -> User | None:
 
 def _counts(org: Org, db: Session) -> AccountCounts:
     saved_views = len(db.scalars(select(SavedView).where(SavedView.org_id == org.id)).all())
-    watchlist_items = len(db.scalars(select(Watchlist).where(Watchlist.org_id == org.id)).all())
     api_keys_active = len(
         db.scalars(select(ApiKey).where(ApiKey.org_id == org.id, ApiKey.active.is_(True))).all()
     )
-    return AccountCounts(saved_views=saved_views, watchlist_items=watchlist_items, api_keys_active=api_keys_active)
+    return AccountCounts(saved_views=saved_views, api_keys_active=api_keys_active)
 
 
 def _to_api_key_out(k: ApiKey) -> ApiKeyOut:
@@ -100,7 +99,6 @@ def get_account(
             can_export=ent.can_export,
             api_access=ent.api_access,
             max_saved_views=ent.max_saved_views,
-            max_watchlist_items=ent.max_watchlist_items,
             max_niche_rows=ent.max_niche_rows,
         ),
         counts=_counts(org, db),
@@ -112,13 +110,12 @@ def get_usage(org: Org = Depends(get_current_org), db: Session = Depends(get_db)
     counts = _counts(org, db)
     return UsageOut(
         saved_views=counts.saved_views,
-        watchlist_items=counts.watchlist_items,
         api_keys_active=counts.api_keys_active,
         tracking_available=False,
         note=(
             "Per-query, export, and chat-message usage isn't tracked yet — that needs a "
             "request-level usage log (planned, not built). The counts above are real, read "
-            "directly from your saved views, watchlist, and API keys."
+            "directly from your saved views and API keys."
         ),
     )
 

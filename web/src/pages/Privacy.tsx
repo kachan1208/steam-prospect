@@ -8,7 +8,7 @@ const PRIVACY_MD = `*This is a general-purpose template pending review by a qual
 ## 1. What we collect
 
 - **Account data**: your email address and an optional display name.
-- **Things you create**: saved views, watchlist entries, and API keys (the API key itself is hashed — we can't read it back after it's created).
+- **Things you create**: saved views and API keys (the API key itself is hashed — we can't read it back after it's created).
 - **Preferences**: your theme/accent choice and whether you've completed the welcome tour, stored in your browser's local storage, not on our servers.
 - **Standard server logs**: request timestamps, IP address, and route, for debugging and abuse prevention — the same baseline logging any web service keeps.
 
@@ -24,7 +24,7 @@ Prospect uses browser local storage for functional purposes only — remembering
 
 ## 4. How we use your data
 
-To operate the service (authenticate requests, save your views/watchlist, enforce plan limits), to respond when you contact support, and to fix bugs. We don't sell your data.
+To operate the service (authenticate requests, save your views, enforce plan limits), to respond when you contact support, and to fix bugs. We don't sell your data.
 
 ## 5. Third parties
 
@@ -32,7 +32,7 @@ Once Prospect is hosted commercially, a hosting/infrastructure provider will pro
 
 ## 6. Retention & deletion
 
-You can delete your saved views, watchlist entries, and API keys at any time from Settings. To delete your account entirely, contact us via the channel listed on the Support doc page — we'll remove your account data, retaining only what's required for legitimate legal/accounting purposes.
+You can delete your saved views and API keys at any time from Settings. To delete your account entirely, contact us via the channel listed on the Support doc page — we'll remove your account data, retaining only what's required for legitimate legal/accounting purposes.
 
 ## 7. Security
 

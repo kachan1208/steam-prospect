@@ -264,7 +264,6 @@ class GameProfile(BaseModel):
     live_players: Optional[int] = None
     twitch_viewers: Optional[int] = None
     twitch_streams: Optional[int] = None
-    in_watchlist: bool = False
 
 
 class PriceBand(BaseModel):
@@ -565,93 +564,6 @@ class ChannelBuzzResponse(BaseModel):
     caveats: list[str]
 
 
-# ---- watchlist (Phase 2) ----------------------------------------------------------------
-class WatchlistIn(BaseModel):
-    appid: int
-    note: Optional[str] = None
-
-
-class WatchlistOut(BaseModel):
-    id: int
-    appid: int
-    note: Optional[str] = None
-    created_at: str
-    name: Optional[str] = None
-    header_image: Optional[str] = None
-    primary_genre: Optional[str] = None
-    price_initial: Optional[float] = None
-    owners_mid: Optional[float] = None
-    total_reviews: Optional[int] = None
-    positive_ratio: Optional[float] = None
-    est_rev_reviews: Optional[float] = None
-    live_players: Optional[int] = None
-    twitch_viewers: Optional[int] = None
-    n_reviews_trailing_30d: Optional[int] = None
-    velocity_sparkline: list[int] = Field(default_factory=list)
-
-
-# ---- explorer (Phase 4 — safe query/filter/chart builder) -----------------------------
-# The request shape here is intentionally generic (col/op/val filters, optional
-# group_by, a whitelisted select list) — api/app/routers/explore.py is the ONLY place
-# that turns this into SQL, and it validates every field against a server-side
-# whitelist (see DIMENSIONS/METRICS there) before compiling anything. This model layer
-# only bounds shape/size (list lengths, limit) — it does not and cannot validate
-# column names, since the whitelist lives in the router, not here.
-FilterOp = Literal["eq", "neq", "gt", "gte", "lt", "lte", "in", "contains", "is_null", "not_null"]
-
-
-class ExploreFilter(BaseModel):
-    col: str
-    op: FilterOp
-    val: Any = None
-
-
-class ExploreQuery(BaseModel):
-    # Dimension names (row mode) or group_by-columns + metric names (grouped mode).
-    select: list[str] = Field(min_length=1, max_length=8)
-    filters: list[ExploreFilter] = Field(default_factory=list, max_length=8)
-    group_by: list[str] = Field(default_factory=list, max_length=2)
-    sort: Optional[str] = None
-    order: Literal["asc", "desc"] = "desc"
-    limit: int = Field(default=200, ge=1, le=1000)
-
-
-class ExploreColumnMeta(BaseModel):
-    name: str
-    label: str
-    kind: Literal["string", "number", "integer", "boolean", "list"]
-    groupable: bool = False
-    ops: list[str] = Field(default_factory=list)
-
-
-class ExploreMetricMeta(BaseModel):
-    name: str
-    label: str
-
-
-class ExploreSchema(BaseModel):
-    dimensions: list[ExploreColumnMeta]
-    metrics: list[ExploreMetricMeta]
-    max_limit: int
-    max_filters: int
-    max_select: int
-    max_group_by: int
-    timeout_seconds: float
-
-
-class ExploreResult(BaseModel):
-    columns: list[str]
-    rows: list[dict[str, Any]]
-    row_count: int
-    truncated: bool
-    grouped: bool
-    elapsed_ms: float
-    # Compiled parameterized SQL with `?` placeholders (never literal filter values) —
-    # transparency into what actually ran; safe to show since it is built entirely from
-    # whitelisted identifiers, never from raw client text.
-    sql_preview: str
-
-
 # ---- chat (Analytics Chat — Claude tool-use assistant over the marts) -----------------
 class ChatMessageIn(BaseModel):
     role: Literal["user", "assistant"]
@@ -693,13 +605,11 @@ class AccountEntitlements(BaseModel):
     can_export: bool
     api_access: bool
     max_saved_views: Optional[int] = None
-    max_watchlist_items: Optional[int] = None
     max_niche_rows: Optional[int] = None
 
 
 class AccountCounts(BaseModel):
     saved_views: int
-    watchlist_items: int
     api_keys_active: int
 
 
@@ -733,7 +643,6 @@ class ApiKeyCreated(ApiKeyOut):
 class UsageOut(BaseModel):
     # Real counts, read straight from the control-plane tables.
     saved_views: int
-    watchlist_items: int
     api_keys_active: int
     # Per-query/export/chat-message activity needs a request-level usage log (Track O5,
     # not built yet) — surfaced honestly rather than faked; see `note`.

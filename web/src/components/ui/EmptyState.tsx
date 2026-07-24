@@ -4,7 +4,7 @@ import clsx from "clsx";
 /**
  * A consistent, polished "nothing here yet" block: icon, heading, description, and an
  * optional action — as distinct from a loading or error state. Generalizes the pattern
- * already used ad hoc on Chat/Watchlist so new surfaces (Settings, Onboarding, Docs) don't
+ * already used ad hoc on Chat/Alerts so new surfaces (Settings, Onboarding, Docs) don't
  * reinvent it.
  */
 export function EmptyState({

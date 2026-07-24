@@ -213,15 +213,15 @@ def render_welcome(org_name: str) -> tuple[str, str, str]:
     text_body = (
         f"Welcome to Prospect, {org_name}!\n\n"
         "Your workspace is ready. Head to the Niche Finder to start exploring the market, "
-        "watchlist games you're tracking, and set up alerts so we tell you when something "
-        "changes instead of you having to go check.\n"
+        "and set up alerts so we tell you when something changes instead of you having to "
+        "go check.\n"
     )
     html_body = _WRAPPER_HTML.format(
         heading=f"Welcome to Prospect, {safe_name}!",
         body=(
             "<p>Your workspace is ready. Head to the Niche Finder to start exploring the "
-            "market, watchlist games you're tracking, and set up alerts so we tell you when "
-            "something changes instead of you having to go check.</p>"
+            "market, and set up alerts so we tell you when something changes instead of you "
+            "having to go check.</p>"
         ),
     )
     return subject, text_body, html_body

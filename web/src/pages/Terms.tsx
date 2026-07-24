@@ -27,7 +27,7 @@ You agree not to:
 
 - Scrape, crawl, or bulk-extract Prospect's own outputs to build a competing product.
 - Redistribute Prospect's raw per-game data as a standalone dataset (aggregated insights and your own analysis built on top are fine).
-- Attempt to circumvent rate limits, entitlement checks, or the whitelist-only query surface in the Data Explorer.
+- Attempt to circumvent rate limits or entitlement checks.
 - Use Prospect to harass, defraud, or make representations that its estimates are guaranteed outcomes.
 
 ## 5. Data sources
@@ -40,7 +40,7 @@ Billing is not live yet. Prospect currently runs in solo/local mode with a singl
 
 ## 7. Your data
 
-Saved views, watchlist entries, and API keys you create belong to you. You can delete any of them at any time from Settings. See the Privacy Policy for how account data is handled.
+Saved views and API keys you create belong to you. You can delete any of them at any time from Settings. See the Privacy Policy for how account data is handled.
 
 ## 8. Intellectual property
 
