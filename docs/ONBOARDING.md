@@ -80,7 +80,7 @@ take a weekend of spreadsheet spelunking.
 | **Games** | Profile any title + read its "Why it works" teardown. |
 | **Estimator** | Turn reviews or wishlists into an owners/revenue range. |
 | **Marketing** | Find press outlets & journalists covering your genre. |
-| **Alerts / Dev log** | Track changes, and journal your own marketing beats. |
+| **Dev log** | A private, browser-local journal for your own marketing beats. |
 | **Use in Claude** | Ask Prospect's data questions in your own Claude (below). |
 
 ---

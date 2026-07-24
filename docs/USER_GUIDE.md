@@ -25,7 +25,6 @@ press coverage into the handful of decisions a solo or indie game dev actually h
   - [Estimator](#estimator)
 - [Marketing & press](#marketing--press)
 - **Your workspace**
-  - [Alerts](#alerts)
   - [Dev log](#dev-log)
 - [Use Prospect inside your own Claude (MCP)](#use-prospect-inside-your-own-claude-mcp)
 - [Data log & freshness](#data-log--freshness)
@@ -52,7 +51,6 @@ What each surface answers, in one line:
 | **Games & teardown** | Where does a specific title stand, and — from its own reviews — why does it win versus genre peers? |
 | **Estimator** | If a game has N reviews (or wishlists) at price P, what's the owners and revenue range? |
 | **Marketing** | Who to pitch and where to post — press outlets and named journalists covering your genre (plus creator channels where data exists). |
-| **Alerts** | Get pinged when a game or niche you track surges, stalls, or shifts. |
 | **Dev log** | A private, browser-local journal for your own marketing beats and wishlist milestones. |
 | **Use in Claude** | Connect Prospect's analytics to your own Claude and just ask questions in natural language. |
 
