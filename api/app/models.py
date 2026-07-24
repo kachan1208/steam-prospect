@@ -110,17 +110,3 @@ class SavedView(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     org: Mapped["Org"] = relationship(back_populates="saved_views")
-
-
-class Alert(Base):
-    __tablename__ = "alerts"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id"), index=True)
-    kind: Mapped[str] = mapped_column(String(40))    # e.g. 'saturation', 'new_hit'
-    target: Mapped[str] = mapped_column(String(200))
-    threshold: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-
-    org: Mapped["Org"] = relationship(back_populates="alerts")
