@@ -383,11 +383,11 @@ export default function GameProfile() {
       {tab === "teardown" && (
         <>
           <Card
-            title="Praise vs. complaint by aspect"
+            title="What players say about each aspect"
             subtitle={
               teardownQ.data
                 ? teardownQ.data.eligible_reviews
-                  ? `${fmtInt(teardownQ.data.n_reviews_sampled)} sampled English reviews · sorted by mention volume · badges mark aspects that over-index vs. genre peers`
+                  ? `${fmtInt(teardownQ.data.n_reviews_sampled)} sampled English reviews · positive vs. negative from the review TEXT around each aspect (VADER sentiment), with the overall-vote split shown for comparison · sorted by mention volume · badges mark aspects that over-index vs. genre peers`
                   : "Not enough sampled English reviews for aspect mining on this title"
                 : undefined
             }
@@ -433,16 +433,58 @@ export default function GameProfile() {
               </div>
             )}
             {teardownQ.data && teardownQ.data.press.total_mentions > 0 && (
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div>
-                  <div className="mb-1 text-xs text-ink-muted">Mentions by outlet</div>
-                  <PressBySourceChart data={teardownQ.data.press.by_source} />
+              <>
+                {teardownQ.data.press.press_pos_share !== null &&
+                  (() => {
+                    const p = teardownQ.data.press;
+                    const posPct = (p.press_pos_share as number) * 100;
+                    const mc = p.mean_compound;
+                    return (
+                      <div className="mb-4">
+                        <div className="mb-1 flex items-center justify-between text-xs">
+                          <span className="text-ink-muted">Coverage tone (headlines &amp; summaries)</span>
+                          <span className="tabular text-ink-secondary">{fmtPct(p.press_pos_share, 0)} positive</span>
+                        </div>
+                        <div
+                          className="relative h-3 rounded-full bg-page"
+                          title={`${p.n_pos_articles} positive / ${p.n_neg_articles} negative${
+                            p.n_neutral_articles ? ` (${p.n_neutral_articles} neutral excluded)` : ""
+                          } of ${p.n_scored_articles} scored articles`}
+                        >
+                          <div
+                            className="absolute inset-y-0 left-0 rounded-l-full"
+                            style={{ width: `${posPct}%`, backgroundColor: CSS_VAR.praise }}
+                          />
+                          <div
+                            className="absolute inset-y-0 right-0 rounded-r-full"
+                            style={{ width: `${100 - posPct}%`, backgroundColor: CSS_VAR.complaint }}
+                          />
+                          <div className="absolute inset-y-0 w-[2px] bg-page" style={{ left: `calc(${posPct}% - 1px)` }} />
+                        </div>
+                        <div className="mt-1 text-[11px] text-ink-muted">
+                          {fmtInt(p.n_pos_articles)} positive · {fmtInt(p.n_neg_articles)} negative
+                          {p.n_neutral_articles > 0 && <> · {fmtInt(p.n_neutral_articles)} neutral</>}
+                          {mc !== null && (
+                            <>
+                              {" · "}mean <span className="tabular">{mc >= 0 ? "+" : ""}{mc.toFixed(2)}</span>
+                            </>
+                          )}{" "}
+                          · VADER on headlines/summaries (coarse — an outlet's framing, not a verdict)
+                        </div>
+                      </div>
+                    );
+                  })()}
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div>
+                    <div className="mb-1 text-xs text-ink-muted">Mentions by outlet</div>
+                    <PressBySourceChart data={teardownQ.data.press.by_source} />
+                  </div>
+                  <div>
+                    <div className="mb-1 text-xs text-ink-muted">Coverage over time</div>
+                    <PressTimelineChart points={teardownQ.data.press.timeline} />
+                  </div>
                 </div>
-                <div>
-                  <div className="mb-1 text-xs text-ink-muted">Coverage over time</div>
-                  <PressTimelineChart points={teardownQ.data.press.timeline} />
-                </div>
-              </div>
+              </>
             )}
           </Card>
 

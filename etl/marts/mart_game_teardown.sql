@@ -8,6 +8,14 @@
 --                                sampled English reviews (stg_review_text — itself a
 --                                per-game SAMPLE of the `reviews` table, recency-biased
 --                                for older/popular titles; see stg_review's caveat).
+--                                pos_share is VOTE-based: the share of reviews mentioning the
+--                                aspect that were thumbs-up OVERALL (so a thumbs-up review
+--                                trashing the combat still counts as praise for combat). The
+--                                n_text_*/text_pos_share/mean_compound columns are the honest
+--                                fix — VADER sentiment of the review TEXT around the aspect
+--                                keyword (LEFT JOINed from stg_aspect_sentiment, precomputed in
+--                                etl/build_marts.py compute_aspect_sentiment). Both ship, so the
+--                                UI can show text sentiment ALONGSIDE the vote split.
 --   mart_genre_aspect_baseline  per (genre, aspect): the SAME praise/complaint counts
 --                                POOLED across all qualifying games in the genre (+ an
 --                                '__all__' catalog-wide row), so the API can compute
@@ -18,7 +26,9 @@
 --                                baseline instead of a single thin-sample game swinging
 --                                it as much as a 500-review one.
 --   mart_game_press_summary     per appid: total press mentions, distinct sources,
---                                first/last seen date.
+--                                first/last seen date, and coverage-tone sentiment (VADER over
+--                                each matched article's headline+summary — press_pos_share /
+--                                mean_compound / pos·neg·neutral counts).
 --   mart_game_press_by_source   per (appid, source): mention count.
 --   mart_game_press_timeline    per (appid, month): mention count.
 --   mart_game_press_notable     per appid: up to @PRESS_NOTABLE_N@ (+1) "notable"
@@ -35,10 +45,11 @@
 -- The floor trims the noisiest, most-diluted matches; it does not guarantee precision.
 -- Placeholder tokens are substituted by build_marts.py.
 --
--- NOTE: mart_game_aspect_reviews.sql (the aspect drill-down — click a bar here to read the
--- underlying reviews) duplicates the 10 keyword regexes in _review_aspect_flags below
--- byte-for-byte, since there's no mechanism to share a regex literal across two
--- independently-rendered .sql files. If you change a keyword set here, change it there too.
+-- NOTE: the 10 keyword regexes below (_review_aspect_flags) are NO LONGER hand-duplicated —
+-- they render from the single source of truth ASPECT_LEXICON in etl/build_marts.py via the
+-- @RX_*@ placeholders, which is ALSO where the text-sentiment windows are matched and where
+-- mart_game_aspect_reviews.sql gets its copy. Change a keyword set in ONE place (build_marts.py)
+-- and the vote flags, the sentiment windows, and the drill-down excerpts all move together.
 
 DROP TABLE IF EXISTS mart_game_review_aspects;
 DROP TABLE IF EXISTS mart_genre_aspect_baseline;
@@ -63,26 +74,16 @@ CREATE TEMP TABLE _review_aspect_flags AS
 SELECT
     rt.appid,
     rt.voted_up,
-    regexp_matches(rt.review_text,
-        '\b(combat|fight|fights|fighting|boss|bosses|dodge|dodges|dodging|parry|parries|parrying|mechanic|mechanics|hitbox|hitboxes)\b', 'i') AS combat,
-    regexp_matches(rt.review_text,
-        '\b(world|explore|explores|exploring|exploration|area|areas|level design|open world|metroidvania)\b', 'i') AS world,
-    regexp_matches(rt.review_text,
-        '\b(art|visual|visuals|graphics|animation|animations|hand-drawn|hand drawn|handdrawn|aesthetic|aesthetics|gorgeous|beautiful|style|art style|artstyle)\b', 'i') AS art,
-    regexp_matches(rt.review_text,
-        '\b(music|soundtrack|soundtracks|sound|sounds|score|ost|audio)\b', 'i') AS music,
-    regexp_matches(rt.review_text,
-        '\b(story|stories|writing|lore|character|characters|narrative|dialogue|dialog|ending|endings)\b', 'i') AS story,
-    regexp_matches(rt.review_text,
-        '\b(difficult|difficulty|hard|hardest|challenging|challenge|challenges|punishing|brutal|easy|unfair)\b', 'i') AS difficulty,
-    regexp_matches(rt.review_text,
-        '\b(controls|control|responsive|tight|clunky|bug|bugs|buggy|crash|crashes|crashing|performance|fps|optimization|optimized|optimisation)\b', 'i') AS controls,
-    regexp_matches(rt.review_text,
-        '\b(map|maps|navigation|backtrack|backtracks|backtracking|lost|confusing|tedious|grind|grinding|grindy)\b', 'i') AS mapnav,
-    regexp_matches(rt.review_text,
-        '\b(content|length|hours|short|long|replay|replayability|replay value)\b', 'i') AS content,
-    regexp_matches(rt.review_text,
-        '\b(price|worth|value|cheap|expensive|overpriced|bargain)\b', 'i') AS pricevalue
+    regexp_matches(rt.review_text, '@RX_COMBAT@', 'i') AS combat,
+    regexp_matches(rt.review_text, '@RX_WORLD@', 'i') AS world,
+    regexp_matches(rt.review_text, '@RX_ART@', 'i') AS art,
+    regexp_matches(rt.review_text, '@RX_MUSIC@', 'i') AS music,
+    regexp_matches(rt.review_text, '@RX_STORY@', 'i') AS story,
+    regexp_matches(rt.review_text, '@RX_DIFFICULTY@', 'i') AS difficulty,
+    regexp_matches(rt.review_text, '@RX_CONTROLS@', 'i') AS controls,
+    regexp_matches(rt.review_text, '@RX_MAPNAV@', 'i') AS mapnav,
+    regexp_matches(rt.review_text, '@RX_CONTENT@', 'i') AS content,
+    regexp_matches(rt.review_text, '@RX_PRICEVALUE@', 'i') AS pricevalue
 FROM stg_review_text rt
 JOIN _teardown_elig e ON e.appid = rt.appid;
 
@@ -124,9 +125,24 @@ SELECT l.appid, l.aspect,
     CASE WHEN l.n_pos_mentions + l.n_neg_mentions > 0
          THEN l.n_pos_mentions * 1.0 / (l.n_pos_mentions + l.n_neg_mentions)
          ELSE NULL END AS pos_share,
-    e.n_reviews_sampled
+    e.n_reviews_sampled,
+    -- Aspect TEXT sentiment (VADER over the local window around the keyword — see
+    -- etl/build_marts.py compute_aspect_sentiment / stg_aspect_sentiment). This is the honest
+    -- "what the review TEXT says about this aspect" signal, vs pos_share above which is really
+    -- "what share of reviews mentioning it were thumbs-up OVERALL." COALESCE counts to 0 for an
+    -- aspect a game never mentions (no stg_aspect_sentiment row); shares/mean stay NULL there.
+    COALESCE(s.n_text_pos, 0) AS n_text_pos,
+    COALESCE(s.n_text_neg, 0) AS n_text_neg,
+    COALESCE(s.n_text_neutral, 0) AS n_text_neutral,
+    s.n_text_scored,
+    s.sum_compound,
+    CASE WHEN COALESCE(s.n_text_pos, 0) + COALESCE(s.n_text_neg, 0) > 0
+         THEN s.n_text_pos * 1.0 / (s.n_text_pos + s.n_text_neg)
+         ELSE NULL END AS text_pos_share,
+    CASE WHEN s.n_text_scored > 0 THEN s.sum_compound / s.n_text_scored ELSE NULL END AS mean_compound
 FROM long l
 JOIN _teardown_elig e ON e.appid = l.appid
+LEFT JOIN stg_aspect_sentiment s ON s.appid = l.appid AND s.aspect = l.aspect
 ORDER BY l.appid, total_mentions DESC;
 
 -- ------------------------------------------------------------------------------------
@@ -137,10 +153,12 @@ WITH game_genre AS (
     SELECT appid, primary_genre FROM stg_primary_genre
 ),
 base AS (
-    SELECT '__all__' AS genre, appid, aspect, n_pos_mentions, n_neg_mentions
+    SELECT '__all__' AS genre, appid, aspect, n_pos_mentions, n_neg_mentions,
+        n_text_pos, n_text_neg, n_text_neutral, n_text_scored, sum_compound
     FROM mart_game_review_aspects
     UNION ALL
-    SELECT gg.primary_genre AS genre, a.appid, a.aspect, a.n_pos_mentions, a.n_neg_mentions
+    SELECT gg.primary_genre AS genre, a.appid, a.aspect, a.n_pos_mentions, a.n_neg_mentions,
+        a.n_text_pos, a.n_text_neg, a.n_text_neutral, a.n_text_scored, a.sum_compound
     FROM mart_game_review_aspects a
     JOIN game_genre gg ON gg.appid = a.appid
     WHERE gg.primary_genre IS NOT NULL
@@ -152,7 +170,17 @@ SELECT genre, aspect,
     SUM(n_pos_mentions) + SUM(n_neg_mentions) AS total_mentions,
     CASE WHEN SUM(n_pos_mentions) + SUM(n_neg_mentions) > 0
          THEN SUM(n_pos_mentions) * 1.0 / (SUM(n_pos_mentions) + SUM(n_neg_mentions))
-         ELSE NULL END AS pos_share
+         ELSE NULL END AS pos_share,
+    -- Pooled TEXT-sentiment baseline (mention-weighted, same rationale as the vote pool above):
+    -- lets the API say whether THIS game's text sentiment on an aspect over/under-indexes vs
+    -- its genre peers (text_delta_vs_genre), the text analogue of the vote-based differential.
+    SUM(n_text_pos) AS n_text_pos,
+    SUM(n_text_neg) AS n_text_neg,
+    SUM(n_text_neutral) AS n_text_neutral,
+    CASE WHEN SUM(n_text_pos) + SUM(n_text_neg) > 0
+         THEN SUM(n_text_pos) * 1.0 / (SUM(n_text_pos) + SUM(n_text_neg))
+         ELSE NULL END AS text_pos_share,
+    CASE WHEN SUM(n_text_scored) > 0 THEN SUM(sum_compound) / SUM(n_text_scored) ELSE NULL END AS mean_compound
 FROM base
 GROUP BY genre, aspect
 HAVING COUNT(DISTINCT appid) >= @TEARDOWN_MIN_GENRE_GAMES@ OR genre = '__all__';
@@ -169,14 +197,32 @@ JOIN src.articles a ON a.id = m.article_id
 WHERE a.source != 'steam_news'
   AND m.match_confidence >= @PRESS_MIN_CONFIDENCE@;
 
+-- Press-coverage sentiment: VADER over each article's headline+summary (stg_press_article_sentiment,
+-- precomputed in etl/build_marts.py compute_press_sentiment), aggregated over this game's matched
+-- articles. press_pos_share = positive / (positive + negative) with VADER's ±0.05 neutral band
+-- excluded; mean_compound is the mean over all scored articles. Coarse: headline/summary-level,
+-- English-only, and an article's overall tone only proxies its stance on the matched game.
 CREATE TABLE mart_game_press_summary AS
-SELECT appid,
-    COUNT(*) AS total_mentions,
-    COUNT(DISTINCT source) AS n_sources,
-    CAST(MIN(published_at) AS VARCHAR) AS first_seen,
-    CAST(MAX(published_at) AS VARCHAR) AS last_seen
-FROM _press_base
-GROUP BY appid;
+WITH agg AS (
+    SELECT pb.appid,
+        COUNT(*) AS total_mentions,
+        COUNT(DISTINCT pb.source) AS n_sources,
+        CAST(MIN(pb.published_at) AS VARCHAR) AS first_seen,
+        CAST(MAX(pb.published_at) AS VARCHAR) AS last_seen,
+        COUNT(ps.compound) AS n_scored_articles,
+        COALESCE(SUM(CASE WHEN ps.compound >= @SENTIMENT_POS_THRESHOLD@ THEN 1 ELSE 0 END), 0) AS n_pos_articles,
+        COALESCE(SUM(CASE WHEN ps.compound <= @SENTIMENT_NEG_THRESHOLD@ THEN 1 ELSE 0 END), 0) AS n_neg_articles,
+        COALESCE(SUM(CASE WHEN ps.compound > @SENTIMENT_NEG_THRESHOLD@ AND ps.compound < @SENTIMENT_POS_THRESHOLD@ THEN 1 ELSE 0 END), 0) AS n_neutral_articles,
+        AVG(ps.compound) AS mean_compound
+    FROM _press_base pb
+    LEFT JOIN stg_press_article_sentiment ps ON ps.article_id = pb.article_id
+    GROUP BY pb.appid
+)
+SELECT *,
+    CASE WHEN n_pos_articles + n_neg_articles > 0
+         THEN n_pos_articles * 1.0 / (n_pos_articles + n_neg_articles)
+         ELSE NULL END AS press_pos_share
+FROM agg;
 
 CREATE TABLE mart_game_press_by_source AS
 SELECT appid, source, COUNT(*) AS n_mentions

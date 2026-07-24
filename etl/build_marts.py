@@ -74,6 +74,56 @@ PRESS_NOTABLE_N = 10             # "notable" articles kept per game (top by matc
 # is identical to the teardown's, by construction.
 ASPECT_REVIEWS_TOP_K = 4         # representative excerpts kept per (appid, aspect, sentiment)
 
+# Phase 3 — Aspect-level TEXT SENTIMENT (VADER). The teardown's praise/complaint split was
+# historically derived from each review's OVERALL Steam thumbs-up/down vote, so a thumbs-up
+# review that trashes the combat still counted as "praise" for combat. compute_aspect_sentiment()
+# below fixes that: for every (review, aspect) mention it scores the VADER compound sentiment
+# of a LOCAL text window around the aspect keyword (not the whole review, not the vote), and
+# precomputes per-(appid, aspect) positive/negative/neutral counts. This is classic lexicon
+# sentiment — pure-Python, no network, no API/LLM (see etl/requirements.txt: vaderSentiment).
+# It is COARSE and honest about it: English-only, sarcasm-blind, and domain-blind (VADER reads
+# gaming terms like "hard"/"brutal"/"insane"/"sick" with their everyday valence), so e.g.
+# Difficulty tends to read more negative in text than the reviewers actually mean. The UI shows
+# it alongside — not silently replacing — the vote-based split, clearly labelled.
+#
+# The 10-aspect keyword lexicon lives HERE as the single source of truth and is rendered into
+# BOTH mart_game_teardown.sql (@RX_*@ placeholders in _review_aspect_flags) and
+# mart_game_aspect_reviews.sql, so the vote flags, the excerpt windows, and the sentiment
+# windows can never drift apart. Each entry: (aspect label, @RX_*@ placeholder, keyword regex).
+ASPECT_LEXICON = [
+    ("Combat & Bosses", "RX_COMBAT",
+     r"\b(combat|fight|fights|fighting|boss|bosses|dodge|dodges|dodging|parry|parries|parrying|mechanic|mechanics|hitbox|hitboxes)\b"),
+    ("World & Exploration", "RX_WORLD",
+     r"\b(world|explore|explores|exploring|exploration|area|areas|level design|open world|metroidvania)\b"),
+    ("Art & Visuals", "RX_ART",
+     r"\b(art|visual|visuals|graphics|animation|animations|hand-drawn|hand drawn|handdrawn|aesthetic|aesthetics|gorgeous|beautiful|style|art style|artstyle)\b"),
+    ("Music & Audio", "RX_MUSIC",
+     r"\b(music|soundtrack|soundtracks|sound|sounds|score|ost|audio)\b"),
+    ("Story & Writing", "RX_STORY",
+     r"\b(story|stories|writing|lore|character|characters|narrative|dialogue|dialog|ending|endings)\b"),
+    ("Difficulty", "RX_DIFFICULTY",
+     r"\b(difficult|difficulty|hard|hardest|challenging|challenge|challenges|punishing|brutal|easy|unfair)\b"),
+    ("Controls & Performance", "RX_CONTROLS",
+     r"\b(controls|control|responsive|tight|clunky|bug|bugs|buggy|crash|crashes|crashing|performance|fps|optimization|optimized|optimisation)\b"),
+    ("Map & Navigation / Backtracking", "RX_MAPNAV",
+     r"\b(map|maps|navigation|backtrack|backtracks|backtracking|lost|confusing|tedious|grind|grinding|grindy)\b"),
+    ("Content & Length", "RX_CONTENT",
+     r"\b(content|length|hours|short|long|replay|replayability|replay value)\b"),
+    ("Price & Value", "RX_PRICEVALUE",
+     r"\b(price|worth|value|cheap|expensive|overpriced|bargain)\b"),
+]
+# Local text window scored per aspect mention: substr starting LEAD chars before the first
+# matched keyword, WINDOW chars long. Identical to the excerpt window in
+# mart_game_aspect_reviews.sql (rendered there via the @ASPECT_SENTIMENT_*@ placeholders), so
+# the sentiment class attached to a drill-down excerpt describes the exact text shown.
+ASPECT_SENTIMENT_LEAD = 140
+ASPECT_SENTIMENT_WINDOW = 280
+# VADER compound thresholds: >= POS is positive, <= NEG is negative, strictly between is the
+# neutral/unclear band (VADER's own standard cutoffs). The pos-vs-neg bar excludes neutrals.
+SENTIMENT_POS_THRESHOLD = 0.05
+SENTIMENT_NEG_THRESHOLD = -0.05
+SENTIMENT_SCORE_BATCH = 20000    # rows pulled+scored+inserted per streamed batch (bounded memory)
+
 # Phase 3 — aggregate Press/Marketing Intelligence tunables (see mart_press.sql). Reuses
 # PRESS_MIN_CONFIDENCE above for the same journalist-only, confidence-filtered article set.
 PRESS_AUTHOR_MIN_ARTICLES = 3    # a (author, genre) needs >= this many articles to be kept
@@ -197,7 +247,16 @@ HERE = Path(__file__).resolve().parent
 def build_params() -> dict[str, str]:
     today = date.today()
     cur_year = today.year
+    # Aspect keyword regexes (single source of truth) rendered into both teardown SQL files,
+    # plus the shared sentiment/excerpt window size — see ASPECT_LEXICON above.
+    lexicon = {placeholder: rx for (_label, placeholder, rx) in ASPECT_LEXICON}
     return {
+        **lexicon,
+        "ASPECT_SENTIMENT_LEAD": ASPECT_SENTIMENT_LEAD,
+        "ASPECT_SENTIMENT_WINDOW": ASPECT_SENTIMENT_WINDOW,
+        # VADER neutral-band cutoffs (mart_game_teardown.sql classifies press-article compounds).
+        "SENTIMENT_POS_THRESHOLD": SENTIMENT_POS_THRESHOLD,
+        "SENTIMENT_NEG_THRESHOLD": SENTIMENT_NEG_THRESHOLD,
         "MR_VALUES": ",".join(f"({m})" for m in MIN_REVIEWS_LEVELS),
         "MIN_REVIEWS_DEFAULT": MIN_REVIEWS_DEFAULT,
         "MIN_NICHE_GAMES": MIN_NICHE_GAMES,
@@ -645,6 +704,184 @@ def create_ccu_staging(con: duckdb.DuckDBPyConnection) -> bool:
     return False
 
 
+_ANALYZER = None
+
+
+def _get_analyzer():
+    """Lazily build (and cache) a single VADER analyzer — loads its bundled lexicon file once,
+    no network. Raises a clear error if the (pinned) dependency is missing."""
+    global _ANALYZER
+    if _ANALYZER is None:
+        try:
+            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+        except ImportError as e:  # pragma: no cover - surfaced only if the dep is missing
+            raise RuntimeError(
+                "vaderSentiment is required for text sentiment — it is pinned in "
+                "etl/requirements.txt (`pip install vaderSentiment`)."
+            ) from e
+        _ANALYZER = SentimentIntensityAnalyzer()
+    return _ANALYZER
+
+
+def _stream_vader_scores(con: duckdb.DuckDBPyConnection, select_sql: str, insert_sql: str) -> int:
+    """Score a text column with VADER in bounded, streamed batches — the shared engine behind
+    both compute_aspect_sentiment (review text) and compute_press_sentiment (article text).
+    `select_sql` returns key column(s) then the text column LAST; `insert_sql` takes those same
+    key column(s) then the DOUBLE compound. Reads through an INDEPENDENT cursor so the batched
+    INSERTs on `con` never invalidate the scan; peak memory is one batch, not the whole corpus
+    (matters on the 2GB Droplet). DuckDB Python UDFs need numpy (absent — we stay dependency-
+    light), which is why this streams in Python rather than registering a scalar UDF. Returns the
+    number of rows scored."""
+    analyzer = _get_analyzer()
+    read = con.cursor()
+    read.execute(select_sql)
+    n = 0
+    while True:
+        batch = read.fetchmany(SENTIMENT_SCORE_BATCH)
+        if not batch:
+            break
+        scored = [(*row[:-1], float(analyzer.polarity_scores(row[-1] or "")["compound"])) for row in batch]
+        con.executemany(insert_sql, scored)
+        n += len(scored)
+    read.close()
+    return n
+
+
+def _aspect_window_sql(pool: str) -> str:
+    """One row per (review, aspect) mention: the local text window scored for sentiment.
+    Built entirely in DuckDB (regexp_extract first keyword + strpos/substr window) from the
+    ASPECT_LEXICON single source of truth, so it can never drift from the vote flags / excerpt
+    windows. Same 10-arm shape as mart_game_teardown.sql's _review_aspect_flags, but emitting
+    a row per match (with recommendationid, so mart_game_aspect_reviews.sql can join each
+    excerpt to its sentiment) rather than a boolean column."""
+    arms = []
+    for label, _placeholder, rx in ASPECT_LEXICON:
+        rxe = rx.replace("'", "''")  # SQL single-quote escape (none today, but be safe)
+        label_e = label.replace("'", "''")
+        arms.append(
+            f"""
+        SELECT appid, recommendationid, '{label_e}' AS aspect,
+            CASE WHEN kw <> '' AND strpos(review_text, kw) > 0
+                 THEN substr(review_text, GREATEST(1, strpos(review_text, kw) - {ASPECT_SENTIMENT_LEAD}), {ASPECT_SENTIMENT_WINDOW})
+                 ELSE substr(review_text, 1, {ASPECT_SENTIMENT_WINDOW}) END AS window_text
+        FROM (
+            SELECT appid, recommendationid, review_text,
+                regexp_extract(review_text, '{rxe}', 1, 'i') AS kw
+            FROM {pool}
+            WHERE regexp_matches(review_text, '{rxe}', 'i')
+        )"""
+        )
+    return "\nUNION ALL\n".join(arms)
+
+
+def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection) -> int:
+    """Precompute per-(appid, aspect) VADER text sentiment for the Game Teardown (see the
+    ASPECT_LEXICON block above for the what/why). Runs BEFORE the mart SQL loop so
+    mart_game_teardown.sql / mart_game_aspect_reviews.sql can read the results:
+
+      stg_aspect_mention_sentiment  per (appid, recommendationid, aspect): the VADER `compound`
+                                     of the local text window around the aspect keyword. Feeds
+                                     the drill-down (mart_game_aspect_reviews classifies each
+                                     excerpt praise/complaint by the sign of this compound).
+      stg_aspect_sentiment          per (appid, aspect): positive/negative/neutral mention
+                                     counts (VADER ±0.05 band) + summed compound. Feeds the
+                                     aggregate bars (mart_game_review_aspects / the genre
+                                     baseline).
+
+    Scoring streams through _stream_vader_scores (a per-mention window table built in SQL, read
+    via an independent cursor in bounded batches) — peak memory is one batch, never the whole
+    ~1.7M-row corpus (matters on the 2GB Droplet)."""
+    # Eligible English-text review pool (identical population + floor to stg_review_text /
+    # _teardown_elig, but carrying recommendationid). TEMP: only read on this connection.
+    con.execute(
+        f"""
+        CREATE TEMP TABLE _sent_pool AS
+        WITH elig AS (
+            SELECT appid FROM src.reviews
+            WHERE language='english' AND review_text IS NOT NULL AND length(trim(review_text)) > 0
+            GROUP BY appid HAVING COUNT(*) >= {TEARDOWN_MIN_REVIEWS}
+        )
+        SELECT r.appid, r.recommendationid, r.review_text
+        FROM src.reviews r
+        JOIN elig e ON e.appid = r.appid
+        WHERE r.language='english' AND r.review_text IS NOT NULL AND length(trim(r.review_text)) > 0
+        """
+    )
+    # Per-mention window table. REGULAR (not TEMP) so the independent read cursor below can see
+    # it; dropped after scoring so it never ships in the versioned .duckdb.
+    con.execute("DROP TABLE IF EXISTS _sent_windows")
+    con.execute(f"CREATE TABLE _sent_windows AS {_aspect_window_sql('_sent_pool')}")
+
+    con.execute(
+        "CREATE TEMP TABLE stg_aspect_mention_sentiment("
+        "appid INTEGER, recommendationid VARCHAR, aspect VARCHAR, compound DOUBLE)"
+    )
+
+    n_scored = _stream_vader_scores(
+        con,
+        "SELECT appid, recommendationid, aspect, window_text FROM _sent_windows",
+        "INSERT INTO stg_aspect_mention_sentiment VALUES (?, ?, ?, ?)",
+    )
+
+    con.execute("DROP TABLE IF EXISTS _sent_windows")
+    con.execute("DROP TABLE IF EXISTS _sent_pool")
+
+    # Aggregate per (appid, aspect). pos/neg/neutral use VADER's ±0.05 band; sum_compound lets
+    # the genre baseline pool a mention-weighted mean compound downstream.
+    con.execute(
+        f"""
+        CREATE TEMP TABLE stg_aspect_sentiment AS
+        SELECT appid, aspect,
+            COUNT(*) AS n_text_scored,
+            COALESCE(SUM(CASE WHEN compound >= {SENTIMENT_POS_THRESHOLD} THEN 1 ELSE 0 END), 0) AS n_text_pos,
+            COALESCE(SUM(CASE WHEN compound <= {SENTIMENT_NEG_THRESHOLD} THEN 1 ELSE 0 END), 0) AS n_text_neg,
+            COALESCE(SUM(CASE WHEN compound > {SENTIMENT_NEG_THRESHOLD} AND compound < {SENTIMENT_POS_THRESHOLD} THEN 1 ELSE 0 END), 0) AS n_text_neutral,
+            SUM(compound) AS sum_compound
+        FROM stg_aspect_mention_sentiment
+        GROUP BY appid, aspect
+        """
+    )
+    return n_scored
+
+
+def compute_press_sentiment(con: duckdb.DuckDBPyConnection) -> int:
+    """Precompute VADER sentiment of each press article's headline+summary, for the Game
+    Teardown's press footprint (does a game's journalist coverage skew positive or negative?).
+    Runs BEFORE the mart loop so mart_game_teardown.sql can aggregate it per game.
+
+      stg_press_article_sentiment  per article_id: the VADER `compound` of "title. summary" for
+                                    every non-Steam-News article that mentions any game.
+
+    Same coarse-lexicon caveats as the review sentiment, plus press-specific ones: it's scored
+    from the headline + short summary (not the full body), so it captures an outlet's framing,
+    not a considered verdict; and an article's overall tone is only a proxy for its stance on the
+    specific game it's matched to. Steam News (dev-authored posts) is excluded, matching
+    _press_base in mart_game_teardown.sql. The mart applies the per-game match-confidence floor
+    when it aggregates, so we score every mentioned article once here regardless of confidence."""
+    # Distinct non-Steam-News articles that mention any game. REGULAR table so the streaming read
+    # cursor can see it; dropped after scoring so it never ships in the versioned .duckdb.
+    con.execute("DROP TABLE IF EXISTS _press_score_set")
+    con.execute(
+        """
+        CREATE TABLE _press_score_set AS
+        SELECT DISTINCT a.id AS article_id,
+            trim(COALESCE(a.title, '')
+                 || CASE WHEN trim(COALESCE(a.summary, '')) <> '' THEN '. ' || a.summary ELSE '' END) AS text
+        FROM src.articles a
+        JOIN src.article_game_mentions m ON m.article_id = a.id
+        WHERE a.source <> 'steam_news'
+        """
+    )
+    con.execute("CREATE TEMP TABLE stg_press_article_sentiment(article_id INTEGER, compound DOUBLE)")
+    n = _stream_vader_scores(
+        con,
+        "SELECT article_id, text FROM _press_score_set",
+        "INSERT INTO stg_press_article_sentiment VALUES (?, ?)",
+    )
+    con.execute("DROP TABLE IF EXISTS _press_score_set")
+    return n
+
+
 def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str) -> None:
     med_rev = con.execute(
         "SELECT median(est_rev_reviews) FROM stg_game WHERE total_reviews >= ? AND est_rev_reviews IS NOT NULL",
@@ -741,6 +978,18 @@ def main() -> int:
         have_ccu = create_ccu_staging(con)
         print("[etl] player_counts (live CCU): "
               + ("found" if have_ccu else "ABSENT — live_players will be NULL"))
+
+        print("[etl] scoring aspect text sentiment (VADER) ...")
+        t_sent = time.perf_counter()
+        n_sent = compute_aspect_sentiment(con)
+        print(f"[etl] aspect sentiment: scored {n_sent:,} aspect mentions "
+              f"({time.perf_counter() - t_sent:.1f}s)")
+
+        print("[etl] scoring press-coverage sentiment (VADER) ...")
+        t_press = time.perf_counter()
+        n_press = compute_press_sentiment(con)
+        print(f"[etl] press sentiment: scored {n_press:,} articles "
+              f"({time.perf_counter() - t_press:.1f}s)")
 
         for fname in MART_FILES:
             sql_path = HERE / "marts" / fname

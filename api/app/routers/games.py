@@ -242,7 +242,11 @@ def game_teardown(appid: int, org: Org = Depends(get_current_org)) -> GameTeardo
             COALESCE(gb.pos_share, ab.pos_share) AS genre_pos_share,
             COALESCE(gb.genre, ab.genre) AS baseline_genre,
             COALESCE(gb.n_games, ab.n_games) AS n_games_in_baseline,
-            a.pos_share - COALESCE(gb.pos_share, ab.pos_share) AS delta_vs_genre
+            a.pos_share - COALESCE(gb.pos_share, ab.pos_share) AS delta_vs_genre,
+            -- Aspect TEXT sentiment (VADER) + its own genre-baseline differential.
+            a.n_text_pos, a.n_text_neg, a.n_text_neutral, a.text_pos_share, a.mean_compound,
+            COALESCE(gb.text_pos_share, ab.text_pos_share) AS genre_text_pos_share,
+            a.text_pos_share - COALESCE(gb.text_pos_share, ab.text_pos_share) AS text_delta_vs_genre
         FROM mart_game_review_aspects a
         LEFT JOIN mart_genre_aspect_baseline gb ON gb.genre = ? AND gb.aspect = a.aspect
         LEFT JOIN mart_genre_aspect_baseline ab ON ab.genre = '__all__' AND ab.aspect = a.aspect
@@ -254,7 +258,10 @@ def game_teardown(appid: int, org: Org = Depends(get_current_org)) -> GameTeardo
     n_reviews_sampled = int(aspect_rows[0]["n_reviews_sampled"]) if aspect_rows else 0
 
     press_summary = analytics_db.query_one(
-        "SELECT total_mentions, n_sources, first_seen, last_seen FROM mart_game_press_summary WHERE appid = ?",
+        "SELECT total_mentions, n_sources, first_seen, last_seen, "
+        "n_pos_articles, n_neg_articles, n_neutral_articles, n_scored_articles, "
+        "press_pos_share, mean_compound "
+        "FROM mart_game_press_summary WHERE appid = ?",
         [appid],
     )
     by_source = analytics_db.query(
@@ -274,6 +281,12 @@ def game_teardown(appid: int, org: Org = Depends(get_current_org)) -> GameTeardo
     caveats = [
         "Review aspects are mined from a SAMPLE of English-language reviews (the `reviews` table is a "
         "per-game sample, recency-biased for older/popular titles) — not the game's full review history.",
+        "Per-aspect sentiment is scored from the review TEXT around each aspect keyword with a lexicon "
+        "method (VADER), not the reviewer's overall thumbs-up/down. It's deliberately lightweight and so "
+        "is coarse: English-only, sarcasm-blind, and domain-blind — everyday-English valence means terms "
+        "like \"hard\", \"brutal\" or \"insane\" often read as negative even where players mean them as "
+        "praise (Difficulty especially). Read it as a directional signal, not a verdict; the overall-vote "
+        "split is shown alongside for comparison.",
         "Press coverage is fuzzy-matched (article_game_mentions, confidence-filtered) and skews recent "
         "(~365-day scrape backfill) and English-outlet; Steam News (dev-authored posts) is excluded — "
         "this is journalist coverage only.",
@@ -289,6 +302,12 @@ def game_teardown(appid: int, org: Org = Depends(get_current_org)) -> GameTeardo
         )
     if press_summary is None:
         caveats.append("No press coverage found for this game above the match-confidence floor.")
+    elif press_summary["n_scored_articles"]:
+        caveats.append(
+            "Press coverage tone is VADER sentiment of each matched article's headline + short summary "
+            "(not the full body), so it captures an outlet's framing rather than a considered verdict — "
+            "and an article's overall tone only proxies its stance on this specific game."
+        )
 
     press = GamePress(
         total_mentions=int(press_summary["total_mentions"]) if press_summary else 0,
@@ -298,6 +317,12 @@ def game_teardown(appid: int, org: Org = Depends(get_current_org)) -> GameTeardo
         by_source=[PressBySource(**s) for s in by_source],
         timeline=[PressTimelinePoint(**t) for t in timeline],
         notable=[PressNotableArticle(**n) for n in notable],
+        n_pos_articles=int(press_summary["n_pos_articles"]) if press_summary else 0,
+        n_neg_articles=int(press_summary["n_neg_articles"]) if press_summary else 0,
+        n_neutral_articles=int(press_summary["n_neutral_articles"]) if press_summary else 0,
+        n_scored_articles=int(press_summary["n_scored_articles"]) if press_summary else 0,
+        press_pos_share=press_summary["press_pos_share"] if press_summary else None,
+        mean_compound=press_summary["mean_compound"] if press_summary else None,
     )
 
     return GameTeardown(

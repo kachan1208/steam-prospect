@@ -633,6 +633,8 @@ export interface ReviewAspect {
   n_pos_mentions: number;
   n_neg_mentions: number;
   total_mentions: number;
+  // Vote-based: share of aspect-mentioning reviews that were thumbs-up OVERALL (coarse — a
+  // thumbs-up review trashing this aspect still counts as praise). Shown for comparison.
   pos_share: number | null;
   n_reviews_sampled: number;
   // baseline_genre is the game's own primary_genre when it had enough qualifying
@@ -641,6 +643,18 @@ export interface ReviewAspect {
   baseline_genre: string | null;
   n_games_in_baseline: number | null;
   delta_vs_genre: number | null;
+  // TEXT sentiment (VADER over the review text around the aspect keyword) — what players
+  // actually SAY about the aspect, the headline signal. text_pos_share = positive /
+  // (positive + negative), neutrals excluded; mean_compound is the mean VADER compound
+  // (-1..1). text_delta_vs_genre = text_pos_share − genre_text_pos_share. Coarse: lexicon,
+  // English-only, sarcasm-/domain-blind. All null when there aren't enough opinionated mentions.
+  n_text_pos: number;
+  n_text_neg: number;
+  n_text_neutral: number;
+  text_pos_share: number | null;
+  mean_compound: number | null;
+  genre_text_pos_share: number | null;
+  text_delta_vs_genre: number | null;
 }
 
 export interface PressBySource {
@@ -670,6 +684,15 @@ export interface GamePress {
   by_source: PressBySource[];
   timeline: PressTimelinePoint[];
   notable: PressNotableArticle[];
+  // Coverage-tone sentiment (VADER over each matched article's headline+summary). Coarse:
+  // headline/summary-level, English-only. press_pos_share = positive / (positive + negative),
+  // neutrals excluded; mean_compound is the mean VADER compound (-1..1). null when nothing scored.
+  n_pos_articles: number;
+  n_neg_articles: number;
+  n_neutral_articles: number;
+  n_scored_articles: number;
+  press_pos_share: number | null;
+  mean_compound: number | null;
 }
 
 export interface GameTeardown {
