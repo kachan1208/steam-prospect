@@ -90,34 +90,57 @@ ASPECT_REVIEWS_TOP_K = 4         # representative excerpts kept per (appid, aspe
 # BOTH mart_game_teardown.sql (@RX_*@ placeholders in _review_aspect_flags) and
 # mart_game_aspect_reviews.sql, so the vote flags, the excerpt windows, and the sentiment
 # windows can never drift apart. Each entry: (aspect label, @RX_*@ placeholder, keyword regex).
+#
+# PRECISION PASS (2026-07): a real user report on Songs of Syx (appid 1162750) showed a
+# negative review about Combat ("This game suffers from something frighteningly terrible:
+# Combat. It was decently fun for the first few hours...") getting logged as a negative
+# "Content & Length" mention, purely because bare "hours" (a playtime reference, not a
+# length/content judgment) matched RX_CONTENT. That prompted a precision pass across every
+# arm: dropped pure-sentiment words that aren't aspects at all (gorgeous/beautiful), dropped or
+# phrase-qualified bare terms that collide with common non-aspect usage (hours, short, long,
+# score, sound, style, lost, tight, area/areas), keeping the clearly-on-topic terms. Combined
+# with the sentence-bounded sentiment window below (ASPECT_SENTENCE_CHARS), this fixes both the
+# false attribution (wrong aspect entirely) and the sentiment bleed (right aspect, wrong
+# clause's sentiment) that the loose lexicon + fixed-char window produced together. Difficulty's
+# hard/easy/brutal terms are left as-is — acknowledged domain-blind (see the caveat below) but
+# there's no cheap phrase-qualified fix without gutting recall on the single most common way
+# reviewers describe difficulty.
 ASPECT_LEXICON = [
     ("Combat & Bosses", "RX_COMBAT",
      r"\b(combat|fight|fights|fighting|boss|bosses|dodge|dodges|dodging|parry|parries|parrying|mechanic|mechanics|hitbox|hitboxes)\b"),
     ("World & Exploration", "RX_WORLD",
-     r"\b(world|explore|explores|exploring|exploration|area|areas|level design|open world|metroidvania)\b"),
+     r"\b(world|explore|explores|exploring|exploration|level design|open world|metroidvania)\b"),
     ("Art & Visuals", "RX_ART",
-     r"\b(art|visual|visuals|graphics|animation|animations|hand-drawn|hand drawn|handdrawn|aesthetic|aesthetics|gorgeous|beautiful|style|art style|artstyle)\b"),
+     r"\b(art|visual|visuals|graphics|animation|animations|hand-drawn|hand drawn|handdrawn|aesthetic|aesthetics|art style|artstyle)\b"),
     ("Music & Audio", "RX_MUSIC",
-     r"\b(music|soundtrack|soundtracks|sound|sounds|score|ost|audio)\b"),
+     r"\b(music|soundtrack|soundtracks|ost|audio|sound design)\b"),
     ("Story & Writing", "RX_STORY",
      r"\b(story|stories|writing|lore|character|characters|narrative|dialogue|dialog|ending|endings)\b"),
     ("Difficulty", "RX_DIFFICULTY",
      r"\b(difficult|difficulty|hard|hardest|challenging|challenge|challenges|punishing|brutal|easy|unfair)\b"),
     ("Controls & Performance", "RX_CONTROLS",
-     r"\b(controls|control|responsive|tight|clunky|bug|bugs|buggy|crash|crashes|crashing|performance|fps|optimization|optimized|optimisation)\b"),
+     r"\b(controls|control|responsive|tight controls|clunky|bug|bugs|buggy|crash|crashes|crashing|performance|fps|optimization|optimized|optimisation)\b"),
     ("Map & Navigation / Backtracking", "RX_MAPNAV",
-     r"\b(map|maps|navigation|backtrack|backtracks|backtracking|lost|confusing|tedious|grind|grinding|grindy)\b"),
+     r"\b(map|maps|navigation|backtrack|backtracks|backtracking|confusing|tedious|grind|grinding|grindy)\b"),
     ("Content & Length", "RX_CONTENT",
-     r"\b(content|length|hours|short|long|replay|replayability|replay value)\b"),
+     r"\b(content|length|hours of (?:content|gameplay|fun|playtime)|too short|too long|feels short|short game|long game|replay|replayability|replay value)\b"),
     ("Price & Value", "RX_PRICEVALUE",
      r"\b(price|worth|value|cheap|expensive|overpriced|bargain)\b"),
 ]
-# Local text window scored per aspect mention: substr starting LEAD chars before the first
-# matched keyword, WINDOW chars long. Identical to the excerpt window in
-# mart_game_aspect_reviews.sql (rendered there via the @ASPECT_SENTIMENT_*@ placeholders), so
-# the sentiment class attached to a drill-down excerpt describes the exact text shown.
-ASPECT_SENTIMENT_LEAD = 140
-ASPECT_SENTIMENT_WINDOW = 280
+# Per-side cap (characters) for the sentence/clause-bounded sentiment & excerpt window: from the
+# first aspect-keyword match, extend outward up to this many characters in each direction,
+# stopping early at a sentence/clause boundary (. ! ? ; or newline) if one comes first. Bounding
+# by clause (not a fixed char count) is what stops the scored/excerpted text from bleeding into
+# an unrelated neighboring sentence -- e.g. the Songs of Syx example above, where a FIXED window
+# used to pull "frighteningly terrible" (about Combat, the previous sentence) onto the unrelated
+# "hours" mention, flipping a genuinely positive clause ("decently fun for the first few hours")
+# negative. The cap just keeps a run-on sentence (no punctuation for a while) from exploding the
+# window. Rendered into mart_game_aspect_reviews.sql's excerpt regex via the
+# @ASPECT_SENTENCE_CHARS@ placeholder, string-concatenated there with the SAME @RX_*@ keyword
+# regex text (see build_params() / _aspect_sentence_regex below) -- so the text actually scored
+# for sentiment and the excerpt shown to users are always the identical window, by construction,
+# not by keeping two numbers in sync by hand.
+ASPECT_SENTENCE_CHARS = 160
 # VADER compound thresholds: >= POS is positive, <= NEG is negative, strictly between is the
 # neutral/unclear band (VADER's own standard cutoffs). The pos-vs-neg bar excludes neutrals.
 SENTIMENT_POS_THRESHOLD = 0.05
@@ -252,8 +275,7 @@ def build_params() -> dict[str, str]:
     lexicon = {placeholder: rx for (_label, placeholder, rx) in ASPECT_LEXICON}
     return {
         **lexicon,
-        "ASPECT_SENTIMENT_LEAD": ASPECT_SENTIMENT_LEAD,
-        "ASPECT_SENTIMENT_WINDOW": ASPECT_SENTIMENT_WINDOW,
+        "ASPECT_SENTENCE_CHARS": ASPECT_SENTENCE_CHARS,
         # VADER neutral-band cutoffs (mart_game_teardown.sql classifies press-article compounds).
         "SENTIMENT_POS_THRESHOLD": SENTIMENT_POS_THRESHOLD,
         "SENTIMENT_NEG_THRESHOLD": SENTIMENT_NEG_THRESHOLD,
@@ -747,29 +769,41 @@ def _stream_vader_scores(con: duckdb.DuckDBPyConnection, select_sql: str, insert
     return n
 
 
+def _aspect_sentence_regex(rx: str) -> str:
+    """Wrap an aspect keyword regex so the overall match is the sentence/clause around the FIRST
+    occurrence of the keyword: up to ASPECT_SENTENCE_CHARS characters on each side, stopped early
+    by a sentence/clause boundary (. ! ? ; or newline -- RE2 char class [^.!?;\\n]) if one comes
+    first. `rx` is wrapped in a non-capturing group so this is safe regardless of rx's own
+    internal grouping/alternation shape.
+
+    This exact shape (same ASPECT_SENTENCE_CHARS cap, same rx text) is ALSO rendered into
+    mart_game_aspect_reviews.sql's excerpt regex, by string-concatenating the @ASPECT_SENTENCE_CHARS@
+    and @RX_*@ placeholders directly inside a SQL string literal (see build_params()/render()) --
+    so the VADER-scored window (here) and the excerpt shown to users (there) can never drift
+    apart: it's the same pattern run by the same DuckDB/RE2 engine over the same review_text,
+    not two numbers kept in sync by hand."""
+    return rf"[^.!?;\n]{{0,{ASPECT_SENTENCE_CHARS}}}(?:{rx})[^.!?;\n]{{0,{ASPECT_SENTENCE_CHARS}}}"
+
+
 def _aspect_window_sql(pool: str) -> str:
-    """One row per (review, aspect) mention: the local text window scored for sentiment.
-    Built entirely in DuckDB (regexp_extract first keyword + strpos/substr window) from the
-    ASPECT_LEXICON single source of truth, so it can never drift from the vote flags / excerpt
-    windows. Same 10-arm shape as mart_game_teardown.sql's _review_aspect_flags, but emitting
-    a row per match (with recommendationid, so mart_game_aspect_reviews.sql can join each
-    excerpt to its sentiment) rather than a boolean column."""
+    """One row per (review, aspect) mention: the sentence/clause-bounded text window (see
+    _aspect_sentence_regex) scored for sentiment. Built entirely in DuckDB (regexp_extract of the
+    whole match -- group 0) from the ASPECT_LEXICON single source of truth, so it can never drift
+    from the vote flags / excerpt window. Same 10-arm shape as mart_game_teardown.sql's
+    _review_aspect_flags, but emitting a row per match (with recommendationid, so
+    mart_game_aspect_reviews.sql can join each excerpt to its sentiment) rather than a boolean
+    column."""
     arms = []
     for label, _placeholder, rx in ASPECT_LEXICON:
         rxe = rx.replace("'", "''")  # SQL single-quote escape (none today, but be safe)
+        sent_e = _aspect_sentence_regex(rx).replace("'", "''")
         label_e = label.replace("'", "''")
         arms.append(
             f"""
         SELECT appid, recommendationid, '{label_e}' AS aspect,
-            CASE WHEN kw <> '' AND strpos(review_text, kw) > 0
-                 THEN substr(review_text, GREATEST(1, strpos(review_text, kw) - {ASPECT_SENTIMENT_LEAD}), {ASPECT_SENTIMENT_WINDOW})
-                 ELSE substr(review_text, 1, {ASPECT_SENTIMENT_WINDOW}) END AS window_text
-        FROM (
-            SELECT appid, recommendationid, review_text,
-                regexp_extract(review_text, '{rxe}', 1, 'i') AS kw
-            FROM {pool}
-            WHERE regexp_matches(review_text, '{rxe}', 'i')
-        )"""
+            regexp_extract(review_text, '{sent_e}', 0, 'i') AS window_text
+        FROM {pool}
+        WHERE regexp_matches(review_text, '{rxe}', 'i')"""
         )
     return "\nUNION ALL\n".join(arms)
 
