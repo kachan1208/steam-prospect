@@ -19,13 +19,15 @@
 --   mart_game_aspect_reviews  per (appid, aspect, sentiment IN ('praise','complaint')): up
 --                              to @ASPECT_REVIEWS_TOP_K@ representative excerpts, ranked by
 --                              votes_up DESC then recency (timestamp_created DESC). Each
---                              excerpt is a <=@ASPECT_SENTIMENT_WINDOW@-char window around the
---                              review's first matched keyword (falls back to the review start
---                              if a keyword position can't be located). Same eligible-game
---                              population as the teardown (games with >= @TEARDOWN_MIN_REVIEWS@
---                              sampled English reviews). NOT joined to mart_game, mirroring
---                              mart_game_teardown.sql — the API 404s upstream via mart_game
---                              before this table is ever queried for a nonexistent appid.
+--                              excerpt is the sentence/clause around the review's first matched
+--                              keyword -- bounded by . ! ? ; or a newline, capped at
+--                              @ASPECT_SENTENCE_CHARS@ chars each side so a run-on sentence can't
+--                              explode it (falls back to the review start if a keyword position
+--                              can't be located). Same eligible-game population as the teardown
+--                              (games with >= @TEARDOWN_MIN_REVIEWS@ sampled English reviews).
+--                              NOT joined to mart_game, mirroring mart_game_teardown.sql — the
+--                              API 404s upstream via mart_game before this table is ever queried
+--                              for a nonexistent appid.
 --
 -- Placeholder tokens are substituted by build_marts.py.
 
@@ -59,66 +61,83 @@ FROM _aspectrev_text t
 JOIN _aspectrev_elig e ON e.appid = t.appid;
 
 -- One row per (review, matched aspect) — same lexicon as everywhere (rendered from
--- ASPECT_LEXICON via @RX_*@ placeholders), emitted as a row per match (not a boolean column)
--- and capturing every matched keyword occurrence (regexp_extract_all, group 1) so we can rank
--- candidates and later show "matched_keywords" + locate an excerpt window around the first hit.
+-- ASPECT_LEXICON via @RX_*@ placeholders), emitted as a row per match (not a boolean column),
+-- capturing every matched keyword occurrence (regexp_extract_all, group 1) so we can rank
+-- candidates and later show "matched_keywords", AND (window_text) the sentence/clause around the
+-- FIRST matched keyword occurrence -- bounded by . ! ? ; or a newline, capped at
+-- @ASPECT_SENTENCE_CHARS@ chars each side (RE2 [^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}). This has to
+-- happen HERE, per arm, while each branch still has its own @RX_*@ text on hand — the sentiment
+-- window can't be reconstructed generically after the UNION ALL below has collapsed all 10 arms
+-- down to a single `aspect` label column. Same regex shape (same @ASPECT_SENTENCE_CHARS@, same
+-- @RX_*@ text) as _aspect_sentence_regex()/_aspect_window_sql() in build_marts.py builds for the
+-- VADER scoring pass, so this excerpt window and the text actually scored can never drift apart.
 CREATE TEMP TABLE _aspectrev_matches AS
 SELECT appid, recommendationid, 'Combat & Bosses' AS aspect, voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
-    regexp_extract_all(review_text, '@RX_COMBAT@', 1, 'i') AS kw_matches
+    regexp_extract_all(review_text, '@RX_COMBAT@', 1, 'i') AS kw_matches,
+    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_COMBAT@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i') AS window_text
 FROM _aspectrev_base
 WHERE regexp_matches(review_text, '@RX_COMBAT@', 'i')
 
 UNION ALL
 SELECT appid, recommendationid, 'World & Exploration', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
-    regexp_extract_all(review_text, '@RX_WORLD@', 1, 'i')
+    regexp_extract_all(review_text, '@RX_WORLD@', 1, 'i'),
+    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_WORLD@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
 FROM _aspectrev_base
 WHERE regexp_matches(review_text, '@RX_WORLD@', 'i')
 
 UNION ALL
 SELECT appid, recommendationid, 'Art & Visuals', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
-    regexp_extract_all(review_text, '@RX_ART@', 1, 'i')
+    regexp_extract_all(review_text, '@RX_ART@', 1, 'i'),
+    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_ART@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
 FROM _aspectrev_base
 WHERE regexp_matches(review_text, '@RX_ART@', 'i')
 
 UNION ALL
 SELECT appid, recommendationid, 'Music & Audio', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
-    regexp_extract_all(review_text, '@RX_MUSIC@', 1, 'i')
+    regexp_extract_all(review_text, '@RX_MUSIC@', 1, 'i'),
+    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_MUSIC@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
 FROM _aspectrev_base
 WHERE regexp_matches(review_text, '@RX_MUSIC@', 'i')
 
 UNION ALL
 SELECT appid, recommendationid, 'Story & Writing', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
-    regexp_extract_all(review_text, '@RX_STORY@', 1, 'i')
+    regexp_extract_all(review_text, '@RX_STORY@', 1, 'i'),
+    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_STORY@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
 FROM _aspectrev_base
 WHERE regexp_matches(review_text, '@RX_STORY@', 'i')
 
 UNION ALL
 SELECT appid, recommendationid, 'Difficulty', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
-    regexp_extract_all(review_text, '@RX_DIFFICULTY@', 1, 'i')
+    regexp_extract_all(review_text, '@RX_DIFFICULTY@', 1, 'i'),
+    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_DIFFICULTY@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
 FROM _aspectrev_base
 WHERE regexp_matches(review_text, '@RX_DIFFICULTY@', 'i')
 
 UNION ALL
 SELECT appid, recommendationid, 'Controls & Performance', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
-    regexp_extract_all(review_text, '@RX_CONTROLS@', 1, 'i')
+    regexp_extract_all(review_text, '@RX_CONTROLS@', 1, 'i'),
+    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_CONTROLS@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
 FROM _aspectrev_base
 WHERE regexp_matches(review_text, '@RX_CONTROLS@', 'i')
 
 UNION ALL
 SELECT appid, recommendationid, 'Map & Navigation / Backtracking', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
-    regexp_extract_all(review_text, '@RX_MAPNAV@', 1, 'i')
+    regexp_extract_all(review_text, '@RX_MAPNAV@', 1, 'i'),
+    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_MAPNAV@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
 FROM _aspectrev_base
 WHERE regexp_matches(review_text, '@RX_MAPNAV@', 'i')
 
 UNION ALL
 SELECT appid, recommendationid, 'Content & Length', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
-    regexp_extract_all(review_text, '@RX_CONTENT@', 1, 'i')
+    regexp_extract_all(review_text, '@RX_CONTENT@', 1, 'i'),
+    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_CONTENT@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
 FROM _aspectrev_base
 WHERE regexp_matches(review_text, '@RX_CONTENT@', 'i')
 
 UNION ALL
 SELECT appid, recommendationid, 'Price & Value', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
-    regexp_extract_all(review_text, '@RX_PRICEVALUE@', 1, 'i')
+    regexp_extract_all(review_text, '@RX_PRICEVALUE@', 1, 'i'),
+    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_PRICEVALUE@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
 FROM _aspectrev_base
 WHERE regexp_matches(review_text, '@RX_PRICEVALUE@', 'i');
 
@@ -145,39 +164,35 @@ SELECT *,
 FROM _aspectrev_scored
 QUALIFY rn <= @ASPECT_REVIEWS_TOP_K@;
 
--- Locate a <=@ASPECT_SENTIMENT_WINDOW@-char excerpt window around the first matched keyword
--- occurrence: find the literal position of the first regexp_extract_all hit via strpos (falls
--- back to the review start when that lookup fails, e.g. NULL kw_matches[1] shouldn't occur but
--- is guarded). Window size = the same @ASPECT_SENTIMENT_*@ constants the sentiment was scored
--- over, so an excerpt's praise/complaint label describes exactly the text displayed.
+-- window_text (the sentence/clause around the first matched keyword — see the @RX_*@ branches
+-- above) is already the exact excerpt body; here we just locate its offset in review_text via
+-- strpos so the final SELECT knows whether to prefix/suffix an ellipsis (i.e. whether the
+-- excerpt starts/ends mid-review rather than at a real sentence boundary that happens to be the
+-- text's own start/end). Falls back to a plain lead substring in the should-never-happen case of
+-- a NULL window_text (the WHERE filter above guarantees the wrapping regex matches wherever the
+-- bare keyword regex does, so this is defensive, not expected to fire).
 CREATE TEMP TABLE _aspectrev_windowed AS
 SELECT
     appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language,
     list_distinct(list_transform(kw_matches, x -> lower(x))) AS matched_keywords,
     review_text,
     length(review_text) AS text_len,
-    CASE WHEN kw_matches[1] IS NOT NULL AND strpos(review_text, kw_matches[1]) > 0
-         THEN GREATEST(1, strpos(review_text, kw_matches[1]) - @ASPECT_SENTIMENT_LEAD@)
-         ELSE 1 END AS win_start
+    COALESCE(window_text, substr(review_text, 1, 2 * @ASPECT_SENTENCE_CHARS@)) AS excerpt_body,
+    strpos(review_text, window_text) AS win_start
 FROM _aspectrev_ranked;
 
 CREATE TABLE mart_game_aspect_reviews AS
-WITH body AS (
-    SELECT *, trim(substr(review_text, win_start, @ASPECT_SENTIMENT_WINDOW@)) AS excerpt_body,
-        length(substr(review_text, win_start, @ASPECT_SENTIMENT_WINDOW@)) AS body_len
-    FROM _aspectrev_windowed
-)
 SELECT
     appid,
     aspect,
     sentiment,
     (CASE WHEN win_start > 1 THEN '…' ELSE '' END)
-        || excerpt_body
-        || (CASE WHEN win_start + body_len - 1 < text_len THEN '…' ELSE '' END) AS excerpt,
+        || trim(excerpt_body)
+        || (CASE WHEN win_start > 0 AND win_start + length(excerpt_body) - 1 < text_len THEN '…' ELSE '' END) AS excerpt,
     matched_keywords,
     votes_up,
     playtime_minutes,
     CAST(to_timestamp(timestamp_created) AS DATE)::VARCHAR AS date,
     language
-FROM body
+FROM _aspectrev_windowed
 ORDER BY appid, aspect, sentiment, votes_up DESC NULLS LAST;
