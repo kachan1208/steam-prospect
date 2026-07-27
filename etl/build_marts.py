@@ -141,11 +141,124 @@ ASPECT_LEXICON = [
 # for sentiment and the excerpt shown to users are always the identical window, by construction,
 # not by keeping two numbers in sync by hand.
 ASPECT_SENTENCE_CHARS = 160
+# PERFORMANCE PASS (2026-07): the sentence-bounded regex above is comparatively heavy (two
+# ASPECT_SENTENCE_CHARS-bounded context clauses either side of the keyword alternation), and
+# running it directly against the FULL review_text -- once per aspect arm, up to 10x per review,
+# across ~1.7M mentions -- is what blew the ETL from ~85min to ~5h (CPU-bound regex, not a query
+# plan problem). Fix (see _aspect_keyword_position_regex / _aspect_window_sql below, and the
+# identically-shaped excerpt window in mart_game_aspect_reviews.sql): locate the FIRST keyword
+# match's character position, slice a small, generously-bounded substring of review_text around
+# it, and run the (unchanged) sentence regex on THAT slice instead of the whole review. Output is
+# byte-identical -- the slice always fully contains the up-to-ASPECT_SENTENCE_CHARS-per-side
+# window a full-text scan would have found -- but the expensive pattern scans a few hundred
+# characters instead of an entire (sometimes very long) review body.
+#
+# ASPECT_WINDOW_SLICE_BEFORE: how far (chars) before the match the slice starts -- the max
+# ASPECT_SENTENCE_CHARS the left-context clause can ever consume, plus a safety margin.
+# ASPECT_WINDOW_SLICE_CHARS: total slice length -- that same left margin, plus ASPECT_SENTENCE_CHARS
+# of right-context, plus a generous allowance for the matched keyword phrase's own length (longest
+# today is ~18 chars, "hours of playtime").
+ASPECT_WINDOW_SLICE_BEFORE = ASPECT_SENTENCE_CHARS + 40                              # 200
+ASPECT_WINDOW_SLICE_CHARS = ASPECT_WINDOW_SLICE_BEFORE + ASPECT_SENTENCE_CHARS + 160  # 520
 # VADER compound thresholds: >= POS is positive, <= NEG is negative, strictly between is the
 # neutral/unclear band (VADER's own standard cutoffs). The pos-vs-neg bar excludes neutrals.
 SENTIMENT_POS_THRESHOLD = 0.05
 SENTIMENT_NEG_THRESHOLD = -0.05
 SENTIMENT_SCORE_BATCH = 20000    # rows pulled+scored+inserted per streamed batch (bounded memory)
+
+# Domain-tuned VADER lexicon overrides (2026-07). Stock VADER is a general-English lexicon: it has
+# no notion that "horror"/"brutal"/"insane"/"sick" are GENRE or INTENSITY descriptors in game
+# reviews and press coverage, not the reviewer's/journalist's quality verdict -- it reads a horror
+# game's own genre as negative sentiment. Real bug: The Mound: Omen of Cthulhu (appid 2569760), a
+# positive IGN preview headlined "...Sets Co-op HORROR Survival for Summer 2026 With Fresh
+# Gameplay Trailer", scored compound -0.34 (should read positive/neutral) purely because of
+# "Horror". The identical failure mode hits Difficulty ("brutal"/"punishing"/"hard" as PRAISE for
+# a well-tuned challenge reads as a complaint) and -- found by auditing ASPECT_LEXICON's own
+# keyword tokens against the baseline VADER lexicon -- Combat & Bosses ("combat"/"fight(s)"/
+# "fighting" are themselves baseline-negative even though they're the aspect's topic, not a
+# verdict on it).
+#
+# Applied ONCE, in _get_analyzer() below, via analyzer.lexicon.update(...) on the single cached
+# analyzer instance -- compute_aspect_sentiment (review text) and compute_press_sentiment (article
+# text) both score through _stream_vader_scores -> _get_analyzer(), so this can't drift between
+# the two scorers by construction (no second copy to keep in sync by hand).
+#
+# Values are VADER valence on its native ~-4..+4 scale. Two deliberate exceptions to a clean
+# "genre word -> exactly 0.0" rule, found by testing (documented inline below):
+#   "mess" -> -0.6, not 0.0. Fully zeroing it would make the sentence "buggy mess, refunded" score
+#             NEUTRAL, not negative -- "buggy"/"refund(ed)" aren't in VADER at all, so "mess" is
+#             the ONLY sentiment-bearing token in it. Dampened instead: still reads negative alone,
+#             but drags far less on genuinely positive text (the horde/chaos-genre usage that a
+#             positive real headline for this same game, "...Sanity Mechanics That Mess with Your
+#             Friends", is an example of).
+#   everything else that had a nonzero baseline and no such conflict -> 0.0. A sensitivity check
+#             (damping Difficulty/Combat words to a small residual negative instead of 0.0, e.g.
+#             -0.3..-0.8) was tried and rejected: on a real 300-review sample it roughly HALVED the
+#             number of false-negative fixes (52 -> 23-25 out of 101 baseline negatives) while only
+#             marginally reducing an already-tiny regression rate (1/300) -- a bad trade.
+#
+# HONEST LIMITATION, found the same way (real-sample testing, not guessed): VADER's own negation
+# heuristic ("not so punishing" partially flips "punishing"'s valence) occasionally relied on the
+# very word this dict neutralizes to correctly read a contrastive "but"-clause. E.g. "They're
+# challenging enough to encourage improvement, but not so punishing that they become frustrating"
+# scored +0.68 (correct) at baseline and -0.20 (wrong) tuned -- a real, small regression from a
+# double-negative/contrastive-clause interaction that word-level lexicon tuning cannot reliably
+# fix without undoing the fix it exists for. Rare in practice (1/300 real samples tested) and
+# reported here rather than hidden; see the ETL run report for the full before/after breakdown.
+#
+# CRITICAL, deliberately UNCHANGED (verified by testing, not enforced by code): buggy, bug,
+# broken, crash(es), boring, bored, tedious, grindy, refund, waste, disappointing, unplayable,
+# garbage, trash, lag(gy), unfinished, unoptimized, terrible, awful, worst, clunky, janky,
+# unresponsive, mediocre, ripoff, scam, unfair, confusing -- genuine quality complaints, including
+# several (e.g. "unfair", an explicit Difficulty keyword right next to "brutal"/"hard") that sit
+# immediately next to words this dict does neutralize.
+GAMING_LEXICON_OVERRIDES = {
+    # --- Genre / setting descriptors: neutralize (horror-genre words VADER reads as negative
+    # sentiment, but which describe WHAT the game is, not whether it's good) ---
+    "horror": 0.0, "terror": 0.0, "terrifying": 0.0, "scary": 0.0, "creepy": 0.0, "spooky": 0.0,
+    "eerie": 0.0, "dread": 0.0, "dreadful": 0.0, "nightmare": 0.0, "nightmares": 0.0,
+    "haunting": 0.0, "disturbing": 0.0, "sinister": 0.0, "ominous": 0.0, "macabre": 0.0,
+    "grim": 0.0, "dark": 0.0, "darkness": 0.0, "evil": 0.0, "demon": 0.0, "demonic": 0.0,
+    "demons": 0.0, "monster": 0.0, "monsters": 0.0, "creature": 0.0, "creatures": 0.0,
+    "zombie": 0.0, "zombies": 0.0, "blood": 0.0, "bloody": 0.0, "gore": 0.0, "gory": 0.0,
+    "death": 0.0, "dead": 0.0, "kill": 0.0, "killing": 0.0, "murder": 0.0,
+    "insane": 0.0, "insanity": 0.0, "sanity": 0.0, "madness": 0.0, "mad": 0.0, "crazy": 0.0,
+    "cthulhu": 0.0, "lovecraftian": 0.0, "occult": 0.0, "cursed": 0.0, "curse": 0.0,
+    "omen": 0.0, "doom": 0.0, "hell": 0.0, "apocalypse": 0.0, "sacrifice": 0.0,
+
+    # --- Difficulty descriptors: neutralize (players use these as PRAISE for a well-tuned
+    # challenge; VADER reads them as complaints). NOT touched: "unfair" -- an explicit
+    # ASPECT_LEXICON Difficulty keyword, but a genuine complaint (badly balanced), not a genre/
+    # intensity descriptor; "challenge(s)/challenging" -- already correctly positive in VADER
+    # (+0.3/+0.6) at baseline, nothing to fix. ---
+    "brutal": 0.0, "brutally": 0.0, "punishing": 0.0, "unforgiving": 0.0, "relentless": 0.0,
+    "merciless": 0.0, "savage": 0.0, "ruthless": 0.0, "hardcore": 0.0, "grueling": 0.0,
+    "hard": 0.0, "hardest": 0.0, "difficult": 0.0, "difficulty": 0.0, "tough": 0.0,
+
+    # --- "mess"/"chaos": see the -0.6 rationale above. "chaos"/"chaotic" have no equivalent
+    # required-guard conflict, so they go to the clean 0.0 the rest of this dict uses. ---
+    "mess": -0.6,
+    "chaos": 0.0, "chaotic": 0.0,
+
+    # --- Combat & Bosses aspect keywords: same bug class, found by auditing ASPECT_LEXICON's own
+    # keyword tokens against the baseline lexicon -- "combat"/"fight(s)"/"fighting" are baseline-
+    # negative even though they're literally the aspect's topic, not a quality judgment. Not in
+    # the task's original word list but the identical failure mode. ---
+    "combat": 0.0, "fight": 0.0, "fights": 0.0, "fighting": 0.0, "dodging": 0.0,
+
+    # --- Horror-mood descriptors, found by testing: same class as dread/eerie/haunting above
+    # ("nails the dread and tension" is praise for atmosphere, not a complaint). ---
+    "tension": 0.0, "tense": 0.0,
+
+    # --- Positive gaming terms VADER lacks or misreads ---
+    "immersive": 1.5, "atmospheric": 1.0, "addictive": 1.0, "addicting": 1.0,
+    "replayable": 1.0, "meaty": 1.0, "sick": 1.5, "epic": 1.0,
+    # "killer" (slang praise, "a killer soundtrack") found by testing -- same VADER-reads-slang-
+    # as-violence pattern as "sick", which was called out by name. Kept more moderate than
+    # sick/immersive since "killer" more often keeps a literal negative sense in context ("a
+    # killer bug", "a killer difficulty spike") than "sick" does in gaming text.
+    "killer": 1.0,
+}
 
 # Phase 3 — aggregate Press/Marketing Intelligence tunables (see mart_press.sql). Reuses
 # PRESS_MIN_CONFIDENCE above for the same journalist-only, confidence-filtered article set.
@@ -276,6 +389,8 @@ def build_params() -> dict[str, str]:
     return {
         **lexicon,
         "ASPECT_SENTENCE_CHARS": ASPECT_SENTENCE_CHARS,
+        "ASPECT_WINDOW_SLICE_BEFORE": ASPECT_WINDOW_SLICE_BEFORE,
+        "ASPECT_WINDOW_SLICE_CHARS": ASPECT_WINDOW_SLICE_CHARS,
         # VADER neutral-band cutoffs (mart_game_teardown.sql classifies press-article compounds).
         "SENTIMENT_POS_THRESHOLD": SENTIMENT_POS_THRESHOLD,
         "SENTIMENT_NEG_THRESHOLD": SENTIMENT_NEG_THRESHOLD,
@@ -730,8 +845,12 @@ _ANALYZER = None
 
 
 def _get_analyzer():
-    """Lazily build (and cache) a single VADER analyzer — loads its bundled lexicon file once,
-    no network. Raises a clear error if the (pinned) dependency is missing."""
+    """Lazily build (and cache) a single VADER analyzer — loads its bundled lexicon file once, no
+    network, then applies GAMING_LEXICON_OVERRIDES on top (see the block above) so both
+    compute_aspect_sentiment (review text) and compute_press_sentiment (article text) score
+    through the SAME domain-tuned lexicon, by construction (they both call this one cached
+    instance) rather than by keeping two separately-patched analyzers in sync by hand. Raises a
+    clear error if the (pinned) dependency is missing."""
     global _ANALYZER
     if _ANALYZER is None:
         try:
@@ -742,6 +861,7 @@ def _get_analyzer():
                 "etl/requirements.txt (`pip install vaderSentiment`)."
             ) from e
         _ANALYZER = SentimentIntensityAnalyzer()
+        _ANALYZER.lexicon.update(GAMING_LEXICON_OVERRIDES)
     return _ANALYZER
 
 
@@ -785,6 +905,25 @@ def _aspect_sentence_regex(rx: str) -> str:
     return rf"[^.!?;\n]{{0,{ASPECT_SENTENCE_CHARS}}}(?:{rx})[^.!?;\n]{{0,{ASPECT_SENTENCE_CHARS}}}"
 
 
+def _aspect_keyword_position_regex(rx: str) -> str:
+    """Wrap an aspect keyword regex to capture (group 1) everything in review_text BEFORE the
+    FIRST match -- length() of that capture is the match's 1-indexed start position, used to slice
+    a small window around it (see ASPECT_WINDOW_SLICE_BEFORE/CHARS and _aspect_window_sql above).
+
+    Deliberately NOT strpos() on the bare matched keyword text: strpos is a plain substring search
+    with no notion of rx's own \\b word-boundary anchors, so for a short keyword like "art" or
+    "hard" it can (and on real review text, does) find an EARLIER false position embedded inside
+    an unrelated word ("start", "hardware") that the \\b-anchored regex itself would never match
+    there. This capture uses the exact same regex/engine/leftmost-match semantics as the real
+    match, so it can't disagree with it.
+
+    `[\\s\\S]` (matches ANY character), not `.`: RE2's `.` does not match newline by default, and
+    review text routinely has embedded newlines before the first aspect keyword -- with a plain
+    `.*?`, the capture would fail to cross them and silently fall back to position 1, corrupting
+    the downstream slice."""
+    return rf"^([\s\S]*?)(?:{rx})"
+
+
 def _aspect_window_sql(pool: str) -> str:
     """One row per (review, aspect) mention: the sentence/clause-bounded text window (see
     _aspect_sentence_regex) scored for sentiment. Built entirely in DuckDB (regexp_extract of the
@@ -792,18 +931,46 @@ def _aspect_window_sql(pool: str) -> str:
     from the vote flags / excerpt window. Same 10-arm shape as mart_game_teardown.sql's
     _review_aspect_flags, but emitting a row per match (with recommendationid, so
     mart_game_aspect_reviews.sql can join each excerpt to its sentiment) rather than a boolean
-    column."""
+    column.
+
+    PERFORMANCE (see the ASPECT_WINDOW_SLICE_BEFORE/CHARS comment above): the sentence regex runs
+    on a small substr slice around the first keyword match's position (an inner subquery computes
+    that position once via _aspect_keyword_position_regex), not the whole review_text -- output is
+    byte-identical, but the expensive pattern scans ~ASPECT_WINDOW_SLICE_CHARS characters instead
+    of the full review body. One extra wrinkle beyond a plain substr: when the slice doesn't start
+    at the review's true beginning, its first few characters can be the TAIL of a word that was
+    truncated mid-word by the cut (e.g. slicing into "...for the most p|art you're..." at the `|`
+    leaves "art you're..." at the slice's start) -- and because a \\b boundary is satisfied at the
+    very start of ANY string, the sentence regex can then wrongly treat that fragment as a
+    standalone keyword match it would never have matched in the original, unsliced text. Stripped
+    with a `^\\S+` regexp_replace (only when the slice doesn't start at position 1, where there's
+    nothing to truncate) before the sentence regex ever sees it -- found and fixed via the
+    byte-identical-output check against real review text (see the ETL run report), not by
+    inspection."""
     arms = []
     for label, _placeholder, rx in ASPECT_LEXICON:
         rxe = rx.replace("'", "''")  # SQL single-quote escape (none today, but be safe)
         sent_e = _aspect_sentence_regex(rx).replace("'", "''")
+        pos_e = _aspect_keyword_position_regex(rx).replace("'", "''")
         label_e = label.replace("'", "''")
         arms.append(
             f"""
         SELECT appid, recommendationid, '{label_e}' AS aspect,
-            regexp_extract(review_text, '{sent_e}', 0, 'i') AS window_text
-        FROM {pool}
-        WHERE regexp_matches(review_text, '{rxe}', 'i')"""
+            regexp_extract(
+                CASE WHEN kw_pos - {ASPECT_WINDOW_SLICE_BEFORE} > 1
+                     THEN regexp_replace(
+                              substr(review_text, kw_pos - {ASPECT_WINDOW_SLICE_BEFORE}, {ASPECT_WINDOW_SLICE_CHARS}),
+                              '^\\S+', '')
+                     ELSE substr(review_text, 1, {ASPECT_WINDOW_SLICE_CHARS})
+                END,
+                '{sent_e}', 0, 'i'
+            ) AS window_text
+        FROM (
+            SELECT appid, recommendationid, review_text,
+                length(regexp_extract(review_text, '{pos_e}', 1, 'i')) + 1 AS kw_pos
+            FROM {pool}
+            WHERE regexp_matches(review_text, '{rxe}', 'i')
+        )"""
         )
     return "\nUNION ALL\n".join(arms)
 

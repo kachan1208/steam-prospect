@@ -71,75 +71,194 @@ JOIN _aspectrev_elig e ON e.appid = t.appid;
 -- down to a single `aspect` label column. Same regex shape (same @ASPECT_SENTENCE_CHARS@, same
 -- @RX_*@ text) as _aspect_sentence_regex()/_aspect_window_sql() in build_marts.py builds for the
 -- VADER scoring pass, so this excerpt window and the text actually scored can never drift apart.
+--
+-- PERFORMANCE (2026-07, mirrors build_marts.py's _aspect_window_sql /
+-- _aspect_keyword_position_regex -- see that comment for the full rationale): the sentence regex
+-- above runs on a small substr slice around the first keyword match, not the whole review_text --
+-- computing it directly against the full body, up to 10x per review, is what blew this ETL step
+-- from ~85min to ~5h. Each arm below first locates the match's character position (kw_pos, via a
+-- lazy `^([\s\S]*?)(?:rx)` prefix capture -- NOT strpos() on the bare matched keyword text, which
+-- ignores rx's own \b word-boundary anchors and can land on an earlier false position embedded
+-- inside an unrelated word, e.g. "hard" inside "hardware"; and NOT a plain `.*?` prefix, since
+-- RE2's `.` doesn't cross newlines and review text routinely has them before the first match),
+-- then slices @ASPECT_WINDOW_SLICE_CHARS@ characters starting @ASPECT_WINDOW_SLICE_BEFORE@ chars
+-- before it -- sized to always fully contain the up-to-@ASPECT_SENTENCE_CHARS@-per-side window a
+-- full-text scan would have found, so kw_matches and window_text are byte-identical to the
+-- pre-optimization output. The `regexp_replace(..., '^\s+... )` -- actually `'^\S+'` -- strips a
+-- possibly mid-word-truncated leading fragment from the slice (when it doesn't start at the
+-- review's true position 1): a \b boundary is satisfied at the very start of ANY string, so
+-- without this, a slice that happens to start inside a word (e.g. "...most p|art you're..." cut
+-- at the `|`) can make the sentence regex wrongly treat that fragment ("art you're...") as a
+-- standalone keyword match it would never match in the unsliced original text.
 CREATE TEMP TABLE _aspectrev_matches AS
 SELECT appid, recommendationid, 'Combat & Bosses' AS aspect, voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract_all(review_text, '@RX_COMBAT@', 1, 'i') AS kw_matches,
-    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_COMBAT@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i') AS window_text
-FROM _aspectrev_base
-WHERE regexp_matches(review_text, '@RX_COMBAT@', 'i')
+    regexp_extract(
+        CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
+             THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
+             ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
+        END,
+        '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_COMBAT@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
+    ) AS window_text
+FROM (
+    SELECT appid, recommendationid, voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
+        length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_COMBAT@)', 1, 'i')) + 1 AS kw_pos
+    FROM _aspectrev_base
+    WHERE regexp_matches(review_text, '@RX_COMBAT@', 'i')
+)
 
 UNION ALL
 SELECT appid, recommendationid, 'World & Exploration', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract_all(review_text, '@RX_WORLD@', 1, 'i'),
-    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_WORLD@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
-FROM _aspectrev_base
-WHERE regexp_matches(review_text, '@RX_WORLD@', 'i')
+    regexp_extract(
+        CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
+             THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
+             ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
+        END,
+        '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_WORLD@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
+    )
+FROM (
+    SELECT appid, recommendationid, voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
+        length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_WORLD@)', 1, 'i')) + 1 AS kw_pos
+    FROM _aspectrev_base
+    WHERE regexp_matches(review_text, '@RX_WORLD@', 'i')
+)
 
 UNION ALL
 SELECT appid, recommendationid, 'Art & Visuals', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract_all(review_text, '@RX_ART@', 1, 'i'),
-    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_ART@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
-FROM _aspectrev_base
-WHERE regexp_matches(review_text, '@RX_ART@', 'i')
+    regexp_extract(
+        CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
+             THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
+             ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
+        END,
+        '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_ART@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
+    )
+FROM (
+    SELECT appid, recommendationid, voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
+        length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_ART@)', 1, 'i')) + 1 AS kw_pos
+    FROM _aspectrev_base
+    WHERE regexp_matches(review_text, '@RX_ART@', 'i')
+)
 
 UNION ALL
 SELECT appid, recommendationid, 'Music & Audio', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract_all(review_text, '@RX_MUSIC@', 1, 'i'),
-    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_MUSIC@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
-FROM _aspectrev_base
-WHERE regexp_matches(review_text, '@RX_MUSIC@', 'i')
+    regexp_extract(
+        CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
+             THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
+             ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
+        END,
+        '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_MUSIC@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
+    )
+FROM (
+    SELECT appid, recommendationid, voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
+        length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_MUSIC@)', 1, 'i')) + 1 AS kw_pos
+    FROM _aspectrev_base
+    WHERE regexp_matches(review_text, '@RX_MUSIC@', 'i')
+)
 
 UNION ALL
 SELECT appid, recommendationid, 'Story & Writing', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract_all(review_text, '@RX_STORY@', 1, 'i'),
-    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_STORY@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
-FROM _aspectrev_base
-WHERE regexp_matches(review_text, '@RX_STORY@', 'i')
+    regexp_extract(
+        CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
+             THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
+             ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
+        END,
+        '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_STORY@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
+    )
+FROM (
+    SELECT appid, recommendationid, voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
+        length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_STORY@)', 1, 'i')) + 1 AS kw_pos
+    FROM _aspectrev_base
+    WHERE regexp_matches(review_text, '@RX_STORY@', 'i')
+)
 
 UNION ALL
 SELECT appid, recommendationid, 'Difficulty', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract_all(review_text, '@RX_DIFFICULTY@', 1, 'i'),
-    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_DIFFICULTY@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
-FROM _aspectrev_base
-WHERE regexp_matches(review_text, '@RX_DIFFICULTY@', 'i')
+    regexp_extract(
+        CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
+             THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
+             ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
+        END,
+        '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_DIFFICULTY@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
+    )
+FROM (
+    SELECT appid, recommendationid, voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
+        length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_DIFFICULTY@)', 1, 'i')) + 1 AS kw_pos
+    FROM _aspectrev_base
+    WHERE regexp_matches(review_text, '@RX_DIFFICULTY@', 'i')
+)
 
 UNION ALL
 SELECT appid, recommendationid, 'Controls & Performance', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract_all(review_text, '@RX_CONTROLS@', 1, 'i'),
-    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_CONTROLS@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
-FROM _aspectrev_base
-WHERE regexp_matches(review_text, '@RX_CONTROLS@', 'i')
+    regexp_extract(
+        CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
+             THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
+             ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
+        END,
+        '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_CONTROLS@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
+    )
+FROM (
+    SELECT appid, recommendationid, voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
+        length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_CONTROLS@)', 1, 'i')) + 1 AS kw_pos
+    FROM _aspectrev_base
+    WHERE regexp_matches(review_text, '@RX_CONTROLS@', 'i')
+)
 
 UNION ALL
 SELECT appid, recommendationid, 'Map & Navigation / Backtracking', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract_all(review_text, '@RX_MAPNAV@', 1, 'i'),
-    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_MAPNAV@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
-FROM _aspectrev_base
-WHERE regexp_matches(review_text, '@RX_MAPNAV@', 'i')
+    regexp_extract(
+        CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
+             THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
+             ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
+        END,
+        '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_MAPNAV@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
+    )
+FROM (
+    SELECT appid, recommendationid, voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
+        length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_MAPNAV@)', 1, 'i')) + 1 AS kw_pos
+    FROM _aspectrev_base
+    WHERE regexp_matches(review_text, '@RX_MAPNAV@', 'i')
+)
 
 UNION ALL
 SELECT appid, recommendationid, 'Content & Length', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract_all(review_text, '@RX_CONTENT@', 1, 'i'),
-    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_CONTENT@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
-FROM _aspectrev_base
-WHERE regexp_matches(review_text, '@RX_CONTENT@', 'i')
+    regexp_extract(
+        CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
+             THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
+             ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
+        END,
+        '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_CONTENT@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
+    )
+FROM (
+    SELECT appid, recommendationid, voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
+        length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_CONTENT@)', 1, 'i')) + 1 AS kw_pos
+    FROM _aspectrev_base
+    WHERE regexp_matches(review_text, '@RX_CONTENT@', 'i')
+)
 
 UNION ALL
 SELECT appid, recommendationid, 'Price & Value', voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract_all(review_text, '@RX_PRICEVALUE@', 1, 'i'),
-    regexp_extract(review_text, '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_PRICEVALUE@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i')
-FROM _aspectrev_base
-WHERE regexp_matches(review_text, '@RX_PRICEVALUE@', 'i');
+    regexp_extract(
+        CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
+             THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
+             ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
+        END,
+        '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_PRICEVALUE@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
+    )
+FROM (
+    SELECT appid, recommendationid, voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
+        length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_PRICEVALUE@)', 1, 'i')) + 1 AS kw_pos
+    FROM _aspectrev_base
+    WHERE regexp_matches(review_text, '@RX_PRICEVALUE@', 'i')
+);
 
 -- Classify each mention praise/complaint by the SIGN of its precomputed VADER compound
 -- (stg_aspect_mention_sentiment — scored over the SAME window shown below, in build_marts.py),
