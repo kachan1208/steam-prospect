@@ -14,6 +14,7 @@ Run:  python build_marts.py            (paths default relative to this file)
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import sys
 import time
@@ -165,6 +166,22 @@ ASPECT_WINDOW_SLICE_CHARS = ASPECT_WINDOW_SLICE_BEFORE + ASPECT_SENTENCE_CHARS +
 SENTIMENT_POS_THRESHOLD = 0.05
 SENTIMENT_NEG_THRESHOLD = -0.05
 SENTIMENT_SCORE_BATCH = 20000    # rows pulled+scored+inserted per streamed batch (bounded memory)
+
+# Incremental sentiment cache (2026-07): compute_aspect_sentiment/compute_press_sentiment used to
+# re-run VADER over the ENTIRE ~1.7M-mention / ~204K-article corpus on EVERY ETL run, even though
+# reviews/articles are immutable — a scored (recommendationid, aspect) mention or article_id's
+# input text never changes once written. That's what turned an ETL that used to take ~85min into a
+# ~3h run as the corpus grew: nightly, we were re-deriving the same answer for the same ~1.9M rows
+# over and over. Since a score is a pure function of (text, scoring config), it only needs to be
+# computed once per id and can be cached forever — see SENTIMENT_CACHE_DB_NAME and
+# compute_aspect_sentiment/compute_press_sentiment below for the cache read/write flow, and
+# _sentiment_config_hash for what forces a full rescore.
+SENTIMENT_CACHE_DB_NAME = "sentiment_cache.duckdb"  # lives in --data-dir, deliberately NOT named
+                                                     # prospect_*.duckdb — main()'s retention logic
+                                                     # prunes old dated marts; this file must survive.
+SENTIMENT_CACHE_VERSION = 1  # bump to force a full rescore even when none of the hashed config
+                              # knobs below changed (e.g. a vaderSentiment version bump, or a fix to
+                              # the scoring code itself that a config-value hash can't see).
 
 # Domain-tuned VADER lexicon overrides (2026-07). Stock VADER is a general-English lexicon: it has
 # no notion that "horror"/"brutal"/"insane"/"sick" are GENRE or INTENSITY descriptors in game
@@ -980,7 +997,78 @@ def _aspect_window_sql(pool: str) -> str:
     return "\nUNION ALL\n".join(arms)
 
 
-def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection) -> int:
+def _sentiment_cache_enabled() -> bool:
+    """Kill-switch: PROSPECT_SENTIMENT_CACHE=off (or =0) disables the cache entirely — no ATTACH,
+    no cache reads/writes, every run does a full rescore exactly as it did before this feature
+    existed. Unset, or any other value, leaves the cache on (the default)."""
+    return os.environ.get("PROSPECT_SENTIMENT_CACHE", "").strip().lower() not in ("off", "0")
+
+
+def _sentiment_config_hash() -> str:
+    """Hash of every knob that can change what a cached score's VALUE would be: the aspect keyword
+    lexicon, the gaming-domain VADER overrides applied in _get_analyzer(), the sentence/window
+    sizing, the pos/neg classification thresholds, plus a manually-bumpable version escape hatch.
+    Any edit to any of these changes the hash — _refresh_sentiment_cache wipes the cache whenever
+    the stored hash disagrees with this one, so a lexicon/window/threshold change can't silently
+    keep serving scores computed under the old config.
+
+    Deliberately NOT hashed: TEARDOWN_MIN_REVIEWS and the other eligibility floors that decide
+    which reviews/articles are IN SCOPE this run — those don't change what an already-scored
+    mention's compound IS, and _sent_pool/_press_score_set are recomputed fresh every run
+    regardless of the cache, so a floor change is picked up automatically."""
+    payload = "\n".join([
+        f"version={SENTIMENT_CACHE_VERSION}",
+        f"aspect_lexicon={ASPECT_LEXICON!r}",
+        f"gaming_overrides={sorted(GAMING_LEXICON_OVERRIDES.items())!r}",
+        f"sentence_chars={ASPECT_SENTENCE_CHARS!r}",
+        f"slice_before={ASPECT_WINDOW_SLICE_BEFORE!r}",
+        f"slice_chars={ASPECT_WINDOW_SLICE_CHARS!r}",
+        f"pos_threshold={SENTIMENT_POS_THRESHOLD!r}",
+        f"neg_threshold={SENTIMENT_NEG_THRESHOLD!r}",
+    ])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _attach_sentiment_cache(con: duckdb.DuckDBPyConnection, data_dir: Path) -> Path:
+    """ATTACH the persistent, cross-run sentiment cache read-write as `cache`, creating its file
+    and/or tables on first use. Caller MUST _detach_sentiment_cache() when done — both compute_*
+    functions do this in a try/finally, since DuckDB holds a write lock on an attached file for as
+    long as it stays attached, and a second ATTACH of the same path (e.g. the next compute_*
+    call, or a re-run in the same process) would otherwise fail."""
+    cache_path = Path(data_dir) / SENTIMENT_CACHE_DB_NAME
+    con.execute(f"ATTACH '{cache_path}' AS cache")
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS cache.aspect_mention("
+        "recommendationid VARCHAR, aspect VARCHAR, compound DOUBLE)"
+    )
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS cache.press_article(article_id BIGINT, compound DOUBLE)"
+    )
+    con.execute("CREATE TABLE IF NOT EXISTS cache.meta(key VARCHAR, value VARCHAR)")
+    return cache_path
+
+
+def _detach_sentiment_cache(con: duckdb.DuckDBPyConnection) -> None:
+    con.execute("DETACH cache")
+
+
+def _refresh_sentiment_cache(con: duckdb.DuckDBPyConnection) -> bool:
+    """Wipe both cache tables when the scoring config changed since they were last populated (or
+    when they're empty/newly created) — makes a lexicon/window/threshold edit, or a
+    SENTIMENT_CACHE_VERSION bump, force a full rescore instead of silently serving stale scores
+    computed under a different config. Returns True iff it invalidated (callers log that)."""
+    current = _sentiment_config_hash()
+    row = con.execute("SELECT value FROM cache.meta WHERE key = 'config_hash'").fetchone()
+    if row is not None and row[0] == current:
+        return False
+    con.execute("DELETE FROM cache.aspect_mention")
+    con.execute("DELETE FROM cache.press_article")
+    con.execute("DELETE FROM cache.meta WHERE key = 'config_hash'")
+    con.execute("INSERT INTO cache.meta VALUES ('config_hash', ?)", [current])
+    return True
+
+
+def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> int:
     """Precompute per-(appid, aspect) VADER text sentiment for the Game Teardown (see the
     ASPECT_LEXICON block above for the what/why). Runs BEFORE the mart SQL loop so
     mart_game_teardown.sql / mart_game_aspect_reviews.sql can read the results:
@@ -993,6 +1081,17 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection) -> int:
                                      counts (VADER ±0.05 band) + summed compound. Feeds the
                                      aggregate bars (mart_game_review_aspects / the genre
                                      baseline).
+
+    INCREMENTAL (2026-07): reviews are immutable and a (recommendationid, aspect) mention's score
+    never changes once computed, so this ATTACHes a persistent cross-run cache (see
+    _attach_sentiment_cache) at {data_dir}/sentiment_cache.duckdb, runs the expensive
+    _aspect_window_sql regex + VADER ONLY over recommendationids not already represented in
+    cache.aspect_mention, and builds stg_aspect_mention_sentiment by joining the full in-scope
+    pool back against the cache (old + newly-scored rows alike) — everything downstream is
+    unchanged, it just reads that table exactly as before. A run with nothing new to score still
+    pays for the (cheap) pool/eligibility query, but none of the regex/VADER work. Disable
+    entirely with PROSPECT_SENTIMENT_CACHE=off — full rescore every run, cache file untouched (see
+    _sentiment_cache_enabled).
 
     Scoring streams through _stream_vader_scores (a per-mention window table built in SQL, read
     via an independent cursor in bounded batches) — peak memory is one batch, never the whole
@@ -1013,23 +1112,78 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection) -> int:
         WHERE r.language='english' AND r.review_text IS NOT NULL AND length(trim(r.review_text)) > 0
         """
     )
-    # Per-mention window table. REGULAR (not TEMP) so the independent read cursor below can see
-    # it; dropped after scoring so it never ships in the versioned .duckdb.
-    con.execute("DROP TABLE IF EXISTS _sent_windows")
-    con.execute(f"CREATE TABLE _sent_windows AS {_aspect_window_sql('_sent_pool')}")
 
-    con.execute(
-        "CREATE TEMP TABLE stg_aspect_mention_sentiment("
-        "appid INTEGER, recommendationid VARCHAR, aspect VARCHAR, compound DOUBLE)"
-    )
+    if not _sentiment_cache_enabled():
+        # Original, uncached path: score the WHOLE pool every run.
+        con.execute("DROP TABLE IF EXISTS _sent_windows")
+        con.execute(f"CREATE TABLE _sent_windows AS {_aspect_window_sql('_sent_pool')}")
+        con.execute(
+            "CREATE TEMP TABLE stg_aspect_mention_sentiment("
+            "appid INTEGER, recommendationid VARCHAR, aspect VARCHAR, compound DOUBLE)"
+        )
+        n_scored = _stream_vader_scores(
+            con,
+            "SELECT appid, recommendationid, aspect, window_text FROM _sent_windows",
+            "INSERT INTO stg_aspect_mention_sentiment VALUES (?, ?, ?, ?)",
+        )
+        con.execute("DROP TABLE IF EXISTS _sent_windows")
+    else:
+        _attach_sentiment_cache(con, data_dir)
+        try:
+            if _refresh_sentiment_cache(con):
+                print("[etl] sentiment cache: config/version changed -> cache cleared, full rescore")
 
-    n_scored = _stream_vader_scores(
-        con,
-        "SELECT appid, recommendationid, aspect, window_text FROM _sent_windows",
-        "INSERT INTO stg_aspect_mention_sentiment VALUES (?, ?, ?, ?)",
-    )
+            # _new = pool reviews not yet represented in the cache AT ALL. Invariant this relies
+            # on (maintained by construction below — every recommendationid selected into _new in
+            # a given run gets every aspect row it matches inserted in that same run): a cached
+            # recommendationid always carries ALL of the aspect rows it ever matched, never a
+            # partial subset — so "no row in cache.aspect_mention" is exactly "needs (re)scoring",
+            # with no risk of mistaking a review that simply matched zero aspects for "cached"
+            # (it has no cache row either, so it's correctly retried — cheap, since the vast
+            # majority of reviews match at least one of the 10 broad aspect arms).
+            con.execute("DROP TABLE IF EXISTS _sent_new")
+            con.execute(
+                """
+                CREATE TEMP TABLE _sent_new AS
+                SELECT p.appid, p.recommendationid, p.review_text
+                FROM _sent_pool p
+                WHERE p.recommendationid NOT IN (
+                    SELECT recommendationid FROM cache.aspect_mention WHERE recommendationid IS NOT NULL
+                )
+                """
+            )
+            n_new_reviews = con.execute("SELECT COUNT(*) FROM _sent_new").fetchone()[0]
 
-    con.execute("DROP TABLE IF EXISTS _sent_windows")
+            # The expensive regex now runs ONLY over the delta (_sent_new), not the full pool.
+            # REGULAR (not TEMP) so the independent read cursor in _stream_vader_scores can see
+            # it; dropped after scoring so it never ships in the versioned .duckdb.
+            con.execute("DROP TABLE IF EXISTS _sent_windows")
+            con.execute(f"CREATE TABLE _sent_windows AS {_aspect_window_sql('_sent_new')}")
+
+            n_new_mentions = _stream_vader_scores(
+                con,
+                "SELECT recommendationid, aspect, window_text FROM _sent_windows",
+                "INSERT INTO cache.aspect_mention VALUES (?, ?, ?)",
+            )
+            con.execute("DROP TABLE IF EXISTS _sent_windows")
+            con.execute("DROP TABLE IF EXISTS _sent_new")
+
+            # Full in-scope set, read back from the cache (untouched old rows + just-inserted new
+            # ones alike). Same shape/columns as the uncached branch above.
+            con.execute(
+                """
+                CREATE TEMP TABLE stg_aspect_mention_sentiment AS
+                SELECT p.appid, m.recommendationid, m.aspect, m.compound
+                FROM cache.aspect_mention m
+                JOIN _sent_pool p ON p.recommendationid = m.recommendationid
+                """
+            )
+            n_scored = con.execute("SELECT COUNT(*) FROM stg_aspect_mention_sentiment").fetchone()[0]
+            print(f"[etl] aspect sentiment cache: {n_new_reviews:,} new review(s) scored "
+                  f"({n_new_mentions:,} new mention rows); {n_scored:,} mention rows in scope total")
+        finally:
+            _detach_sentiment_cache(con)
+
     con.execute("DROP TABLE IF EXISTS _sent_pool")
 
     # Aggregate per (appid, aspect). pos/neg/neutral use VADER's ±0.05 band; sum_compound lets
@@ -1050,7 +1204,7 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection) -> int:
     return n_scored
 
 
-def compute_press_sentiment(con: duckdb.DuckDBPyConnection) -> int:
+def compute_press_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> int:
     """Precompute VADER sentiment of each press article's headline+summary, for the Game
     Teardown's press footprint (does a game's journalist coverage skew positive or negative?).
     Runs BEFORE the mart loop so mart_game_teardown.sql can aggregate it per game.
@@ -1063,7 +1217,12 @@ def compute_press_sentiment(con: duckdb.DuckDBPyConnection) -> int:
     not a considered verdict; and an article's overall tone is only a proxy for its stance on the
     specific game it's matched to. Steam News (dev-authored posts) is excluded, matching
     _press_base in mart_game_teardown.sql. The mart applies the per-game match-confidence floor
-    when it aggregates, so we score every mentioned article once here regardless of confidence."""
+    when it aggregates, so we score every mentioned article once here regardless of confidence.
+
+    INCREMENTAL (2026-07): same cache as compute_aspect_sentiment (see its docstring), keyed by
+    article_id instead of recommendationid — articles are immutable too, so a scored article_id's
+    compound never changes. PROSPECT_SENTIMENT_CACHE=off disables it (full rescore, no cache
+    file touched)."""
     # Distinct non-Steam-News articles that mention any game. REGULAR table so the streaming read
     # cursor can see it; dropped after scoring so it never ships in the versioned .duckdb.
     con.execute("DROP TABLE IF EXISTS _press_score_set")
@@ -1078,12 +1237,61 @@ def compute_press_sentiment(con: duckdb.DuckDBPyConnection) -> int:
         WHERE a.source <> 'steam_news'
         """
     )
-    con.execute("CREATE TEMP TABLE stg_press_article_sentiment(article_id INTEGER, compound DOUBLE)")
-    n = _stream_vader_scores(
-        con,
-        "SELECT article_id, text FROM _press_score_set",
-        "INSERT INTO stg_press_article_sentiment VALUES (?, ?)",
-    )
+
+    if not _sentiment_cache_enabled():
+        # Original, uncached path: score every in-scope article every run.
+        con.execute("CREATE TEMP TABLE stg_press_article_sentiment(article_id INTEGER, compound DOUBLE)")
+        n = _stream_vader_scores(
+            con,
+            "SELECT article_id, text FROM _press_score_set",
+            "INSERT INTO stg_press_article_sentiment VALUES (?, ?)",
+        )
+        con.execute("DROP TABLE IF EXISTS _press_score_set")
+        return n
+
+    _attach_sentiment_cache(con, data_dir)
+    try:
+        if _refresh_sentiment_cache(con):
+            print("[etl] sentiment cache: config/version changed -> cache cleared, full rescore")
+
+        # _press_new = in-scope articles not yet in the cache. REGULAR (not TEMP) so the
+        # independent read cursor in _stream_vader_scores can see it.
+        con.execute("DROP TABLE IF EXISTS _press_new")
+        con.execute(
+            """
+            CREATE TABLE _press_new AS
+            SELECT s.article_id, s.text
+            FROM _press_score_set s
+            WHERE s.article_id NOT IN (
+                SELECT article_id FROM cache.press_article WHERE article_id IS NOT NULL
+            )
+            """
+        )
+        n_new_articles = con.execute("SELECT COUNT(*) FROM _press_new").fetchone()[0]
+
+        _stream_vader_scores(
+            con,
+            "SELECT article_id, text FROM _press_new",
+            "INSERT INTO cache.press_article VALUES (?, ?)",
+        )
+        con.execute("DROP TABLE IF EXISTS _press_new")
+
+        # Full in-scope set, read back from the cache (untouched old rows + just-inserted new
+        # ones alike). Same shape/columns as the uncached branch above.
+        con.execute(
+            """
+            CREATE TEMP TABLE stg_press_article_sentiment AS
+            SELECT s.article_id, c.compound
+            FROM cache.press_article c
+            JOIN _press_score_set s ON s.article_id = c.article_id
+            """
+        )
+        n = con.execute("SELECT COUNT(*) FROM stg_press_article_sentiment").fetchone()[0]
+        print(f"[etl] press sentiment cache: {n_new_articles:,} new article(s) scored; "
+              f"{n:,} articles in scope total")
+    finally:
+        _detach_sentiment_cache(con)
+
     con.execute("DROP TABLE IF EXISTS _press_score_set")
     return n
 
@@ -1185,15 +1393,21 @@ def main() -> int:
         print("[etl] player_counts (live CCU): "
               + ("found" if have_ccu else "ABSENT — live_players will be NULL"))
 
+        if _sentiment_cache_enabled():
+            print(f"[etl] sentiment cache  : {data_dir / SENTIMENT_CACHE_DB_NAME}")
+        else:
+            print("[etl] sentiment cache  : DISABLED (PROSPECT_SENTIMENT_CACHE=off) "
+                  "-- full rescore every run, cache file untouched")
+
         print("[etl] scoring aspect text sentiment (VADER) ...")
         t_sent = time.perf_counter()
-        n_sent = compute_aspect_sentiment(con)
+        n_sent = compute_aspect_sentiment(con, data_dir)
         print(f"[etl] aspect sentiment: scored {n_sent:,} aspect mentions "
               f"({time.perf_counter() - t_sent:.1f}s)")
 
         print("[etl] scoring press-coverage sentiment (VADER) ...")
         t_press = time.perf_counter()
-        n_press = compute_press_sentiment(con)
+        n_press = compute_press_sentiment(con, data_dir)
         print(f"[etl] press sentiment: scored {n_press:,} articles "
               f"({time.perf_counter() - t_press:.1f}s)")
 
