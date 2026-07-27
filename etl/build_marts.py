@@ -533,7 +533,11 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
             SELECT
                 ag.appid, ag.name, ag.release_year,
                 TRY_CAST(ag.release_date_iso AS DATE) AS release_date,
-                ag.price_initial, ag.is_free, ag.developers, ag.publishers,
+                -- SteamSpy price, falling back to Steam's own appdetails price (games.price_initial,
+                -- stored in cents) for brand-new games SteamSpy hasn't indexed yet -- so revenue
+                -- estimates immediately instead of stranding a blank $ on every fresh release.
+                COALESCE(ag.price_initial, g.price_initial / 100.0) AS price_initial,
+                ag.is_free, ag.developers, ag.publishers,
                 ag.self_published, ag.dev_game_count, ag.is_indie,
                 ag.metacritic_score, ag.achievements_count,
                 ag.owners_mid AS owners_mid_steamspy,
@@ -554,6 +558,7 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
             FROM src.analysis_games ag
             LEFT JOIN stg_reviews_agg ra ON ra.appid = ag.appid
             LEFT JOIN src.review_summary rs ON rs.appid = ag.appid
+            LEFT JOIN src.games g ON g.appid = ag.appid   -- appdetails price fallback (see above)
         )
         SELECT
             appid, name, release_year, release_date,
