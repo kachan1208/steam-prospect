@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
     init_db()
     # Analytics plane: open the read-only marts. Fail loud if the ETL hasn't run.
     try:
-        analytics_db.init(settings.analytics_db_path)
+        analytics_db.init(settings.analytics_db_path, settings.analytics_pool_size)
     except FileNotFoundError as exc:
         # Keep the app up so /docs and a clear error are reachable; endpoints will 503.
         print(f"[api] WARNING: {exc}")

@@ -15,6 +15,9 @@ class Settings(BaseSettings):
 
     # Analytics plane: read-only DuckDB marts (the current.duckdb symlink from the ETL).
     analytics_db_path: str = str(REPO_ROOT / "data" / "current.duckdb")
+    # Read-only DuckDB cursor pool size — how many analytics queries can run concurrently
+    # before requests queue (env: PROSPECT_ANALYTICS_POOL_SIZE). ~2x vCPUs is a good default.
+    analytics_pool_size: int = 4
 
     # Control plane: SQLAlchemy DSN. Local default = SQLite file; set to a Postgres URL later.
     control_dsn: str = f"sqlite:///{REPO_ROOT / 'prospect_control.db'}"
