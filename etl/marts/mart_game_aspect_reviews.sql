@@ -39,26 +39,25 @@ DROP TABLE IF EXISTS mart_game_aspect_reviews;
 -- text-mining-only staging table). Kept as its own filter rather than widening
 -- stg_review_text, so this file can't change behavior for the already-verified
 -- mart_game_teardown.sql.
-CREATE TEMP TABLE _aspectrev_text AS
+-- OPTIMIZATION (2026-07-28): the english-review pool has ~doubled (2.06M rows / ~0.8GB text) as
+-- the reviews scraper backfilled. Materializing it in FULL (_aspectrev_text) and then AGAIN
+-- filtered (_aspectrev_base) kept TWO ~0.8GB text copies live at once. Instead: derive
+-- eligibility from a COUNT-only pass over src.reviews (no text materialized), then materialize
+-- review text exactly ONCE and only for eligible games.
+CREATE TEMP TABLE _aspectrev_elig AS
+SELECT appid FROM src.reviews
+WHERE language = 'english' AND review_text IS NOT NULL AND length(trim(review_text)) > 0
+GROUP BY appid HAVING COUNT(*) >= @TEARDOWN_MIN_REVIEWS@;
+
+-- The eligible-game review pool, materialized ONCE (the 10 aspect branches below each scan it).
+-- recommendationid is carried so each mention can join to its precomputed VADER sentiment.
+CREATE TEMP TABLE _aspectrev_base AS
 SELECT r.appid, r.recommendationid, r.voted_up, r.review_text, r.votes_up,
     COALESCE(r.playtime_at_review, r.playtime_forever) AS playtime_minutes,
     r.timestamp_created, r.language
 FROM src.reviews r
-WHERE r.language = 'english'
-  AND r.review_text IS NOT NULL
-  AND length(trim(r.review_text)) > 0;
-
-CREATE TEMP TABLE _aspectrev_elig AS
-SELECT appid FROM _aspectrev_text GROUP BY appid HAVING COUNT(*) >= @TEARDOWN_MIN_REVIEWS@;
-
--- Materialize the eligible-game review pool ONCE so the 10 aspect branches below each scan
--- it directly rather than re-joining _aspectrev_text x _aspectrev_elig ten times.
--- recommendationid is carried so each mention can join to its precomputed VADER sentiment.
-CREATE TEMP TABLE _aspectrev_base AS
-SELECT t.appid, t.recommendationid, t.voted_up, t.review_text, t.votes_up, t.playtime_minutes,
-    t.timestamp_created, t.language
-FROM _aspectrev_text t
-JOIN _aspectrev_elig e ON e.appid = t.appid;
+JOIN _aspectrev_elig e ON e.appid = r.appid
+WHERE r.language = 'english' AND r.review_text IS NOT NULL AND length(trim(r.review_text)) > 0;
 
 -- One row per (review, matched aspect) — same lexicon as everywhere (rendered from
 -- ASPECT_LEXICON via @RX_*@ placeholders), emitted as a row per match (not a boolean column),
@@ -91,6 +90,17 @@ JOIN _aspectrev_elig e ON e.appid = t.appid;
 -- at the `|`) can make the sentence regex wrongly treat that fragment ("art you're...") as a
 -- standalone keyword match it would never match in the unsliced original text.
 CREATE TEMP TABLE _aspectrev_matches AS
+-- OPTIMIZATION (2026-07-28): rank/sort the matches WITHOUT carrying the full review_text.
+-- Precompute win_start + text_len + a short text_head HERE (while review_text is on hand), then
+-- drop review_text so the downstream window sort (_aspectrev_ranked) moves ~300-char excerpts
+-- instead of multi-KB review bodies. window_text/win_start/text_len come from the SAME review_text,
+-- so the emitted excerpts are byte-identical to before.
+SELECT appid, recommendationid, aspect, voted_up, votes_up, playtime_minutes, timestamp_created, language,
+    kw_matches, window_text,
+    strpos(review_text, window_text) AS win_start,
+    length(review_text) AS text_len,
+    substr(review_text, 1, 2 * @ASPECT_SENTENCE_CHARS@) AS text_head
+FROM (
 SELECT appid, recommendationid, 'Combat & Bosses' AS aspect, voted_up, review_text, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract_all(review_text, '@RX_COMBAT@', 1, 'i') AS kw_matches,
     regexp_extract(
@@ -258,7 +268,12 @@ FROM (
         length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_PRICEVALUE@)', 1, 'i')) + 1 AS kw_pos
     FROM _aspectrev_base
     WHERE regexp_matches(review_text, '@RX_PRICEVALUE@', 'i')
+)
 );
+
+-- _aspectrev_base (the ~0.8GB eligible review-text pool) is now fully consumed by the 10-arm
+-- match scan above; drop it so it doesn't sit in memory through the ranking + windowing below.
+DROP TABLE _aspectrev_base;
 
 -- Classify each mention praise/complaint by the SIGN of its precomputed VADER compound
 -- (stg_aspect_mention_sentiment — scored over the SAME window shown below, in build_marts.py),
@@ -294,10 +309,9 @@ CREATE TEMP TABLE _aspectrev_windowed AS
 SELECT
     appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language,
     list_distinct(list_transform(kw_matches, x -> lower(x))) AS matched_keywords,
-    review_text,
-    length(review_text) AS text_len,
-    COALESCE(window_text, substr(review_text, 1, 2 * @ASPECT_SENTENCE_CHARS@)) AS excerpt_body,
-    strpos(review_text, window_text) AS win_start
+    text_len,
+    COALESCE(window_text, text_head) AS excerpt_body,
+    win_start
 FROM _aspectrev_ranked;
 
 CREATE TABLE mart_game_aspect_reviews AS

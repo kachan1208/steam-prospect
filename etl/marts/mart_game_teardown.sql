@@ -265,3 +265,10 @@ SELECT appid, source, title, author, url, CAST(published_at AS VARCHAR) AS publi
 FROM ranked
 WHERE conf_rank <= @PRESS_NOTABLE_N@ OR date_rank = 1
 ORDER BY appid, published_at ASC NULLS LAST;
+
+-- OPTIMIZATION (2026-07-28): stg_review_text (staging's ~0.8GB english review-text copy) is used
+-- ONLY by this teardown mart. Drop it here so it doesn't sit in memory alongside
+-- mart_game_aspect_reviews' own eligible review-text pool, which builds next — two ~0.8GB text
+-- copies coexisting was a big part of the ETL's memory peak once the review corpus doubled.
+-- Recreated by create_staging() on the next run.
+DROP TABLE IF EXISTS stg_review_text;
