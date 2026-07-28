@@ -10,6 +10,7 @@ import {
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { useGameSearch } from "./api";
+import { trackEvent } from "./analytics";
 
 /**
  * The interactive, in-context product tour — driver.js/react-joyride style coach marks that
@@ -357,6 +358,7 @@ export function TourProvider({ children }: { children: ReactNode }) {
   }, [running, stepIndex]);
 
   const startTour = useCallback(() => {
+    trackEvent("tour_start");
     clearStep();
     setStepIndex(0);
     setRunning(true);

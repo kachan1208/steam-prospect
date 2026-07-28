@@ -6,6 +6,7 @@ import { OpportunityBars, OPPORTUNITY_LEGEND } from "../components/charts/Opport
 import { NicheDetailDrawer } from "../components/NicheDetailDrawer";
 import { SavedViewsMenu, type NicheViewConfig } from "../components/SavedViewsMenu";
 import { Card } from "../components/ui/Card";
+import { trackEvent } from "../lib/analytics";
 import {
   nicheExportCsvUrl,
   useNiches,
@@ -319,6 +320,7 @@ export default function NicheFinder() {
             <SavedViewsMenu current={currentConfig} onApply={applyView} />
             <a
               href={csvUrl}
+              onClick={() => trackEvent("niche_export_csv")}
               className="rounded-lg border border-chartborder bg-surface px-3 py-1.5 text-xs font-medium text-ink-secondary shadow-xs transition-colors hover:bg-surface2 hover:text-ink-primary"
             >
               Export CSV

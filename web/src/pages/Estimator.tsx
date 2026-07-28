@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { Badge } from "../components/ui/Badge";
 import { Card } from "../components/ui/Card";
 import { useEstimate, useGenres } from "../lib/api";
+import { trackEvent } from "../lib/analytics";
 import { fmtCompact, fmtUsd } from "../lib/format";
 import { tierColor } from "../lib/palette";
 import { useTheme } from "../lib/theme";
@@ -45,6 +46,7 @@ export default function Estimator() {
   const [genre, setGenre] = useState("__all__");
 
   function runEstimate() {
+    trackEvent("estimator_run");
     estimate.mutate({
       reviews: basis === "reviews" ? reviews : undefined,
       wishlists: basis === "wishlists" ? wishlists : undefined,

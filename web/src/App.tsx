@@ -3,6 +3,7 @@ import clsx from "clsx";
 import { useEffect, type ReactNode } from "react";
 
 import { useHealth } from "./lib/api";
+import { initAnalytics, trackPageview } from "./lib/analytics";
 import { useTheme, ACCENTS, PRESETS } from "./lib/theme";
 import { hasInProgressTourStep, ONBOARDING_STORAGE_KEY, TourProvider } from "./lib/tour";
 import { TourOverlay } from "./components/TourOverlay";
@@ -376,9 +377,23 @@ function AppShell() {
   );
 }
 
+// Emits a page-view event on every client-side route change (the server never sees SPA
+// navigations) and wires the flush-on-unload listeners once. Rendered inside the Router.
+function RouteTracker() {
+  const location = useLocation();
+  useEffect(() => {
+    initAnalytics();
+  }, []);
+  useEffect(() => {
+    trackPageview(location.pathname);
+  }, [location.pathname]);
+  return null;
+}
+
 export default function App() {
   return (
     <TourProvider>
+      <RouteTracker />
       <Routes>
         <Route path="/" element={<Navigate to="/niches" replace />} />
         <Route path="/terms" element={<Terms />} />

@@ -1,0 +1,124 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Frontend usage: page views + interactions (prospect_pageview_total / prospect_event_total) and server-side feature usage (http_requests_total). Counters reset on the nightly app restart; all panels use increase(), which is reset-aware.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "blue", "value": null } ] }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto" },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "sum(increase(prospect_pageview_total[$__range]))", "instant": true, "legendFormat": "page views", "range": false, "refId": "A" } ],
+      "title": "Page views (selected range)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "purple", "value": null } ] }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto" },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "sum(increase(prospect_event_total[$__range]))", "instant": true, "legendFormat": "interactions", "range": false, "refId": "A" } ],
+      "title": "Interactions (selected range)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto" },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "sum(increase(http_requests_total{handler!~\"/metrics|/api/analytics/collect|/api/health\"}[$__range]))", "instant": true, "legendFormat": "api requests", "range": false, "refId": "A" } ],
+      "title": "API requests (selected range)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "orange", "value": null } ] }, "unit": "percentunit" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto" },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "sum(increase(prospect_event_total{event=\"tour_complete\"}[$__range])) / clamp_min(sum(increase(prospect_event_total{event=\"tour_start\"}[$__range])), 1)", "instant": true, "legendFormat": "tour completion", "range": false, "refId": "A" } ],
+      "title": "Onboarding completion rate",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 4 },
+      "id": 5,
+      "options": { "displayMode": "gradient", "minVizHeight": 10, "minVizWidth": 0, "orientation": "horizontal", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "showUnfilled": true, "valueMode": "color" },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "sort_desc(sum by (route) (increase(prospect_pageview_total[$__range])))", "instant": true, "legendFormat": "{{route}}", "range": false, "refId": "A" } ],
+      "title": "Top pages (what gets used)",
+      "type": "bargauge"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 4 },
+      "id": 6,
+      "options": { "displayMode": "gradient", "minVizHeight": 10, "minVizWidth": 0, "orientation": "horizontal", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "showUnfilled": true, "valueMode": "color" },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "sort_desc(sum by (event) (increase(prospect_event_total[$__range])))", "instant": true, "legendFormat": "{{event}}", "range": false, "refId": "A" } ],
+      "title": "Top interactions (what's interesting)",
+      "type": "bargauge"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 15, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 5, "scaleDistribution": { "type": "linear" }, "showPoints": "never", "spanNulls": true, "stacking": { "group": "A", "mode": "normal" }, "thresholdsStyle": { "mode": "off" } }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 13 },
+      "id": 7,
+      "options": { "legend": { "calcs": [], "displayMode": "table", "placement": "right", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "sum by (route) (increase(prospect_pageview_total[$__interval]))", "legendFormat": "{{route}}", "range": true, "refId": "A" } ],
+      "title": "Page views over time (by route)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] }, "unit": "short" }, "overrides": [ { "matcher": { "id": "byName", "options": "Value" }, "properties": [ { "id": "custom.cellOptions", "value": { "mode": "gradient", "type": "gauge" } }, { "id": "custom.width", "value": 320 } ] } ] },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 21 },
+      "id": 8,
+      "options": { "cellHeight": "sm", "footer": { "countRows": false, "fields": "", "reducer": [ "sum" ], "show": false }, "showHeader": true, "sortBy": [ { "displayName": "Value", "desc": true } ] },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "sort_desc(sum by (handler) (increase(http_requests_total{handler!~\"/metrics|/api/analytics/collect|/api/health|/\"}[$__range])))", "format": "table", "instant": true, "legendFormat": "{{handler}}", "range": false, "refId": "A" } ],
+      "title": "Feature usage by API endpoint (server-side)",
+      "transformations": [ { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true }, "renameByName": { "handler": "endpoint", "Value": "requests" } } } ],
+      "type": "table"
+    }
+  ],
+  "refresh": "",
+  "schemaVersion": 39,
+  "tags": [ "prospect", "usage" ],
+  "templating": { "list": [] },
+  "time": { "from": "now-7d", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Prospect — Usage Analytics",
+  "uid": "prospect-usage",
+  "version": 1,
+  "weekStart": ""
+}

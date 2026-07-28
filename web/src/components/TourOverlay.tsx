@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { useTour, type TourPlacement, type TourStep } from "../lib/tour";
+import { trackEvent } from "../lib/analytics";
 
 /**
  * Renders the running tour's dim scrim + spotlight hole + anchored popover, portaled to
@@ -340,14 +341,17 @@ export function TourOverlay() {
       const inField = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
       if (e.key === "Escape") {
         e.preventDefault();
+        trackEvent("tour_skip");
         endTour();
         return;
       }
       if (inField) return; // don't hijack typing during an interactive step
       if (e.key === "ArrowRight" || e.key === "Enter") {
         e.preventDefault();
-        if (isLast) endTour();
-        else next();
+        if (isLast) {
+          trackEvent("tour_complete");
+          endTour();
+        } else next();
       } else if (e.key === "ArrowLeft") {
         e.preventDefault();
         if (!isFirst) prev();
@@ -403,9 +407,17 @@ export function TourOverlay() {
         total={steps.length}
         isFirst={isFirst}
         isLast={isLast}
-        onNext={() => (isLast ? endTour() : next())}
+        onNext={() => {
+          if (isLast) {
+            trackEvent("tour_complete");
+            endTour();
+          } else next();
+        }}
         onPrev={prev}
-        onSkip={endTour}
+        onSkip={() => {
+          trackEvent("tour_skip");
+          endTour();
+        }}
       />
     </div>,
     document.body,
