@@ -131,6 +131,15 @@ export default function GameProfile() {
                   <span>{fmtPrice(profile.price_initial)}</span>
                   {profile.is_indie === 1 && <Badge>Indie</Badge>}
                   <Badge>{profile.self_published ? "Self-published" : "Publisher"}</Badge>
+                  {profile.first_seen && !Number.isNaN(Date.parse(profile.first_seen)) && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span title={`First seen in our catalog: ${profile.first_seen}`}>
+                        In catalog since{" "}
+                        {new Date(profile.first_seen).toLocaleDateString(undefined, { year: "numeric", month: "short" })}
+                      </span>
+                    </>
+                  )}
                 </div>
                 <div className="mt-1 text-xs text-ink-secondary">
                   {profile.developers ?? "Unknown developer"}

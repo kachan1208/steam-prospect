@@ -538,6 +538,7 @@ export interface GameProfile {
   live_players: number | null;
   twitch_viewers: number | null;
   twitch_streams: number | null;
+  first_seen: string | null;
 }
 
 export function useGameProfile(appid: number | null) {

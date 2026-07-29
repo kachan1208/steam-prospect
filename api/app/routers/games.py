@@ -35,12 +35,12 @@ router = APIRouter(prefix="/api/games", tags=["games"])
 SORTABLE = {
     "name", "release_year", "price_initial", "owners_mid", "total_reviews",
     "positive_ratio", "est_rev_reviews", "rev_pct_in_genre", "reviews_pct_in_genre",
-    "owners_pct_in_genre", "n_reviews_trailing_30d", "live_players",
+    "owners_pct_in_genre", "n_reviews_trailing_30d", "live_players", "first_seen",
 }
 
 _SEARCH_COLS = (
     "appid, name, primary_genre, release_year, price_initial, is_free, owners_mid, "
-    "total_reviews, positive_ratio, est_rev_reviews, live_players, header_image, top_tags"
+    "total_reviews, positive_ratio, est_rev_reviews, live_players, first_seen, header_image, top_tags"
 )
 
 _PROFILE_COLS = (
@@ -51,7 +51,7 @@ _PROFILE_COLS = (
     "reviews_pct_in_genre, owners_pct_in_genre, top_tags, n_reviews_sampled, "
     "n_reviews_first_30d, n_reviews_first_90d, n_reviews_first_365d, n_reviews_trailing_30d, "
     "playtime_p25, playtime_p50, playtime_p75, "
-    "live_players, twitch_viewers, twitch_streams"
+    "live_players, twitch_viewers, twitch_streams, first_seen"
 )
 
 

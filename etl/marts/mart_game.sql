@@ -79,6 +79,7 @@ SELECT
     g.est_rev_reviews, g.est_rev_owners,
     g.metacritic_score, g.achievements_count, g.avg_playtime_forever,
     gh.header_image, gh.short_description,
+    CAST(gh.first_seen AS VARCHAR) AS first_seen,   -- when this game first entered OUR catalog
     pr.rev_pct_in_genre, pr.reviews_pct_in_genre, pr.owners_pct_in_genre,
     COALESCE(tt.top_tags, []::VARCHAR[]) AS top_tags,
     COALESCE(v.n_reviews_sampled, 0) AS n_reviews_sampled,
