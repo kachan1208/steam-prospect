@@ -140,7 +140,7 @@ STEP="etl"; ETL_T0=$(date -u +%s)
 echo "[etl] start $(date -u)"
 cd /root/prospect/etl || exit 1
 ETL_RC=0
-timeout 7200 /root/prospect/etl/.venv/bin/python build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data || ETL_RC=$?
+timeout 14400 /root/prospect/etl/.venv/bin/python build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data || ETL_RC=$?
 ETL_DUR=$(( $(date -u +%s) - ETL_T0 ))
 if [ "$ETL_RC" -eq 0 ]; then
     docker restart prospect
