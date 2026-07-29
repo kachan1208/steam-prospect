@@ -214,6 +214,7 @@ class GameSearchRow(BaseModel):
     live_players: Optional[int] = None
     header_image: Optional[str] = None
     top_tags: list[str] = Field(default_factory=list)
+    first_seen: Optional[str] = None   # when this game first entered our catalog
 
 
 class GameSearchList(BaseModel):
@@ -264,6 +265,7 @@ class GameProfile(BaseModel):
     live_players: Optional[int] = None
     twitch_viewers: Optional[int] = None
     twitch_streams: Optional[int] = None
+    first_seen: Optional[str] = None   # when this game first entered our catalog (not Steam's release date)
 
 
 class PriceBand(BaseModel):
