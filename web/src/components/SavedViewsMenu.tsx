@@ -23,7 +23,7 @@ const SORT_KEYS: SortKey[] = [
 function parseViewConfig(raw: Record<string, unknown>): NicheViewConfig {
   const dimension: Dimension = raw.dimension === "genre" ? "genre" : "tag";
   const windowVal: Window = raw.window === "24m" ? "24m" : "all";
-  const min_reviews = typeof raw.min_reviews === "number" ? raw.min_reviews : 10;
+  const min_reviews = typeof raw.min_reviews === "number" ? raw.min_reviews : 50;
   const sortRaw = typeof raw.sort === "string" ? raw.sort : "opportunity";
   const sort: SortKey = (SORT_KEYS as string[]).includes(sortRaw) ? (sortRaw as SortKey) : "opportunity";
   const order: "asc" | "desc" = raw.order === "asc" ? "asc" : "desc";

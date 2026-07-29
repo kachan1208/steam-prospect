@@ -53,7 +53,7 @@ export default function GameSearch() {
   const [genre, setGenre] = useState("__all__");
   const [tag, setTag] = useState("");
   const debouncedTag = useDebounced(tag, 300);
-  const [minReviews, setMinReviews] = useState(10);
+  const [minReviews, setMinReviews] = useState(0); // show the FULL catalog by default (incl. games with no review data); user can raise the floor
   const [sort, setSort] = useState<GameSortKey>("total_reviews");
   const [order, setOrder] = useState<"asc" | "desc">("desc");
   const [offset, setOffset] = useState(0);

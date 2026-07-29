@@ -97,7 +97,7 @@ export default function NicheFinder() {
   const { theme } = useTheme();
   const [dimension, setDimension] = useState<Dimension>("tag");
   const [windowParam, setWindowParam] = useState<Window>("all");
-  const [minReviews, setMinReviews] = useState(10);
+  const [minReviews, setMinReviews] = useState(50); // niche STATS floor (mart materializes 50 & 100)
   const [q, setQ] = useState("");
   const debouncedQ = useDebounced(q, 300);
   const [sort, setSort] = useState<SortKey>("opportunity");

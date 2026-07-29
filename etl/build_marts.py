@@ -27,8 +27,9 @@ import duckdb
 # Tunable constants (single source of truth for the ETL). Mirrored where relevant in
 # api/app/benchmarks.py — keep the two in sync if you change scoring.
 # --------------------------------------------------------------------------------------
-MIN_REVIEWS_DEFAULT = 10          # a game needs >= this many reviews to enter niche stats
-MIN_REVIEWS_LEVELS = [10, 50]     # min_reviews floors materialised in mart_niche
+MIN_REVIEWS_DEFAULT = 50          # a game needs >= this many reviews to enter niche/analysis STATS
+                                  # (NOT the games list — that now shows the full live catalog, below)
+MIN_REVIEWS_LEVELS = [50, 100]    # min_reviews floors materialised in mart_niche
 MIN_NICHE_GAMES = 30              # a niche needs >= this many qualifying games to be ranked
 TAG_VOTE_FLOOR = 3                # a (game,tag) association needs >= this many community votes
 TAG_RANK_FLOOR = 20              # ...and be within the game's top-N tags
@@ -547,16 +548,27 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         -- owners floor in stg_game below, which only overwrites the true SteamSpy zeros.
         CREATE TEMP TABLE _stg_game_reconciled AS
         WITH base AS (
+            -- UNIVERSE = the LIVE `games` catalog (type='game', or an un-enriched stub with
+            -- type still NULL), NOT the frozen one-off `analysis_games` table -- so every real
+            -- Steam game shows in the app, even with no reviews/owners data yet. Better to show a
+            -- game that's live and selling on Steam with blank stats than to hide it entirely
+            -- (which is what basing the universe on the stale analysis_games did: no discovered
+            -- game ever appeared). analysis_games is LEFT JOINed for its richer SteamSpy-derived
+            -- aggregates where present; games without it fall back to raw appdetails columns and
+            -- carry NULL/0 for the analysis-only fields (owners, playtime, self_published, ...).
             SELECT
-                ag.appid, ag.name, ag.release_year,
+                g.appid, COALESCE(ag.name, g.name) AS name, ag.release_year,
                 TRY_CAST(ag.release_date_iso AS DATE) AS release_date,
                 -- SteamSpy price, falling back to Steam's own appdetails price (games.price_initial,
                 -- stored in cents) for brand-new games SteamSpy hasn't indexed yet -- so revenue
                 -- estimates immediately instead of stranding a blank $ on every fresh release.
                 COALESCE(ag.price_initial, g.price_initial / 100.0) AS price_initial,
-                ag.is_free, ag.developers, ag.publishers,
+                COALESCE(ag.is_free, g.is_free) AS is_free,
+                COALESCE(ag.developers, g.developers) AS developers,
+                COALESCE(ag.publishers, g.publishers) AS publishers,
                 ag.self_published, ag.dev_game_count, ag.is_indie,
-                ag.metacritic_score, ag.achievements_count,
+                COALESCE(ag.metacritic_score, g.metacritic_score) AS metacritic_score,
+                COALESCE(ag.achievements_count, g.achievements_count) AS achievements_count,
                 ag.owners_mid AS owners_mid_steamspy,
                 ag.est_rev_owners AS est_rev_owners_steamspy,
                 ag.avg_playtime_forever, ag.ccu, ag.tag_count,
@@ -572,10 +584,11 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
                 rs.total_reviews AS api_total_reviews,
                 rs.total_positive AS api_positive,
                 rs.total_negative AS api_negative
-            FROM src.analysis_games ag
-            LEFT JOIN stg_reviews_agg ra ON ra.appid = ag.appid
-            LEFT JOIN src.review_summary rs ON rs.appid = ag.appid
-            LEFT JOIN src.games g ON g.appid = ag.appid   -- appdetails price fallback (see above)
+            FROM src.games g
+            LEFT JOIN src.analysis_games ag ON ag.appid = g.appid
+            LEFT JOIN stg_reviews_agg ra ON ra.appid = g.appid
+            LEFT JOIN src.review_summary rs ON rs.appid = g.appid
+            WHERE (g.type = 'game' OR g.type IS NULL) AND g.name IS NOT NULL AND g.name <> ''
         )
         SELECT
             appid, name, release_year, release_date,
