@@ -1,0 +1,123 @@
+{
+  "annotations": { "list": [ { "builtIn": 1, "datasource": { "type": "grafana", "uid": "-- Grafana --" }, "enable": true, "hide": true, "iconColor": "rgba(0, 211, 255, 1)", "name": "Annotations & Alerts", "type": "dashboard" } ] },
+  "description": "Nightly data-refresh pipeline health: per-step timings + success, data freshness per source, row counts, run status. Metrics pushed to VictoriaMetrics by /root/prospect-refresh.sh.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [ { "options": { "0": { "color": "red", "index": 1, "text": "FAILED" }, "1": { "color": "green", "index": 0, "text": "OK" } }, "type": "value" } ], "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "value" },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "prospect_pipeline_run_ok", "instant": true, "range": false, "refId": "A" } ],
+      "title": "Last run",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 90000 }, { "color": "red", "value": 172800 } ] }, "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto" },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "time() - prospect_pipeline_last_success_timestamp", "instant": true, "range": false, "refId": "A" } ],
+      "title": "Since last success",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 3600 }, { "color": "red", "value": 10800 } ] }, "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto" },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "prospect_pipeline_run_duration_seconds", "instant": true, "range": false, "refId": "A" } ],
+      "title": "Last run duration",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [ { "options": { "0": { "color": "text", "index": 1, "text": "idle" }, "1": { "color": "blue", "index": 0, "text": "RUNNING" } }, "type": "value" } ], "thresholds": { "mode": "absolute", "steps": [ { "color": "text", "value": null }, { "color": "blue", "value": 1 } ] }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "value" },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "prospect_pipeline_running", "instant": true, "range": false, "refId": "A" } ],
+      "title": "Pipeline",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "continuous-BlPu" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] }, "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 4 },
+      "id": 5,
+      "options": { "displayMode": "gradient", "minVizHeight": 10, "minVizWidth": 0, "orientation": "horizontal", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "showUnfilled": true, "valueMode": "text" },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "prospect_pipeline_step_duration_seconds", "instant": true, "legendFormat": "{{step}}", "range": false, "refId": "A" } ],
+      "title": "Step durations (last run)",
+      "type": "bargauge"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "custom": { "align": "auto", "cellOptions": { "type": "color-text" }, "inspect": false }, "mappings": [ { "options": { "0": { "color": "red", "index": 1, "text": "FAIL" }, "1": { "color": "green", "index": 0, "text": "ok" } }, "type": "value" } ], "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 4 },
+      "id": 6,
+      "options": { "cellHeight": "sm", "footer": { "countRows": false, "fields": "", "reducer": [ "sum" ], "show": false }, "showHeader": true },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "prospect_pipeline_step_success", "format": "table", "instant": true, "range": false, "refId": "A" } ],
+      "title": "Step success (last run)",
+      "transformations": [ { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true }, "renameByName": { "step": "step", "Value": "ok" } } } ],
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 30 }, { "color": "red", "value": 72 } ] }, "unit": "h" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "id": 7,
+      "options": { "displayMode": "gradient", "minVizHeight": 10, "minVizWidth": 0, "orientation": "horizontal", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "showUnfilled": true, "valueMode": "color" },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "prospect_data_freshness_hours", "instant": true, "legendFormat": "{{source}}", "range": false, "refId": "A" } ],
+      "title": "Data freshness — hours since newest row (per source)",
+      "type": "bargauge"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "blue", "value": null } ] }, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "id": 8,
+      "options": { "cellHeight": "sm", "footer": { "show": false }, "showHeader": true, "sortBy": [ { "displayName": "rows", "desc": true } ] },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "prospect_data_rows", "format": "table", "instant": true, "range": false, "refId": "A" } ],
+      "title": "Row counts (source tables)",
+      "transformations": [ { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true }, "renameByName": { "table": "table", "Value": "rows" } } } ],
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "drawStyle": "line", "fillOpacity": 12, "gradientMode": "none", "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 5, "showPoints": "auto", "spanNulls": true, "stacking": { "group": "A", "mode": "none" } }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] }, "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 21 },
+      "id": 9,
+      "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "single", "sort": "none" } },
+      "pluginVersion": "11.5.2",
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "prospect_pipeline_run_duration_seconds", "legendFormat": "run duration", "range": true, "refId": "A" }, { "datasource": { "type": "prometheus", "uid": "victoriametrics" }, "editorMode": "code", "expr": "prospect_pipeline_step_duration_seconds", "legendFormat": "{{step}}", "range": true, "refId": "B" } ],
+      "title": "Run + step durations over time",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": [ "prospect", "pipeline" ],
+  "templating": { "list": [] },
+  "time": { "from": "now-14d", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Prospect — Data Pipeline",
+  "uid": "prospect-pipeline",
+  "version": 1,
+  "weekStart": ""
+}
