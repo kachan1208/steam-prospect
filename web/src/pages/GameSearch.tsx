@@ -10,6 +10,27 @@ import { useDebounced } from "../lib/useDebounced";
 
 const LIMIT = 25;
 
+// "New releases" windows for the release-date filter. `days` is sent as released_within_days;
+// the API bounds the match to <= today, so upcoming / placeholder-dated titles are excluded.
+const RELEASE_WINDOWS: { label: string; days: number | undefined }[] = [
+  { label: "Any release date", days: undefined },
+  { label: "New · last 30 days", days: 30 },
+  { label: "New · last 90 days", days: 90 },
+  { label: "New · last 6 months", days: 182 },
+  { label: "New · last 12 months", days: 365 },
+];
+
+// Format an ISO YYYY-MM-DD (fall back to the year, then em dash) without a UTC→local off-by-one.
+function fmtReleaseDate(iso: string | null, year: number | null): string {
+  if (iso) {
+    const d = new Date(`${iso}T00:00:00`);
+    if (!Number.isNaN(d.getTime())) {
+      return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    }
+  }
+  return year != null ? String(year) : "—";
+}
+
 function SortLabel({
   label,
   col,
@@ -54,6 +75,7 @@ export default function GameSearch() {
   const [tag, setTag] = useState("");
   const debouncedTag = useDebounced(tag, 300);
   const [minReviews, setMinReviews] = useState(0); // show the FULL catalog by default (incl. games with no review data); user can raise the floor
+  const [releasedWithinDays, setReleasedWithinDays] = useState<number | undefined>(undefined);
   const [sort, setSort] = useState<GameSortKey>("total_reviews");
   const [order, setOrder] = useState<"asc" | "desc">("desc");
   const [offset, setOffset] = useState(0);
@@ -68,13 +90,14 @@ export default function GameSearch() {
 
   useEffect(() => {
     setOffset(0);
-  }, [debouncedQ, genre, debouncedTag, minReviews, sort, order]);
+  }, [debouncedQ, genre, debouncedTag, minReviews, releasedWithinDays, sort, order]);
 
   const { data, isLoading, isFetching, isError, error } = useGameSearch({
     q: debouncedQ || undefined,
     tag: debouncedTag || undefined,
     genre: genre === "__all__" ? undefined : genre,
     min_reviews: minReviews,
+    released_within_days: releasedWithinDays,
     sort,
     order,
     limit: LIMIT,
@@ -127,6 +150,16 @@ export default function GameSearch() {
             </button>
           );
         },
+      }),
+      columnHelper.accessor("release_date", {
+        header: () => (
+          <SortLabel label="Released" col="release_date" active={sort === "release_date"} order={order} onSort={toggleSort} />
+        ),
+        cell: (info) => (
+          <span className="tabular whitespace-nowrap text-ink-secondary">
+            {fmtReleaseDate(info.getValue(), info.row.original.release_year)}
+          </span>
+        ),
       }),
       columnHelper.accessor("price_initial", {
         header: () => (
@@ -244,6 +277,26 @@ export default function GameSearch() {
               className="w-16 rounded-md border border-chartborder bg-page px-2 py-1 text-xs text-ink-primary outline-none focus:border-series-1"
             />
           </label>
+          <select
+            value={releasedWithinDays ?? ""}
+            onChange={(e) => {
+              const v = e.target.value === "" ? undefined : Number(e.target.value);
+              setReleasedWithinDays(v);
+              // Narrowing to new releases → default to newest-first so the filter's intent is visible.
+              if (v !== undefined) {
+                setSort("release_date");
+                setOrder("desc");
+              }
+            }}
+            title="Show only recently released games (by Steam release date)"
+            className="rounded-md border border-chartborder bg-page px-2 py-1.5 text-xs text-ink-primary outline-none focus:border-series-1"
+          >
+            {RELEASE_WINDOWS.map((w) => (
+              <option key={w.label} value={w.days ?? ""}>
+                {w.label}
+              </option>
+            ))}
+          </select>
           {tag && (
             <button
               type="button"

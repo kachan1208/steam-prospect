@@ -449,6 +449,7 @@ export interface GameSearchRow {
   name: string | null;
   primary_genre: string | null;
   release_year: number | null;
+  release_date: string | null;
   price_initial: number | null;
   is_free: number | null;
   owners_mid: number | null;
@@ -471,6 +472,7 @@ export interface GameSearchList {
 export type GameSortKey =
   | "name"
   | "release_year"
+  | "release_date"
   | "price_initial"
   | "owners_mid"
   | "total_reviews"
@@ -487,6 +489,7 @@ export interface GameSearchParams {
   tag?: string;
   genre?: string;
   min_reviews?: number;
+  released_within_days?: number;
   sort: GameSortKey;
   order: "asc" | "desc";
   limit: number;

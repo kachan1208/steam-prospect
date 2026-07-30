@@ -33,13 +33,13 @@ router = APIRouter(prefix="/api/games", tags=["games"])
 
 # Columns a client is allowed to sort search results on (prevents SQL injection via `sort`).
 SORTABLE = {
-    "name", "release_year", "price_initial", "owners_mid", "total_reviews",
+    "name", "release_year", "release_date", "price_initial", "owners_mid", "total_reviews",
     "positive_ratio", "est_rev_reviews", "rev_pct_in_genre", "reviews_pct_in_genre",
     "owners_pct_in_genre", "n_reviews_trailing_30d", "live_players", "first_seen",
 }
 
 _SEARCH_COLS = (
-    "appid, name, primary_genre, release_year, price_initial, is_free, owners_mid, "
+    "appid, name, primary_genre, release_year, release_date, price_initial, is_free, owners_mid, "
     "total_reviews, positive_ratio, est_rev_reviews, live_players, first_seen, header_image, top_tags"
 )
 
@@ -61,6 +61,9 @@ def search_games(
     tag: str | None = Query(None),
     genre: str | None = Query(None),
     min_reviews: int = Query(0, ge=0),
+    released_within_days: int | None = Query(
+        None, ge=1, le=3650, description="Only games released within the last N days (a 'new releases' filter)."
+    ),
     sort: str = Query("total_reviews"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(25, ge=1, le=100),
@@ -81,6 +84,15 @@ def search_games(
     if tag:
         where.append("list_contains(top_tags, ?)")
         params.append(tag)
+    if released_within_days is not None:
+        # "New releases": released in the recent PAST. Upper-bounded to today so upcoming/announced
+        # titles — and the garbage far-future placeholder dates in the source (e.g. 9998-12-31) —
+        # are excluded; NULL / unparseable release dates drop out via TRY_CAST.
+        where.append(
+            "TRY_CAST(release_date AS DATE) >= CURRENT_DATE - CAST(? AS INTEGER) "
+            "AND TRY_CAST(release_date AS DATE) <= CURRENT_DATE"
+        )
+        params.append(released_within_days)
     where_sql = "WHERE " + " AND ".join(where)
 
     total = analytics_db.scalar(f"SELECT COUNT(*) FROM mart_game {where_sql}", params)

@@ -205,6 +205,7 @@ class GameSearchRow(BaseModel):
     name: Optional[str] = None
     primary_genre: Optional[str] = None
     release_year: Optional[int] = None
+    release_date: Optional[str] = None
     price_initial: Optional[float] = None
     is_free: Optional[int] = None
     owners_mid: Optional[float] = None
