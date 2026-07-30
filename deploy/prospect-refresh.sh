@@ -134,6 +134,13 @@ run_step "ccu"              3600 "STEAM_DB=/root/steam-scraper/steam_games.db WO
 run_step "news"             2400 "./run_news.sh"
 run_step "twitch"           3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=10 RATE_PER_WORKER=1.5 MIN_REVIEWS=50 python3 twitch_bulk.py"
 
+# [7b] Review DEEPEN — top up review TEXT toward 20k for under-target games Steam still has more of,
+# MOST-RECENTLY-REVIEWED first (review_histogram velocity — still-updated/selling titles, not dead
+# back-catalogue megahits). Tracked by reviews_deepened_at + 30d staleness so it advances a big slice
+# each night instead of re-fetching the same games; commits per game so the 4h timeout keeps every
+# finished title. The shallow ~2k stream pass (review_refresh) still seeds brand-new games separately.
+run_step "review_deepen"   14400 "python3 -m steam_scraper.scraper --db steam_games.db deepen-reviews --target 20000 --min-reviews 50 --activity-months 12 --refresh-days 30 --limit 4000 --workers 16 --rate 8.0"
+
 # [8] ETL — timeout-bounded (was UNbounded; a hung ETL once ran 406min). On success: atomic swap +
 # app restart + prune. On failure/timeout: keep the previous mart so the app never serves a partial.
 STEP="etl"; ETL_T0=$(date -u +%s)
