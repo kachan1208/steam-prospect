@@ -29,6 +29,10 @@ class NicheRow(BaseModel):
     median_price: Optional[float] = None
     median_positive_ratio: Optional[float] = None
     median_owners: Optional[float] = None
+    total_owners: Optional[float] = None
+    total_rev: Optional[float] = None
+    total_reviews: Optional[float] = None
+    market_size: Optional[float] = None
     recent_velocity: Optional[float] = None
     self_pub_share: Optional[float] = None
     winner_concentration: Optional[float] = None

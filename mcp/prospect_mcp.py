@@ -177,6 +177,20 @@ against every other niche in the SAME cut:
 - **opportunity** = clamp(0.5 x demand − 0.35 x competition + 0.3 x quality_gap, 0, 100).
   The headline ranking metric in `find_niches`.
 
+### Absolute market size (the "pie") — separate from `demand`
+
+`demand` is a percentile of PER-GAME MEDIANS (typical-game quality), so a narrow niche of
+strong titles scores high `demand` yet has a tiny total audience. These fields give the
+ABSOLUTE size instead, summed over the niche's scored population (min_reviews floor applies,
+so they describe the reviewed market, not every shovelware release):
+
+- **total_owners** = SUM(owners_mid) — total consumer base across the niche.
+- **total_rev** = SUM(est_rev_reviews) — total est. gross revenue in the niche.
+- **total_reviews** = SUM(total_reviews) — total reviews (engaged-player proxy).
+- **market_size** = total_owners as a 0-100 percentile vs other niches in the same cut,
+  comparable to demand/competition. Use it (or sort/filter by total_owners) to prefer a
+  small slice of a big pie over a big slice of a small one — the solo-dev sizing lens.
+
 `window="all"` scores a niche's full history; `"24m"` restricts to games released in the
 last 24 months (current-market read, smaller sample). `min_reviews` is the per-game
 review floor before a title counts toward niche stats (10 = broad/noisy, 50 =
@@ -250,6 +264,7 @@ games clearing the review floor).
 # ==========================================================================================
 _NICHE_SORTABLE = {
     "opportunity", "demand", "competition", "quality_gap",
+    "market_size", "total_owners", "total_rev", "total_reviews",
     "median_rev", "median_reviews", "median_price", "median_owners",
     "median_positive_ratio", "recent_velocity",
     "n_games", "n_recent", "hit_rate_200k", "hit_rate_500k",
@@ -264,6 +279,7 @@ def find_niches(
     min_reviews: Literal[10, 50] = 10,
     min_median_rev: float | None = None,
     max_competition: float | None = None,
+    min_total_owners: float | None = None,
     sort: str = "opportunity",
     limit: int = 15,
 ) -> dict:
@@ -279,6 +295,15 @@ def find_niches(
         means it's easier to out-execute the field.
     opportunity = 0.5*demand − 0.35*competition + 0.3*quality_gap, clamped [0,100].
 
+    ABSOLUTE SIZE (the "pie"), distinct from the percentile-of-medians `demand`:
+      - total_owners: SUM of owners across the niche's scored games — total consumer base.
+      - total_rev / total_reviews: total est. gross revenue / total reviews in the niche.
+      - market_size: total_owners expressed as a 0-100 percentile vs other niches (same
+        cut), so it's comparable to demand/competition.
+    Use these when a small share of a BIG niche beats a big share of a small one — sort by
+    "total_owners" or "market_size", or floor with min_total_owners, to find large-audience
+    niches a solo dev can take a sliver of.
+
     dimension="tag" = SteamSpy's large community-tag vocabulary (specific micro-niches
     like "Souls-like", "Deckbuilder" — usually more actionable); "genre" = Steam's small
     fixed genre list. window="all" scores full history; "24m" restricts to games released
@@ -286,9 +311,10 @@ def find_niches(
     heating up NOW). min_reviews is the per-game review floor (10=broad/noisy,
     50=stricter/cleaner) — only these two values are precomputed.
 
-    min_median_rev / max_competition are optional post-filters, e.g. min_median_rev=200000
-    to require a real revenue floor, or max_competition=50 to exclude the most saturated
-    niches. sort is any returned numeric field (default "opportunity"). Returns compact
+    min_median_rev / max_competition / min_total_owners are optional post-filters, e.g.
+    min_median_rev=200000 to require a real revenue floor, max_competition=50 to exclude the
+    most saturated niches, or min_total_owners=1000000 to require a large total audience.
+    sort is any returned numeric field (default "opportunity"). Returns compact
     rows only — call niche_detail(dimension, key) for one niche's saturation trend,
     revenue histogram, and representative games.
     """
@@ -303,11 +329,15 @@ def find_niches(
     if max_competition is not None:
         where.append("competition <= ?")
         params.append(max_competition)
+    if min_total_owners is not None:
+        where.append("total_owners >= ?")
+        params.append(min_total_owners)
     limit = max(1, min(limit, 50))
 
     rows = query(
         f"""
         SELECT key, n_games, n_recent, opportunity, demand, competition, quality_gap,
+               market_size, total_owners, total_rev, total_reviews,
                median_rev, median_reviews, median_price, median_positive_ratio,
                median_owners, recent_velocity, hit_rate_200k, hit_rate_500k,
                saturation_yoy, winner_concentration
@@ -353,7 +383,8 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
     variants = query(
         """
         SELECT win, min_reviews, n_games, n_recent, opportunity, demand,
-               competition, quality_gap, median_rev, median_reviews, median_price,
+               competition, quality_gap, market_size, total_owners, total_rev,
+               total_reviews, median_rev, median_reviews, median_price,
                median_positive_ratio, median_owners, recent_velocity, hit_rate_200k,
                hit_rate_500k, beatable_share, saturation_yoy, winner_concentration
         FROM mart_niche WHERE dimension = ? AND key = ? ORDER BY win, min_reviews
