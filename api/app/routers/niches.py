@@ -25,6 +25,7 @@ router = APIRouter(prefix="/api/niches", tags=["niches"])
 SORTABLE = {
     "key",
     "opportunity", "demand", "competition", "quality_gap",
+    "market_size", "total_owners", "total_rev", "total_reviews",
     "median_rev", "median_reviews", "median_price", "median_owners",
     "median_positive_ratio", "recent_velocity",
     "n_games", "n_recent", "hit_rate_200k", "hit_rate_500k",
@@ -35,7 +36,9 @@ SORTABLE = {
 _COLS = [
     "dimension", "key", "win", "min_reviews", "n_games", "n_recent",
     "median_rev", "p25_rev", "p75_rev", "median_reviews", "median_price",
-    "median_positive_ratio", "median_owners", "recent_velocity",
+    "median_positive_ratio", "median_owners",
+    "total_owners", "total_rev", "total_reviews", "market_size",
+    "recent_velocity",
     "self_pub_share", "winner_concentration", "hit_rate_200k", "hit_rate_500k",
     "beatable_share", "saturation_yoy", "demand", "competition", "quality_gap", "opportunity",
 ]

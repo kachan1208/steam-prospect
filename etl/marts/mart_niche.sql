@@ -59,6 +59,13 @@ agg AS (
         quantile_cont(price_initial, 0.75) AS p75_price,
         median(positive_ratio) AS median_positive_ratio,
         median(owners_mid) AS median_owners,
+        -- Absolute niche SIZE (the "pie"): totals across the scored population, NOT
+        -- per-game medians. A narrow niche of strong games has high median_* but small
+        -- totals; these expose that difference so a solo dev can prefer a small slice of
+        -- a big pie over a big slice of a small one.
+        SUM(owners_mid) AS total_owners,
+        SUM(est_rev_reviews) AS total_rev,
+        SUM(total_reviews) AS total_reviews,
         median(total_reviews) FILTER (WHERE is_recent) AS recent_velocity,
         AVG(CAST(self_published AS DOUBLE)) AS self_pub_share,
         SUM(est_rev_reviews) FILTER (WHERE rev_pr >= @WINNER_TOP_PCT@)
@@ -84,6 +91,7 @@ opp AS (
     SELECT *,
         100.0 * percent_rank() OVER (PARTITION BY dimension, win, min_reviews ORDER BY median_rev) AS pr_rev,
         100.0 * percent_rank() OVER (PARTITION BY dimension, win, min_reviews ORDER BY COALESCE(median_owners,0)) AS pr_own,
+        100.0 * percent_rank() OVER (PARTITION BY dimension, win, min_reviews ORDER BY COALESCE(total_owners,0)) AS pr_size,
         100.0 * percent_rank() OVER (PARTITION BY dimension, win, min_reviews ORDER BY COALESCE(recent_velocity,0)) AS pr_vel,
         100.0 * percent_rank() OVER (PARTITION BY dimension, win, min_reviews ORDER BY n_recent) AS pr_nrec,
         100.0 * percent_rank() OVER (PARTITION BY dimension, win, min_reviews ORDER BY COALESCE(winner_concentration,0)) AS pr_wc,
@@ -94,7 +102,8 @@ final AS (
     SELECT *,
         (0.4 * pr_rev + 0.3 * pr_own + 0.3 * pr_vel) AS demand,
         (0.6 * pr_nrec + 0.4 * pr_wc) AS competition,
-        pr_beatable AS quality_gap
+        pr_beatable AS quality_gap,
+        pr_size AS market_size
     FROM opp
 )
 SELECT
@@ -105,6 +114,8 @@ SELECT
     f.median_price, f.p25_price, f.p75_price,
     f.median_positive_ratio,
     f.median_owners,
+    f.total_owners, f.total_rev, f.total_reviews,
+    round(f.market_size, 2) AS market_size,
     COALESCE(f.recent_velocity, 0) AS recent_velocity,
     f.self_pub_share,
     f.winner_concentration,
