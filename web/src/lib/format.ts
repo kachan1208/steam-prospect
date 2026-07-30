@@ -9,6 +9,18 @@ export function fmtUsd(value: number | null | undefined): string {
   return `${sign}$${abs.toFixed(abs < 10 ? 2 : 0)}`;
 }
 
+/**
+ * Per-game estimated revenue for display. Titles with a $0 list price read "Free" instead of a
+ * misleading "$0" — box revenue is $0 at a $0 price (the Boxleiter method models box sales, not the
+ * MTX / battle-pass income F2P games actually run on). Pass isFree = (price_initial === 0), NOT the
+ * is_free flag: some F2P-flagged titles also sell paid editions with real box revenue (e.g. Rainbow
+ * Six Siege, is_free yet $19.99 / ~$920M est.), which should keep showing their number.
+ */
+export function fmtRevenue(value: number | null | undefined, isFree: boolean): string {
+  if (isFree) return "Free";
+  return fmtUsd(value);
+}
+
 /** Compact count: 1,284 / 12.9K / 4.2M. */
 export function fmtCompact(value: number | null | undefined): string {
   if (value === null || value === undefined || Number.isNaN(value)) return "—";

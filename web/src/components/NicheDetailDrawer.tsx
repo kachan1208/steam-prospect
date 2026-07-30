@@ -16,7 +16,7 @@ import {
   type NicheRow,
   type Window,
 } from "../lib/api";
-import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtUsd, titleCase } from "../lib/format";
+import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd, titleCase } from "../lib/format";
 import { CSS_VAR } from "../lib/palette";
 
 function variantLabel(v: NicheRow): string {
@@ -207,7 +207,7 @@ export function NicheDetailDrawer({
                       <td className="tabular px-2 py-1.5">{fmtCompact(g.owners_mid)}</td>
                       <td className="tabular px-2 py-1.5">{fmtInt(g.total_reviews)}</td>
                       <td className="tabular px-2 py-1.5">{fmtPct(g.positive_ratio)}</td>
-                      <td className="tabular px-2 py-1.5">{fmtUsd(g.est_rev_reviews)}</td>
+                      <td className="tabular px-2 py-1.5">{fmtRevenue(g.est_rev_reviews, g.price_initial === 0)}</td>
                       <td className="px-2 py-1.5">
                         <Badge>{g.self_published ? "Self-published" : "Publisher"}</Badge>
                       </td>

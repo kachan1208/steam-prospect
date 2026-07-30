@@ -23,7 +23,7 @@ import {
   useLaunchCurve,
   useMarketBenchmarks,
 } from "../lib/api";
-import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtUsd } from "../lib/format";
+import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
 import { CSS_VAR } from "../lib/palette";
 
 const TABS = [
@@ -164,8 +164,14 @@ export default function GameProfile() {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" data-tour="tour-gameprofile-stats">
         <StatTile
           label="Est. revenue (Boxleiter range)"
-          value={revenueRange ? fmtUsd(revenueRange.mid) : fmtUsd(profile.est_rev_reviews)}
-          sub={revenueRange ? `${fmtUsd(revenueRange.low)} – ${fmtUsd(revenueRange.high)}` : undefined}
+          value={fmtRevenue(revenueRange ? revenueRange.mid : profile.est_rev_reviews, profile.price_initial === 0)}
+          sub={
+            profile.price_initial === 0
+              ? "Free-to-play — no box revenue at $0 price"
+              : revenueRange
+                ? `${fmtUsd(revenueRange.low)} – ${fmtUsd(revenueRange.high)}`
+                : undefined
+          }
           onClick={() => toggleMetric("revenue")}
           active={selectedMetric === "revenue"}
         />
@@ -435,7 +441,7 @@ export default function GameProfile() {
                     <td className="tabular px-2 py-1.5">{fmtPrice(c.price_initial)}</td>
                     <td className="tabular px-2 py-1.5">{fmtInt(c.total_reviews)}</td>
                     <td className="tabular px-2 py-1.5">{fmtPct(c.positive_ratio)}</td>
-                    <td className="tabular px-2 py-1.5">{fmtUsd(c.est_rev_reviews)}</td>
+                    <td className="tabular px-2 py-1.5">{fmtRevenue(c.est_rev_reviews, c.price_initial === 0)}</td>
                     <td className="px-2 py-1.5">
                       <div className="flex items-center gap-1.5" title={c.shared_tags.join(", ")}>
                         <Meter value={c.jaccard * 100} color={CSS_VAR.competition} />

@@ -5,7 +5,7 @@ import clsx from "clsx";
 
 import { Card } from "../components/ui/Card";
 import { useGameSearch, useGenres, type GameSearchRow, type GameSortKey } from "../lib/api";
-import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtUsd } from "../lib/format";
+import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
 import { useDebounced } from "../lib/useDebounced";
 
 const LIMIT = 25;
@@ -204,7 +204,11 @@ export default function GameSearch() {
             onSort={toggleSort}
           />
         ),
-        cell: (info) => <span className="tabular font-medium text-ink-primary">{fmtUsd(info.getValue())}</span>,
+        cell: (info) => (
+          <span className="tabular font-medium text-ink-primary">
+            {fmtRevenue(info.getValue(), info.row.original.price_initial === 0)}
+          </span>
+        ),
       }),
       columnHelper.display({
         id: "tags",
