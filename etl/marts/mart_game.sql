@@ -70,7 +70,14 @@ twitch AS (
     GROUP BY appid
 )
 SELECT
-    g.appid, g.name, g.release_year,
+    g.appid, g.name,
+    -- Persisted lowercased name for the /api/games/search substring match: the endpoint
+    -- filters on this via contains(name_lower, ?) instead of name ILIKE '%q%', which drops
+    -- the per-row lower() of the ~170K-row full scan the leading-wildcard match forces on
+    -- every call (~2.3x faster end-to-end — see api/app/routers/games.py). Accent-insensitive
+    -- matching is NOT provided (same as the old ILIKE); only case is folded, once, at build.
+    lower(g.name) AS name_lower,
+    g.release_year,
     CAST(g.release_date AS VARCHAR) AS release_date,
     g.price_initial, g.is_free,
     pg.primary_genre,

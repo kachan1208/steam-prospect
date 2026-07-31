@@ -56,6 +56,17 @@ def query_one(sql: str, params: list[Any] | None = None) -> dict | None:
     return rows[0] if rows else None
 
 
+# Whether the mart carries mart_game.name_lower (persisted lower(name)); if so game_search
+# filters via the cheaper contains(name_lower, ?) rather than name ILIKE '%q%'. Falls back to
+# ILIKE on older marts. Read once — the DB is swapped + process restarted on each ETL build.
+_HAS_NAME_LOWER = bool(
+    query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_game' AND column_name = 'name_lower'"
+    )
+)
+
+
 def _round(v: Any, nd: int) -> Any:
     if isinstance(v, float):
         return round(v, nd)
@@ -764,8 +775,12 @@ def game_search(
     where = ["total_reviews >= ?"]
     params: list = [min_reviews]
     if q:
-        where.append("name ILIKE ?")
-        params.append(f"%{q}%")
+        if _HAS_NAME_LOWER:
+            where.append("contains(name_lower, ?)")
+            params.append(q.lower())
+        else:
+            where.append("name ILIKE ?")
+            params.append(f"%{q}%")
     if genre:
         where.append("primary_genre = ?")
         params.append(genre)
