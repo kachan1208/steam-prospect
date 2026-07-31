@@ -31,4 +31,19 @@ else
 fi
 
 # App Platform injects $PORT (default 8080). No --reload in production.
-exec uvicorn --app-dir /app/api app.main:app --host 0.0.0.0 --port "${PORT:-8080}"
+#
+# Run one uvicorn worker per vCPU (the droplet has 2) so the API uses both cores — a single
+# worker was pinned to 1 core in load tests and saturated at ~30-45 req/s. Each forked worker
+# runs the app's lifespan independently, so each opens its OWN read-only DuckDB connection +
+# cursor pool (DuckDB allows many concurrent read_only openers of one file — no shared handle).
+#
+# --limit-concurrency sheds overload as fast 503s instead of letting requests pile up to the
+# 60s timeout: under ~90+ rps the single worker queued until it stopped responding even on
+# localhost and never recovered (required `docker restart`). A short --timeout-keep-alive frees
+# idle client sockets quickly so they don't hold a slot. All three are env-tunable so the box
+# can be retuned without a rebuild.
+exec uvicorn --app-dir /app/api app.main:app \
+    --host 0.0.0.0 --port "${PORT:-8080}" \
+    --workers "${WEB_CONCURRENCY:-2}" \
+    --limit-concurrency "${PROSPECT_LIMIT_CONCURRENCY:-40}" \
+    --timeout-keep-alive "${PROSPECT_KEEPALIVE:-5}"
