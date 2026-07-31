@@ -43,6 +43,40 @@ prospect_pipeline_step_success{step=\"$label\"} $ok
 prospect_pipeline_step_last_run_timestamp{step=\"$label\"} $(date -u +%s)"
 }
 
+# run_step_bg — same contract as run_step, but runs the step in a BACKGROUND subshell so
+# independent-service steps (news/twitch/ccu — different endpoints + different tables) can
+# overlap the serial Steam-review lane. Safe because steam_games.db is WAL and every writer
+# sets a busy_timeout (get_connection=30s; steam_players_bulk/twitch_bulk=120s, explicitly
+# built to coexist), so concurrent writers QUEUE instead of erroring. Does NOT touch the
+# global STEP (that tracks the critical Lane-A path for the failure record). PIDs collected
+# in BG_PIDS; wait_bg() is the barrier before the ETL.
+BG_PIDS=()
+run_step_bg() {
+    local label="$1" tmo="$2" cmd="$3"
+    (
+        local t0 dur rc=0
+        t0=$(date -u +%s)
+        echo "[$label] start $(date -u) (parallel lane)"
+        timeout "$tmo" bash -c "$cmd" || rc=$?
+        dur=$(( $(date -u +%s) - t0 ))
+        local ok=1; [ "$rc" -ne 0 ] && { ok=0; echo "WARN: [$label] exited rc=$rc after ${dur}s"; }
+        echo "[$label] done ${dur}s (rc=$rc)"
+        push "prospect_pipeline_step_duration_seconds{step=\"$label\"} $dur
+prospect_pipeline_step_success{step=\"$label\"} $ok
+prospect_pipeline_step_last_run_timestamp{step=\"$label\"} $(date -u +%s)"
+    ) &
+    BG_PIDS+=("$!")
+    echo "[$label] launched in background (pid $!)"
+}
+
+# Barrier: block until every background (Lane B) step has finished. Called before the ETL,
+# which needs a consistent, fully-written DB snapshot.
+wait_bg() {
+    local pid
+    for pid in "${BG_PIDS[@]}"; do wait "$pid"; done
+    BG_PIDS=()
+}
+
 record_run() {
     local dur=$(( $(date -u +%s) - START ))
     /root/steam-scraper/.venv/bin/python - "$RESULT" "$dur" "$STEP" <<'PY'
@@ -116,6 +150,20 @@ prospect_pipeline_start_timestamp $START"
 
 cd /root/steam-scraper || exit 1
 
+# ── Lane B (independent services) — launched in PARALLEL up front so they overlap the serial
+# Steam-review lane below. Each hits a DIFFERENT external service and writes a DIFFERENT table
+# (news→articles, twitch→game_creator_mention, ccu→player_counts). steam_games.db is WAL and
+# every writer sets a busy_timeout (get_connection=30s; steam_players_bulk/twitch_bulk=120s,
+# explicitly built to coexist), so these queue rather than error against each other and Lane A.
+# wait_bg (just before the ETL) is the barrier that guarantees a consistent snapshot for the ETL.
+run_step_bg "news"   2400 "./run_news.sh"
+run_step_bg "twitch" 3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=10 RATE_PER_WORKER=1.5 MIN_REVIEWS=50 python3 twitch_bulk.py"
+run_step_bg "ccu"    3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=16 RATE_PER_WORKER=3.0 MIN_REVIEWS=50 python3 steam_players_bulk.py"
+
+# ── Lane A (Steam review endpoint + shared proxy pool) — SEQUENTIAL by necessity: these all hit
+# store.steampowered.com/appreviews through the ONE shared proxy pool, so parallelising them
+# would multiply proxy/rate contention, not throughput. This lane is the critical path.
+
 # [1] Discovery — WEEKLY (Sundays). backfill-missing walks Steam's whole storefront; SteamSpy's
 # 'all' pagination dead-ends ~page 87 so this is the real new-game path, but it's heavy and the
 # games it finds are mostly sub-threshold — nightly re-discovery just made nightlies 5h+.
@@ -130,9 +178,6 @@ fi
 run_step "steam_scrape"     3600 "./run_full.sh"
 run_step "review_refresh"   2700 "python3 -m steam_scraper.scraper --db steam_games.db review-summary --workers 16 --rate 12.0 --refresh-older-than-days 7 --limit 25000"
 run_step "review_histogram" 1800 "python3 -m steam_scraper.scraper --db steam_games.db review-histogram --min-reviews 50 --workers 16 --rate 10.0"
-run_step "ccu"              3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=16 RATE_PER_WORKER=3.0 MIN_REVIEWS=50 python3 steam_players_bulk.py"
-run_step "news"             2400 "./run_news.sh"
-run_step "twitch"           3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=10 RATE_PER_WORKER=1.5 MIN_REVIEWS=50 python3 twitch_bulk.py"
 
 # [7b] Review DEEPEN — top up review TEXT toward 20k for under-target games Steam still has more of,
 # MOST-RECENTLY-REVIEWED first (review_histogram velocity — still-updated/selling titles, not dead
@@ -140,6 +185,11 @@ run_step "twitch"           3600 "STEAM_DB=/root/steam-scraper/steam_games.db WO
 # each night instead of re-fetching the same games; commits per game so the 4h timeout keeps every
 # finished title. The shallow ~2k stream pass (review_refresh) still seeds brand-new games separately.
 run_step "review_deepen"   14400 "python3 -m steam_scraper.scraper --db steam_games.db deepen-reviews --target 20000 --min-reviews 50 --activity-months 12 --refresh-days 30 --limit 4000 --workers 16 --rate 8.0"
+
+# ── Barrier: block until Lane B (news/twitch/ccu) has fully written before the ETL snapshots the DB.
+echo "[lane-b] waiting for background service steps to finish before ETL ..."
+wait_bg
+echo "[lane-b] background service steps complete."
 
 # [8] ETL — timeout-bounded (was UNbounded; a hung ETL once ran 406min). On success: atomic swap +
 # app restart + prune. On failure/timeout: keep the previous mart so the app never serves a partial.
