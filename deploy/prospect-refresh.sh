@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prospect daily data refresh (Droplet cron 04:00 UTC). Scrapes Steam (keyless), rebuilds the
+# Prospect daily data refresh (Droplet cron 21:00 UTC). Scrapes Steam (keyless), rebuilds the
 # DuckDB marts, restarts the app, appends a JSON history record, AND pushes pipeline-health metrics
 # to VictoriaMetrics so the "Prospect — Data Pipeline" Grafana dashboard shows step timings,
 # success/failure, data freshness, and row counts — no SSH needed to know it's healthy.
