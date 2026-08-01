@@ -49,7 +49,7 @@ prospect_pipeline_step_last_run_timestamp{step=\"$label\"} $(date -u +%s)"
 # sets a busy_timeout (get_connection=30s; steam_players_bulk/twitch_bulk=120s, explicitly
 # built to coexist), so concurrent writers QUEUE instead of erroring. Does NOT touch the
 # global STEP (that tracks the critical Lane-A path for the failure record). PIDs collected
-# in BG_PIDS; wait_bg() is the barrier before the ETL.
+# in BG_PIDS; wait_bg() is the barrier (called before review_deepen — memory safety, see below).
 BG_PIDS=()
 run_step_bg() {
     local label="$1" tmo="$2" cmd="$3"
@@ -155,10 +155,15 @@ cd /root/steam-scraper || exit 1
 # (news→articles, twitch→game_creator_mention, ccu→player_counts). steam_games.db is WAL and
 # every writer sets a busy_timeout (get_connection=30s; steam_players_bulk/twitch_bulk=120s,
 # explicitly built to coexist), so these queue rather than error against each other and Lane A.
-# wait_bg (just before the ETL) is the barrier that guarantees a consistent snapshot for the ETL.
+# MEMORY SAFETY (4GB box): Lane B worker counts are kept modest AND wait_bg (below, BEFORE
+# review_deepen) ensures Lane B finishes before the heavy 16-worker review_deepen starts, so the
+# two big concurrent-worker phases never STACK. On 2026-08-01 the original design (all of Lane B
+# concurrent WITH review_deepen + 2 app workers) peaked past 4GB and swap-thrashed the box into an
+# unreachable state. Lane B (~40min) is hidden under steam_scrape/review_refresh, so the barrier
+# costs ~no wall time; it only caps peak memory.
 run_step_bg "news"   2400 "./run_news.sh"
-run_step_bg "twitch" 3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=10 RATE_PER_WORKER=1.5 MIN_REVIEWS=50 python3 twitch_bulk.py"
-run_step_bg "ccu"    3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=16 RATE_PER_WORKER=3.0 MIN_REVIEWS=50 python3 steam_players_bulk.py"
+run_step_bg "twitch" 3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=6 RATE_PER_WORKER=1.5 MIN_REVIEWS=50 python3 twitch_bulk.py"
+run_step_bg "ccu"    3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=8 RATE_PER_WORKER=3.0 MIN_REVIEWS=50 python3 steam_players_bulk.py"
 
 # ── Lane A (Steam review endpoint + shared proxy pool) — SEQUENTIAL by necessity: these all hit
 # store.steampowered.com/appreviews through the ONE shared proxy pool, so parallelising them
@@ -179,17 +184,18 @@ run_step "steam_scrape"     3600 "./run_full.sh"
 run_step "review_refresh"   2700 "python3 -m steam_scraper.scraper --db steam_games.db review-summary --workers 16 --rate 12.0 --refresh-older-than-days 7 --limit 25000"
 run_step "review_histogram" 1800 "python3 -m steam_scraper.scraper --db steam_games.db review-histogram --min-reviews 50 --workers 16 --rate 10.0"
 
+# ── Barrier: Lane B must finish BEFORE review_deepen so the two heavy concurrent-worker phases
+# never overlap (memory safety — see the Lane B note above). Lane B is already done by here.
+echo "[lane-b] waiting for background service steps to finish before review_deepen ..."
+wait_bg
+echo "[lane-b] background service steps complete."
+
 # [7b] Review DEEPEN — top up review TEXT toward 20k for under-target games Steam still has more of,
 # MOST-RECENTLY-REVIEWED first (review_histogram velocity — still-updated/selling titles, not dead
 # back-catalogue megahits). Tracked by reviews_deepened_at + 30d staleness so it advances a big slice
 # each night instead of re-fetching the same games; commits per game so the 4h timeout keeps every
 # finished title. The shallow ~2k stream pass (review_refresh) still seeds brand-new games separately.
 run_step "review_deepen"   14400 "python3 -m steam_scraper.scraper --db steam_games.db deepen-reviews --target 20000 --min-reviews 50 --activity-months 12 --refresh-days 30 --limit 4000 --workers 16 --rate 8.0"
-
-# ── Barrier: block until Lane B (news/twitch/ccu) has fully written before the ETL snapshots the DB.
-echo "[lane-b] waiting for background service steps to finish before ETL ..."
-wait_bg
-echo "[lane-b] background service steps complete."
 
 # [8] ETL — timeout-bounded (was UNbounded; a hung ETL once ran 406min). On success: atomic swap +
 # app restart + prune. On failure/timeout: keep the previous mart so the app never serves a partial.
