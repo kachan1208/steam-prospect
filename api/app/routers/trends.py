@@ -25,7 +25,7 @@ Data caveats (surfaced so the UI can caption the chart honestly):
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from pydantic import BaseModel
 

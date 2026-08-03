@@ -114,21 +114,8 @@ const TOC: { group: string; items: [string, string][] }[] = [
   {
     group: "The core",
     items: [
-      ["niche-finder", "Niche Finder"],
-      ["benchmarks", "Market Benchmarks"],
-      ["timing", "Launch & Timing"],
       ["games", "Games & teardown"],
-      ["estimator", "Estimator"],
-    ],
-  },
-  {
-    group: "Marketing",
-    items: [["marketing", "Marketing & press"]],
-  },
-  {
-    group: "Your workspace",
-    items: [
-      ["devlog", "Dev log"],
+      ["timing", "Launch & Timing"],
     ],
   },
   {
@@ -209,40 +196,33 @@ export default function Docs() {
               and never asks for one — it works entirely off public, aggregate data, and it's read-only: you browse and
               analyze, nothing to configure.
             </p>
-            <p className="text-ink-secondary">What each part of the core answers, in one line:</p>
+            <p className="text-ink-secondary">
+              Prospect is four screens plus a connector. The screens are the things worth looking at — charts you
+              read rather than numbers you quote. Everything else is answered by asking, through the MCP:
+            </p>
             <Terms
               items={[
                 [
-                  "Niche Finder",
-                  <>What should I build? Rank every Steam tag and genre by opportunity — demand vs. competition vs. how beatable the incumbents are.</>,
-                ],
-                [
-                  "Market Benchmarks",
-                  <>Is this number good or a fantasy? Reference points from indie-market research alongside what this catalog actually shows.</>,
+                  "Games & teardown",
+                  <>Where does a specific title stand, and — from its own reviews — why does it win versus genre peers?</>,
                 ],
                 [
                   "Launch & Timing",
                   <>When should I launch, and is my genre a launch-splash or a slow-burn?</>,
                 ],
                 [
-                  "Games & teardown",
-                  <>Where does a specific title stand, and — from its own reviews — why does it win versus genre peers?</>,
-                ],
-                [
-                  "Estimator",
-                  <>If a game has N reviews (or wishlists) at price P, what's the owners and revenue range?</>,
-                ],
-                [
-                  "Marketing",
-                  <>Who to pitch and where to post — press outlets and named journalists covering your genre (plus creator channels where data exists).</>,
-                ],
-                [
-                  "Dev log",
-                  <>A private, browser-local journal for your own marketing beats and wishlist milestones.</>,
-                ],
-                [
                   "Use in Claude",
-                  <>Connect Prospect's analytics to your own Claude and just ask questions in natural language.</>,
+                  <>
+                    Connect Prospect to your own Claude and ask in plain language. This is where the rest of the
+                    analysis lives: <Code>find_niches</Code> (what should I build), <Code>market_benchmarks</Code>{" "}
+                    (is this number good), <Code>estimate_revenue</Code> (owners/revenue range for N reviews at
+                    price P), <Code>press_pitch_list</Code> and <Code>creator_pitch_list</Code> (who to pitch) —
+                    15 tools over the same marts these screens read.
+                  </>,
+                ],
+                [
+                  "Data log",
+                  <>What changed in the data, and when it last refreshed.</>,
                 ],
               ]}
             />
@@ -261,21 +241,21 @@ export default function Docs() {
           <ol className="flex flex-col gap-3 text-sm leading-relaxed text-ink-secondary">
             {[
               <>
-                <span className="font-semibold text-ink-primary">Find a niche.</span> Open{" "}
-                <Link to="/niches" className="font-medium text-brand hover:underline">Niche Finder</Link>, keep it sorted
-                by <span className="text-ink-primary">Opportunity</span>, and leave "Min reviews" at 10. Skim the top
-                rows and click one to open its detail drawer (saturation trend, revenue histogram, top games).
+                <span className="font-semibold text-ink-primary">Connect Prospect to your Claude.</span> Follow{" "}
+                <Link to="/chat" className="font-medium text-brand hover:underline">Use in Claude</Link> — one command.
+                The next two steps happen there, in plain language.
               </>,
               <>
-                <span className="font-semibold text-ink-primary">Sanity-check the market.</span> Glance at{" "}
-                <Link to="/benchmarks" className="font-medium text-brand hover:underline">Market Benchmarks</Link> so you
-                know what "good" revenue even looks like before you get excited about a number.
+                <span className="font-semibold text-ink-primary">Find a niche.</span> Ask{" "}
+                <em>"what are the best under-served Steam niches right now?"</em> — that runs{" "}
+                <Code>find_niches</Code>, ranking every tag and genre by opportunity (demand vs. competition vs. how
+                beatable the incumbents look). Follow up on any one of them for its saturation trend, revenue
+                histogram and top games.
               </>,
               <>
-                <span className="font-semibold text-ink-primary">Price the payoff.</span> Take that niche's median
-                review count into the{" "}
-                <Link to="/estimator" className="font-medium text-brand hover:underline">Estimator</Link>, set a price
-                and genre, and read the owners / revenue range.
+                <span className="font-semibold text-ink-primary">Price the payoff.</span> Ask what a game with that
+                niche's median review count would earn at your price — <Code>estimate_revenue</Code> returns an
+                owners and revenue <em>range</em>, never a single fake-precise number.
               </>,
               <>
                 <span className="font-semibold text-ink-primary">Study a hit.</span> Search a comparable game in{" "}
@@ -307,81 +287,6 @@ export default function Docs() {
       </Section>
 
       {/* ============================ THE CORE ============================ */}
-      <Section id="niche-finder" kicker="The core" title="Niche Finder">
-        <Feature
-          id="niche-finder-card"
-          name="Niche Finder"
-          where="Sidebar “Niche Finder”"
-          to="/niches"
-          question="Which corners of Steam are under-served relative to demand?"
-        >
-          <p>
-            The headline tool. It ranks every Steam <span className="text-ink-primary">tag</span> or{" "}
-            <span className="text-ink-primary">genre</span> by an <span className="text-ink-primary">Opportunity</span>{" "}
-            score that balances how big/hot the market is against how crowded and how beatable it is. Toggle{" "}
-            <span className="text-ink-primary">Tags vs Genres</span> (tags are the larger, more specific community
-            vocabulary — better for finding real micro-niches), and{" "}
-            <span className="text-ink-primary">All-time vs Last 24 months</span> (24m catches niches heating up now).
-            Search, sort any column, save the view, or export to CSV. Click a niche name to open a drawer with its
-            saturation trend, revenue histogram, and representative games.
-          </p>
-          <p className="text-xs font-medium text-ink-secondary">The columns:</p>
-          <Terms
-            items={[
-              ["Games / Recent 24m", "How many qualifying games are in the niche total, and how many launched in the last 24 months."],
-              ["Median rev / Median price", "The middle game's estimated lifetime revenue and launch price — a realistic center of gravity, not the average (which a few hits would inflate)."],
-              ["Demand / Comp. / Quality gap", "The three 0–100 parts of the score, shown as bars. Demand = market size & heat. Competition = how crowded / winner-take-most (higher is worse). Quality gap = how beatable the incumbents are (higher is better)."],
-              ["Opportunity", "The blended headline score, 0–100. Higher = a bigger, less-crowded, more-beatable niche. It's a relative ranking across niches, not an absolute grade."],
-              ["Hit ≥$200K", "Share of the niche's games that cleared ~$200K estimated revenue — your odds of a real outcome, not just the median."],
-              ["Saturation YoY", "Year-over-year change in release count. A big positive number means everyone is piling in."],
-            ]}
-          />
-          <ReadBox>
-            Don't read Opportunity alone — open the three bars. A high score driven by a big{" "}
-            <span className="text-ink-primary">quality gap</span> means "the incumbents are weak, out-execute them";
-            one driven by low <span className="text-ink-primary">competition</span> means "few games here." A high{" "}
-            <span className="text-ink-primary">Hit ≥$200K</span> with a modest median is often more encouraging than a
-            high median alone.
-          </ReadBox>
-          <ReadBox label="Practical tip">
-            "Min reviews" is the per-game review floor for the scoring, and only two values are precomputed —{" "}
-            <span className="text-ink-primary">10</span> (broad, noisier) and <span className="text-ink-primary">50</span>{" "}
-            (stricter, cleaner). Set it to 10 or 50; other numbers return an empty table.
-          </ReadBox>
-        </Feature>
-      </Section>
-
-      <Section id="benchmarks" kicker="The core" title="Market Benchmarks">
-        <Feature
-          id="benchmarks-card"
-          name="Market Benchmarks"
-          where="Sidebar “Market Benchmarks”"
-          to="/benchmarks"
-          question="Is this revenue number good, average, or a fantasy?"
-        >
-          <p>
-            Reference points for judging any dollar figure. The top row shows{" "}
-            <span className="text-ink-primary">cited</span> numbers from public indie-market research (e.g. a median
-            indie grosses only a few hundred dollars; a small share of releases ever clear $100K; Steam keeps ~30% and
-            pays ~70% to the dev). The second row shows what <span className="text-ink-primary">this catalog</span>{" "}
-            actually computes, so you can see how the two differ and why.
-          </p>
-          <p>
-            Below: a <span className="text-ink-primary">long-tail distribution</span> (revenue / reviews / owners, per
-            genre and window) that shows the full shape of outcomes — a huge left mass of small games and a thin tail of
-            hits; the <span className="text-ink-primary">Boxleiter</span> reviews→owners chart (the same conversion the
-            Estimator uses, fitted per genre); and the four <span className="text-ink-primary">dev tiers</span>{" "}
-            (Hobby / Small / Middle / Triple-I) by lifetime copies sold.
-          </p>
-          <ReadBox>
-            The cited median and the catalog median are <span className="text-ink-primary">supposed</span> to differ:
-            cited figures are first-year / net-of-Steam's-cut over <em>all</em> releases; the catalog's are Boxleiter
-            gross-lifetime over games that cleared the review floor. Use the distribution's percentiles (P50, P90…) to
-            place any single game honestly — the mean is always well above the median because of the tail.
-          </ReadBox>
-        </Feature>
-      </Section>
-
       <Section id="timing" kicker="The core" title="Launch & Timing">
         <Feature
           id="timing-card"
@@ -452,85 +357,6 @@ export default function Docs() {
         </Feature>
       </Section>
 
-      <Section id="estimator" kicker="The core" title="Estimator">
-        <Feature
-          id="estimator-card"
-          name="Estimator"
-          where="Sidebar “Estimator”"
-          to="/estimator"
-          question="If a game has N reviews (or wishlists) at price P, what's the revenue range?"
-        >
-          <p>
-            Turn a review count <span className="text-ink-primary">or</span> a launch-day wishlist count into an owners
-            and revenue range. Pick the basis, enter the number, a price and a genre, and read three ranges:{" "}
-            <span className="text-ink-primary">estimated owners</span>,{" "}
-            <span className="text-ink-primary">gross revenue</span>, and{" "}
-            <span className="text-ink-primary">net revenue</span> (after Steam's ~30% cut). The dev-tier badge tells you
-            which of the four tiers the midpoint lands in, and "How this was calculated" shows the exact multipliers
-            used.
-          </p>
-          <ReadBox>
-            Always quote the <span className="text-ink-primary">range</span>, not the midpoint. The reviews path uses
-            the Boxleiter method (~20–55 owners per review, fitted per genre), so the low↔high span is real
-            uncertainty, not decoration. Passing a genre matters — owners-per-review varies a lot by genre. See{" "}
-            <a href="#methodology" className="text-brand hover:underline">Methodology</a> for the full formula.
-          </ReadBox>
-        </Feature>
-      </Section>
-
-      {/* ============================ MARKETING ============================ */}
-      <Section id="marketing" kicker="Marketing" title="Marketing & press">
-        <Feature
-          id="marketing-card"
-          name="Marketing"
-          where="Sidebar “Marketing”"
-          to="/marketing"
-          question="Who covers my genre, and where does it get attention?"
-        >
-          <p>
-            Pick your genre for a set of marketing reads. The{" "}
-            <span className="text-ink-primary">pitch / target list</span> has tabs for Press, YouTube, Reddit, Twitch
-            and X — each a ranked list of outlets, journalists, or creators covering your genre, with an example mention
-            and an "active vs. quiet" flag. There's also a channel-mix read (where a genre's attention concentrates) and
-            rising / cooling "buzz" themes.
-          </p>
-          <ReadBox label="What to trust here">
-            The <span className="text-ink-primary">Press</span> tab is the solid part — outlets and named journalists
-            drawn from ~1.1M scraped articles (journalist outlets only; Steam News excluded). The creator / social tabs
-            (YouTube, Reddit, Twitch, X) depend on separate scrapers and are often{" "}
-            <span className="text-ink-primary">sparse or empty</span> — an empty list is an honest "no data yet," not an
-            error. Rankings are by all-time volume, so always check the example date and the "last 24mo" count before
-            pitching; coverage is fuzzy-matched, English-skewed, and reflects selection bias (these outlets already
-            chose to cover the genre).
-          </ReadBox>
-        </Feature>
-      </Section>
-
-      {/* ============================ WORKSPACE ============================ */}
-      <Section id="devlog" kicker="Your workspace" title="Dev log">
-        <Feature
-          id="devlog-card"
-          name="Dev log"
-          where="Sidebar “Dev log”"
-          to="/devlog"
-          question="Can I track my own marketing beats and wishlist growth?"
-        >
-          <p>
-            A private journal for your game. Log{" "}
-            <span className="text-ink-primary">marketing events</span> (trailers, festivals, press, updates) and{" "}
-            <span className="text-ink-primary">wishlist / follower milestones</span>, then read them back together; it
-            also suggests a rough wishlist target for your genre and tracks your progress toward a goal you set.
-          </p>
-          <ReadBox label="Private to this browser">
-            Your dev-log entries are stored locally in <span className="text-ink-primary">your own browser</span> — they're
-            private to you, but they are <span className="text-ink-primary">not synced or shared across devices</span>,
-            and they'll be gone if you clear the browser's site data. The suggested wishlist targets are rough
-            heuristics, not guarantees.
-          </ReadBox>
-        </Feature>
-      </Section>
-
-      {/* ============================ MCP ============================ */}
       <Section id="mcp" kicker="Connect" title="Use Prospect inside your own Claude">
         <Card>
           <div className="flex flex-col gap-4 text-sm leading-relaxed text-ink-secondary">
@@ -660,7 +486,7 @@ export default function Docs() {
               ]}
             />
             <p>
-              Scores are computed at four cuts — window (all-time / last 24 months) × review floor (10 / 50) — and a
+              Scores are computed at four cuts — window (all-time / last 24 months) × review floor (50 / 100) — and a
               niche needs at least 30 qualifying games to be scored at all. Because the parts are percentiles,{" "}
               <span className="text-ink-primary">Opportunity is a relative ranking</span>, not an absolute grade: an 80
               means "better than most niches on this blend," not "80% likely to succeed." That's why the app always
@@ -680,7 +506,7 @@ export default function Docs() {
               <span className="text-ink-primary">20–55</span>, fitted per genre (mid ≈ 30) and clamped to that band.
             </p>
             <p>
-              In the Estimator, the reviews path gives owners = reviews × (20 / genre-mid / 55) for low/mid/high; net =
+              In estimate_revenue, the reviews path gives owners = reviews × (20 / genre-mid / 55) for low/mid/high; net =
               gross × ~70% (after Steam's ~30% cut). The wishlist path is rougher: owners = wishlists × ~8–12%
               first-week conversion × 5 (first-week → first-year).
             </p>
@@ -749,11 +575,11 @@ export default function Docs() {
               ],
               [
                 "Why do Prospect's numbers differ from other tools?",
-                "Different tools use different owner multipliers and review sources. Prospect fits its Boxleiter multiplier per genre and prefers Steam's ground-truth review counts where available — the Estimator's “How this was calculated” panel shows the exact inputs for any estimate.",
+                "Different tools use different owner multipliers and review sources. Prospect fits its Boxleiter multiplier per genre and prefers Steam's ground-truth review counts where available — estimate_revenue returns the exact inputs it used alongside every estimate.",
               ],
               [
                 "Can I export data?",
-                "Yes — CSV export is available from the Niche Finder. Bulk raw exports of the underlying catalog aren't offered.",
+                "Ask your Claude — the MCP tools return structured JSON you can save or reshape. Bulk raw exports of the underlying catalog aren't offered.",
               ],
               [
                 "Does Prospect track my personal Steam account?",
