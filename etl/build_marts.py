@@ -76,6 +76,17 @@ PRESS_NOTABLE_N = 10             # "notable" articles kept per game (top by matc
 # is identical to the teardown's, by construction.
 ASPECT_REVIEWS_TOP_K = 4         # representative excerpts kept per (appid, aspect, sentiment)
 
+# JTBD — niche review themes (see mart_niche_themes.sql): the per-game aspect
+# praise/complaint signal rolled up to niche (tag/genre) level, with a delta vs the
+# all-catalog baseline. Reuses TEARDOWN_MIN_REVIEWS implicitly (it reads
+# mart_game_review_aspects, whose population that floor defines); this floor is the
+# niche-level one on top of it.
+NICHE_THEMES_MIN_GAMES = 10      # a (niche, aspect) needs >= this many games with >=1 review
+                                  # mentioning the aspect to be published — below that, one
+                                  # title's fans/haters would read as "the niche's" theme
+                                  # (mirrors MIN_NICHE_GAMES's role, floored lower because the
+                                  # teardown-eligible population is much smaller than mart_niche's)
+
 # Phase 3 — Aspect-level TEXT SENTIMENT (VADER). The teardown's praise/complaint split was
 # historically derived from each review's OVERALL Steam thumbs-up/down vote, so a thumbs-up
 # review that trashes the combat still counted as "praise" for combat. compute_aspect_sentiment()
@@ -400,7 +411,11 @@ MART_FILES = [
     "mart_creator_pitch.sql",
     "mart_channel_mix.sql",
     "mart_channel_buzz.sql",
-    "mart_tag_lift.sql",   # LAST: reads mart_game + mart_niche built above
+    # These two are LAST on purpose: they read marts built above (mart_game, mart_niche,
+    # mart_game_review_aspects, mart_genre_aspect_baseline) rather than staging tables.
+    # They are independent of each other.
+    "mart_tag_lift.sql",
+    "mart_niche_themes.sql",
 ]
 
 HERE = Path(__file__).resolve().parent
@@ -448,6 +463,7 @@ def build_params() -> dict[str, str]:
         "PRESS_MIN_CONFIDENCE": PRESS_MIN_CONFIDENCE,
         "PRESS_NOTABLE_N": PRESS_NOTABLE_N,
         "ASPECT_REVIEWS_TOP_K": ASPECT_REVIEWS_TOP_K,
+        "NICHE_THEMES_MIN_GAMES": NICHE_THEMES_MIN_GAMES,
         "PRESS_AUTHOR_MIN_ARTICLES": PRESS_AUTHOR_MIN_ARTICLES,
         "BUZZ_TOTAL_MONTHS": BUZZ_TOTAL_MONTHS,
         "BUZZ_RECENT_MONTHS": BUZZ_RECENT_MONTHS,
