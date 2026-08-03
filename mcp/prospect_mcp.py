@@ -175,7 +175,7 @@ caveats at the bottom before treating any number as ground truth.
 ## The opportunity score (mart_niche)
 
 For each niche (a Steam community `tag` or a Steam `genre`), computed at 4 cuts —
-`window` in {`all`, `24m`} x `min_reviews` in {`10`, `50`} — as percentile ranks (0-100)
+`window` in {`all`, `24m`} x `min_reviews` in {`50`, `100`} — as percentile ranks (0-100)
 against every other niche in the SAME cut:
 
 - **demand** = 0.4 x percentile(median revenue) + 0.3 x percentile(median owners) +
@@ -287,7 +287,7 @@ _NICHE_SORTABLE = {
 def find_niches(
     dimension: Literal["tag", "genre"] = "tag",
     window: Literal["all", "24m"] = "all",
-    min_reviews: Literal[10, 50] = 10,
+    min_reviews: Literal[50, 100] = 50,
     min_median_rev: float | None = None,
     max_competition: float | None = None,
     min_total_owners: float | None = None,
@@ -319,8 +319,10 @@ def find_niches(
     like "Souls-like", "Deckbuilder" — usually more actionable); "genre" = Steam's small
     fixed genre list. window="all" scores full history; "24m" restricts to games released
     in the last 24 months (current-market read, smaller n — use this to catch niches
-    heating up NOW). min_reviews is the per-game review floor (10=broad/noisy,
-    50=stricter/cleaner) — only these two values are precomputed.
+    heating up NOW). min_reviews is the per-game review floor (50=broader/noisier,
+    100=stricter/cleaner) — only these two values are precomputed, and they must stay in
+    sync with MIN_REVIEWS_LEVELS in etl/build_marts.py: a value the ETL didn't materialise
+    silently matches no rows and returns an empty list rather than an error.
 
     min_median_rev / max_competition / min_total_owners are optional post-filters, e.g.
     min_median_rev=200000 to require a real revenue floor, max_competition=50 to exclude the
@@ -374,14 +376,14 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
     """Deep dive on one niche (get valid `key` values from find_niches — exact match,
     case-sensitive). Returns:
       - variants: this niche's opportunity/demand/competition/etc at all 4 precomputed
-        cuts — (all|24m) x (min_reviews 10|50).
+        cuts — (all|24m) x (min_reviews 50|100).
       - saturation_trend: yearly release counts + median revenue, oldest-first — is this
         niche heating up or cooling off?
       - revenue_histogram: log-scale bucketed distribution of est. lifetime revenue
-        across the niche (min_reviews=10 population) — the full shape, not just the
+        across the niche (min_reviews=50 population) — the full shape, not just the
         median.
       - representative_games: top 8 games in the niche by est. revenue.
-      - hit_rates: headline (window="all", min_reviews=10) hit_rate_200k / hit_rate_500k
+      - hit_rates: headline (window="all", min_reviews=50) hit_rate_200k / hit_rate_500k
         (share of games clearing $200K/$500K est. revenue), median_rev, n_games,
         winner_concentration.
     Returns {"error": ...} if dimension/key doesn't match any niche (call find_niches to
@@ -426,7 +428,7 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
         "WHERE dimension = ? AND key = ? ORDER BY rank_in_niche LIMIT 8",
         [dimension, key],
     )
-    headline = next((v for v in variants if v["window"] == "all" and v["min_reviews"] == 10), variants[0])
+    headline = next((v for v in variants if v["window"] == "all" and v["min_reviews"] == 50), variants[0])
     return {
         "dimension": dimension,
         "key": key,
