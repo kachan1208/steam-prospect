@@ -39,10 +39,9 @@ COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Hosted defaults. REPO_ROOT resolves to /app (config.py: app -> api -> /app), so these
-# match where the app expects them; the control-plane SQLite + chat log land in /app/data.
+# match where the app expects them; the analytics DB lands in the mounted /app/data.
 ENV PROSPECT_STATIC_DIR=/app/web_dist \
     PROSPECT_ANALYTICS_DB_PATH=/app/data/current.duckdb \
-    PROSPECT_CONTROL_DSN=sqlite:////app/data/prospect_control.db \
     PROSPECT_ENABLE_MCP=true \
     PYTHONUNBUFFERED=1 \
     PORT=8080

@@ -3,8 +3,6 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 
 from .. import analytics_db
-from ..auth import get_current_org
-from ..models import Org
 from ..schemas import LaunchCurve, LaunchCurvePoint, Seasonality, SeasonalityCell
 
 router = APIRouter(tags=["timing"])
@@ -18,7 +16,6 @@ _SEASON_COLS = (
 @router.get("/api/seasonality", response_model=Seasonality)
 def seasonality(
     genre: str = Query("__all__"),
-    org: Org = Depends(get_current_org),
 ) -> Seasonality:
     rows = analytics_db.query(
         f"SELECT grain, {_SEASON_COLS} FROM mart_seasonality WHERE genre = ?",
@@ -39,7 +36,6 @@ def seasonality(
 @router.get("/api/launch-curve", response_model=LaunchCurve)
 def launch_curve(
     genre: str = Query("__all__"),
-    org: Org = Depends(get_current_org),
 ) -> LaunchCurve:
     rows = analytics_db.query(
         "SELECT day, mean_cum_fraction, median_cum_fraction, n_games "

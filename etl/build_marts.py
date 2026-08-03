@@ -389,7 +389,6 @@ MART_FILES = [
     "mart_game_teardown.sql",
     "mart_game_aspect_reviews.sql",
     "mart_press.sql",
-    "mart_explorer.sql",
     "mart_creator_pitch.sql",
     "mart_channel_mix.sql",
     "mart_channel_buzz.sql",

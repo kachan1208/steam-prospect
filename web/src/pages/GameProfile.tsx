@@ -171,7 +171,7 @@ export default function GameProfile() {
         </div>
       </Card>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" data-tour="tour-gameprofile-stats">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatTile
           label="Est. revenue (Boxleiter range)"
           value={fmtRevenue(revenueRange ? revenueRange.mid : profile.est_rev_reviews, profile.price_initial === 0)}
@@ -256,7 +256,6 @@ export default function GameProfile() {
             role="tab"
             aria-selected={tab === t.key}
             onClick={() => setTab(t.key)}
-            data-tour={t.key === "teardown" ? "tour-gameprofile-why-tab" : undefined}
             className={clsx(
               "rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
               tab === t.key

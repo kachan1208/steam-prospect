@@ -30,8 +30,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from .. import analytics_db
-from ..auth import get_current_org
-from ..models import Org
 
 router = APIRouter(prefix="/api/games", tags=["games"])
 
@@ -160,7 +158,6 @@ def game_trends(
         description="Optional comma-separated comparable appids, e.g. `1,2,3`. When present, "
         "the response adds a `comps` block with each comp's series and a cohort median/band.",
     ),
-    org: Org = Depends(get_current_org),
 ) -> GameTrendsResponse:
     exists = analytics_db.scalar("SELECT COUNT(*) FROM mart_game WHERE appid = ?", [appid])
     if not exists:

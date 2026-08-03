@@ -6,8 +6,6 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from .. import analytics_db
-from ..auth import get_current_org
-from ..models import Org
 from ..schemas import (
     AspectReviewExcerpt,
     AspectReviewsResponse,
@@ -86,7 +84,6 @@ def search_games(
     order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    org: Org = Depends(get_current_org),
 ) -> GameSearchList:
     if sort not in SORTABLE:
         raise HTTPException(status_code=400, detail=f"sort must be one of {sorted(SORTABLE)}")
@@ -137,7 +134,6 @@ def search_games(
 @router.get("/{appid}", response_model=GameProfile)
 def game_profile(
     appid: int,
-    org: Org = Depends(get_current_org),
 ) -> GameProfile:
     row = analytics_db.query_one(f"SELECT {_PROFILE_COLS} FROM mart_game WHERE appid = ?", [appid])
     if row is None:
@@ -150,7 +146,6 @@ def game_comparables(
     appid: int,
     limit: int = Query(20, ge=1, le=50),
     min_reviews: int = Query(10, ge=0),
-    org: Org = Depends(get_current_org),
 ) -> GameComparablesResponse:
     """On-demand tag-Jaccard comparables: bounded to same primary_genre + a price band
     around the target (computed at query time from mart_game.top_tags — never precomputed
@@ -218,7 +213,7 @@ def game_comparables(
 
 
 @router.get("/{appid}/reviews-summary", response_model=GameReviewsSummary)
-def reviews_summary(appid: int, org: Org = Depends(get_current_org)) -> GameReviewsSummary:
+def reviews_summary(appid: int) -> GameReviewsSummary:
     exists = analytics_db.scalar("SELECT COUNT(*) FROM mart_game WHERE appid = ?", [appid])
     if not exists:
         raise HTTPException(status_code=404, detail=f"game not found: {appid}")
@@ -258,7 +253,7 @@ _TEARDOWN_MIN_REVIEWS = 20
 
 
 @router.get("/{appid}/teardown", response_model=GameTeardown)
-def game_teardown(appid: int, org: Org = Depends(get_current_org)) -> GameTeardown:
+def game_teardown(appid: int) -> GameTeardown:
     """"Why it works" — review-text aspect mining (praise vs. complaint per aspect, with
     a genre-baseline differential) fused with the press/PR footprint. See
     etl/marts/mart_game_teardown.sql for how each mart is built. Both signals are
@@ -396,7 +391,6 @@ def game_aspect_reviews(
     aspect: str = Query(..., description="Exact aspect label, e.g. 'Combat & Bosses' (URL-encoded)."),
     sentiment: Literal["praise", "complaint"] = Query(...),
     limit: int = Query(4, ge=1, le=10),
-    org: Org = Depends(get_current_org),
 ) -> AspectReviewsResponse:
     """Aspect drill-down — the representative review excerpts behind one aspect bar's
     praise or complaint share in the Game Teardown. See
