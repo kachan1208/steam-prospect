@@ -222,6 +222,13 @@ games clearing the review floor).
 - **mart_niche / mart_niche_top / mart_niche_hist / mart_niche_trend** — niche
   opportunity scores, representative top games per niche, a revenue histogram, and a
   yearly release/saturation trend. -> `find_niches`, `niche_detail`.
+- **mart_niche_themes** — per (tag|genre niche, aspect): the per-game review-aspect
+  signal POOLED to niche level — praise/complaint shares in both signal families
+  (vote-based and VADER-text) plus each share's delta vs the all-catalog baseline —
+  "what does the whole niche praise/complain about," the concrete counterpart to
+  quality_gap. Membership is narrower than mart_niche's (tag must be in a game's TOP-10
+  tags; genre = primary genre only) and floored at >=10 games per (niche, aspect), each
+  with >=20 sampled English text reviews. -> `niche_review_themes`.
 - **mart_market_pct / mart_market_hist / mart_market_boxleiter / mart_market_tiers /
   mart_meta** — catalog-wide (or per-genre) percentile distributions, histograms, the
   fitted Boxleiter owners-per-review slope per genre, dev-tier population counts, and
@@ -445,6 +452,117 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
                 "winner_concentration": headline["winner_concentration"],
             }
         ),
+    }
+
+
+_NICHE_THEME_CAVEATS = [
+    "Aspect mining is keyword-lexicon based (10 fixed aspects), not semantic — any review "
+    "containing e.g. \"boss\" counts toward Combat & Bosses regardless of what it meant.",
+    "praise_share/complaint_share are VOTE-based (share of aspect-mentioning reviews that "
+    "were thumbs-up/down OVERALL — they sum to 1, and complaint delta = -praise delta); "
+    "text_praise_rate/text_complaint_rate are VADER sentiment of the local text window "
+    "around the keyword — coarse lexicon scoring, sarcasm-blind, English-only, with a "
+    "neutral band so the two rates do NOT sum to 1.",
+    "Pooled, review-volume-weighted: heavily-reviewed games dominate their niche's shares. "
+    "When n_games is low or one hit dwarfs the niche, a \"niche theme\" can really be one "
+    "game's theme — check n_games/n_reviews_sampled.",
+    "Niche membership is NARROWER than find_niches': tag = appears in the game's top-10 "
+    "community tags; genre = the game's PRIMARY genre only. n_games here is therefore "
+    "smaller than the same key's n_games in find_niches.",
+    "Deltas vs the all-catalog pooled baseline are typically small (±0.01-0.06) — read "
+    "them as leanings, not verdicts. Correlational, not causal.",
+]
+
+
+@mcp.tool()
+def niche_review_themes(dimension: Literal["tag", "genre"], key: str) -> dict:
+    """What a whole NICHE praises vs complains about — per-aspect review sentiment rolled
+    up across every review-mined game in one tag/genre niche, with each share's delta vs
+    the all-catalog baseline. This turns find_niches' abstract quality_gap score into a
+    concrete gap statement ("Souls-likes complain about Map & Navigation more than games
+    in general — ship a great map"). Get valid `key` values from find_niches (exact match,
+    case-sensitive).
+
+    What is materialized (mart_niche_themes): games from mart_game_review_aspects (>= 20
+    sampled English text reviews — TEARDOWN_MIN_REVIEWS in etl/build_marts.py) are joined
+    to tag niches via the game's TOP-10 community tags (mart_game.top_tags) and to genre
+    via primary_genre, then mention counts are POOLED per (niche, aspect) — review-volume
+    weighted, so a 5-review game can't swamp the signal (flip side: a big hit can dominate
+    its niche). A (niche, aspect) row only exists with >= 10 games mentioning the aspect
+    (NICHE_THEMES_MIN_GAMES).
+
+    Returns the 10 fixed aspects as two rankings:
+      - complaint_themes: sorted by text_complaint_delta_vs_catalog DESC — what this niche
+        complains about MORE than games in general (positive delta) at the top.
+      - praise_themes: sorted by text_praise_delta_vs_catalog DESC — what it praises more
+        than games in general at the top.
+    Each row carries both signal families: vote-based praise_share/complaint_share (+
+    praise_delta_vs_catalog) and text-sentiment text_praise_rate/text_complaint_rate (+
+    their deltas), plus n_games / n_reviews_sampled / total_mentions to judge sample depth.
+    An aspect can rank high in BOTH lists (its reviews are polarized) — the neutral-band
+    text rates are independent, not complements.
+
+    Empty praise/complaint lists (with a `note`) mean the key IS a real niche but too few
+    of its games clear the review/games floors above — an honest "not enough review-text
+    signal", not an error. {"error": ...} means the key matched no niche at all — call
+    find_niches for valid keys — or the analytics DB predates this mart (re-run the ETL).
+    """
+    try:
+        rows = query(
+            """
+            SELECT aspect, n_games, n_reviews_sampled, total_mentions,
+                   praise_share, complaint_share, praise_delta_vs_catalog,
+                   n_text_scored, text_praise_rate, text_complaint_rate,
+                   text_praise_delta_vs_catalog, text_complaint_delta_vs_catalog
+            FROM mart_niche_themes
+            WHERE dimension = ? AND key = ?
+            """,
+            [dimension, key],
+        )
+    except duckdb.Error as e:
+        # The production DB won't carry mart_niche_themes until the next ETL run builds it
+        # — degrade to a clear error instead of crashing the tool call.
+        return {
+            "error": "mart_niche_themes is missing from this analytics DB — it is built by "
+            "etl/marts/mart_niche_themes.sql (registered last in MART_FILES); re-run the ETL "
+            f"(`task etl`) so current.duckdb includes it. ({type(e).__name__}: {e})"
+        }
+
+    if not rows:
+        known = query_one(
+            "SELECT 1 AS one FROM mart_niche WHERE dimension = ? AND key = ? LIMIT 1",
+            [dimension, key],
+        )
+        if known is None:
+            return {
+                "error": f"no niche found for dimension={dimension!r} key={key!r}. "
+                "Call find_niches to list valid keys — spelling/case must match exactly."
+            }
+        return {
+            "dimension": dimension,
+            "key": key,
+            "praise_themes": [],
+            "complaint_themes": [],
+            "note": "Niche exists but no aspect cleared the reliability floors (>= 10 games "
+            "with >= 20 sampled English text reviews each mentioning the aspect) — too few "
+            "review-mined games in this niche for a reliable theme read.",
+            "caveats": _NICHE_THEME_CAVEATS,
+        }
+
+    def _delta_sorted(field: str) -> list[dict]:
+        return sorted(
+            rows,
+            key=lambda r: r[field] if r[field] is not None else float("-inf"),
+            reverse=True,
+        )[:5]
+
+    return {
+        "dimension": dimension,
+        "key": key,
+        "n_aspects": len(rows),
+        "praise_themes": clean_rows(_delta_sorted("text_praise_delta_vs_catalog")),
+        "complaint_themes": clean_rows(_delta_sorted("text_complaint_delta_vs_catalog")),
+        "caveats": _NICHE_THEME_CAVEATS,
     }
 
 
