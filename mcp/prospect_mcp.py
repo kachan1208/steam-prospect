@@ -147,9 +147,9 @@ mcp = FastMCP(
     instructions=(
         "Steam market-intelligence tools over Prospect's curated DuckDB marts: find "
         "under-served niches, benchmark the market, estimate revenue, check launch "
-        "timing, look up/compare games, and find press/creator pitch targets across every "
-        "marketing channel (Press, YouTube, Reddit, Twitch, X). Read the "
-        "prospect-data-dictionary resource first."
+        "timing, look up games and rank a game's closest competitors (find_comparables), "
+        "and find press/creator pitch targets across every marketing channel (Press, "
+        "YouTube, Reddit, Twitch, X). Read the prospect-data-dictionary resource first."
     ),
 )
 
@@ -231,7 +231,9 @@ games clearing the review floor).
 - **mart_seasonality** — release-timing outcomes by month / weekday / month×weekday.
   -> `best_launch_timing`.
 - **mart_game** — one row per game: metadata, revenue/owners, percentile-vs-genre, top
-  tags, review velocity. -> `game_search`, `game_profile`.
+  tags, review velocity. -> `game_search`, `game_profile`, `find_comparables` (closest
+  competitors, ranked on demand by tag-Jaccard over `top_tags` within the same primary
+  genre + a price band — no precomputed pairwise mart).
 - **mart_game_review_aspects / mart_genre_aspect_baseline / mart_game_press_summary /
   mart_game_press_by_source / mart_game_press_timeline / mart_game_press_notable** —
   per-game praise/complaint aspect mining (10 fixed aspects) + press footprint.
@@ -842,6 +844,108 @@ def game_profile(appid: int) -> dict:
             "or has fewer than 10 sampled reviews and didn't clear the analysis floor."
         }
     return clean(row)
+
+
+@mcp.tool()
+def find_comparables(appid: int, limit: int = 15, min_reviews: int = 10) -> dict:
+    """Closest competitors for one game — "who else is fighting for this audience?"
+    Tag-overlap comparables computed on demand at query time (never precomputed pairwise
+    across the ~142K catalog). Use game_search to find the appid by name first.
+
+    Matching rules (exact):
+      - Same PRIMARY Steam genre as the target only. A multi-genre game is indexed under
+        one primary genre, so a near-neighbor filed under a different primary won't appear.
+      - Price band around the target's launch price: paid games match
+        [max(0, 0.5*price − $2), 2*price + $2]; FREE games are only comparable to other
+        free games (F2P competes on a different axis than any paid title).
+      - Candidates need total_reviews >= min_reviews (default 10 — raise it to keep only
+        proven competitors).
+      - Ranked by Jaccard similarity over the two games' top community tags (each game's
+        top-10 SteamSpy tags): |shared tags| / |union of both tag sets|, ties broken by
+        total_reviews. shared_tags shows exactly which tags matched.
+
+    Returns compact rows: appid, name, release_year, price_initial, total_reviews,
+    positive_ratio, est_rev_reviews, shared_tags, jaccard (0-1), plus the price band used.
+
+    Honest caveats: tag-Jaccard is MECHANICAL similarity — a high score says the tag sets
+    overlap, not that the audiences do (two "Souls-like" matches can serve disjoint
+    players); est_rev_reviews is a Boxleiter ESTIMATE (see market_benchmarks), not
+    reported revenue; and tags are community-applied, so mistagged or thinly-tagged games
+    mismatch. Unknown appid (or one below the >=10-review analysis floor) returns
+    {"error": ...} — use game_search to find valid appids. Follow up with
+    game_profile(appid) on the closest matches to see how each performs, and
+    game_teardown(appid) to see WHY the strongest ones work.
+    """
+    target = query_one(
+        "SELECT appid, name, primary_genre, price_initial, top_tags FROM mart_game WHERE appid = ?",
+        [appid],
+    )
+    if target is None:
+        return {
+            "error": f"appid {appid} not found in mart_game — either not in the catalog, "
+            "or below the >=10-review analysis floor. Use game_search to find appids."
+        }
+
+    price = target["price_initial"] or 0.0
+    if price <= 0:
+        lo, hi = -0.01, 0.01  # free games are only comparable to other free games
+    else:
+        lo, hi = max(0.0, price * 0.5 - 2.0), price * 2.0 + 2.0
+    limit = max(1, min(limit, 50))
+
+    # Jaccard denominator via |A ∪ B| = len(a) + len(b) − |A ∩ B| — exact, because
+    # top_tags is duplicate-free by construction (a top-10 ranking). The FastAPI twin
+    # (api/app/routers/games.py::game_comparables) computes it as
+    # len(list_distinct(list_concat(a, b))) per row, which made it the slowest handler in
+    # production (808ms p95); this form skips the per-row concat+distinct and returns the
+    # identical ordering.
+    rows = query(
+        """
+        WITH target AS (SELECT appid, primary_genre, top_tags FROM mart_game WHERE appid = ?),
+        scored AS (
+            SELECT g.appid, g.name, g.release_year, g.price_initial, g.total_reviews,
+                g.positive_ratio, g.est_rev_reviews,
+                list_intersect(g.top_tags, t.top_tags) AS shared_tags,
+                len(list_intersect(g.top_tags, t.top_tags)) AS n_shared,
+                len(g.top_tags) + len(t.top_tags) AS len_sum
+            FROM mart_game g, target t
+            WHERE g.appid != t.appid
+              AND g.primary_genre = t.primary_genre
+              AND g.price_initial BETWEEN ? AND ?
+              AND g.total_reviews >= ?
+        )
+        SELECT appid, name, release_year, price_initial, total_reviews, positive_ratio,
+            est_rev_reviews, shared_tags,
+            n_shared * 1.0 / (len_sum - n_shared) AS jaccard
+        FROM scored
+        WHERE len_sum - n_shared > 0
+        ORDER BY jaccard DESC, total_reviews DESC
+        LIMIT ?
+        """,
+        [appid, lo, hi, min_reviews, limit],
+    )
+    result = {
+        "appid": appid,
+        "name": target["name"],
+        "primary_genre": target["primary_genre"],
+        "price_band": {"low": lo, "high": hi},
+        "min_reviews": min_reviews,
+        "n_returned": len(rows),
+        "comparables": clean_rows(rows),
+        "caveats": [
+            "Tag-Jaccard is mechanical similarity: overlapping tag sets, not overlapping "
+            "audiences — sanity-check the top matches with game_profile before leaning on them.",
+            "est_rev_reviews is a Boxleiter estimate (gross lifetime), not reported revenue.",
+            "Only games sharing the target's PRIMARY genre are candidates; free games only "
+            "match other free games.",
+        ],
+    }
+    if not rows:
+        result["note"] = (
+            "No comparables matched — the target may have a rare primary genre, few/no "
+            "community tags, or no same-genre games in its price band clearing min_reviews."
+        )
+    return clean(result)
 
 
 @mcp.tool()
