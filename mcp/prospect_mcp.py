@@ -222,6 +222,12 @@ games clearing the review floor).
 - **mart_niche / mart_niche_top / mart_niche_hist / mart_niche_trend** — niche
   opportunity scores, representative top games per niche, a revenue histogram, and a
   yearly release/saturation trend. -> `find_niches`, `niche_detail`.
+- **mart_tag_lift** — pairwise tag-combination performance: one row per unordered pair
+  of community tags (from each game's top-10 tags; games with >=50 reviews; pairs with
+  >=15 games), with the pair's median est. revenue, hit_rate_200k, both tags' solo
+  medians (mart_niche all/50 baselines), and lift = pair median / better solo median.
+  Lift is null for pairs of free-to-play-dominated tags (both solo medians $0).
+  -> `tag_combos`.
 - **mart_market_pct / mart_market_hist / mart_market_boxleiter / mart_market_tiers /
   mart_meta** — catalog-wide (or per-genre) percentile distributions, histograms, the
   fitted Boxleiter owners-per-review slope per genre, dev-tier population counts, and
@@ -447,6 +453,138 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
                 "winner_concentration": headline["winner_concentration"],
             }
         ),
+    }
+
+
+@mcp.tool()
+def tag_combos(tag: str, limit: int = 15) -> dict:
+    """Which co-tags does one Steam community tag perform best/worst WITH? Answers "which
+    tags should MY game ship with?" — e.g. does 'Roguelike Deckbuilder'+'Horror' outperform
+    each tag alone? Reads mart_tag_lift: unordered tag PAIRS exploded from each game's
+    top-10 community tags (vote-floored + denylist-filtered, same hygiene as every other
+    tag mart), restricted to games with >= 50 total reviews (the same min_reviews=50 floor
+    as the niche mart, so pair and solo populations are comparable), and kept only when
+    the pair has >= 15 qualifying games (TAG_PAIR_MIN_GAMES in etl/build_marts.py — below
+    that a median is noise).
+
+    LIFT = pair median est. revenue / GREATEST(tag A solo median, tag B solo median),
+    where the solo medians are mart_niche's (dimension='tag', window='all',
+    min_reviews=50) baselines. Lift > 1 means the combination's typical game out-earns
+    the BETTER of the two tags alone — it can't be gamed by pairing a strong tag with a
+    weak one. Lift is null when both solo medians are $0 (free-to-play-dominated tags:
+    est. revenue is reviews x owners-per-review x PRICE, so all-free tags median $0).
+
+    Revenue throughout is est_rev_reviews — a Boxleiter-style ESTIMATE (gross lifetime
+    box revenue), never ground truth. pair_hit_rate_200k mirrors mart_niche's
+    hit_rate_200k convention (share of the pair's games clearing $200K est. revenue).
+
+    Returns solo context for `tag` (its all/50 baseline), best_combos (highest lift
+    first) and worst_combos (lowest lift first, no overlap with best), each row carrying
+    partner, n_games, pair_median_rev, pair_hit_rate_200k, the two solo medians,
+    best_solo_median_rev, and lift — plus a one-line headline takeaway.
+
+    An empty best/worst list is a real answer: the tag has no pairs meeting the 15-game
+    floor. An unknown tag returns {"error": ...} — get valid tags from
+    find_niches(dimension="tag") (exact match, case-sensitive). ALWAYS weigh n_games:
+    pairs at the floor (~15 games) are often a handful of famous titles wearing both
+    tags, not a repeatable pattern. Correlation, not causation — good games choose these
+    tag combinations as much as the combinations make games good, and tags are SteamSpy
+    community tags (crowd-applied, occasionally wrong/late, top-10-per-game only).
+    """
+    limit = max(1, min(limit, 50))
+
+    try:
+        rows = query(
+            """
+            SELECT
+                CASE WHEN tag_a = ? THEN tag_b ELSE tag_a END AS partner,
+                n_games,
+                median_rev AS pair_median_rev,
+                hit_rate_200k AS pair_hit_rate_200k,
+                CASE WHEN tag_a = ? THEN tag_a_solo_median_rev ELSE tag_b_solo_median_rev END AS tag_solo_median_rev,
+                CASE WHEN tag_a = ? THEN tag_b_solo_median_rev ELSE tag_a_solo_median_rev END AS partner_solo_median_rev,
+                best_solo_median_rev,
+                lift
+            FROM mart_tag_lift
+            WHERE tag_a = ? OR tag_b = ?
+            ORDER BY lift DESC NULLS LAST
+            """,
+            [tag, tag, tag, tag, tag],
+        )
+    except duckdb.CatalogException:
+        return {
+            "error": "mart_tag_lift is not present in this analytics DB — it is built by a "
+            "newer ETL than the one that produced this current.duckdb. Rebuild the marts "
+            "(`task etl` in the main prospect checkout) and retry."
+        }
+
+    solo = query_one(
+        "SELECT n_games, median_rev, hit_rate_200k FROM mart_niche "
+        "WHERE dimension = 'tag' AND win = 'all' AND min_reviews = 50 AND key = ?",
+        [tag],
+    )
+    if not rows and solo is None:
+        return {
+            "error": f"tag {tag!r} not found — it has neither a solo baseline in mart_niche "
+            "nor any pairs meeting the 15-game floor. Get valid tags from "
+            "find_niches(dimension='tag'); spelling and case must match exactly."
+        }
+
+    ranked = [r for r in rows if r["lift"] is not None]
+    unranked_free = len(rows) - len(ranked)  # both-solo-medians-$0 (free-to-play) pairs
+    best = ranked[:limit]
+    worst = list(reversed(ranked[limit:]))[:limit]  # lowest lift first, never overlaps best
+
+    headline = None
+    if best:
+        b = best[0]
+        headline = (
+            f"'{tag}' pairs best with '{b['partner']}': the combo's median est. revenue is "
+            f"${b['pair_median_rev']:,.0f} across {b['n_games']} games — {b['lift']:.2f}x the "
+            f"better solo tag's median (${b['best_solo_median_rev']:,.0f})."
+        )
+        if worst:
+            w = worst[0]
+            headline += (
+                f" It pairs worst with '{w['partner']}' ({w['lift']:.2f}x, "
+                f"median ${w['pair_median_rev']:,.0f} across {w['n_games']} games)."
+            )
+    elif solo is not None:
+        headline = (
+            f"'{tag}' has no tag pairs meeting the 15-game reliability floor — solo baseline "
+            f"only (median est. revenue ${solo['median_rev']:,.0f} across {solo['n_games']} games)."
+        )
+
+    caveats = [
+        "Revenue is est_rev_reviews — a Boxleiter-style estimate (gross lifetime), not ground "
+        "truth; lift compares pair median vs the BETTER solo tag's median (mart_niche all/50 cut).",
+        "Correlation, not causation: good games choose these tag combinations as much as the "
+        "combinations make games good.",
+        "Weigh n_games — a pair near the 15-game floor is often a few famous titles wearing "
+        "both tags, not a repeatable pattern.",
+        "Tags are SteamSpy community tags (crowd-applied, top-10-per-game, vote-floored) — "
+        "coverage is imperfect, especially for small/new games.",
+    ]
+    if unranked_free:
+        caveats.append(
+            f"{unranked_free} pair(s) omitted from the ranking: lift is undefined because both "
+            "tags' solo medians are $0 (free-to-play-dominated tags have no box revenue)."
+        )
+
+    return {
+        "tag": tag,
+        "solo": clean(
+            {
+                "n_games": solo["n_games"] if solo else None,
+                "median_rev": solo["median_rev"] if solo else None,
+                "hit_rate_200k": solo["hit_rate_200k"] if solo else None,
+            }
+        ),
+        "n_pairs": len(rows),
+        "headline": headline,
+        "best_combos": clean_rows(best),
+        "worst_combos": clean_rows(worst),
+        "caveats": caveats,
     }
 
 

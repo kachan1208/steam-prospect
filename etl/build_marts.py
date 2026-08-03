@@ -377,6 +377,14 @@ CREATOR_PITCH_MIN_MENTIONS = 1    # a (creator, genre) needs >= this many mentio
                                   # not 3 -- channel collection is new/low-volume; raise once
                                   # real volume exists).
 
+# JTBD — tag-combination lift (see mart_tag_lift.sql; runs LAST in MART_FILES so it can
+# read mart_game.top_tags and mart_niche's solo-tag baselines instead of re-deriving them).
+TAG_PAIR_MIN_GAMES = 15           # an unordered tag PAIR needs >= this many qualifying games
+                                  # (total_reviews >= MIN_REVIEWS_DEFAULT) to be kept — a
+                                  # median over fewer games is noise, not signal (mirrors
+                                  # MIN_NICHE_GAMES's role at the pair grain, floored lower
+                                  # because pairs slice the population much thinner).
+
 MART_FILES = [
     "mart_game.sql",
     "mart_niche.sql",
@@ -392,6 +400,7 @@ MART_FILES = [
     "mart_creator_pitch.sql",
     "mart_channel_mix.sql",
     "mart_channel_buzz.sql",
+    "mart_tag_lift.sql",   # LAST: reads mart_game + mart_niche built above
 ]
 
 HERE = Path(__file__).resolve().parent
@@ -446,6 +455,7 @@ def build_params() -> dict[str, str]:
         "BUZZ_SLOPE_EPSILON": BUZZ_SLOPE_EPSILON,
         "CREATOR_MIN_CONFIDENCE": CREATOR_MIN_CONFIDENCE,
         "CREATOR_PITCH_MIN_MENTIONS": CREATOR_PITCH_MIN_MENTIONS,
+        "TAG_PAIR_MIN_GAMES": TAG_PAIR_MIN_GAMES,
         "CUR_YEAR": cur_year,
         "RECENT_YEAR": cur_year - 1,
         "PRIOR_YEAR": cur_year - 2,
