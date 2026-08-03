@@ -123,7 +123,17 @@ export default function GameProfile() {
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <h1 className="text-lg font-semibold text-ink-primary">{profile.name ?? `App ${profile.appid}`}</h1>
+                <div className="flex items-center gap-2">
+                  <h1 className="text-lg font-semibold text-ink-primary">{profile.name ?? `App ${profile.appid}`}</h1>
+                  <a
+                    href={`https://store.steampowered.com/app/${profile.appid}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-series-1 hover:underline"
+                  >
+                    View on Steam ↗
+                  </a>
+                </div>
                 <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-ink-muted">
                   {profile.primary_genre && <Badge color={CSS_VAR.demand}>{profile.primary_genre}</Badge>}
                   <span>{profile.release_date ?? "Release date unknown"}</span>
