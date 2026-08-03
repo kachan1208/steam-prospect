@@ -29,6 +29,10 @@ export const options = {
     'http_req_duration{name:game_search}': ['p(95)<700'],  // substring scan — measured ~620ms p95 @25VUs
     'http_req_duration{name:game_profile}': ['p(95)<600'],
     'http_req_duration{name:game_teardown}': ['p(95)<4000'],
+    // Slowest handler on the droplet by ~4x (808ms p95 server-side, measured 2026-08-03):
+    // it computes tag-Jaccard at query time over every game in the genre + price band
+    // before LIMIT. Budgeted loosely so it's tracked rather than silently the tail driver.
+    'http_req_duration{name:game_comparables}': ['p(95)<1500'],
   },
 };
 
