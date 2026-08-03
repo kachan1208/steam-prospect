@@ -126,7 +126,14 @@ def _create_mart_game(con: duckdb.DuckDBPyConnection) -> None:
             top_tags VARCHAR[], n_reviews_sampled INTEGER, n_reviews_first_30d INTEGER,
             n_reviews_first_90d INTEGER, n_reviews_first_365d INTEGER,
             n_reviews_trailing_30d INTEGER, playtime_p25 DOUBLE, playtime_p50 DOUBLE,
-            playtime_p75 DOUBLE
+            playtime_p75 DOUBLE,
+            -- Live/streaming columns (CCU + Twitch collectors) and the first-seen crawl date.
+            -- Part of _PROFILE_COLS/_SEARCH_COLS, so they must exist here or every games
+            -- query fails to bind. `name_lower` is deliberately absent: games.py gates on it
+            -- via _has_name_lower() and falls back to ILIKE, and leaving it out keeps that
+            -- fallback path covered.
+            live_players INTEGER, twitch_viewers INTEGER, twitch_streams INTEGER,
+            first_seen VARCHAR
         )
     """)
     rows = []
@@ -140,8 +147,10 @@ def _create_mart_game(con: duckdb.DuckDBPyConnection) -> None:
             f"{g['name']} — a synthetic fixture game.", 65.0, 60.0, 55.0, g["top_tags"],
             g["total_reviews"], g["total_reviews"] // 5, g["total_reviews"] // 3,
             g["total_reviews"], g["total_reviews"] // 10, 120.0, 300.0, 600.0,
+            g["total_reviews"] // 100, g["total_reviews"] // 200, g["total_reviews"] // 1000,
+            f"{g['release_year']}-01-01",
         ))
-    con.executemany(f"INSERT INTO mart_game VALUES ({', '.join(['?'] * 33)})", rows)
+    con.executemany(f"INSERT INTO mart_game VALUES ({', '.join(['?'] * 37)})", rows)
 
 
 def _create_mart_niche(con: duckdb.DuckDBPyConnection) -> None:

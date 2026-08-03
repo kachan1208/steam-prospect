@@ -57,7 +57,7 @@ The Droplet is a small (4 GB) box also running VictoriaMetrics + Grafana + the n
 k6 prints an end-of-run summary. Key lines:
 - `http_req_duration` — `avg`, `p(95)`, `p(99)` (the thresholds gate on p95/p99).
 - `http_req_failed` — error rate (thresholds require <1% for `load.js`).
-- Per-endpoint: filter by the `name` tag, e.g. `http_req_duration{name:niches_list}`.
+- Per-endpoint: filter by the `name` tag, e.g. `http_req_duration{name:game_search}`.
 - A ✓/✗ next to each threshold; k6 exits non-zero if any threshold fails (CI-friendly).
 
 Save a machine-readable summary:
