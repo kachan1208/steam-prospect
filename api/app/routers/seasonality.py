@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Query
 
 from .. import analytics_db
 from ..schemas import LaunchCurve, LaunchCurvePoint, Seasonality, SeasonalityCell
