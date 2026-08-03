@@ -1,43 +1,20 @@
-import { Link, NavLink, Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Link, NavLink, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import clsx from "clsx";
 import { useEffect, type ReactNode } from "react";
 
 import { useHealth } from "./lib/api";
 import { initAnalytics, trackPageview } from "./lib/analytics";
 import { useTheme, ACCENTS, PRESETS } from "./lib/theme";
-import { hasInProgressTourStep, ONBOARDING_STORAGE_KEY, TourProvider } from "./lib/tour";
-import { TourOverlay } from "./components/TourOverlay";
-import NicheFinder from "./pages/NicheFinder";
-import MarketBenchmarks from "./pages/MarketBenchmarks";
 import LaunchTiming from "./pages/LaunchTiming";
-import Estimator from "./pages/Estimator";
 import GameSearch from "./pages/GameSearch";
 import GameProfile from "./pages/GameProfile";
-import Press from "./pages/Press";
-import Marketing from "./pages/Marketing";
 import Chat from "./pages/Chat";
-import DevLog from "./pages/DevLog";
 import DataLog from "./pages/DataLog";
-import Onboarding from "./pages/Onboarding";
-import Settings from "./pages/Settings";
 import Docs from "./pages/Docs";
 import Terms from "./pages/Terms";
 import Privacy from "./pages/Privacy";
 
 const ICONS: Record<string, ReactNode> = {
-  compass: (
-    <>
-      <circle cx="12" cy="12" r="9" />
-      <polygon points="15.5 8.5 13.5 13.5 8.5 15.5 10.5 10.5" />
-    </>
-  ),
-  bars: (
-    <>
-      <line x1="6" y1="20" x2="6" y2="13" />
-      <line x1="12" y1="20" x2="12" y2="7" />
-      <line x1="18" y1="20" x2="18" y2="11" />
-    </>
-  ),
   calendar: (
     <>
       <rect x="3.5" y="5" width="17" height="15.5" rx="2" />
@@ -54,46 +31,8 @@ const ICONS: Record<string, ReactNode> = {
       <rect x="13.5" y="13.5" width="7" height="7" rx="1.5" />
     </>
   ),
-  calculator: (
-    <>
-      <rect x="5" y="3" width="14" height="18" rx="2" />
-      <line x1="8" y1="7" x2="16" y2="7" />
-      <line x1="8" y1="12" x2="16" y2="12" />
-      <line x1="8" y1="16" x2="13" y2="16" />
-    </>
-  ),
-  megaphone: (
-    <>
-      <path d="M4 9v6h3l7 4V5L7 9H4Z" />
-      <path d="M17.5 8.5a5 5 0 0 1 0 7" />
-    </>
-  ),
   chat: (
     <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5Z" />
-  ),
-  flag: (
-    <>
-      <path d="M6 21V4" />
-      <path d="M6 4h11l-2.5 3.5L17 11H6" />
-    </>
-  ),
-  gear: (
-    <>
-      <circle cx="12" cy="12" r="3.2" />
-      <path d="M12 3.5v2.2M12 18.3v2.2M20.5 12h-2.2M5.7 12H3.5M17.7 6.3l-1.55 1.55M7.85 16.15 6.3 17.7M17.7 17.7l-1.55-1.55M7.85 7.85 6.3 6.3" />
-    </>
-  ),
-  book: (
-    <>
-      <path d="M4 5.5c0-1 .9-1.8 2-1.8h5.5v15.6H6c-1.1 0-2 .3-2 1.2V5.5Z" />
-      <path d="M20 5.5c0-1-.9-1.8-2-1.8h-5.5v15.6H18c1.1 0 2 .3 2 1.2V5.5Z" />
-    </>
-  ),
-  bell: (
-    <>
-      <path d="M18 8.5a6 6 0 0 0-12 0c0 6.5-2.5 8.5-2.5 8.5h17S18 15 18 8.5" />
-      <path d="M13.7 20.5a2 2 0 0 1-3.4 0" />
-    </>
   ),
   history: (
     <>
@@ -120,49 +59,16 @@ function Icon({ name }: { name: string }) {
   );
 }
 
-const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: string; end?: boolean }[] }[] = [
-  {
-    label: "Guide",
-    items: [{ to: "/welcome", label: "Getting Started", icon: "flag" }],
-  },
-  {
-    label: "Discover",
-    items: [
-      { to: "/niches", label: "Niche Finder", icon: "compass" },
-      { to: "/benchmarks", label: "Market Benchmarks", icon: "bars" },
-      { to: "/timing", label: "Launch & Timing", icon: "calendar" },
-    ],
-  },
-  {
-    label: "Analyze",
-    items: [
-      { to: "/games", label: "Games", icon: "grid" },
-      { to: "/estimator", label: "Estimator", icon: "calculator" },
-    ],
-  },
-  {
-    label: "Marketing",
-    items: [{ to: "/marketing", label: "Marketing", icon: "megaphone" }],
-  },
-  {
-    label: "Workspace",
-    items: [
-      { to: "/devlog", label: "Dev log", icon: "book" },
-      { to: "/datalog", label: "Data log", icon: "history" },
-      { to: "/chat", label: "Use in Claude", icon: "chat" },
-    ],
-  },
-  {
-    label: "Account",
-    items: [
-      { to: "/settings", label: "Settings", icon: "gear" },
-      { to: "/docs", label: "Docs", icon: "book" },
-    ],
-  },
+// Four surfaces, deliberately. The two that need pixels (a game's teardown charts, the
+// seasonality heatmap), the connector, and the data-freshness receipt. Everything the old
+// nav carried — niches, benchmarks, the estimator, marketing pitch lists — is still fully
+// answerable, but through the MCP against current.duckdb rather than a page of its own.
+const NAV_ITEMS: { to: string; label: string; icon: string }[] = [
+  { to: "/games", label: "Games", icon: "grid" },
+  { to: "/timing", label: "Launch & Timing", icon: "calendar" },
+  { to: "/chat", label: "Use in Claude", icon: "chat" },
+  { to: "/datalog", label: "Data log", icon: "history" },
 ];
-
-// Pages added in the watchtower build — flagged "New" in the sidebar so they're easy to spot.
-const NEW_PATHS = new Set(["/devlog", "/datalog"]);
 
 function Logo() {
   return (
@@ -275,7 +181,7 @@ function HealthRow() {
 function Sidebar() {
   return (
     <aside className="flex w-60 shrink-0 flex-col border-r border-chartborder bg-surface">
-      <Link to="/niches" className="flex items-center gap-2.5 px-5 py-[18px]">
+      <Link to="/games" className="flex items-center gap-2.5 px-5 py-[18px]">
         <Logo />
         <div className="leading-tight">
           <div className="text-sm font-semibold tracking-tight text-ink-primary">Prospect</div>
@@ -283,38 +189,23 @@ function Sidebar() {
         </div>
       </Link>
 
-      <nav className="flex-1 overflow-y-auto px-3 pb-3">
-        {NAV_GROUPS.map((group) => (
-          <div key={group.label} className="mb-5">
-            <div className="px-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-ink-muted">
-              {group.label}
-            </div>
-            <div className="flex flex-col gap-0.5">
-              {group.items.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  end={item.end}
-                  className={({ isActive }) =>
-                    clsx(
-                      "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] font-medium transition-colors",
-                      isActive
-                        ? "bg-brand-tint text-brand"
-                        : "text-ink-secondary hover:bg-surface2 hover:text-ink-primary",
-                    )
-                  }
-                >
-                  <Icon name={item.icon} />
-                  <span className="truncate min-w-0">{item.label}</span>
-                  {NEW_PATHS.has(item.to) && (
-                    <span className="ml-auto shrink-0 rounded-full bg-brand-tint px-1.5 py-[3px] text-[9px] font-semibold uppercase leading-none tracking-[0.06em] text-brand">
-                      New
-                    </span>
-                  )}
-                </NavLink>
-              ))}
-            </div>
-          </div>
+      <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-3 pb-3">
+        {NAV_ITEMS.map((item) => (
+          <NavLink
+            key={item.to}
+            to={item.to}
+            className={({ isActive }) =>
+              clsx(
+                "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] font-medium transition-colors",
+                isActive
+                  ? "bg-brand-tint text-brand"
+                  : "text-ink-secondary hover:bg-surface2 hover:text-ink-primary",
+              )
+            }
+          >
+            <Icon name={item.icon} />
+            <span className="truncate min-w-0">{item.label}</span>
+          </NavLink>
         ))}
       </nav>
 
@@ -345,26 +236,6 @@ function Sidebar() {
 }
 
 function AppShell() {
-  const location = useLocation();
-  const navigate = useNavigate();
-
-  // First-run only: a brand-new session landing on the default /niches entry gets sent to
-  // /welcome, which starts the guided tour (see lib/tour.tsx). Finishing, skipping, or Esc-ing
-  // the tour sets ONBOARDING_STORAGE_KEY, so this never re-fires and never touches a direct/
-  // deep link (only the canonical /niches entry point is redirected). Also skipped when a tour
-  // is already mid-progress (e.g. this is a reload) — /welcome would otherwise restart it from
-  // step 0 out from under a visitor lib/tour.tsx is already resuming in place.
-  useEffect(() => {
-    if (
-      location.pathname === "/niches" &&
-      !window.localStorage.getItem(ONBOARDING_STORAGE_KEY) &&
-      !hasInProgressTourStep()
-    ) {
-      navigate("/welcome", { replace: true });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   return (
     <div className="flex h-full bg-page">
       <Sidebar />
@@ -392,31 +263,25 @@ function RouteTracker() {
 
 export default function App() {
   return (
-    <TourProvider>
+    <>
       <RouteTracker />
       <Routes>
-        <Route path="/" element={<Navigate to="/niches" replace />} />
+        <Route path="/" element={<Navigate to="/games" replace />} />
         <Route path="/terms" element={<Terms />} />
         <Route path="/privacy" element={<Privacy />} />
         <Route element={<AppShell />}>
-          <Route path="/niches" element={<NicheFinder />} />
-          <Route path="/benchmarks" element={<MarketBenchmarks />} />
-          <Route path="/timing" element={<LaunchTiming />} />
-          <Route path="/estimator" element={<Estimator />} />
           <Route path="/games" element={<GameSearch />} />
           <Route path="/games/:appid" element={<GameProfile />} />
-          <Route path="/press" element={<Press />} />
-          <Route path="/marketing" element={<Marketing />} />
-          <Route path="/devlog" element={<DevLog />} />
+          <Route path="/timing" element={<LaunchTiming />} />
           <Route path="/chat" element={<Chat />} />
           <Route path="/datalog" element={<DataLog />} />
-          <Route path="/welcome" element={<Onboarding />} />
-          <Route path="/settings" element={<Settings />} />
           <Route path="/docs" element={<Docs />} />
           <Route path="/docs/:slug" element={<Docs />} />
         </Route>
+        {/* Anything else (including the retired /niches, /benchmarks, /estimator,
+            /marketing, /press, /devlog, /settings, /welcome) lands on Games. */}
+        <Route path="*" element={<Navigate to="/games" replace />} />
       </Routes>
-      <TourOverlay />
-    </TourProvider>
+    </>
   );
 }

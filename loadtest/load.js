@@ -1,5 +1,5 @@
 // LOAD — steady, realistic traffic at an expected concurrency, weighted like real usage
-// (Niche Finder dominates). Ramps up, holds, ramps down. This is the "is it healthy under
+// (Games dominates). Ramps up, holds, ramps down. This is the "is it healthy under
 // normal peak load" test.
 //   VUS=25 DURATION=3m k6 run loadtest/load.js
 //   BASE_URL=http://127.0.0.1:8080 VUS=25 k6 run loadtest/load.js   (app-local, no TLS/nginx)
@@ -26,8 +26,8 @@ export const options = {
     http_req_failed: ['rate<0.01'],                     // <1% errors
     http_req_duration: ['p(95)<800', 'p(99)<2000'],     // overall
     // Per-endpoint p95 budgets (heavy teardown gets its own looser budget):
-    'http_req_duration{name:niches_list}': ['p(95)<600'],
     'http_req_duration{name:game_search}': ['p(95)<700'],  // substring scan — measured ~620ms p95 @25VUs
+    'http_req_duration{name:game_profile}': ['p(95)<600'],
     'http_req_duration{name:game_teardown}': ['p(95)<4000'],
   },
 };

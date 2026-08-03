@@ -11,12 +11,9 @@ from fastapi.staticfiles import StaticFiles
 
 from . import analytics_db
 from .config import settings
-from .control_db import init_db
 from .observability import setup_observability
-from . import input_models  # noqa: F401 — register watchtower tables on Base.metadata before init_db()
 from .routers import (
-    analytics, chat, estimate, games, health, inputs, market, marketing,
-    niches, press, refresh, seasonality, trends, views,
+    analytics, games, health, market, refresh, seasonality, trends,
 )
 from .mcp_mount import load_prospect_mcp
 
@@ -28,8 +25,6 @@ _prospect_mcp, _mcp_asgi = load_prospect_mcp()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Control plane: create schema + seed solo org.
-    init_db()
     # Analytics plane: open the read-only marts. Fail loud if the ETL hasn't run.
     try:
         analytics_db.init(settings.analytics_db_path, settings.analytics_pool_size)
@@ -63,28 +58,12 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
-app.include_router(niches.router)
 app.include_router(market.router)
 app.include_router(seasonality.router)
-app.include_router(estimate.router)
-app.include_router(views.router)
 app.include_router(games.router)
-app.include_router(press.router)
-app.include_router(marketing.router)
-app.include_router(chat.router)
-app.include_router(inputs.router)
 app.include_router(refresh.router)
 app.include_router(trends.router)
 app.include_router(analytics.router)
-
-# Alias the plan's canonical CSV export path to the niches export handler.
-app.add_api_route(
-    "/api/export/niches.csv",
-    niches.export_csv,
-    methods=["GET"],
-    tags=["niches"],
-    name="export_niches_csv",
-)
 
 
 # Mount the Prospect MCP (Streamable HTTP) at /mcp so users can add it to their own Claude.

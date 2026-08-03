@@ -1,12 +1,12 @@
-"""Observability (O3) + request-level hardening (O4) middleware.
+"""Observability middleware.
 
 Wired once from main.py via setup_observability(app), called BEFORE the existing
 CORSMiddleware registration — Starlette's add_middleware() makes the LAST-added
 middleware outermost (see main.py for the full ordering rationale), so calling this
-first keeps CORS wrapping everything else, including a 429 from the rate limiter or
-an early exception, exactly as it does today.
+first keeps CORS wrapping everything else, including an early exception, exactly as
+it does today.
 
-Three O3 pieces:
+Three pieces:
   - Metrics: prometheus-fastapi-instrumentator exposes GET /metrics in the standard
     Prometheus exposition format — VictoriaMetrics (or Prometheus) scrapes this
     directly, no special wiring needed on the VM side beyond a scrape target.
@@ -16,30 +16,19 @@ Three O3 pieces:
     (`X-Request-ID` response header + `request.state.request_id`), times it, and
     emits one structured JSON log line per request.
   - Sentry: env-gated on PROSPECT_SENTRY_DSN. A no-op (no init call at all) when
-    unset, so local/solo dev has zero Sentry footprint and no network calls.
-
-One O4 piece (bundled here rather than a new file, to keep this task's edit surface
-to the files it was scoped to touch):
-  - Rate limiting: an in-process, per-key request throttle. Keyed by org today (solo
-    mode's single seeded org) with a header/IP-keyed fallback for whenever real
-    multi-tenant auth exists; the ceiling is always read from entitlements.py, never
-    hardcoded here. In solo mode entitlements() returns rate_limit_per_minute=None
-    (unlimited), so this is a pass-through today by construction — see
-    RateLimitMiddleware's docstring.
+    unset, so local dev has zero Sentry footprint and no network calls.
 """
 from __future__ import annotations
 
 import json
 import logging
 import sys
-import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from starlette.datastructures import Headers, MutableHeaders
-from starlette.responses import JSONResponse
+from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .config import settings
@@ -198,130 +187,6 @@ def _setup_sentry() -> None:
     )
 
 
-# ==========================================================================================
-# O4: rate-limit middleware (per-key, in-process)
-# ==========================================================================================
-class _FixedWindowLimiter:
-    """In-process fixed-window counter (per key, per 60s window). No external store —
-    correct for a single-process deployment; swap for a Redis-backed limiter if/when this
-    ever runs multi-worker/multi-process."""
-
-    def __init__(self) -> None:
-        self._windows: dict[str, tuple[int, int]] = {}  # key -> (window_start_minute, count)
-        self._lock = threading.Lock()
-
-    def hit(self, key: str, limit_per_minute: int) -> tuple[bool, int]:
-        """Record one hit for `key`; returns (allowed, retry_after_seconds)."""
-        now = time.time()
-        window = int(now // 60)
-        with self._lock:
-            win_start, count = self._windows.get(key, (window, 0))
-            if win_start != window:
-                win_start, count = window, 0
-            count += 1
-            self._windows[key] = (win_start, count)
-            # Cheap, bounded cleanup: an in-process dict of recent keys never grows large
-            # for this app's traffic shape, but drop clearly-stale entries opportunistically
-            # so a long-running process doesn't accumulate one entry per distinct IP forever.
-            if len(self._windows) > 10_000:
-                stale = [k for k, (w, _) in self._windows.items() if w < window - 2]
-                for k in stale:
-                    del self._windows[k]
-        if count > limit_per_minute:
-            return False, 60 - int(now % 60)
-        return True, 0
-
-
-_solo_org_cache: Any = None
-_solo_org_lock = threading.Lock()
-
-
-def _get_solo_org() -> Any:
-    """Cached lookup of the seeded solo org (there is only ever one). Looking this up for
-    real — rather than re-deriving the solo_mode shortcut here — is what lets the rate
-    limiter genuinely source its ceiling from entitlements.py instead of hardcoding
-    "unlimited" a second time in this file."""
-    global _solo_org_cache
-    if _solo_org_cache is None:
-        with _solo_org_lock:
-            if _solo_org_cache is None:
-                from sqlalchemy import select
-
-                from . import control_db
-                from .models import Org
-
-                db = control_db.SessionLocal()
-                try:
-                    _solo_org_cache = db.scalar(
-                        select(Org).where(Org.slug == settings.solo_org_slug)
-                    )
-                finally:
-                    db.close()
-    return _solo_org_cache
-
-
-class RateLimitMiddleware:
-    """Per-key request throttle. The ceiling always comes from `entitlements.py` — never a
-    number hardcoded here — so plan changes there apply without touching this file.
-
-    In solo mode (the only mode that runs today: auth.py's non-solo branch
-    unconditionally 401s, so `settings.solo_mode` is effectively always True in any real
-    deployment of this codebase) this resolves to the single seeded org and
-    `entitlements()` returns `rate_limit_per_minute=None` -> unlimited -> pass-through by
-    construction, per the plan's "pass-through/unlimited in solo mode" requirement.
-
-    The non-solo branch is scaffolding for once auth.py can resolve a real org from an
-    API key: it buckets by the presented `X-API-Key` header (or client IP with none) and
-    applies a flat config default (`settings.rate_limit_per_minute`) today, since there is
-    no verified org to call `entitlements()` on yet — swap in a verified-org lookup +
-    `entitlements(org).rate_limit_per_minute` there the moment auth.py can produce one,
-    mirroring the solo-mode branch below.
-    """
-
-    PUBLIC_PATHS = {"/metrics", "/", "/docs", "/openapi.json", "/redoc"}
-
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-        self._limiter = _FixedWindowLimiter()
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if (
-            scope["type"] != "http"
-            or scope.get("method") == "OPTIONS"
-            or scope.get("path") in self.PUBLIC_PATHS
-        ):
-            await self.app(scope, receive, send)
-            return
-
-        key, limit = self._resolve(scope)
-        if limit is not None:
-            allowed, retry_after = self._limiter.hit(key, limit)
-            if not allowed:
-                response = JSONResponse(
-                    {"detail": "Rate limit exceeded. Slow down and retry shortly."},
-                    status_code=429,
-                    headers={"Retry-After": str(retry_after)},
-                )
-                await response(scope, receive, send)
-                return
-        await self.app(scope, receive, send)
-
-    @staticmethod
-    def _resolve(scope: Scope) -> tuple[str, int | None]:
-        from .entitlements import entitlements
-
-        if settings.solo_mode:
-            org = _get_solo_org()
-            limit = entitlements(org).rate_limit_per_minute if org is not None else None
-            return f"org:{settings.solo_org_slug}", limit
-
-        headers = Headers(scope=scope)
-        api_key = headers.get("x-api-key")
-        if api_key:
-            return f"key:{api_key[:12]}", settings.rate_limit_per_minute
-        client = scope.get("client")
-        return f"ip:{client[0] if client else 'unknown'}", settings.rate_limit_per_minute
-
 
 # ==========================================================================================
 # Entry point — call once, right after `FastAPI()` and BEFORE `app.add_middleware(CORSMiddleware, ...)`.
@@ -329,6 +194,5 @@ class RateLimitMiddleware:
 def setup_observability(app: Any) -> None:
     configure_json_logging()
     _setup_sentry()
-    app.add_middleware(RateLimitMiddleware)  # innermost of these three: throttle first
-    _setup_metrics(app)  # wraps the limiter so 429s are still counted in /metrics
-    app.add_middleware(RequestContextMiddleware)  # outermost of these three: logs everything
+    _setup_metrics(app)
+    app.add_middleware(RequestContextMiddleware)  # outermost: logs everything

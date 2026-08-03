@@ -3,8 +3,6 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 
 from .. import analytics_db, benchmarks
-from ..auth import get_current_org
-from ..models import Org
 from ..schemas import (
     BenchmarkMark,
     BoxleiterRow,
@@ -45,7 +43,6 @@ def distribution(
     metric: str = Query("revenue"),
     genre: str = Query("__all__"),
     window: str = Query("all", pattern="^(all|24m)$"),
-    org: Org = Depends(get_current_org),
 ) -> MarketDistribution:
     if metric not in _METRICS:
         metric = "revenue"
@@ -72,7 +69,7 @@ def distribution(
 
 
 @router.get("/benchmarks")
-def market_benchmarks(org: Org = Depends(get_current_org)) -> dict:
+def market_benchmarks() -> dict:
     meta = {r["key"]: r["value"] for r in analytics_db.query("SELECT key, value FROM mart_meta")}
     boxleiter = analytics_db.query(
         "SELECT genre, n, owners_per_review_median, owners_per_review_p25, "

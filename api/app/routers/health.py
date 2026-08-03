@@ -3,8 +3,6 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from .. import analytics_db
-from ..auth import get_current_org
-from ..models import Org
 from ..schemas import Health
 
 router = APIRouter(tags=["health"])
@@ -18,7 +16,7 @@ def _meta() -> dict:
 
 
 @router.get("/api/health", response_model=Health)
-def health(org: Org = Depends(get_current_org)) -> Health:
+def health() -> Health:
     meta = _meta()
     return Health(
         status="ok" if analytics_db.is_ready() else "degraded",
