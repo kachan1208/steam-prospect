@@ -58,6 +58,19 @@ def main() -> None:
         print(f"\n[OK] niche_detail returned {len(detail['representative_games'])} representative games, "
               f"{len(detail['saturation_trend'])} trend years, {len(detail['revenue_histogram'])} hist buckets")
 
+    # 2b. tag_combos — tolerant: mart_tag_lift only exists once the ETL that added it has
+    # run, and its absence must yield the tool's clear error dict, never a crash.
+    combos = srv.tag_combos("Roguelike Deckbuilder", limit=5)
+    show("tag_combos('Roguelike Deckbuilder', limit=5)", combos)
+    if "error" in combos:
+        assert "mart_tag_lift" in combos["error"], f"unexpected tag_combos error: {combos['error']!r}"
+        print("\n[OK] tag_combos degraded cleanly (mart_tag_lift not built yet — run `task etl`)")
+    else:
+        assert combos["n_pairs"] > 0 and combos["best_combos"], "expected pairs for a popular tag"
+        assert all(c["lift"] is not None for c in combos["best_combos"])
+        print(f"\n[OK] tag_combos: {combos['n_pairs']} pairs, best partner "
+              f"{combos['best_combos'][0]['partner']!r} at {combos['best_combos'][0]['lift']}x lift")
+
     # 3. market_benchmarks.
     bm = srv.market_benchmarks()
     show("market_benchmarks()", bm)
