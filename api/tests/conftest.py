@@ -118,6 +118,22 @@ ENTITIES = [
     ("publisher", "Big Publisher D", 1, 2022, 2022, 0, 0.0, 0.0, 0.0, 3000.0, 0.81, 0.0, ["Action"], 1),
 ]
 
+# Launch & Timing marts (api/app/routers/timing.py). Values are hand-picked so the
+# window_recommendation arithmetic is checkable on paper:
+#   demand_index[m] = share*12; congestion_index[m] = releases/mean(releases)
+#   mean(releases) = (100*9 + 160 + 140 + 80)/12 = 106.666...
+#   -> best months by score: Dec (1.32-0.9375=0.3825), Nov (1.56-1.3125=0.2475),
+#      Jul (1.08-0.9375=0.1425).
+# Shares sum to exactly 1.0. "Roguelike" gets demand+decay but NO congestion rows (as a
+# genre below the congestion size floor) -> recommendation must be None, series empty.
+TIMING_DEMAND_SHARES = [0.06, 0.06, 0.08, 0.07, 0.08, 0.08, 0.09, 0.08, 0.07, 0.09, 0.13, 0.11]
+TIMING_CONGESTION_RELEASES = [80.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 160.0, 140.0, 100.0]
+# Decay medians deliberately do NOT sum to 1 (0.30+0.15+0.05 + 21*0.02 = 0.92) so tests
+# pin the router's renormalization: first_3 = 0.50/0.92, first_6 = 0.56/0.92,
+# first_12 = 0.68/0.92.
+TIMING_DECAY_SHARES = [0.30, 0.15, 0.05] + [0.02] * 21
+
+
 # (role, name, appid, seq) — seq 1 = the entity's earliest release (1006 is 2021, 1005 is
 # 2024, 1003 is 2025 for the collective).
 ENTITY_GAMES = [
@@ -140,6 +156,7 @@ def _build_fixture_mart(path: Path) -> None:
         _create_mart_market_boxleiter(con)
         _create_mart_meta(con)
         _create_mart_entity(con)
+        _create_mart_timing(con)
     finally:
         con.close()  # MUST close before analytics_db opens its own read_only connection
 
@@ -311,6 +328,46 @@ def _create_mart_entity(con: duckdb.DuckDBPyConnection) -> None:
         )
     """)
     con.executemany("INSERT INTO mart_entity_games VALUES (?, ?, ?, ?)", ENTITY_GAMES)
+
+
+def _create_mart_timing(con: duckdb.DuckDBPyConnection) -> None:
+    """The three Launch & Timing marts, exactly per etl/marts/mart_timing.sql's schema
+    contract that api/app/routers/timing.py reads. '__all__' is complete (12 demand + 12
+    congestion + 24 decay rows); 'Roguelike' deliberately lacks congestion rows."""
+    con.execute("""
+        CREATE TABLE mart_timing_demand (
+            genre VARCHAR, month INTEGER, demand_share DOUBLE, month_reviews BIGINT,
+            n_games INTEGER, n_games_genre INTEGER
+        )
+    """)
+    demand_rows = []
+    for genre in ("__all__", "Roguelike"):
+        for m, share in enumerate(TIMING_DEMAND_SHARES, start=1):
+            demand_rows.append((genre, m, share, int(share * 100000), 40, 60))
+    con.executemany(f"INSERT INTO mart_timing_demand VALUES ({', '.join(['?'] * 6)})", demand_rows)
+
+    con.execute("""
+        CREATE TABLE mart_timing_congestion (
+            genre VARCHAR, month INTEGER, avg_releases DOUBLE, avg_big_releases DOUBLE,
+            n_years INTEGER
+        )
+    """)
+    con.executemany(
+        "INSERT INTO mart_timing_congestion VALUES (?, ?, ?, ?, ?)",
+        [("__all__", m, rel, 5.0, 3) for m, rel in enumerate(TIMING_CONGESTION_RELEASES, start=1)],
+    )
+
+    con.execute("""
+        CREATE TABLE mart_timing_decay (
+            genre VARCHAR, month_since_release INTEGER, median_share DOUBLE,
+            mean_share DOUBLE, n_games INTEGER
+        )
+    """)
+    decay_rows = []
+    for genre in ("__all__", "Roguelike"):
+        for m, share in enumerate(TIMING_DECAY_SHARES):
+            decay_rows.append((genre, m, share, share * 1.1, 40))
+    con.executemany("INSERT INTO mart_timing_decay VALUES (?, ?, ?, ?, ?)", decay_rows)
 
 
 def _create_mart_meta(con: duckdb.DuckDBPyConnection) -> None:

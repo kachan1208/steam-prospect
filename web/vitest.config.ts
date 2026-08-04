@@ -10,5 +10,8 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     include: ["src/**/*.test.{ts,tsx}"],
+    // Repairs Node >= 22's method-less builtin localStorage stub, which shadows jsdom's
+    // real Storage in this environment — see src/test/setup.ts.
+    setupFiles: ["./src/test/setup.ts"],
   },
 });

@@ -125,6 +125,15 @@ class GameSearchList(BaseModel):
     offset: int
 
 
+class TagSuggestion(BaseModel):
+    tag: str  # the EXACT tag string as stored in mart_game.top_tags (case/hyphenation matter)
+    n_games: int  # how many catalog games carry the tag (frequency = suggestion rank)
+
+
+class TagSuggestList(BaseModel):
+    items: list[TagSuggestion]
+
+
 class GameProfile(BaseModel):
     appid: int
     name: Optional[str] = None

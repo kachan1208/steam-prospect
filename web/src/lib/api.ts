@@ -273,6 +273,78 @@ export function useLaunchCurve(genre: string) {
   return useQuery(launchCurveQueryOptions(genre));
 }
 
+// ---- launch & timing overview (mart_timing_* — TRUE monthly review histograms) -----------
+export interface TimingDemandPoint {
+  month: number; // 1-12
+  demand_share: number | null;
+  month_reviews: number | null;
+  n_games: number;
+}
+
+export interface TimingCongestionPoint {
+  month: number;
+  avg_releases: number;
+  avg_big_releases: number;
+  n_years: number;
+}
+
+export interface TimingDecayPoint {
+  month_since_release: number; // 0-23
+  median_share: number | null;
+  mean_share: number | null;
+  n_games: number;
+}
+
+export interface TimingDecaySummary {
+  first_3_months_share: number | null;
+  first_6_months_share: number | null;
+  first_12_months_share: number | null;
+  n_games: number;
+}
+
+export interface TimingWindowScore {
+  month: number;
+  month_name: string;
+  demand_share: number | null;
+  demand_index: number | null; // 1.0 = an average month
+  avg_releases: number | null;
+  avg_big_releases: number | null;
+  congestion_index: number | null; // 1.0 = an average month
+  score: number | null; // demand_index - congestion_index
+}
+
+export interface TimingWindowRecommendation {
+  best_months: number[];
+  best_month_names: string[];
+  rationale: string;
+  method: string;
+  months: TimingWindowScore[];
+}
+
+export interface TimingOverview {
+  genre: string;
+  demand: TimingDemandPoint[];
+  congestion: TimingCongestionPoint[];
+  decay: TimingDecayPoint[];
+  decay_summary: TimingDecaySummary | null;
+  window_recommendation: TimingWindowRecommendation | null;
+  notes: string[];
+}
+
+export function useTimingOverview(genre: string) {
+  return useQuery({
+    queryKey: ["timing-overview", genre],
+    queryFn: () => request<TimingOverview>(`/timing/overview${qs({ genre })}`),
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000,
+    // 503 = marts not built yet, 404 = genre below the size floors — both are stable
+    // answers; surface them immediately instead of retrying for seconds.
+    retry: (failureCount, error) =>
+      !(error instanceof ApiError && (error.status === 503 || error.status === 404)) &&
+      failureCount < 2,
+  });
+}
+
 // ---- games (Phase 2) --------------------------------------------------------------------
 export interface GameSearchRow {
   appid: number;
@@ -320,6 +392,19 @@ export interface GameSearchParams {
   genre?: string;
   min_reviews?: number;
   released_within_days?: number;
+  /** Price band in USD (list price). NULL-priced rows drop out of any price filter. */
+  price_min?: number;
+  price_max?: number;
+  /** Floor on positive_ratio, 0-1 (0.8 = at least 80% positive). */
+  min_positive?: number;
+  /** Floor on est_rev_reviews, USD. */
+  min_revenue?: number;
+  /** Inclusive release_year bounds. */
+  released_after?: number;
+  released_before?: number;
+  /** true = only, false = only-the-opposite, undefined = both (don't pass false unless meant). */
+  self_published?: boolean;
+  indie?: boolean;
   sort: GameSortKey;
   order: "asc" | "desc";
   limit: number;
@@ -330,6 +415,28 @@ export function useGameSearch(params: GameSearchParams) {
   return useQuery({
     queryKey: ["games-search", params],
     queryFn: () => request<GameSearchList>(`/games/search${qs(params)}`),
+    placeholderData: keepPreviousData,
+  });
+}
+
+// ---- tag autocomplete -------------------------------------------------------------------
+export interface TagSuggestion {
+  tag: string; // the EXACT stored tag string (case/hyphenation-sensitive)
+  n_games: number;
+}
+
+export interface TagSuggestList {
+  items: TagSuggestion[];
+}
+
+/** Distinct catalog tags matching `q` (case-insensitive substring), ranked by frequency.
+ * Pass the DEBOUNCED input value; empty q returns the overall top tags. */
+export function useTagSuggest(q: string, enabled = true) {
+  return useQuery({
+    queryKey: ["tag-suggest", q],
+    queryFn: () => request<TagSuggestList>(`/games/tags/suggest${qs({ q, limit: 10 })}`),
+    enabled,
+    staleTime: 5 * 60_000, // the tag universe only changes on the nightly ETL
     placeholderData: keepPreviousData,
   });
 }
@@ -374,10 +481,19 @@ export interface GameProfile {
   first_seen: string | null;
 }
 
+/** Shared query options so the compare page can fan out over N games via useQueries while
+ * hitting the same cache entries as useGameProfile. */
+export function gameProfileQueryOptions(appid: number) {
+  return {
+    queryKey: ["game-profile", appid] as const,
+    queryFn: () => request<GameProfile>(`/games/${appid}`),
+    staleTime: 5 * 60_000,
+  };
+}
+
 export function useGameProfile(appid: number | null) {
   return useQuery({
-    queryKey: ["game-profile", appid],
-    queryFn: () => request<GameProfile>(`/games/${appid}`),
+    ...gameProfileQueryOptions(appid ?? -1),
     enabled: appid !== null,
   });
 }
@@ -551,6 +667,51 @@ export function useGameTeardown(appid: number | null) {
     queryKey: ["game-teardown", appid],
     queryFn: () => request<GameTeardown>(`/games/${appid}/teardown`),
     enabled: appid !== null,
+  });
+}
+
+// ---- game trends (+ compare overlay) ----------------------------------------------------
+// Mirrors api/app/routers/trends.py. GameTrendsChart keeps its own local copy of the base
+// point shape (it self-fetches without comps); these typed hooks exist for the /compare
+// page, which needs the `comps` block (each comp's own monthly series).
+export interface GameTrendPoint {
+  period: string; // 'YYYY-MM'
+  n_reviews: number;
+  ccu_avg: number | null;
+  twitch_viewers: number;
+  n_mentions: number;
+}
+
+export interface CompSeries {
+  appid: number;
+  points: GameTrendPoint[];
+}
+
+export interface GameTrendsComps {
+  requested: number[];
+  matched: number[];
+  series: CompSeries[];
+  cohort: unknown[]; // cohort median/band — unused by the compare page (it draws per-game lines)
+}
+
+export interface GameTrendsResponse {
+  appid: number;
+  eligible: boolean;
+  points: GameTrendPoint[];
+  comps: GameTrendsComps | null;
+}
+
+/** Primary game's monthly trends with the rest overlaid via ?comps= (one request total). */
+export function useGameTrendsWithComps(appid: number | null, comps: number[]) {
+  const compsKey = comps.join(",");
+  return useQuery({
+    queryKey: ["game-trends-comps", appid, compsKey],
+    queryFn: () =>
+      request<GameTrendsResponse>(
+        `/games/${appid}/trends${qs({ comps: compsKey || undefined })}`,
+      ),
+    enabled: appid !== null,
+    staleTime: 5 * 60_000,
   });
 }
 
