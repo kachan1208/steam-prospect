@@ -791,8 +791,24 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
             -- aggregates where present; games without it fall back to raw appdetails columns and
             -- carry NULL/0 for the analysis-only fields (owners, playtime, self_published, ...).
             SELECT
-                g.appid, COALESCE(ag.name, g.name) AS name, ag.release_year,
-                TRY_CAST(ag.release_date_iso AS DATE) AS release_date,
+                g.appid, COALESCE(ag.name, g.name) AS name,
+                -- Release date: analysis_games' ISO date where present, else parse the raw
+                -- appdetails string on the live games row ("Jul 30, 2026" / "30 Jul, 2026").
+                -- analysis_games is a frozen one-off snapshot, so EVERY game released after
+                -- it would otherwise carry NULL release_date/year forever (found via appid
+                -- 4108000, released Jul 30 2026: reviews/price flowed through their own
+                -- fallbacks below while the date stayed blank). Placeholders ("Q3 2026",
+                -- "Coming soon") don't parse -> NULL, which release_valid already guards.
+                COALESCE(
+                    ag.release_year,
+                    EXTRACT(year FROM try_strptime(g.release_date,
+                        ['%b %d, %Y', '%d %b, %Y', '%B %d, %Y', '%d %B, %Y']))
+                ) AS release_year,
+                COALESCE(
+                    TRY_CAST(ag.release_date_iso AS DATE),
+                    CAST(try_strptime(g.release_date,
+                        ['%b %d, %Y', '%d %b, %Y', '%B %d, %Y', '%d %B, %Y']) AS DATE)
+                ) AS release_date,
                 -- SteamSpy price, falling back to Steam's own appdetails price (games.price_initial,
                 -- stored in cents) for brand-new games SteamSpy hasn't indexed yet -- so revenue
                 -- estimates immediately instead of stranding a blank $ on every fresh release.
