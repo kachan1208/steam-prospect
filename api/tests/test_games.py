@@ -65,6 +65,99 @@ def test_search_pagination(client):
     assert [g["appid"] for g in r2.json()["items"]] == [1001, 1005]
 
 
+def test_search_price_band_excludes_free_null_and_out_of_band(client):
+    # $10-$20: 1001 (14.99) and 1002 (19.99); excludes 9.99, 24.99, 4.99 and free 1004.
+    r = client.get("/api/games/search", params={"price_min": 10, "price_max": 20})
+    assert r.status_code == 200
+    assert {g["appid"] for g in r.json()["items"]} == {1001, 1002}
+
+
+def test_search_price_max_alone_keeps_free_games(client):
+    # "Under $5" is a budget filter — free titles belong in it (floor unset = 0 allowed).
+    r = client.get("/api/games/search", params={"price_max": 5})
+    assert r.status_code == 200
+    assert {g["appid"] for g in r.json()["items"]} == {1004, 1006}
+
+
+def test_search_min_positive_floor(client):
+    r = client.get("/api/games/search", params={"min_positive": 0.85})
+    assert r.status_code == 200
+    # 1001 (.88), 1002 (.92), 1005 (.90); excludes .65/.81/.55.
+    assert {g["appid"] for g in r.json()["items"]} == {1001, 1002, 1005}
+
+
+def test_search_min_positive_rejects_out_of_range(client):
+    r = client.get("/api/games/search", params={"min_positive": 1.5})
+    assert r.status_code == 422
+
+
+def test_search_min_revenue_floor(client):
+    r = client.get("/api/games/search", params={"min_revenue": 100_000})
+    assert r.status_code == 200
+    # 1001 (150K), 1002 (900K), 1005 (250K); excludes 20K/0/3K.
+    assert {g["appid"] for g in r.json()["items"]} == {1001, 1002, 1005}
+
+
+def test_search_release_year_range(client):
+    r = client.get("/api/games/search", params={"released_after": 2023, "released_before": 2024})
+    assert r.status_code == 200
+    # release_year 2023-2024 inclusive: 1001 (2024), 1002 (2023), 1005 (2024).
+    assert {g["appid"] for g in r.json()["items"]} == {1001, 1002, 1005}
+
+
+def test_search_self_published_both_directions(client):
+    r = client.get("/api/games/search", params={"self_published": "true"})
+    assert {g["appid"] for g in r.json()["items"]} == {1001, 1003, 1005, 1006}
+    r = client.get("/api/games/search", params={"self_published": "false"})
+    assert {g["appid"] for g in r.json()["items"]} == {1002, 1004}
+
+
+def test_search_indie_filter(client):
+    r = client.get("/api/games/search", params={"indie": "true"})
+    assert {g["appid"] for g in r.json()["items"]} == {1001, 1002, 1003, 1005, 1006}
+    r = client.get("/api/games/search", params={"indie": "false"})
+    assert {g["appid"] for g in r.json()["items"]} == {1004}
+
+
+def test_search_research_filters_compose(client):
+    # The realistic research query: paid Roguelikes $10+, rated >= 0.8.
+    r = client.get(
+        "/api/games/search",
+        params={"genre": "Roguelike", "price_min": 10, "min_positive": 0.8},
+    )
+    assert r.status_code == 200
+    assert {g["appid"] for g in r.json()["items"]} == {1001, 1002}
+
+
+def test_tags_suggest_substring_match_is_case_insensitive(client):
+    r = client.get("/api/games/tags/suggest", params={"q": "ROGUE"})
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert items == [{"tag": "Roguelike", "n_games": 3}]
+
+
+def test_tags_suggest_orders_by_frequency_and_respects_limit(client):
+    # Tags containing "a": Farming (2 games) tops the 1-count tags; ties break alphabetically
+    # ("Action" first), so limit=2 pins the ordering contract.
+    r = client.get("/api/games/tags/suggest", params={"q": "a", "limit": 2})
+    assert r.status_code == 200
+    assert [i["tag"] for i in r.json()["items"]] == ["Farming", "Action"]
+
+
+def test_tags_suggest_empty_q_returns_top_tags(client):
+    r = client.get("/api/games/tags/suggest", params={"limit": 3})
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert len(items) == 3
+    assert items[0] == {"tag": "Roguelike", "n_games": 3}  # most frequent fixture tag
+
+
+def test_tags_suggest_no_match_is_empty_not_error(client):
+    r = client.get("/api/games/tags/suggest", params={"q": "zzz-no-such-tag"})
+    assert r.status_code == 200
+    assert r.json()["items"] == []
+
+
 def test_game_profile_happy_path(client):
     r = client.get("/api/games/1001")
     assert r.status_code == 200

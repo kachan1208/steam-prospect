@@ -26,6 +26,8 @@ from ..schemas import (
     PriceBand,
     ReviewAspect,
     ReviewTimelinePoint,
+    TagSuggestion,
+    TagSuggestList,
 )
 
 router = APIRouter(prefix="/api/games", tags=["games"])
@@ -80,6 +82,24 @@ def search_games(
     released_within_days: int | None = Query(
         None, ge=1, le=3650, description="Only games released within the last N days (a 'new releases' filter)."
     ),
+    price_min: float | None = Query(
+        None, ge=0, description="Price floor in USD (list price). Any price filter drops NULL-priced rows."
+    ),
+    price_max: float | None = Query(None, ge=0, description="Price ceiling in USD (list price)."),
+    min_positive: float | None = Query(
+        None, ge=0, le=1, description="Floor on positive_ratio (0-1, e.g. 0.8 = at least 80% positive)."
+    ),
+    min_revenue: float | None = Query(None, ge=0, description="Floor on est_rev_reviews (USD)."),
+    released_after: int | None = Query(
+        None, ge=1970, le=2100, description="Only games with release_year >= this year (inclusive)."
+    ),
+    released_before: int | None = Query(
+        None, ge=1970, le=2100, description="Only games with release_year <= this year (inclusive)."
+    ),
+    self_published: bool | None = Query(
+        None, description="true = self-published only, false = publisher-backed only, omitted = both."
+    ),
+    indie: bool | None = Query(None, description="true = indie only, false = non-indie only, omitted = both."),
     sort: str = Query("total_reviews"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(25, ge=1, le=100),
@@ -115,6 +135,36 @@ def search_games(
             "AND TRY_CAST(release_date AS DATE) <= CURRENT_DATE"
         )
         params.append(released_within_days)
+    # Price band, in USD. Comparisons on price_initial drop NULL-priced rows naturally —
+    # a game with an unknown price can't be shown to satisfy a price constraint. Free games
+    # (price_initial = 0, incl. is_free titles) stay in as long as the floor allows 0: a
+    # researcher's "under $5" should include free titles; "$10-30" should not. We filter on
+    # the actual list price rather than is_free because some F2P-flagged titles sell paid
+    # editions with a real price (e.g. Rainbow Six Siege at $19.99).
+    if price_min is not None:
+        where.append("price_initial >= ?")
+        params.append(price_min)
+    if price_max is not None:
+        where.append("price_initial <= ?")
+        params.append(price_max)
+    if min_positive is not None:
+        where.append("positive_ratio >= ?")
+        params.append(min_positive)
+    if min_revenue is not None:
+        where.append("est_rev_reviews >= ?")
+        params.append(min_revenue)
+    if released_after is not None:
+        where.append("release_year >= ?")
+        params.append(released_after)
+    if released_before is not None:
+        where.append("release_year <= ?")
+        params.append(released_before)
+    if self_published is not None:
+        where.append("self_published = ?")
+        params.append(1 if self_published else 0)
+    if indie is not None:
+        where.append("is_indie = ?")
+        params.append(1 if indie else 0)
     where_sql = "WHERE " + " AND ".join(where)
 
     total = analytics_db.scalar(f"SELECT COUNT(*) FROM mart_game {where_sql}", params)
@@ -129,6 +179,46 @@ def search_games(
         limit=limit,
         offset=offset,
     )
+
+
+# In-process cache of the distinct (tag, n_games) list for /tags/suggest. Tradeoff, measured
+# on the real ~170K-row data/current.duckdb: running the UNNEST(top_tags) + ILIKE aggregate
+# per keystroke costs ~90ms per request (well over the 50ms budget — the scan re-unnests
+# every game's tag list each time), while building the FULL distinct list once costs ~25ms
+# and yields only ~460 rows, after which each suggest call is a sub-millisecond in-memory
+# substring filter. Cached lazily for the process lifetime: safe because the analytics DB is
+# swapped + the app restarted on each nightly ETL (the same invariant _has_name_lower()
+# relies on), so the tag universe can't change under a running process.
+_tag_freq_cache: list[tuple[str, int]] | None = None
+
+
+def _tag_frequencies() -> list[tuple[str, int]]:
+    global _tag_freq_cache
+    if _tag_freq_cache is None:
+        rows = analytics_db.query(
+            "SELECT tag, COUNT(*) AS n_games "
+            "FROM (SELECT UNNEST(top_tags) AS tag FROM mart_game) "
+            "WHERE tag IS NOT NULL "
+            "GROUP BY tag ORDER BY n_games DESC, tag"
+        )
+        _tag_freq_cache = [(r["tag"], int(r["n_games"])) for r in rows]
+    return _tag_freq_cache
+
+
+# NOTE: registered before the /{appid} route below — FastAPI matches in declaration order,
+# so a literal "tags" path segment must come first or it would 422 as a non-integer appid.
+@router.get("/tags/suggest", response_model=TagSuggestList)
+def suggest_tags(
+    q: str = Query("", max_length=100, description="Substring to match (case-insensitive). Empty = top tags."),
+    limit: int = Query(10, ge=1, le=50),
+) -> TagSuggestList:
+    """Autocomplete for the search page's tag filter: distinct tags from mart_game.top_tags,
+    case-insensitive substring match, ordered by catalog frequency — so users land on the
+    EXACT tag string ("Rogue-like" vs "Roguelike" are different tags) instead of guessing."""
+    needle = q.strip().lower()
+    freqs = _tag_frequencies()
+    matched = [(t, n) for t, n in freqs if needle in t.lower()] if needle else freqs
+    return TagSuggestList(items=[TagSuggestion(tag=t, n_games=n) for t, n in matched[:limit]])
 
 
 @router.get("/{appid}", response_model=GameProfile)

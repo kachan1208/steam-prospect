@@ -8,6 +8,8 @@ import { useTheme, ACCENTS, PRESETS } from "./lib/theme";
 import LaunchTiming from "./pages/LaunchTiming";
 import GameSearch from "./pages/GameSearch";
 import GameProfile from "./pages/GameProfile";
+import Compare from "./pages/Compare";
+import { CompareTray } from "./components/CompareTray";
 import EntityProfile from "./pages/EntityProfile";
 import Studios from "./pages/Studios";
 import Chat from "./pages/Chat";
@@ -276,6 +278,8 @@ function AppShell() {
           <Outlet />
         </div>
       </main>
+      {/* Compare tray on every page (sticky above the footer; renders nothing when empty). */}
+      <CompareTray />
       <Footer />
     </div>
   );
@@ -305,6 +309,9 @@ export default function App() {
         <Route element={<AppShell />}>
           <Route path="/games" element={<GameSearch />} />
           <Route path="/games/:appid" element={<GameProfile />} />
+          {/* Side-by-side comparison — reached from the CompareTray or a shared ?ids= URL,
+              deliberately not a nav item. */}
+          <Route path="/compare" element={<Compare />} />
           {/* Developer/publisher career profiles — reached from game-profile credit links
               and the Studios browse table. Entity names carry slashes/unicode, so the name
               rides ?name=, not the path. */}
