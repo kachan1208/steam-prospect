@@ -147,10 +147,20 @@ mcp = FastMCP(
     instructions=(
         "Steam market-intelligence tools over Prospect's curated DuckDB marts: find "
         "under-served niches, benchmark the market, estimate revenue, check launch "
-        "timing, look up/compare games, profile developers/publishers and scout "
-        "publishers active in a genre (entity_profile, publisher_pitch_list), and find "
-        "press/creator pitch targets across every marketing channel (Press, YouTube, "
-        "Reddit, Twitch, X). Read the prospect-data-dictionary resource first."
+        "timing, look up games and rank a game's closest competitors (find_comparables), "
+        "profile developers/publishers and scout publishers active in a genre "
+        "(entity_profile, publisher_pitch_list), and find press/creator pitch targets "
+        "across every marketing channel (Press, YouTube, Reddit, Twitch, X). Read the "
+        "prospect-data-dictionary resource first. "
+        "For 'what should I build' questions, keep find_niches' defaults (24m window, "
+        "opportunity_v2 sort, micro+theme tags only) and apply its falsification rules: "
+        "low competition with negative saturation_yoy is usually a market in DECLINE "
+        "(everyone stopped entering), not an opportunity — check entrant_ratio "
+        "(catalog-median tag ~1.08; <1 = recent entrants underearn) before recommending; "
+        "winner_concentration > 0.85 means winner-take-most (judge by the median, not "
+        "the hits); and for solo devs check solo_viability (~0.9 is the norm; below ~0.8 "
+        "leans multiplayer — e.g. Extraction Shooter — and is not solo-buildable without "
+        "flagging it)."
     ),
 )
 
@@ -187,7 +197,50 @@ against every other niche in the SAME cut:
 - **quality_gap** (aka `beatable_share`) = percentile(share of incumbents that are weak:
   low rating OR thin review count). Higher = easier to out-execute the field.
 - **opportunity** = clamp(0.5 x demand − 0.35 x competition + 0.3 x quality_gap, 0, 100).
-  The headline ranking metric in `find_niches`.
+  The ORIGINAL score, kept for continuity. KNOWN FAILURE MODE: it rewards low
+  competition without asking WHY it's low — a niche everyone abandoned scores like an
+  open market.
+- **opportunity_v2** = opportunity x decline_gate. `find_niches`' default ranking
+  metric. The gate (returned as `decline_gate`, in [0.5, 1]) shrinks linearly with the
+  WORSE of two decline signals and never penalizes on missing data:
+  - sat_severity = clamp(−saturation_yoy / 0.30, 0, 1) — full penalty at a −30%/yr
+    release-pipeline decline.
+  - entrant_severity = clamp((1 − entrant_ratio) / 0.5, 0, 1) — full penalty at
+    entrant_ratio 0.5.
+  - decline_gate = 1 − 0.5 x max(sat_severity, entrant_severity).
+  MAX (either-signal) semantics on purpose: entrant_ratio >= 1 is the catalog NORM (see
+  below), so it must not excuse a collapsing release pipeline.
+
+### Niche-score v2 fields (mart_niche, additive)
+
+- **entrant_ratio** = (24m median_rev) / (all-time median_rev) for the same (dimension,
+  key, min_reviews) — same value on both window rows. INTERPRET AGAINST THE NORM: the
+  catalog-median tag sits at ~1.08 (price inflation + the review floor filters recent
+  releases harder), so ~1.0-1.3 is unremarkable; <1 is a real warning that newcomers
+  earn less than the back catalog did; a high ratio over a SHRINKING pipeline (few
+  self-selected survivors) is not health. NULL = no 24m cut or a zero/missing all-time
+  median (treated as no evidence, not as decline).
+- **solo_viability** = share of the cut's scored games playable single-player (Steam's
+  own `categories` field, community-tag fallback), computed per cut. Catalog norm ~0.9;
+  below ~0.8 the niche leans multiplayer (Extraction Shooter ~0.6, MMORPG ~0.35) — a
+  multiplayer-dependent niche is NOT solo-buildable without netcode/servers/live
+  player-base plans, flag it for solo devs.
+- **tier** (tags; genre rows get 'genre') = 'micro' (buildable game concept: Colony Sim,
+  Souls-like), 'theme' (setting/aesthetic you attach TO a game: Vikings, Pixel
+  Graphics), 'umbrella' (genre/mechanic/mode container: Open World, Sandbox, Turn-Based
+  — NOT buildable), 'meta' (reception/store tags: Great Soundtrack, Nostalgia — never
+  buildable). Curated map + size heuristic (all-time n_games >= 400 -> umbrella) in
+  etl/build_marts.py. `find_niches` EXCLUDES umbrella/meta by default because
+  recommending them was a real, user-rejected failure mode; a 'theme' answer still needs
+  a micro-genre attached to be an actionable recommendation.
+- **decline_gate** — the opportunity_v2 multiplier itself, exposed so every score is
+  inspectable.
+
+Interpretation playbook for "what should I build": keep the 24m default window (that IS
+the market a new entrant faces), require the decline gate near 1.0 or understand exactly
+why it isn't, verify recent entrants get paid (24m median_rev, hit_rate_200k, n_recent),
+check winner_concentration (> 0.85 = winner-take-most: expect the median outcome, not
+the hits), and check solo_viability when the asker builds solo.
 
 ### Absolute market size (the "pie") — separate from `demand`
 
@@ -223,6 +276,19 @@ games clearing the review floor).
 - **mart_niche / mart_niche_top / mart_niche_hist / mart_niche_trend** — niche
   opportunity scores, representative top games per niche, a revenue histogram, and a
   yearly release/saturation trend. -> `find_niches`, `niche_detail`.
+- **mart_tag_lift** — pairwise tag-combination performance: one row per unordered pair
+  of community tags (from each game's top-10 tags; games with >=50 reviews; pairs with
+  >=15 games), with the pair's median est. revenue, hit_rate_200k, both tags' solo
+  medians (mart_niche all/50 baselines), and lift = pair median / better solo median.
+  Lift is null for pairs of free-to-play-dominated tags (both solo medians $0).
+  -> `tag_combos`.
+- **mart_niche_themes** — per (tag|genre niche, aspect): the per-game review-aspect
+  signal POOLED to niche level — praise/complaint shares in both signal families
+  (vote-based and VADER-text) plus each share's delta vs the all-catalog baseline —
+  "what does the whole niche praise/complain about," the concrete counterpart to
+  quality_gap. Membership is narrower than mart_niche's (tag must be in a game's TOP-10
+  tags; genre = primary genre only) and floored at >=10 games per (niche, aspect), each
+  with >=20 sampled English text reviews. -> `niche_review_themes`.
 - **mart_market_pct / mart_market_hist / mart_market_boxleiter / mart_market_tiers /
   mart_meta** — catalog-wide (or per-genre) percentile distributions, histograms, the
   fitted Boxleiter owners-per-review slope per genre, dev-tier population counts, and
@@ -232,7 +298,9 @@ games clearing the review floor).
 - **mart_seasonality** — release-timing outcomes by month / weekday / month×weekday.
   -> `best_launch_timing`.
 - **mart_game** — one row per game: metadata, revenue/owners, percentile-vs-genre, top
-  tags, review velocity. -> `game_search`, `game_profile`.
+  tags, review velocity. -> `game_search`, `game_profile`, `find_comparables` (closest
+  competitors, ranked on demand by tag-Jaccard over `top_tags` within the same primary
+  genre + a price band — no precomputed pairwise mart).
 - **mart_entity / mart_entity_games** — one row per (role, developer/publisher name),
   normalized out of mart_game's comma-joined developers/publishers strings (corporate
   suffixes like ", Inc." / ", Ltd." are re-merged into the name instead of becoming fake
@@ -284,65 +352,119 @@ games clearing the review floor).
 # Niche / opportunity tools
 # ==========================================================================================
 _NICHE_SORTABLE = {
-    "opportunity", "demand", "competition", "quality_gap",
+    "opportunity", "opportunity_v2", "demand", "competition", "quality_gap",
     "market_size", "total_owners", "total_rev", "total_reviews",
     "median_rev", "median_reviews", "median_price", "median_owners",
     "median_positive_ratio", "recent_velocity",
     "n_games", "n_recent", "hit_rate_200k", "hit_rate_500k",
     "beatable_share", "saturation_yoy", "self_pub_share", "winner_concentration",
+    "entrant_ratio", "solo_viability",
 }
+_NICHE_TIERS = {"micro", "umbrella", "theme", "meta"}
+# Default tier filter (tags only): buildable micro-genres + themes. Umbrella containers
+# (Open World, Sandbox, RPG...) and meta/reception tags (Great Soundtrack, Nostalgia...)
+# are EXCLUDED by default — they aren't things a developer can build. Pass
+# include_tiers=None to see everything, or an explicit list to widen/narrow.
+_DEFAULT_INCLUDE_TIERS = ["micro", "theme"]
+
+# Shared soft-fail message: the v2 columns only exist once the ETL that added them has
+# rebuilt current.duckdb. Same degrade-cleanly idiom as tag_combos/mart_tag_lift.
+_NICHE_V2_MISSING = (
+    "mart_niche is missing the niche-score v2 columns (opportunity_v2 / entrant_ratio / "
+    "solo_viability / tier / decline_gate) — this analytics DB was built by an older ETL. "
+    "Re-run the ETL (`task etl` in the main prospect checkout) and retry."
+)
 
 
 @mcp.tool()
 def find_niches(
     dimension: Literal["tag", "genre"] = "tag",
-    window: Literal["all", "24m"] = "all",
+    window: Literal["all", "24m"] = "24m",
     min_reviews: Literal[50, 100] = 50,
     min_median_rev: float | None = None,
     max_competition: float | None = None,
     min_total_owners: float | None = None,
-    sort: str = "opportunity",
+    include_tiers: list[str] | None = _DEFAULT_INCLUDE_TIERS,
+    sort: str = "opportunity_v2",
     limit: int = 15,
 ) -> dict:
-    """Rank niches (Steam community tags, or Steam genres) by opportunity score. THE
-    headline tool — start here for "what should I build" questions.
+    """Rank niches (Steam community tags, or Steam genres) by growth-gated opportunity.
+    THE headline tool — start here for "what should I build" questions. Defaults are
+    tuned for exactly that question: window="24m" (the market a new entrant actually
+    faces), sort="opportunity_v2" (decline-gated), include_tiers=["micro","theme"]
+    (buildable concepts only). This docstring is an INTERPRETATION PLAYBOOK — the numbers
+    lie in specific, known ways; the falsification rules below are how you catch them.
 
-    opportunity fuses three 0-100 percentile components (see the prospect-data-dictionary
-    resource for exact formulas):
-      - demand: bigger/hotter market (revenue + owners + recent review velocity).
-      - competition: how crowded/winner-take-most the niche is — HIGH is bad for a new
-        entrant.
-      - quality_gap: share of incumbents that are weak (low rating / thin reviews) — HIGH
-        means it's easier to out-execute the field.
-    opportunity = 0.5*demand − 0.35*competition + 0.3*quality_gap, clamped [0,100].
+    THE SCORES
+      - opportunity = 0.5*demand − 0.35*competition + 0.3*quality_gap, clamped [0,100]
+        (all three are 0-100 percentiles vs other niches in the same cut — exact formulas
+        in the prospect-data-dictionary resource). KNOWN FAILURE MODE: it rewards LOW
+        competition without asking WHY competition is low.
+      - opportunity_v2 = opportunity * decline_gate, where decline_gate (in [0.5, 1],
+        returned per row) shrinks linearly with the WORSE of two decline signals:
+        saturation_yoy below 0 (release pipeline shrinking; full penalty at −30%/yr) and
+        entrant_ratio below 1 (recent entrants underearn the niche's history; full
+        penalty at 0.5). Sort by this, not by raw opportunity, for build decisions.
+
+    FALSIFICATION RULES — run these before recommending a niche:
+      1. Low competition + negative saturation_yoy usually means a market in DECLINE —
+         everyone STOPPED entering — not a cracked-open opportunity. Check entrant_ratio
+         and the niche_detail saturation_trend before recommending. (This exact failure
+         put Naval/Transportation/Diplomacy — new releases shrinking 15-37%/yr — at the
+         top of the old raw-opportunity ranking.)
+      2. entrant_ratio reads AGAINST THE NORM, not against 1.0: the catalog-median tag
+         sits at ~1.08 (price inflation + the review floor filters recent releases
+         harder), so ~1.0-1.3 is unremarkable and <1 is a real warning that newcomers
+         earn less than the back catalog did. A high ratio over a shrinking pipeline
+         (few, self-selected survivors) is NOT health — trust saturation_yoy first.
+      3. Verify recent entrants actually get paid: with window="24m", median_rev IS the
+         recent-entrant median. Cross-check hit_rate_200k and n_recent (a great median
+         over 30 games is thinner evidence than a good median over 300).
+      4. winner_concentration > 0.85 = winner-take-most: the niche's revenue lives in a
+         few hits, so the MEDIAN outcome (not the visible winners) is what a new entrant
+         should expect. Check the revenue_histogram in niche_detail.
+      5. If the asker is a solo dev, check solo_viability (share of the niche's scored
+         games playable single-player; catalog norm ~0.9). Below ~0.8 the niche leans
+         multiplayer (e.g. Extraction Shooter ~0.6): a multiplayer-dependent game needs
+         netcode, servers, and a live player base a solo dev usually can't fund — do not
+         recommend it for solo builds without flagging that.
+      6. tier: rows are 'micro' (buildable game concept), 'theme' (setting/aesthetic you
+         attach TO a game), 'umbrella' (genre/mechanic container — NOT buildable: "build
+         an Open World game" is not a plan), 'meta' (reception tags like Great
+         Soundtrack — never buildable), or 'genre' (dimension="genre" rows). Umbrella and
+         meta are EXCLUDED by default because recommending them was the second failure
+         mode this tool had; pass include_tiers=None (everything) or an explicit subset
+         of ["micro","theme","umbrella","meta"] to widen. The filter only applies when
+         dimension="tag". A 'theme' answer means "make a game ABOUT this" and still needs
+         a micro-genre attached to be a real recommendation.
 
     ABSOLUTE SIZE (the "pie"), distinct from the percentile-of-medians `demand`:
-      - total_owners: SUM of owners across the niche's scored games — total consumer base.
-      - total_rev / total_reviews: total est. gross revenue / total reviews in the niche.
-      - market_size: total_owners expressed as a 0-100 percentile vs other niches (same
-        cut), so it's comparable to demand/competition.
-    Use these when a small share of a BIG niche beats a big share of a small one — sort by
-    "total_owners" or "market_size", or floor with min_total_owners, to find large-audience
-    niches a solo dev can take a sliver of.
+      - total_owners / total_rev / total_reviews: summed over the niche's scored games.
+      - market_size: total_owners as a 0-100 percentile vs other niches (same cut).
+    Use these (or min_total_owners) when a small share of a BIG niche beats a big share
+    of a small one — the solo-dev sizing lens.
 
-    dimension="tag" = SteamSpy's large community-tag vocabulary (specific micro-niches
-    like "Souls-like", "Deckbuilder" — usually more actionable); "genre" = Steam's small
-    fixed genre list. window="all" scores full history; "24m" restricts to games released
-    in the last 24 months (current-market read, smaller n — use this to catch niches
-    heating up NOW). min_reviews is the per-game review floor (50=broader/noisier,
-    100=stricter/cleaner) — only these two values are precomputed, and they must stay in
-    sync with MIN_REVIEWS_LEVELS in etl/build_marts.py: a value the ETL didn't materialise
-    silently matches no rows and returns an empty list rather than an error.
+    EXACT MATERIALISATION: only the precomputed cuts exist — window in {"all","24m"} x
+    min_reviews in {50,100} (must stay in sync with MIN_REVIEWS_LEVELS in
+    etl/build_marts.py; a value the ETL didn't materialise matches no rows and returns an
+    empty list, not an error). window="all" scores full history — use it for context, not
+    for entry decisions. min_reviews=50 is broader/noisier, 100 stricter/cleaner.
 
-    min_median_rev / max_competition / min_total_owners are optional post-filters, e.g.
-    min_median_rev=200000 to require a real revenue floor, max_competition=50 to exclude the
-    most saturated niches, or min_total_owners=1000000 to require a large total audience.
-    sort is any returned numeric field (default "opportunity"). Returns compact
-    rows only — call niche_detail(dimension, key) for one niche's saturation trend,
-    revenue histogram, and representative games.
+    min_median_rev / max_competition / min_total_owners are optional post-filters
+    (e.g. min_median_rev=200000, max_competition=50, min_total_owners=1000000). sort is
+    any returned numeric field. Returns compact rows only — call niche_detail(dimension,
+    key) for one niche's saturation trend, revenue histogram, and representative games.
+    Returns an {"error": ...} asking you to re-run the ETL if the analytics DB predates
+    the v2 columns.
     """
     if sort not in _NICHE_SORTABLE:
         return {"error": f"sort must be one of {sorted(_NICHE_SORTABLE)}"}
+    if include_tiers is not None:
+        bad = [t for t in include_tiers if t not in _NICHE_TIERS]
+        if bad:
+            return {"error": f"include_tiers entries must be in {sorted(_NICHE_TIERS)}, got {bad}"}
+        if not include_tiers:
+            return {"error": "include_tiers must be None or a non-empty list"}
 
     where = ["dimension = ?", "win = ?", "min_reviews = ?"]
     params: list = [dimension, window, min_reviews]
@@ -355,26 +477,36 @@ def find_niches(
     if min_total_owners is not None:
         where.append("total_owners >= ?")
         params.append(min_total_owners)
+    tiers_applied = None
+    if dimension == "tag" and include_tiers is not None:
+        tiers_applied = list(include_tiers)
+        where.append(f"tier IN ({','.join('?' for _ in tiers_applied)})")
+        params.extend(tiers_applied)
     limit = max(1, min(limit, 50))
 
-    rows = query(
-        f"""
-        SELECT key, n_games, n_recent, opportunity, demand, competition, quality_gap,
-               market_size, total_owners, total_rev, total_reviews,
-               median_rev, median_reviews, median_price, median_positive_ratio,
-               median_owners, recent_velocity, hit_rate_200k, hit_rate_500k,
-               saturation_yoy, winner_concentration
-        FROM mart_niche
-        WHERE {" AND ".join(where)}
-        ORDER BY {sort} DESC NULLS LAST, n_games DESC
-        LIMIT ?
-        """,
-        params + [limit],
-    )
+    try:
+        rows = query(
+            f"""
+            SELECT key, tier, n_games, n_recent, opportunity_v2, opportunity, decline_gate,
+                   entrant_ratio, solo_viability, demand, competition, quality_gap,
+                   market_size, total_owners, total_rev, total_reviews,
+                   median_rev, median_reviews, median_price, median_positive_ratio,
+                   median_owners, recent_velocity, hit_rate_200k, hit_rate_500k,
+                   saturation_yoy, winner_concentration
+            FROM mart_niche
+            WHERE {" AND ".join(where)}
+            ORDER BY {sort} DESC NULLS LAST, n_games DESC
+            LIMIT ?
+            """,
+            params + [limit],
+        )
+    except (duckdb.BinderException, duckdb.CatalogException):
+        return {"error": _NICHE_V2_MISSING}
     return {
         "dimension": dimension,
         "window": window,
         "min_reviews": min_reviews,
+        "include_tiers": tiers_applied,
         "sort": sort,
         "n_returned": len(rows),
         "niches": clean_rows(rows),
@@ -385,10 +517,17 @@ def find_niches(
 def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
     """Deep dive on one niche (get valid `key` values from find_niches — exact match,
     case-sensitive). Returns:
-      - variants: this niche's opportunity/demand/competition/etc at all 4 precomputed
-        cuts — (all|24m) x (min_reviews 50|100).
+      - tier: 'micro' | 'theme' | 'umbrella' | 'meta' (tags) or 'genre' — an 'umbrella'
+        or 'meta' key is a container/reception tag, not a buildable niche.
+      - variants: this niche's opportunity_v2/opportunity/demand/competition/etc at all
+        4 precomputed cuts — (all|24m) x (min_reviews 50|100) — including entrant_ratio
+        (24m-vs-all-time median revenue; catalog-median tag is ~1.08, so <1 means recent
+        entrants genuinely underearn), solo_viability (share of scored games playable
+        single-player; ~0.9 is the catalog norm, below ~0.8 leans multiplayer — a red
+        flag for solo devs), and decline_gate (the opportunity_v2 multiplier, 0.5-1.0).
       - saturation_trend: yearly release counts + median revenue, oldest-first — is this
-        niche heating up or cooling off?
+        niche heating up or cooling off? A shrinking n_releases pipeline is DECLINE even
+        when competition looks invitingly low.
       - revenue_histogram: log-scale bucketed distribution of est. lifetime revenue
         across the niche (min_reviews=50 population) — the full shape, not just the
         median.
@@ -397,23 +536,28 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
         (share of games clearing $200K/$500K est. revenue), median_rev, n_games,
         winner_concentration.
     Returns {"error": ...} if dimension/key doesn't match any niche (call find_niches to
-    get exact valid keys — spelling and case must match precisely).
+    get exact valid keys — spelling and case must match precisely), or asking you to
+    re-run the ETL if the analytics DB predates the v2 columns.
     """
     # NOTE: `win` is selected un-aliased (not `AS window`) because `window` is a reserved
     # word in DuckDB SQL (window functions) and can't be used unquoted in ORDER BY — same
     # reason api/app/routers/niches.py renames win -> window in Python, after the fetch,
     # rather than in SQL.
-    variants = query(
-        """
-        SELECT win, min_reviews, n_games, n_recent, opportunity, demand,
-               competition, quality_gap, market_size, total_owners, total_rev,
-               total_reviews, median_rev, median_reviews, median_price,
-               median_positive_ratio, median_owners, recent_velocity, hit_rate_200k,
-               hit_rate_500k, beatable_share, saturation_yoy, winner_concentration
-        FROM mart_niche WHERE dimension = ? AND key = ? ORDER BY win, min_reviews
-        """,
-        [dimension, key],
-    )
+    try:
+        variants = query(
+            """
+            SELECT win, min_reviews, tier, n_games, n_recent, opportunity_v2, opportunity,
+                   decline_gate, entrant_ratio, solo_viability, demand,
+                   competition, quality_gap, market_size, total_owners, total_rev,
+                   total_reviews, median_rev, median_reviews, median_price,
+                   median_positive_ratio, median_owners, recent_velocity, hit_rate_200k,
+                   hit_rate_500k, beatable_share, saturation_yoy, winner_concentration
+            FROM mart_niche WHERE dimension = ? AND key = ? ORDER BY win, min_reviews
+            """,
+            [dimension, key],
+        )
+    except (duckdb.BinderException, duckdb.CatalogException):
+        return {"error": _NICHE_V2_MISSING}
     if not variants:
         return {
             "error": f"no niche found for dimension={dimension!r} key={key!r}. "
@@ -442,6 +586,7 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
     return {
         "dimension": dimension,
         "key": key,
+        "tier": headline.get("tier"),
         "variants": clean_rows(variants),
         "saturation_trend": clean_rows(trend),
         "revenue_histogram": clean_rows(hist),
@@ -455,6 +600,249 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
                 "winner_concentration": headline["winner_concentration"],
             }
         ),
+    }
+
+
+@mcp.tool()
+def tag_combos(tag: str, limit: int = 15) -> dict:
+    """Which co-tags does one Steam community tag perform best/worst WITH? Answers "which
+    tags should MY game ship with?" — e.g. does 'Roguelike Deckbuilder'+'Horror' outperform
+    each tag alone? Reads mart_tag_lift: unordered tag PAIRS exploded from each game's
+    top-10 community tags (vote-floored + denylist-filtered, same hygiene as every other
+    tag mart), restricted to games with >= 50 total reviews (the same min_reviews=50 floor
+    as the niche mart, so pair and solo populations are comparable), and kept only when
+    the pair has >= 15 qualifying games (TAG_PAIR_MIN_GAMES in etl/build_marts.py — below
+    that a median is noise).
+
+    LIFT = pair median est. revenue / GREATEST(tag A solo median, tag B solo median),
+    where the solo medians are mart_niche's (dimension='tag', window='all',
+    min_reviews=50) baselines. Lift > 1 means the combination's typical game out-earns
+    the BETTER of the two tags alone — it can't be gamed by pairing a strong tag with a
+    weak one. Lift is null when both solo medians are $0 (free-to-play-dominated tags:
+    est. revenue is reviews x owners-per-review x PRICE, so all-free tags median $0).
+
+    Revenue throughout is est_rev_reviews — a Boxleiter-style ESTIMATE (gross lifetime
+    box revenue), never ground truth. pair_hit_rate_200k mirrors mart_niche's
+    hit_rate_200k convention (share of the pair's games clearing $200K est. revenue).
+
+    Returns solo context for `tag` (its all/50 baseline), best_combos (highest lift
+    first) and worst_combos (lowest lift first, no overlap with best), each row carrying
+    partner, n_games, pair_median_rev, pair_hit_rate_200k, the two solo medians,
+    best_solo_median_rev, and lift — plus a one-line headline takeaway.
+
+    An empty best/worst list is a real answer: the tag has no pairs meeting the 15-game
+    floor. An unknown tag returns {"error": ...} — get valid tags from
+    find_niches(dimension="tag") (exact match, case-sensitive). ALWAYS weigh n_games:
+    pairs at the floor (~15 games) are often a handful of famous titles wearing both
+    tags, not a repeatable pattern. Correlation, not causation — good games choose these
+    tag combinations as much as the combinations make games good, and tags are SteamSpy
+    community tags (crowd-applied, occasionally wrong/late, top-10-per-game only).
+    """
+    limit = max(1, min(limit, 50))
+
+    try:
+        rows = query(
+            """
+            SELECT
+                CASE WHEN tag_a = ? THEN tag_b ELSE tag_a END AS partner,
+                n_games,
+                median_rev AS pair_median_rev,
+                hit_rate_200k AS pair_hit_rate_200k,
+                CASE WHEN tag_a = ? THEN tag_a_solo_median_rev ELSE tag_b_solo_median_rev END AS tag_solo_median_rev,
+                CASE WHEN tag_a = ? THEN tag_b_solo_median_rev ELSE tag_a_solo_median_rev END AS partner_solo_median_rev,
+                best_solo_median_rev,
+                lift
+            FROM mart_tag_lift
+            WHERE tag_a = ? OR tag_b = ?
+            ORDER BY lift DESC NULLS LAST
+            """,
+            [tag, tag, tag, tag, tag],
+        )
+    except duckdb.CatalogException:
+        return {
+            "error": "mart_tag_lift is not present in this analytics DB — it is built by a "
+            "newer ETL than the one that produced this current.duckdb. Rebuild the marts "
+            "(`task etl` in the main prospect checkout) and retry."
+        }
+
+    solo = query_one(
+        "SELECT n_games, median_rev, hit_rate_200k FROM mart_niche "
+        "WHERE dimension = 'tag' AND win = 'all' AND min_reviews = 50 AND key = ?",
+        [tag],
+    )
+    if not rows and solo is None:
+        return {
+            "error": f"tag {tag!r} not found — it has neither a solo baseline in mart_niche "
+            "nor any pairs meeting the 15-game floor. Get valid tags from "
+            "find_niches(dimension='tag'); spelling and case must match exactly."
+        }
+
+    ranked = [r for r in rows if r["lift"] is not None]
+    unranked_free = len(rows) - len(ranked)  # both-solo-medians-$0 (free-to-play) pairs
+    best = ranked[:limit]
+    worst = list(reversed(ranked[limit:]))[:limit]  # lowest lift first, never overlaps best
+
+    headline = None
+    if best:
+        b = best[0]
+        headline = (
+            f"'{tag}' pairs best with '{b['partner']}': the combo's median est. revenue is "
+            f"${b['pair_median_rev']:,.0f} across {b['n_games']} games — {b['lift']:.2f}x the "
+            f"better solo tag's median (${b['best_solo_median_rev']:,.0f})."
+        )
+        if worst:
+            w = worst[0]
+            headline += (
+                f" It pairs worst with '{w['partner']}' ({w['lift']:.2f}x, "
+                f"median ${w['pair_median_rev']:,.0f} across {w['n_games']} games)."
+            )
+    elif solo is not None:
+        headline = (
+            f"'{tag}' has no tag pairs meeting the 15-game reliability floor — solo baseline "
+            f"only (median est. revenue ${solo['median_rev']:,.0f} across {solo['n_games']} games)."
+        )
+
+    caveats = [
+        "Revenue is est_rev_reviews — a Boxleiter-style estimate (gross lifetime), not ground "
+        "truth; lift compares pair median vs the BETTER solo tag's median (mart_niche all/50 cut).",
+        "Correlation, not causation: good games choose these tag combinations as much as the "
+        "combinations make games good.",
+        "Weigh n_games — a pair near the 15-game floor is often a few famous titles wearing "
+        "both tags, not a repeatable pattern.",
+        "Tags are SteamSpy community tags (crowd-applied, top-10-per-game, vote-floored) — "
+        "coverage is imperfect, especially for small/new games.",
+    ]
+    if unranked_free:
+        caveats.append(
+            f"{unranked_free} pair(s) omitted from the ranking: lift is undefined because both "
+            "tags' solo medians are $0 (free-to-play-dominated tags have no box revenue)."
+        )
+
+    return {
+        "tag": tag,
+        "solo": clean(
+            {
+                "n_games": solo["n_games"] if solo else None,
+                "median_rev": solo["median_rev"] if solo else None,
+                "hit_rate_200k": solo["hit_rate_200k"] if solo else None,
+            }
+        ),
+        "n_pairs": len(rows),
+        "headline": headline,
+        "best_combos": clean_rows(best),
+        "worst_combos": clean_rows(worst),
+        "caveats": caveats,
+    }
+
+
+_NICHE_THEME_CAVEATS = [
+    "Aspect mining is keyword-lexicon based (10 fixed aspects), not semantic — any review "
+    "containing e.g. \"boss\" counts toward Combat & Bosses regardless of what it meant.",
+    "praise_share/complaint_share are VOTE-based (share of aspect-mentioning reviews that "
+    "were thumbs-up/down OVERALL — they sum to 1, and complaint delta = -praise delta); "
+    "text_praise_rate/text_complaint_rate are VADER sentiment of the local text window "
+    "around the keyword — coarse lexicon scoring, sarcasm-blind, English-only, with a "
+    "neutral band so the two rates do NOT sum to 1.",
+    "Pooled, review-volume-weighted: heavily-reviewed games dominate their niche's shares. "
+    "When n_games is low or one hit dwarfs the niche, a \"niche theme\" can really be one "
+    "game's theme — check n_games/n_reviews_sampled.",
+    "Niche membership is NARROWER than find_niches': tag = appears in the game's top-10 "
+    "community tags; genre = the game's PRIMARY genre only. n_games here is therefore "
+    "smaller than the same key's n_games in find_niches.",
+    "Deltas vs the all-catalog pooled baseline are typically small (±0.01-0.06) — read "
+    "them as leanings, not verdicts. Correlational, not causal.",
+]
+
+
+@mcp.tool()
+def niche_review_themes(dimension: Literal["tag", "genre"], key: str) -> dict:
+    """What a whole NICHE praises vs complains about — per-aspect review sentiment rolled
+    up across every review-mined game in one tag/genre niche, with each share's delta vs
+    the all-catalog baseline. This turns find_niches' abstract quality_gap score into a
+    concrete gap statement ("Souls-likes complain about Map & Navigation more than games
+    in general — ship a great map"). Get valid `key` values from find_niches (exact match,
+    case-sensitive).
+
+    What is materialized (mart_niche_themes): games from mart_game_review_aspects (>= 20
+    sampled English text reviews — TEARDOWN_MIN_REVIEWS in etl/build_marts.py) are joined
+    to tag niches via the game's TOP-10 community tags (mart_game.top_tags) and to genre
+    via primary_genre, then mention counts are POOLED per (niche, aspect) — review-volume
+    weighted, so a 5-review game can't swamp the signal (flip side: a big hit can dominate
+    its niche). A (niche, aspect) row only exists with >= 10 games mentioning the aspect
+    (NICHE_THEMES_MIN_GAMES).
+
+    Returns the 10 fixed aspects as two rankings:
+      - complaint_themes: sorted by text_complaint_delta_vs_catalog DESC — what this niche
+        complains about MORE than games in general (positive delta) at the top.
+      - praise_themes: sorted by text_praise_delta_vs_catalog DESC — what it praises more
+        than games in general at the top.
+    Each row carries both signal families: vote-based praise_share/complaint_share (+
+    praise_delta_vs_catalog) and text-sentiment text_praise_rate/text_complaint_rate (+
+    their deltas), plus n_games / n_reviews_sampled / total_mentions to judge sample depth.
+    An aspect can rank high in BOTH lists (its reviews are polarized) — the neutral-band
+    text rates are independent, not complements.
+
+    Empty praise/complaint lists (with a `note`) mean the key IS a real niche but too few
+    of its games clear the review/games floors above — an honest "not enough review-text
+    signal", not an error. {"error": ...} means the key matched no niche at all — call
+    find_niches for valid keys — or the analytics DB predates this mart (re-run the ETL).
+    """
+    try:
+        rows = query(
+            """
+            SELECT aspect, n_games, n_reviews_sampled, total_mentions,
+                   praise_share, complaint_share, praise_delta_vs_catalog,
+                   n_text_scored, text_praise_rate, text_complaint_rate,
+                   text_praise_delta_vs_catalog, text_complaint_delta_vs_catalog
+            FROM mart_niche_themes
+            WHERE dimension = ? AND key = ?
+            """,
+            [dimension, key],
+        )
+    except duckdb.Error as e:
+        # The production DB won't carry mart_niche_themes until the next ETL run builds it
+        # — degrade to a clear error instead of crashing the tool call.
+        return {
+            "error": "mart_niche_themes is missing from this analytics DB — it is built by "
+            "etl/marts/mart_niche_themes.sql (registered last in MART_FILES); re-run the ETL "
+            f"(`task etl`) so current.duckdb includes it. ({type(e).__name__}: {e})"
+        }
+
+    if not rows:
+        known = query_one(
+            "SELECT 1 AS one FROM mart_niche WHERE dimension = ? AND key = ? LIMIT 1",
+            [dimension, key],
+        )
+        if known is None:
+            return {
+                "error": f"no niche found for dimension={dimension!r} key={key!r}. "
+                "Call find_niches to list valid keys — spelling/case must match exactly."
+            }
+        return {
+            "dimension": dimension,
+            "key": key,
+            "praise_themes": [],
+            "complaint_themes": [],
+            "note": "Niche exists but no aspect cleared the reliability floors (>= 10 games "
+            "with >= 20 sampled English text reviews each mentioning the aspect) — too few "
+            "review-mined games in this niche for a reliable theme read.",
+            "caveats": _NICHE_THEME_CAVEATS,
+        }
+
+    def _delta_sorted(field: str) -> list[dict]:
+        return sorted(
+            rows,
+            key=lambda r: r[field] if r[field] is not None else float("-inf"),
+            reverse=True,
+        )[:5]
+
+    return {
+        "dimension": dimension,
+        "key": key,
+        "n_aspects": len(rows),
+        "praise_themes": clean_rows(_delta_sorted("text_praise_delta_vs_catalog")),
+        "complaint_themes": clean_rows(_delta_sorted("text_complaint_delta_vs_catalog")),
+        "caveats": _NICHE_THEME_CAVEATS,
     }
 
 
@@ -852,6 +1240,108 @@ def game_profile(appid: int) -> dict:
             "or has fewer than 10 sampled reviews and didn't clear the analysis floor."
         }
     return clean(row)
+
+
+@mcp.tool()
+def find_comparables(appid: int, limit: int = 15, min_reviews: int = 10) -> dict:
+    """Closest competitors for one game — "who else is fighting for this audience?"
+    Tag-overlap comparables computed on demand at query time (never precomputed pairwise
+    across the ~142K catalog). Use game_search to find the appid by name first.
+
+    Matching rules (exact):
+      - Same PRIMARY Steam genre as the target only. A multi-genre game is indexed under
+        one primary genre, so a near-neighbor filed under a different primary won't appear.
+      - Price band around the target's launch price: paid games match
+        [max(0, 0.5*price − $2), 2*price + $2]; FREE games are only comparable to other
+        free games (F2P competes on a different axis than any paid title).
+      - Candidates need total_reviews >= min_reviews (default 10 — raise it to keep only
+        proven competitors).
+      - Ranked by Jaccard similarity over the two games' top community tags (each game's
+        top-10 SteamSpy tags): |shared tags| / |union of both tag sets|, ties broken by
+        total_reviews. shared_tags shows exactly which tags matched.
+
+    Returns compact rows: appid, name, release_year, price_initial, total_reviews,
+    positive_ratio, est_rev_reviews, shared_tags, jaccard (0-1), plus the price band used.
+
+    Honest caveats: tag-Jaccard is MECHANICAL similarity — a high score says the tag sets
+    overlap, not that the audiences do (two "Souls-like" matches can serve disjoint
+    players); est_rev_reviews is a Boxleiter ESTIMATE (see market_benchmarks), not
+    reported revenue; and tags are community-applied, so mistagged or thinly-tagged games
+    mismatch. Unknown appid (or one below the >=10-review analysis floor) returns
+    {"error": ...} — use game_search to find valid appids. Follow up with
+    game_profile(appid) on the closest matches to see how each performs, and
+    game_teardown(appid) to see WHY the strongest ones work.
+    """
+    target = query_one(
+        "SELECT appid, name, primary_genre, price_initial, top_tags FROM mart_game WHERE appid = ?",
+        [appid],
+    )
+    if target is None:
+        return {
+            "error": f"appid {appid} not found in mart_game — either not in the catalog, "
+            "or below the >=10-review analysis floor. Use game_search to find appids."
+        }
+
+    price = target["price_initial"] or 0.0
+    if price <= 0:
+        lo, hi = -0.01, 0.01  # free games are only comparable to other free games
+    else:
+        lo, hi = max(0.0, price * 0.5 - 2.0), price * 2.0 + 2.0
+    limit = max(1, min(limit, 50))
+
+    # Jaccard denominator via |A ∪ B| = len(a) + len(b) − |A ∩ B| — exact, because
+    # top_tags is duplicate-free by construction (a top-10 ranking). The FastAPI twin
+    # (api/app/routers/games.py::game_comparables) computes it as
+    # len(list_distinct(list_concat(a, b))) per row, which made it the slowest handler in
+    # production (808ms p95); this form skips the per-row concat+distinct and returns the
+    # identical ordering.
+    rows = query(
+        """
+        WITH target AS (SELECT appid, primary_genre, top_tags FROM mart_game WHERE appid = ?),
+        scored AS (
+            SELECT g.appid, g.name, g.release_year, g.price_initial, g.total_reviews,
+                g.positive_ratio, g.est_rev_reviews,
+                list_intersect(g.top_tags, t.top_tags) AS shared_tags,
+                len(list_intersect(g.top_tags, t.top_tags)) AS n_shared,
+                len(g.top_tags) + len(t.top_tags) AS len_sum
+            FROM mart_game g, target t
+            WHERE g.appid != t.appid
+              AND g.primary_genre = t.primary_genre
+              AND g.price_initial BETWEEN ? AND ?
+              AND g.total_reviews >= ?
+        )
+        SELECT appid, name, release_year, price_initial, total_reviews, positive_ratio,
+            est_rev_reviews, shared_tags,
+            n_shared * 1.0 / (len_sum - n_shared) AS jaccard
+        FROM scored
+        WHERE len_sum - n_shared > 0
+        ORDER BY jaccard DESC, total_reviews DESC
+        LIMIT ?
+        """,
+        [appid, lo, hi, min_reviews, limit],
+    )
+    result = {
+        "appid": appid,
+        "name": target["name"],
+        "primary_genre": target["primary_genre"],
+        "price_band": {"low": lo, "high": hi},
+        "min_reviews": min_reviews,
+        "n_returned": len(rows),
+        "comparables": clean_rows(rows),
+        "caveats": [
+            "Tag-Jaccard is mechanical similarity: overlapping tag sets, not overlapping "
+            "audiences — sanity-check the top matches with game_profile before leaning on them.",
+            "est_rev_reviews is a Boxleiter estimate (gross lifetime), not reported revenue.",
+            "Only games sharing the target's PRIMARY genre are candidates; free games only "
+            "match other free games.",
+        ],
+    }
+    if not rows:
+        result["note"] = (
+            "No comparables matched — the target may have a rare primary genre, few/no "
+            "community tags, or no same-genre games in its price band clearing min_reviews."
+        )
+    return clean(result)
 
 
 @mcp.tool()

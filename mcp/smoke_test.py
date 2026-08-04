@@ -19,22 +19,57 @@ def show(title: str, obj) -> None:
 
 
 def main() -> None:
-    # 1. find_niches — "Open World Survival Craft" must rank among the top tag niches under
-    # default filters. (Was asserted as exactly #1, but the top slot legitimately drifts as
-    # nightly data lands — on the 2026-07-30 mart it's 'Extraction Shooter' — so this now
-    # checks membership in the returned top list rather than the exact winner.)
+    # 1. find_niches — defaults are now the niche-score v2 cut (window=24m,
+    # sort=opportunity_v2, include_tiers=[micro, theme]). Tolerant on purpose: the v2
+    # columns only exist once the ETL that added them has rebuilt current.duckdb, and
+    # their absence must yield the tool's clear "re-run ETL" error dict, never a crash
+    # (post-ETL the assertions are real).
     niches = srv.find_niches()
-    show("find_niches() [defaults: tag/all/min_reviews=10]", niches)
-    keys = [n["key"] for n in niches["niches"]]
-    assert "Open World Survival Craft" in keys, f"expected 'Open World Survival Craft' in top niches, got {keys!r}"
-    print(f"\n[OK] top niche is {keys[0]!r}; 'Open World Survival Craft' ranks #{keys.index('Open World Survival Craft') + 1}")
+    show("find_niches() [defaults: tag/24m/min_reviews=50/opportunity_v2/micro+theme]", niches)
+    has_v2 = "error" not in niches
+    if not has_v2:
+        assert "opportunity_v2" in niches["error"], f"unexpected find_niches error: {niches['error']!r}"
+        print("\n[OK] find_niches degraded cleanly (v2 columns not built yet — run `task etl`)")
+    else:
+        assert niches["niches"], "expected at least one niche row under default filters"
+        top = niches["niches"][0]
+        for field in ("opportunity_v2", "opportunity", "decline_gate", "entrant_ratio",
+                      "solo_viability", "tier"):
+            assert field in top, f"missing v2 field {field!r} in find_niches rows"
+        bad_tiers = {n["tier"] for n in niches["niches"]} - {"micro", "theme"}
+        assert not bad_tiers, f"default include_tiers leaked tiers: {bad_tiers}"
+        assert all(n["opportunity_v2"] <= n["opportunity"] + 1e-9 for n in niches["niches"]), \
+            "opportunity_v2 must never exceed opportunity (gate is <= 1)"
+        print(f"\n[OK] top niche is {top['key']!r} (tier={top['tier']}, "
+              f"opportunity_v2={top['opportunity_v2']}, gate={top['decline_gate']})")
 
-    # 2. niche_detail on that same niche.
-    detail = srv.niche_detail("tag", "Open World Survival Craft")
-    show("niche_detail('tag', 'Open World Survival Craft')", detail)
-    assert "error" not in detail
-    print(f"\n[OK] niche_detail returned {len(detail['representative_games'])} representative games, "
-          f"{len(detail['saturation_trend'])} trend years, {len(detail['revenue_histogram'])} hist buckets")
+    # 2. niche_detail — same tolerance: v2 columns are in its variants query too.
+    detail_key = niches["niches"][0]["key"] if has_v2 else "Open World Survival Craft"
+    detail = srv.niche_detail("tag", detail_key)
+    show(f"niche_detail('tag', {detail_key!r})", detail)
+    if not has_v2:
+        assert "error" in detail and "opportunity_v2" in detail["error"], \
+            f"expected the v2 re-run-ETL error, got: {detail!r}"
+        print("\n[OK] niche_detail degraded cleanly (v2 columns not built yet — run `task etl`)")
+    else:
+        assert "error" not in detail
+        assert detail["tier"] in ("micro", "umbrella", "theme", "meta", "genre")
+        assert all("entrant_ratio" in v and "solo_viability" in v for v in detail["variants"])
+        print(f"\n[OK] niche_detail returned {len(detail['representative_games'])} representative games, "
+              f"{len(detail['saturation_trend'])} trend years, {len(detail['revenue_histogram'])} hist buckets")
+
+    # 2b. tag_combos — tolerant: mart_tag_lift only exists once the ETL that added it has
+    # run, and its absence must yield the tool's clear error dict, never a crash.
+    combos = srv.tag_combos("Roguelike Deckbuilder", limit=5)
+    show("tag_combos('Roguelike Deckbuilder', limit=5)", combos)
+    if "error" in combos:
+        assert "mart_tag_lift" in combos["error"], f"unexpected tag_combos error: {combos['error']!r}"
+        print("\n[OK] tag_combos degraded cleanly (mart_tag_lift not built yet — run `task etl`)")
+    else:
+        assert combos["n_pairs"] > 0 and combos["best_combos"], "expected pairs for a popular tag"
+        assert all(c["lift"] is not None for c in combos["best_combos"])
+        print(f"\n[OK] tag_combos: {combos['n_pairs']} pairs, best partner "
+              f"{combos['best_combos'][0]['partner']!r} at {combos['best_combos'][0]['lift']}x lift")
 
     # 3. market_benchmarks.
     bm = srv.market_benchmarks()
