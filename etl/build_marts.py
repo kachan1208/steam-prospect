@@ -1704,15 +1704,24 @@ def main() -> int:
     versioned = data_dir / f"prospect_{mart_version}.duckdb"
     current = data_dir / "current.duckdb"
 
-    if versioned.exists():
-        versioned.unlink()
+    # Build into a scratch file and only os.replace() it over the versioned name once the
+    # build succeeds. A SAME-DAY rerun otherwise deletes and rebuilds the very file
+    # current.duckdb points at, so the serving app and the ETL fight over a DuckDB file
+    # lock — any app (re)start mid-build then crash-loops on "Conflicting lock is held"
+    # (took the site down on 2026-08-04 after several manual same-day rebuilds). The
+    # nightly never hits this only because each day gets a fresh filename; this makes
+    # reruns safe regardless of restart timing. A failed/killed run leaves only a stale
+    # .building file, which the next run removes — the served mart is never touched.
+    building = data_dir / f"prospect_{mart_version}.duckdb.building"
+    if building.exists():
+        building.unlink()
 
     params = build_params()
     print(f"[etl] source     : {source_db}")
     print(f"[etl] output     : {versioned}")
     t0 = time.perf_counter()
 
-    con = duckdb.connect(str(versioned))
+    con = duckdb.connect(str(building))
     try:
         # On memory-constrained hosts (e.g. a small Droplet) cap DuckDB's memory so it spills
         # to its on-disk temp dir instead of being OOM-killed. Env-driven; unset = default.
@@ -1774,6 +1783,11 @@ def main() -> int:
             print(f"        {tbl:24s} {n:>10,}")
     finally:
         con.close()
+
+    # Land the finished build atomically over the versioned name (see the .building
+    # comment above). os.replace is atomic on the same filesystem; if the app is serving
+    # this same-day file, it keeps its open inode until the post-ETL restart.
+    os.replace(building, versioned)
 
     # Atomic symlink swap: current.duckdb -> prospect_<version>.duckdb (relative target).
     tmp_link = data_dir / ".current.tmp"
