@@ -59,8 +59,10 @@ _ENTITY_COLS = (
 )
 
 # Compact subset for search results (list rows, not the full career profile).
+# n_recent_24m rides along so browse views (the Studios page) can show an honest
+# "still shipping?" Active signal without a per-row profile fetch.
 _SEARCH_COLS = (
-    "role, name, n_games, first_release_year, last_release_year, "
+    "role, name, n_games, first_release_year, last_release_year, n_recent_24m, "
     "total_rev, median_rev, hit_rate_200k, top_genres"
 )
 
@@ -71,6 +73,7 @@ class EntitySearchRow(BaseModel):
     n_games: int
     first_release_year: int | None
     last_release_year: int | None
+    n_recent_24m: int | None
     total_rev: float | None
     median_rev: float | None
     hit_rate_200k: float | None
@@ -124,12 +127,17 @@ class EntityProfileResponse(BaseModel):
 
 @router.get("/search", response_model=EntitySearchList)
 def search_entities(
-    q: str = Query(..., min_length=1, description="Case-insensitive substring of the entity name."),
+    q: str | None = Query(None, description="Case-insensitive substring of the entity name. "
+                          "Omit to BROWSE: top entities by total est. revenue."),
     role: Role | None = Query(None, description="Restrict to developers or publishers."),
+    min_games: int = Query(1, ge=1, description="Floor on n_games — browse views pass e.g. 3 "
+                           "so single-release entities don't drown the ranking."),
     limit: int = Query(20, ge=1, le=100),
 ) -> EntitySearchList:
-    where = ["name ILIKE ?"]
-    params: list = [f"%{q}%"]
+    where, params = ["n_games >= ?"], [min_games]
+    if q:
+        where.append("name ILIKE ?")
+        params.append(f"%{q}%")
     if role:
         where.append("role = ?")
         params.append(role)

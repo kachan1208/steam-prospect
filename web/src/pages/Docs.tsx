@@ -9,11 +9,11 @@ const MCP_URL = "https://142-93-49-69.nip.io/mcp/";
 
 // ---- small building blocks --------------------------------------------------------------
 
-/** A top-level section anchor + heading. `scroll-mt` keeps the heading clear of the top edge
- *  when you jump to it from the table of contents. */
+/** A top-level section anchor + heading. `scroll-mt` keeps the heading clear of the sticky
+ *  app header (56px) when you jump to it from the table of contents. */
 function Section({ id, kicker, title, children }: { id: string; kicker?: string; title: string; children: ReactNode }) {
   return (
-    <section id={id} className="flex scroll-mt-6 flex-col gap-3">
+    <section id={id} className="flex scroll-mt-20 flex-col gap-3">
       <div>
         {kicker && <div className="text-[11px] font-semibold uppercase tracking-wide text-brand">{kicker}</div>}
         <h2 className="text-lg font-semibold text-ink-primary">{title}</h2>
@@ -41,7 +41,7 @@ function Feature({
   children: ReactNode;
 }) {
   return (
-    <section id={id} className="scroll-mt-6">
+    <section id={id} className="scroll-mt-20">
       <Card
         title={name}
         subtitle={
@@ -115,6 +115,7 @@ const TOC: { group: string; items: [string, string][] }[] = [
     group: "The core",
     items: [
       ["games", "Games & teardown"],
+      ["studios", "Studios"],
       ["timing", "Launch & Timing"],
     ],
   },
@@ -178,7 +179,7 @@ export default function Docs() {
           <span aria-hidden>·</span>
           <span>Data refreshes nightly</span>
           <span aria-hidden>·</span>
-          <span>The sidebar health dot shows the exact "data as of" build</span>
+          <span>The footer health dot shows the exact "data as of" build</span>
         </div>
       </div>
 
@@ -197,7 +198,7 @@ export default function Docs() {
               analyze, nothing to configure.
             </p>
             <p className="text-ink-secondary">
-              Prospect is four screens plus a connector. The screens are the things worth looking at — charts you
+              Prospect is five screens plus a connector. The screens are the things worth looking at — charts you
               read rather than numbers you quote. Everything else is answered by asking, through the MCP:
             </p>
             <Terms
@@ -205,6 +206,10 @@ export default function Docs() {
                 [
                   "Games & teardown",
                   <>Where does a specific title stand, and — from its own reviews — why does it win versus genre peers?</>,
+                ],
+                [
+                  "Studios",
+                  <>Who ships games like mine — which developers and publishers, with what track record?</>,
                 ],
                 [
                   "Launch & Timing",
@@ -291,7 +296,7 @@ export default function Docs() {
         <Feature
           id="timing-card"
           name="Launch & Timing"
-          where="Sidebar “Launch & Timing”"
+          where="Header nav “Timing”"
           to="/timing"
           question="When should I launch, and does the calendar even matter?"
         >
@@ -317,7 +322,7 @@ export default function Docs() {
         <Feature
           id="games-card"
           name="Games (search)"
-          where="Sidebar “Games”"
+          where="Header nav “Games”"
           to="/games"
           question="Where does a specific title or competitor actually stand?"
         >
@@ -353,6 +358,28 @@ export default function Docs() {
             game's players talk about that others don't," which is <span className="text-ink-primary">correlational
             evidence</span>, not a recipe. Aspects come from a recency-biased sample of English reviews, so thin-review
             games carry a caveat.
+          </ReadBox>
+        </Feature>
+      </Section>
+
+      <Section id="studios" kicker="The core" title="Studios">
+        <Feature
+          id="studios-card"
+          name="Studios"
+          where="Header nav “Studios”"
+          to="/studios"
+          question="Who ships games like mine, and what's their track record?"
+        >
+          <p>
+            Browse or search developer and publisher track records — release count, career and median est. revenue,
+            hit rate, and whether they're still shipping — then open any studio for its full release trajectory. Built
+            for publisher scouting: filter to publishers, find who's active in your genres, and judge them by what
+            their releases actually did.
+          </p>
+          <ReadBox>
+            Studio names are self-reported Steam credit strings, so the same company can appear under several
+            spellings, and every revenue figure is a review-based estimate — read the numbers as directional, not as a
+            registry.
           </ReadBox>
         </Feature>
       </Section>
@@ -440,14 +467,14 @@ export default function Docs() {
         <Feature
           id="datalog-card"
           name="Data log"
-          where="Sidebar “Data log”"
+          where="Header nav “Data”"
           to="/datalog"
           question="How fresh is the data I'm looking at?"
         >
           <p>
             The refresh history. Each nightly run re-scrapes Steam, rebuilds the analytics, and reloads the app; this log
             shows what each run added (games, reviews, player updates), the mart version, and how long it took. The
-            sidebar's health dot is the quick version — hover it for the exact mart version and build timestamp, which is
+            footer's health dot is the quick version — hover it for the exact mart version and build timestamp, which is
             the authoritative "data as of" answer.
           </p>
         </Feature>
@@ -465,7 +492,7 @@ export default function Docs() {
             />
             <p className="text-xs text-ink-muted">
               Roughly: the full Steam catalog (~142K apps), a few million sampled reviews, and ~1.1M press articles —
-              rebuilt nightly. The exact size and build date for your session are in the sidebar health dot and the{" "}
+              rebuilt nightly. The exact size and build date for your session are in the footer health dot and the{" "}
               <a href="#datalog" className="text-brand hover:underline">Data log</a>.
             </p>
           </div>
@@ -587,7 +614,7 @@ export default function Docs() {
               ],
               [
                 "How current is what I'm seeing?",
-                "The data rebuilds nightly. The sidebar health dot (and the Data log) show the exact mart version and build timestamp — that's the authoritative “data as of.”",
+                "The data rebuilds nightly. The footer health dot (and the Data log) show the exact mart version and build timestamp — that's the authoritative “data as of.”",
               ],
             ].map(([q, a], i) => (
               <div key={i} className="py-3 first:pt-0 last:pb-0">
@@ -598,7 +625,7 @@ export default function Docs() {
           </div>
         </Card>
         <p className="text-center text-xs text-ink-muted">
-          Prospect is early and solo-run — if a number looks wrong, note the mart version from the sidebar health dot so
+          Prospect is early and solo-run — if a number looks wrong, note the mart version from the footer health dot so
           it can be reproduced.
         </p>
       </Section>

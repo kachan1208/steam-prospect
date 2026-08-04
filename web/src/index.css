@@ -12,7 +12,7 @@
  * ------------------------------------------------------------------------------- */
 :root {
   /* surfaces */
-  --surface-1: #ffffff;   /* cards, sidebar, popovers */
+  --surface-1: #ffffff;   /* cards, header/footer chrome, popovers */
   --surface-2: #f4f6f8;   /* subtle raised / hover / inset fills */
   --page-plane: #f6f7f9;  /* app background */
 
