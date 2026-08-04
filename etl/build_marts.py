@@ -56,6 +56,198 @@ W_DEMAND = 0.50
 W_COMPETITION = 0.35
 W_QUALITY = 0.30
 
+# --------------------------------------------------------------------------------------
+# Niche-score v2 (2026-08) — growth gate + tag tiers + solo viability (see mart_niche.sql).
+#
+# WHY: a real user rejected find_niches' top answers — sorting by raw `opportunity`
+# returned Naval / Transportation / Diplomacy (new releases shrinking 15-37%/yr: the
+# "low competition" the score rewarded was everyone LEAVING, not an open market) and
+# 4X / Open World (genre umbrellas a solo dev can't "build", not actionable niches).
+# The v2 columns fix both failure modes WITHOUT touching the original score: a decline
+# gate multiplies `opportunity` into `opportunity_v2`, and a tag `tier` lets the MCP/API
+# default to buildable micro-genres + themes while keeping umbrellas/meta reachable.
+# --------------------------------------------------------------------------------------
+# Decline gate (opportunity_v2 = opportunity * gate). Two independent decline signals:
+#   sat_severity      = clamp(-saturation_yoy / GATE_SAT_FULL_DECLINE, 0, 1)
+#                       (release pipeline shrinking; full severity at a
+#                        GATE_SAT_FULL_DECLINE, e.g. 30%/yr, drop in new releases)
+#   entrant_severity  = clamp((1 - entrant_ratio) / (1 - GATE_ENTRANT_FULL), 0, 1)
+#                       (recent entrants underearn the niche's all-time median; full
+#                        severity at entrant_ratio <= GATE_ENTRANT_FULL)
+#   gate = 1 - (1 - GATE_FLOOR) * MAX(sat_severity, entrant_severity)   -> in [GATE_FLOOR, 1]
+#
+# Deliberate deviation from the obvious "AND" gate (only penalize when BOTH signals are
+# bad): measured on the real catalog, the median tag's entrant_ratio is ~1.08 (24m medians
+# run structurally higher than all-time medians — price inflation + the review floor
+# filtering recent releases harder), so entrant_ratio >= 1 is the NORM and cannot excuse a
+# collapsing release pipeline. Concretely, the user-rejected niches themselves (Naval
+# er~1.5, Fighting er~3.1 — tiny 24m survivor cohorts over a huge cheap back catalog)
+# would sail through an AND gate untouched. MAX (i.e. OR) semantics treat each decline
+# signal as sufficient evidence on its own; a niche only keeps gate=1.0 when NEITHER
+# signal is negative. NULL signals (no prior-year releases / zero or missing medians)
+# count as "no evidence of decline", not as decline.
+GATE_FLOOR = 0.5                 # worst-case multiplier on opportunity (never below half)
+GATE_SAT_FULL_DECLINE = 0.30     # saturation_yoy <= -30%/yr -> full saturation severity
+GATE_ENTRANT_FULL = 0.5          # entrant_ratio <= 0.5 -> full entrant severity
+                                 # (severity ramps linearly over er in [0.5, 1.0])
+
+# Tag tiers. Curated TAG_TIER map below classifies the big/obvious tags; any UNMAPPED tag
+# falls back to a size heuristic: all-time n_games (win='all', min_reviews=
+# MIN_REVIEWS_DEFAULT cut) >= UMBRELLA_N_GAMES -> 'umbrella', else 'micro'. dimension=
+# 'genre' rows always get tier='genre' (Steam's fixed genre list is a different vocabulary,
+# not tiered). The MCP/API default to micro+theme ONLY — see find_niches.
+UMBRELLA_N_GAMES = 400
+
+# Curated tag -> tier map ('micro' | 'umbrella' | 'theme' | 'meta'), from reading the
+# actual DISTINCT keys in mart_niche (414 tags, 2026-08 build). Semantics:
+#   micro     a buildable game concept — you can start THIS game tomorrow
+#             (Colony Sim, Souls-like, Deckbuilding, City Builder...).
+#   umbrella  a genre/mechanic/mode/perspective CONTAINER, too broad to build directly
+#             (Open World, Sandbox, RPG, Turn-Based, Co-op, First-Person...). Also used
+#             for feature tags (Character Customization, Multiple Endings...).
+#   theme     a setting/subject/aesthetic you pick FOR a game, not a game by itself
+#             (Vikings, Western, Naval, Pixel Graphics, Cozy, World War II...).
+#   meta      reception/quality/store-metadata tags that describe how a game is perceived
+#             or packaged, never what to build (Great Soundtrack, Nostalgia, Replay
+#             Value, Early Access, RPGMaker, content-rating descriptors...).
+# micro-vs-theme is informational (both included by default downstream); the boundary that
+# changes behavior is (micro|theme) vs (umbrella|meta), so curation effort concentrated
+# there. NOTE the vocabulary quirks preserved verbatim from real tag data: 'Dystopian '
+# (trailing space) and 'Point &amp; Click' / 'Design &amp; Illustration' (HTML entities)
+# are distinct keys in game_tags and must be matched exactly.
+TAG_TIER: dict[str, str] = {
+    # ---- umbrellas: broad genre containers ----
+    "Action": "umbrella", "Adventure": "umbrella", "Action-Adventure": "umbrella",
+    "Casual": "umbrella", "Simulation": "umbrella", "Strategy": "umbrella",
+    "RPG": "umbrella", "Action RPG": "umbrella", "Puzzle": "umbrella",
+    "Arcade": "umbrella", "Sports": "umbrella", "Racing": "umbrella",
+    "Shooter": "umbrella", "FPS": "umbrella", "Third-Person Shooter": "umbrella",
+    "Platformer": "umbrella", "Horror": "umbrella", "Survival": "umbrella",
+    "Open World": "umbrella", "Sandbox": "umbrella", "Exploration": "umbrella",
+    "Management": "umbrella", "Logic": "umbrella", "4X": "umbrella",
+    "Rogue-like": "umbrella", "Rogue-lite": "umbrella", "Roguelike": "umbrella",
+    "Roguelite": "umbrella", "War": "umbrella", "Combat": "umbrella",
+    "Tactical": "umbrella",
+    # ---- umbrellas: mechanic/feature containers ----
+    "Building": "umbrella", "Crafting": "umbrella", "Base-Building": "umbrella",
+    "Base Building": "umbrella", "Resource Management": "umbrella", "Economy": "umbrella",
+    "Physics": "umbrella", "Procedural Generation": "umbrella", "Loot": "umbrella",
+    "Turn-Based": "umbrella", "Turn-Based Combat": "umbrella", "Real-Time": "umbrella",
+    "Real-Time with Pause": "umbrella", "Grid-Based Movement": "umbrella",
+    "Character Customization": "umbrella", "Multiple Endings": "umbrella",
+    "Choices Matter": "umbrella", "Perma Death": "umbrella", "Score Attack": "umbrella",
+    "Quick-Time Events": "umbrella", "Destruction": "umbrella", "Conversation": "umbrella",
+    "Bullet Time": "umbrella", "6DOF": "umbrella",
+    # ---- umbrellas: mode/perspective/platform descriptors ----
+    "Singleplayer": "umbrella", "Multiplayer": "umbrella",
+    "Massively Multiplayer": "umbrella", "Co-op": "umbrella", "Online Co-Op": "umbrella",
+    "Local Co-Op": "umbrella", "Local Multiplayer": "umbrella",
+    "4 Player Local": "umbrella", "Split Screen": "umbrella", "Co-op Campaign": "umbrella",
+    "Asynchronous Multiplayer": "umbrella", "Team-Based": "umbrella",
+    "Competitive": "umbrella", "PvP": "umbrella", "PvE": "umbrella",
+    "2D": "umbrella", "3D": "umbrella", "2.5D": "umbrella",
+    "First-Person": "umbrella", "Third Person": "umbrella", "Top-Down": "umbrella",
+    "Isometric": "umbrella", "Side Scroller": "umbrella", "VR": "umbrella",
+    "Driving": "umbrella",
+    # ---- micro: buildable genres (incl. >=UMBRELLA_N_GAMES rescues the heuristic would
+    #      otherwise misfile as umbrella) ----
+    "Psychological Horror": "micro", "Survival Horror": "micro", "Visual Novel": "micro",
+    "Interactive Fiction": "micro", "Choose Your Own Adventure": "micro",
+    "Text-Based": "micro", "JRPG": "micro", "CRPG": "micro", "Tactical RPG": "micro",
+    "Strategy RPG": "micro", "Party-Based RPG": "micro", "Dungeon Crawler": "micro",
+    "Immersive Sim": "micro", "Walking Simulator": "micro", "Hack and Slash": "micro",
+    "Turn-Based Strategy": "micro", "Turn-Based Tactics": "micro",
+    "Real Time Tactics": "micro", "RTS": "micro", "Grand Strategy": "micro",
+    "Wargame": "micro", "City Builder": "micro", "Colony Sim": "micro",
+    "Life Sim": "micro", "Farming Sim": "micro", "Farming": "micro",
+    "Agriculture": "micro", "Automation": "micro", "Idler": "micro", "Clicker": "micro",
+    "Incremental": "micro", "Time Management": "micro", "Deckbuilding": "micro",
+    "Card Battler": "micro", "Auto Battler": "micro", "Roguelike Deckbuilder": "micro",
+    "Action Roguelike": "micro", "Traditional Roguelike": "micro", "Roguevania": "micro",
+    "Bullet Hell": "micro", "Bullet Heaven": "micro", "Shoot 'Em Up": "micro",
+    "Twin Stick Shooter": "micro", "Top-Down Shooter": "micro", "Arena Shooter": "micro",
+    "Boomer Shooter": "micro", "Looter Shooter": "micro", "Hero Shooter": "micro",
+    "Extraction Shooter": "micro", "Battle Royale": "micro", "MOBA": "micro",
+    "MMORPG": "micro", "Tower Defense": "micro", "Metroidvania": "micro",
+    "2D Platformer": "micro", "3D Platformer": "micro", "Puzzle-Platformer": "micro",
+    "Puzzle Platformer": "micro", "Precision Platformer": "micro", "Collectathon": "micro",
+    "Souls-like": "micro", "Beat 'em up": "micro", "2D Fighter": "micro",
+    "3D Fighter": "micro", "Fighting": "micro", "Spectacle fighter": "micro",
+    "Character Action Game": "micro", "Musou": "micro", "Boss Rush": "micro",
+    "Point & Click": "micro", "Point &amp; Click": "micro", "Hidden Object": "micro",
+    "Dating Sim": "micro", "Otome": "micro", "Rhythm": "micro", "Stealth": "micro",
+    "Card Game": "micro", "Board Game": "micro", "Tabletop": "micro",
+    "Word Game": "micro", "Trivia": "micro", "Solitaire": "micro", "Chess": "micro",
+    "Mahjong": "micro", "Pinball": "micro", "Open World Survival Craft": "micro",
+    "Creature Collector": "micro", "God Game": "micro", "Political Sim": "micro",
+    "Outbreak Sim": "micro", "Job Simulator": "micro", "Medical Sim": "micro",
+    "Automobile Sim": "micro", "Space Sim": "micro", "Flight": "micro",
+    "Combat Racing": "micro", "Vehicular Combat": "micro", "Naval Combat": "micro",
+    "Trading": "micro", "Cooking": "micro", "Fishing": "micro", "Hunting": "micro",
+    "Mining": "micro", "Trains": "micro", "Transportation": "micro",
+    "Diplomacy": "micro", "Minigames": "micro", "Escape Room": "micro",
+    "Mystery Dungeon": "micro", "Party Game": "micro", "Inventory Management": "micro",
+    "Education": "micro", "FMV": "micro", "Parkour": "micro",
+    "Social Deduction": "micro", "Sokoban": "micro",
+    # ---- themes: setting / subject matter ----
+    "Fantasy": "theme", "Dark Fantasy": "theme", "Sci-fi": "theme",
+    "Cyberpunk": "theme", "Steampunk": "theme", "Space": "theme",
+    "Futuristic": "theme", "Post-apocalyptic": "theme", "Zombies": "theme",
+    "Medieval": "theme", "Historical": "theme", "Alternate History": "theme",
+    "Rome": "theme", "Vikings": "theme", "Western": "theme", "America": "theme",
+    "World War I": "theme", "World War II": "theme", "Cold War": "theme",
+    "Military": "theme", "Naval": "theme", "Pirates": "theme", "Sailing": "theme",
+    "Ninja": "theme", "Martial Arts": "theme", "Assassin": "theme",
+    "Dwarf": "theme", "Jet": "theme", "Tanks": "theme", "Submarine": "theme",
+    "Spaceships": "theme", "Mechs": "theme", "Robots": "theme", "Aliens": "theme",
+    "Dragons": "theme", "Demons": "theme", "Vampire": "theme", "Werewolves": "theme",
+    "Lovecraftian": "theme", "Mythology": "theme", "Gothic": "theme", "Noir": "theme",
+    "Crime": "theme", "Detective": "theme", "Investigation": "theme",
+    "Conspiracy": "theme", "Illuminati": "theme", "Politics": "theme",
+    "Political": "theme", "Capitalism": "theme", "Dystopian": "theme",
+    "Dystopian ": "theme", "Superhero": "theme", "Supernatural": "theme",
+    "Magic": "theme", "Nature": "theme", "Underwater": "theme", "Underground": "theme",
+    "Snow": "theme", "Cats": "theme", "Dog": "theme", "Horses": "theme",
+    "Dinosaurs": "theme", "Time Travel": "theme", "Faith": "theme", "Science": "theme",
+    "Artificial Intelligence": "theme", "Transhumanism": "theme", "Mars": "theme",
+    "Heist": "theme", "Villain Protagonist": "theme", "Female Protagonist": "theme",
+    "Based On A Novel": "theme", "Dungeons & Dragons": "theme", "Modern": "theme",
+    # ---- themes: aesthetic / tone (a deliberate positioning choice, so kept in
+    #      defaults, unlike reception-descriptor meta tags) ----
+    "Anime": "theme", "Pixel Graphics": "theme", "Hand-drawn": "theme",
+    "Voxel": "theme", "Minimalist": "theme", "Abstract": "theme",
+    "Cartoony": "theme", "Cartoon": "theme", "Comic Book": "theme",
+    "Stylized": "theme", "Realistic": "theme", "Retro": "theme", "Old School": "theme",
+    "1980s": "theme", "1990's": "theme", "Cute": "theme", "Colorful": "theme",
+    "Cozy": "theme", "Wholesome": "theme", "Family Friendly": "theme",
+    "Dark": "theme", "Surreal": "theme", "Psychedelic": "theme",
+    "Comedy": "theme", "Dark Humor": "theme", "Dark Comedy": "theme",
+    "Satire": "theme", "Parody": "theme", "Parody ": "theme", "Memes": "theme",
+    "Drama": "theme", "Romance": "theme", "Mystery": "theme", "Thriller": "theme",
+    "Psychological": "theme", "Philosophical": "theme", "LGBTQ+": "theme",
+    "Hentai": "theme",
+    # ---- meta: reception/quality/store-metadata — never a thing to build ----
+    "Great Soundtrack": "meta", "Soundtrack": "meta", "Music": "meta",
+    "Nostalgia": "meta", "Replay Value": "meta", "Story Rich": "meta",
+    "Atmospheric": "meta", "Emotional": "meta", "Funny": "meta", "Relaxing": "meta",
+    "Addictive": "meta", "Immersive": "meta", "Beautiful": "meta", "Classic": "meta",
+    "Cult Classic": "meta", "Lore-Rich": "meta", "Cinematic": "meta",
+    "Experimental": "meta", "Experience": "meta", "Well-Written": "meta",
+    "Narrative": "meta", "Narration": "meta", "Dynamic Narration": "meta",
+    "Difficult": "meta", "Fast-Paced": "meta", "Linear": "meta", "Nonlinear": "meta",
+    "Short": "meta", "Mature": "meta", "Violent": "meta", "Gore": "meta",
+    "Blood": "meta", "Sexual Content": "meta", "Nudity": "meta", "NSFW": "meta",
+    "Indie": "meta", "Early Access": "meta", "Free to Play": "meta",
+    "e-sports": "meta", "Remake": "meta", "Sequel": "meta", "Episodic": "meta",
+    "Movie": "meta", "Crowdfunded": "meta", "Tutorial": "meta", "Foreign": "meta",
+    "Gaming": "meta", "Mod": "meta", "Moddable": "meta", "Level Editor": "meta",
+    "RPGMaker": "meta", "GameMaker": "meta", "Mouse only": "meta",
+    "Touch-Friendly": "meta", "3D Vision": "meta", "360 Video": "meta",
+    "Ambient": "meta", "Silent Protagonist": "meta", "Jump Scare": "meta",
+    "Unforgiving": "meta", "Intentionally Awkward Controls": "meta",
+    "Design &amp; Illustration": "meta",  # HTML-entity twin of a DENYLIST_TAG entry
+}
+
 # Launch-curve eligibility.
 CURVE_MIN_REVIEWS = 10           # sampled first-year reviews a game needs to enter the curve
 CURVE_MIN_GAMES = 30             # a genre needs this many eligible games to publish a curve
@@ -453,6 +645,10 @@ def build_params() -> dict[str, str]:
         "W_DEMAND": W_DEMAND,
         "W_COMPETITION": W_COMPETITION,
         "W_QUALITY": W_QUALITY,
+        "GATE_FLOOR": GATE_FLOOR,
+        "GATE_SAT_FULL_DECLINE": GATE_SAT_FULL_DECLINE,
+        "GATE_ENTRANT_FULL": GATE_ENTRANT_FULL,
+        "UMBRELLA_N_GAMES": UMBRELLA_N_GAMES,
         "CURVE_MIN_REVIEWS": CURVE_MIN_REVIEWS,
         "CURVE_MIN_GAMES": CURVE_MIN_GAMES,
         "TOP_TAGS_PER_GAME": TOP_TAGS_PER_GAME,
@@ -504,6 +700,10 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
     con.executemany("INSERT INTO denylist_buzz_term VALUES (?)", [(t,) for t in DENYLIST_BUZZ_TERM])
     con.execute("CREATE TEMP TABLE denylist_buzz_word(word VARCHAR)")
     con.executemany("INSERT INTO denylist_buzz_word VALUES (?)", [(w,) for w in DENYLIST_BUZZ_WORD])
+    # Curated tag tiers (niche-score v2) — read by mart_niche.sql; unmapped tags fall back
+    # to the UMBRELLA_N_GAMES size heuristic there.
+    con.execute("CREATE TEMP TABLE tag_tier(tag VARCHAR, tier VARCHAR)")
+    con.executemany("INSERT INTO tag_tier VALUES (?, ?)", list(TAG_TIER.items()))
 
     staging_sql = render(
         """
@@ -518,6 +718,15 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         SELECT DISTINCT gg.appid, gg.genre
         FROM src.game_genres gg
         WHERE gg.genre NOT IN (SELECT genre FROM denylist_genre);
+
+        -- Niche-score v2 fallback for is_singleplayer (see stg_game below): games carrying
+        -- the 'Singleplayer' community tag anywhere in the FULL game_tags table — no vote/
+        -- rank floor, deliberately unlike stg_tag_membership, because this is a coverage
+        -- signal ("is the game playable solo at all?"), not a niche-membership signal.
+        -- Only consulted when the game's raw Steam `categories` field is missing/empty
+        -- (~0.6 percent of the catalog); Steam's own category list wins whenever present.
+        CREATE TEMP TABLE stg_singleplayer_tag AS
+        SELECT DISTINCT gt.appid FROM src.game_tags gt WHERE gt.tag = 'Singleplayer';
 
         -- Moved ahead of stg_game (below needs it for the owners-floor genre lookup).
         CREATE TEMP TABLE stg_primary_genre AS
@@ -738,9 +947,27 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
             CASE WHEN gp.owners_is_floor_estimate THEN gp.reviews_owner_est * g.price_initial
                  ELSE g.est_rev_owners_steamspy END AS est_rev_owners,
             g.est_rev_reviews,
-            g.avg_playtime_forever, g.ccu, g.tag_count
+            g.avg_playtime_forever, g.ccu, g.tag_count,
+            -- Niche-score v2: is this game playable single-player? PRIMARY source: Steam's
+            -- own `categories` field (raw comma-separated appdetails list, e.g.
+            -- 'Single-player,Multi-player,...'), matched as an exact trimmed token so
+            -- 'Single-player' can never false-positive on another category (verified: no
+            -- other category token contains the substring). FALLBACK (categories missing/
+            -- empty only): the game carries the 'Singleplayer' community tag anywhere in
+            -- the full game_tags table (stg_singleplayer_tag above). NOTE: Steam's checkbox
+            -- means "has any solo-playable mode" — an online-only extraction shooter with a
+            -- solo queue may still set it, so niche-level shares (solo_viability) are read
+            -- RELATIVE to the ~0.9 catalog norm, not as an absolute guarantee.
+            COALESCE(
+                CASE WHEN cg.categories IS NOT NULL AND trim(cg.categories) <> ''
+                     THEN list_contains(list_transform(string_split(cg.categories, ','), x -> trim(x)), 'Single-player')
+                END,
+                sp.appid IS NOT NULL
+            ) AS is_singleplayer
         FROM _stg_game_reconciled g
-        JOIN genre_pick gp ON gp.appid = g.appid;
+        JOIN genre_pick gp ON gp.appid = g.appid
+        LEFT JOIN src.games cg ON cg.appid = g.appid
+        LEFT JOIN stg_singleplayer_tag sp ON sp.appid = g.appid;
 
         CREATE TEMP TABLE stg_review_dsr AS
         SELECT r.appid,
@@ -1373,6 +1600,11 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
         "boxleiter_owners_per_review": f"{boxleiter_slope:.2f}" if boxleiter_slope is not None else "",
         "pct_over_100k": f"{over_100k:.4f}" if over_100k is not None else "",
         "opportunity_weights": f"demand={W_DEMAND},competition={W_COMPETITION},quality_gap={W_QUALITY}",
+        "opportunity_v2_gate": (
+            f"gate=1-(1-{GATE_FLOOR})*max(sat_severity,entrant_severity); "
+            f"sat_full_decline={GATE_SAT_FULL_DECLINE},entrant_full={GATE_ENTRANT_FULL},"
+            f"umbrella_n_games={UMBRELLA_N_GAMES}"
+        ),
     }
     con.execute("DROP TABLE IF EXISTS mart_meta")
     con.execute("CREATE TABLE mart_meta(key VARCHAR, value VARCHAR)")
