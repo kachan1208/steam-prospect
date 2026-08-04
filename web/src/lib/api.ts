@@ -13,10 +13,15 @@ export const API_BASE: string = import.meta.env.VITE_API_BASE || "/api";
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** The raw `detail` payload when the API sent a structured (non-string) one — e.g. the
+   * entity-profile 404 carries `{error, suggestions}` so the UI can render did-you-mean
+   * links. Undefined for plain string details (already the `message`). */
+  detail?: unknown;
+  constructor(status: number, message: string, detail?: unknown) {
     super(message);
     this.status = status;
     this.name = "ApiError";
+    this.detail = detail;
   }
 }
 
@@ -33,7 +38,11 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // non-JSON error body; fall back to statusText
     }
-    throw new ApiError(res.status, typeof detail === "string" ? detail : JSON.stringify(detail));
+    throw new ApiError(
+      res.status,
+      typeof detail === "string" ? detail : JSON.stringify(detail),
+      typeof detail === "string" ? undefined : detail,
+    );
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -542,6 +551,93 @@ export function useGameTeardown(appid: number | null) {
     queryKey: ["game-teardown", appid],
     queryFn: () => request<GameTeardown>(`/games/${appid}/teardown`),
     enabled: appid !== null,
+  });
+}
+
+// ---- entities (developer/publisher profiles) --------------------------------------------
+export type EntityRole = "developer" | "publisher";
+
+export interface EntitySearchRow {
+  role: EntityRole;
+  name: string;
+  n_games: number;
+  first_release_year: number | null;
+  last_release_year: number | null;
+  total_rev: number | null;
+  median_rev: number | null;
+  hit_rate_200k: number | null;
+  top_genres: string[];
+}
+
+export interface EntitySearchList {
+  items: EntitySearchRow[];
+  total: number;
+  limit: number;
+}
+
+export function useEntitySearch(q: string, role: EntityRole | null, limit = 20) {
+  return useQuery({
+    queryKey: ["entity-search", q, role, limit],
+    queryFn: () => request<EntitySearchList>(`/entities/search${qs({ q, role, limit })}`),
+    enabled: q.trim().length > 0,
+    placeholderData: keepPreviousData,
+  });
+}
+
+export interface EntitySummary {
+  role: EntityRole;
+  name: string;
+  n_games: number;
+  first_release_year: number | null;
+  last_release_year: number | null;
+  n_recent_24m: number | null;
+  total_rev: number | null;
+  median_rev: number | null;
+  hit_rate_200k: number | null;
+  median_reviews: number | null;
+  median_positive_ratio: number | null;
+  self_published_share: number | null;
+  top_genres: string[];
+  // Distinct co-credited entities of the other role — null for developers by contract.
+  n_partners: number | null;
+}
+
+export interface EntityGameRow {
+  appid: number;
+  seq: number; // 1 = the entity's earliest release
+  name: string | null;
+  release_year: number | null;
+  release_date: string | null;
+  price_initial: number | null;
+  total_reviews: number | null;
+  positive_ratio: number | null;
+  est_rev_reviews: number | null;
+  primary_genre: string | null;
+  header_image: string | null;
+}
+
+export interface EntityProfileResponse {
+  entity: EntitySummary;
+  games: EntityGameRow[]; // ordered by seq ASC
+}
+
+/** Shape of the entity-profile 404's structured detail (ApiError.detail). */
+export interface EntityNotFoundDetail {
+  error: string;
+  suggestions: string[];
+}
+
+export function useEntityProfile(role: EntityRole | null, name: string | null) {
+  return useQuery({
+    queryKey: ["entity-profile", role, name],
+    queryFn: () =>
+      request<EntityProfileResponse>(`/entities/profile${qs({ role, name })}`),
+    enabled: !!role && !!name,
+    // 404 carries did-you-mean suggestions and 503 means "marts not built yet" — both are
+    // stable answers, so surface them immediately instead of retrying for seconds.
+    retry: (failureCount, error) =>
+      !(error instanceof ApiError && (error.status === 404 || error.status === 503)) &&
+      failureCount < 2,
   });
 }
 

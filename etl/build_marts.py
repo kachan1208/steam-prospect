@@ -580,6 +580,56 @@ CREATOR_PITCH_MIN_MENTIONS = 1    # a (creator, genre) needs >= this many mentio
                                   # not 3 -- channel collection is new/low-volume; raise once
                                   # real volume exists).
 
+# --------------------------------------------------------------------------------------
+# Entity marts (mart_entity.sql) — corporate-suffix re-merge for the developers/publishers
+# comma-split. mart_game.developers/publishers are comma-JOINED strings, and corporate
+# names themselves contain commas: "Some Studio, Inc." naively splits into "Some Studio" +
+# "Inc.", which made "Inc." the #2 publisher on Steam (916 games on the real catalog)
+# before this fix. After splitting on ',', any trimmed token whose lower() matches this
+# set is re-merged into the preceding token as ", <suffix>" (chains like "X, Co., Ltd."
+# work — see mart_entity.sql).
+#
+# Tunable, EVIDENCE-BASED list — built by inspecting the real catalog's standalone
+# comma-split tokens (counts below are standalone-token occurrences across both roles on
+# the 2026-07-30 mart). Matching is on lower(trim(token)), which is why "INC."/"LTD."/
+# "llc" variants collapse into one entry each.
+ENTITY_CORP_SUFFIXES = [
+    # US/UK-style incorporation suffixes — the overwhelming bulk of the bug:
+    "inc.",          # 1,791 standalone tokens ("...Studio, Inc." / ", INC.")
+    "inc",           #   162
+    "incorporated",  #     4 ("Dream Garage, Incorporated")
+    "llc",           # 1,428
+    "llc.",          #    76
+    "l.l.c.",        #    16
+    "llp",           #     2 ("Blood Oath Games, LLP")
+    "ltd.",          # 1,663
+    "ltd",           #   525
+    "limited",       #    35 ("Interactive Tragedy, Limited", "...CO., LIMITED")
+    "pte. ltd.",     #     1 (Singapore; "Pte. Ltd." is ONE token — no inner comma)
+    "co.",           #    10 (chain case: "Thirdverse, Co., Ltd.")
+    "co",            #     0 today — kept as a cheap guard; bare ", Co" never occurs in
+                     #       this catalog ("Yak & Co" etc. have no comma so never split)
+    "co. ltd.",      #     0 today — same guard ("X Co., Ltd." splits to "X Co." + "Ltd.",
+                     #       already handled; this catches a hypothetical "X, Co. Ltd.")
+    "corp",          #     1
+    "corp.",         #     3
+    # European legal forms with real comma-suffix usage in this catalog:
+    "s.r.o.",        #    19 (Czech/Slovak)
+    "s.l.",          #    12 (Spanish — "Tequila Works, S.L.")
+    "a.s.",          #     9 (Czech — "MADFINGER Games, a.s.")
+    "s.a.",          #     3 ("Psion Tech, S.A.")
+    "s.c.",          #     2 ("Vertex Games, S.C.")
+    "d.o.o.",        #     2 (Balkan — "SubRealityStudio,d.o.o.")
+    # DELIBERATELY EXCLUDED, from the same evidence pass:
+    #   "gmbh"  — always attached without a comma ("Daedalic Entertainment GmbH"); zero
+    #             standalone comma-tokens, so including it only adds false-positive risk.
+    #   "s.a." IS included but "sa"/"ab"/"as"/"oy" (bare Nordic/European forms) are NOT:
+    #             they appear almost exclusively as WHOLE-FIELD standalone names ("AB",
+    #             "as" — 5-6 rows each), and "kk" is a real developer NAME in the list
+    #             "Utayo,KK,9lock" — merging would corrupt real multi-dev lists. The one
+    #             legit ", AB" row ("Underground Alien Studios, AB") is the cost.
+    #             ("Gamatron AB" has no comma and is never split — unaffected.)
+]
 # JTBD — tag-combination lift (see mart_tag_lift.sql; runs LAST in MART_FILES so it can
 # read mart_game.top_tags and mart_niche's solo-tag baselines instead of re-deriving them).
 TAG_PAIR_MIN_GAMES = 15           # an unordered tag PAIR needs >= this many qualifying games
@@ -590,6 +640,9 @@ TAG_PAIR_MIN_GAMES = 15           # an unordered tag PAIR needs >= this many qua
 
 MART_FILES = [
     "mart_game.sql",
+    "mart_entity.sql",   # reads ONLY mart_game (+ the entity_suffix temp table) — must
+                         # come anywhere after mart_game.sql; kept adjacent since it's
+                         # a direct normalization of mart_game's entity strings.
     "mart_niche.sql",
     "mart_market.sql",
     "mart_seasonality.sql",
@@ -700,6 +753,10 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
     con.executemany("INSERT INTO denylist_buzz_term VALUES (?)", [(t,) for t in DENYLIST_BUZZ_TERM])
     con.execute("CREATE TEMP TABLE denylist_buzz_word(word VARCHAR)")
     con.executemany("INSERT INTO denylist_buzz_word VALUES (?)", [(w,) for w in DENYLIST_BUZZ_WORD])
+    # Corporate-suffix tokens for the developers/publishers comma-split re-merge (see
+    # ENTITY_CORP_SUFFIXES above; consumed by mart_entity.sql via lower(trim(token))).
+    con.execute("CREATE TEMP TABLE entity_suffix(token VARCHAR)")
+    con.executemany("INSERT INTO entity_suffix VALUES (?)", [(s,) for s in ENTITY_CORP_SUFFIXES])
     # Curated tag tiers (niche-score v2) — read by mart_niche.sql; unmapped tags fall back
     # to the UMBRELLA_N_GAMES size heuristic there.
     con.execute("CREATE TEMP TABLE tag_tier(tag VARCHAR, tier VARCHAR)")
