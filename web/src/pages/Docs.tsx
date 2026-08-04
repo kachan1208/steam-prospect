@@ -216,7 +216,7 @@ export default function Docs() {
                   <>When should I launch, and is my genre a launch-splash or a slow-burn?</>,
                 ],
                 [
-                  "Use in Claude",
+                  "MCP",
                   <>
                     Connect Prospect to your own Claude and ask in plain language. This is where the rest of the
                     analysis lives: <Code>find_niches</Code> (what should I build), <Code>market_benchmarks</Code>{" "}
@@ -247,7 +247,7 @@ export default function Docs() {
             {[
               <>
                 <span className="font-semibold text-ink-primary">Connect Prospect to your Claude.</span> Follow{" "}
-                <Link to="/chat" className="font-medium text-brand hover:underline">Use in Claude</Link> — one command.
+                <Link to="/chat" className="font-medium text-brand hover:underline">MCP</Link> — one command.
                 The next two steps happen there, in plain language.
               </>,
               <>
@@ -393,7 +393,7 @@ export default function Docs() {
               claude.ai) and ask market questions in plain language; the answers come straight from Prospect's Steam
               data, running on your Claude. It's read-only, needs no API key, and there's nothing to install on
               Prospect's side. (The in-app{" "}
-              <Link to="/chat" className="font-medium text-brand hover:underline">Use in Claude</Link> page has the same
+              <Link to="/chat" className="font-medium text-brand hover:underline">MCP</Link> page has the same
               setup with copy buttons.)
             </p>
 
