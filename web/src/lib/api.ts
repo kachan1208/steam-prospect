@@ -563,6 +563,7 @@ export interface EntitySearchRow {
   n_games: number;
   first_release_year: number | null;
   last_release_year: number | null;
+  n_recent_24m: number | null;
   total_rev: number | null;
   median_rev: number | null;
   hit_rate_200k: number | null;
@@ -575,12 +576,24 @@ export interface EntitySearchList {
   limit: number;
 }
 
-export function useEntitySearch(q: string, role: EntityRole | null, limit = 20) {
+/**
+ * Search OR browse entities. An empty `q` is the API's BROWSE mode (top entities by total
+ * est. revenue), so the query is always enabled; `minGames` maps to the API's n_games
+ * floor — browse views pass e.g. 3 so single-release credits don't drown the ranking.
+ */
+export function useEntitySearch(q: string, role: EntityRole | null, minGames = 1, limit = 20) {
+  const query = q.trim();
   return useQuery({
-    queryKey: ["entity-search", q, role, limit],
-    queryFn: () => request<EntitySearchList>(`/entities/search${qs({ q, role, limit })}`),
-    enabled: q.trim().length > 0,
+    queryKey: ["entity-search", query, role, minGames, limit],
+    queryFn: () =>
+      request<EntitySearchList>(
+        `/entities/search${qs({ q: query || undefined, role, min_games: minGames, limit })}`,
+      ),
     placeholderData: keepPreviousData,
+    // 503 means "marts not built yet" — a stable answer; surface the refreshing state
+    // immediately instead of retrying for seconds.
+    retry: (failureCount, error) =>
+      !(error instanceof ApiError && error.status === 503) && failureCount < 2,
   });
 }
 

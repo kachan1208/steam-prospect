@@ -2,10 +2,9 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 /**
- * Minimal standalone chrome for legal documents (Terms/Privacy) — reachable from the
- * marketing footer without the authenticated app shell, matching how most SaaS products
- * present ToS/Privacy as their own lightweight page rather than inside the dashboard
- * sidebar. Uses the same clean-light design tokens as the app shell.
+ * Minimal standalone chrome for legal documents (Terms/Privacy) — rendered outside the
+ * app shell, matching how most SaaS products present ToS/Privacy as their own lightweight
+ * page. Uses the same clean-light design tokens as the app shell.
  */
 export function LegalLayout({
   title,
@@ -28,7 +27,7 @@ export function LegalLayout({
             </div>
             <span className="text-sm font-semibold tracking-tight text-ink-primary">Prospect</span>
           </Link>
-          <Link to="/niches" className="text-xs font-medium text-ink-secondary hover:text-ink-primary">
+          <Link to="/games" className="text-xs font-medium text-ink-secondary hover:text-ink-primary">
             Open the app →
           </Link>
         </div>

@@ -1,6 +1,6 @@
 import { Link, NavLink, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import clsx from "clsx";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useHealth } from "./lib/api";
 import { initAnalytics, trackPageview } from "./lib/analytics";
@@ -9,66 +9,26 @@ import LaunchTiming from "./pages/LaunchTiming";
 import GameSearch from "./pages/GameSearch";
 import GameProfile from "./pages/GameProfile";
 import EntityProfile from "./pages/EntityProfile";
+import Studios from "./pages/Studios";
 import Chat from "./pages/Chat";
 import DataLog from "./pages/DataLog";
 import Docs from "./pages/Docs";
 import Terms from "./pages/Terms";
 import Privacy from "./pages/Privacy";
 
-const ICONS: Record<string, ReactNode> = {
-  calendar: (
-    <>
-      <rect x="3.5" y="5" width="17" height="15.5" rx="2" />
-      <line x1="3.5" y1="9.5" x2="20.5" y2="9.5" />
-      <line x1="8" y1="3" x2="8" y2="6.5" />
-      <line x1="16" y1="3" x2="16" y2="6.5" />
-    </>
-  ),
-  grid: (
-    <>
-      <rect x="3.5" y="3.5" width="7" height="7" rx="1.5" />
-      <rect x="13.5" y="3.5" width="7" height="7" rx="1.5" />
-      <rect x="3.5" y="13.5" width="7" height="7" rx="1.5" />
-      <rect x="13.5" y="13.5" width="7" height="7" rx="1.5" />
-    </>
-  ),
-  chat: (
-    <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5Z" />
-  ),
-  history: (
-    <>
-      <path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />
-      <path d="M3 4.5V9h4.5" />
-      <path d="M12 7.8v4.4l2.9 1.7" />
-    </>
-  ),
-};
-
-function Icon({ name }: { name: string }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.75"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="h-[18px] w-[18px] shrink-0"
-    >
-      {ICONS[name]}
-    </svg>
-  );
-}
-
-// Four surfaces, deliberately. The two that need pixels (a game's teardown charts, the
-// seasonality heatmap), the connector, and the data-freshness receipt. Everything the old
-// nav carried — niches, benchmarks, the estimator, marketing pitch lists — is still fully
-// answerable, but through the MCP against current.duckdb rather than a page of its own.
-const NAV_ITEMS: { to: string; label: string; icon: string }[] = [
-  { to: "/games", label: "Games", icon: "grid" },
-  { to: "/timing", label: "Launch & Timing", icon: "calendar" },
-  { to: "/chat", label: "Use in Claude", icon: "chat" },
-  { to: "/datalog", label: "Data log", icon: "history" },
+// Five destinations plus one CTA, deliberately. The old 14-page dashboard was trimmed to
+// the surfaces that earn their pixels: Games (teardown charts), Studios (developer/
+// publisher track records — added by user request: publisher scouting needs a discoverable
+// entry point, not a link buried in game credits), Timing (the seasonality heatmap), Data
+// (the freshness receipt), and Docs in the footer. "Use in Claude" is the primary CTA, not
+// a peer nav item. Everything else the old nav carried — niches, benchmarks, the
+// estimator, marketing pitch lists — is still fully answerable, but through the MCP
+// against current.duckdb rather than a page of its own.
+const NAV_ITEMS: { to: string; label: string }[] = [
+  { to: "/games", label: "Games" },
+  { to: "/studios", label: "Studios" },
+  { to: "/timing", label: "Timing" },
+  { to: "/datalog", label: "Data" },
 ];
 
 function Logo() {
@@ -108,7 +68,7 @@ function ThemeToggle() {
 function ThemePresetPicker() {
   const { preset, setPreset } = useTheme();
   return (
-    <div className="mt-2.5 flex items-center gap-2 px-1">
+    <div className="flex items-center justify-between gap-3">
       <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">Theme</span>
       <div className="flex items-center gap-0.5 rounded-lg bg-surface2 p-0.5">
         {PRESETS.map((pz) => (
@@ -132,7 +92,7 @@ function ThemePresetPicker() {
 function AccentPicker() {
   const { accent, setAccent } = useTheme();
   return (
-    <div className="mt-2.5 flex items-center gap-2 px-1">
+    <div className="flex items-center justify-between gap-3">
       <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">Accent</span>
       <div className="flex items-center gap-1.5">
         {ACCENTS.map((a) => {
@@ -159,6 +119,112 @@ function AccentPicker() {
   );
 }
 
+/** The Theme preset + Accent pickers, relocated from the old sidebar footer into a compact
+ * header popover. Plain click-outside/Escape close — no positioning or portal deps. */
+function AppearancePopover() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative" data-testid="appearance-popover">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-haspopup="true"
+        aria-expanded={open}
+        title="Appearance — theme preset and accent color"
+        className={clsx(
+          "flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium transition-colors",
+          open ? "bg-surface2 text-ink-primary" : "text-ink-muted hover:bg-surface2 hover:text-ink-primary",
+        )}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <line x1="4" y1="8" x2="20" y2="8" />
+          <line x1="4" y1="16" x2="20" y2="16" />
+          <circle cx="9" cy="8" r="2.2" fill="var(--surface-1)" />
+          <circle cx="15" cy="16" r="2.2" fill="var(--surface-1)" />
+        </svg>
+        <span className="hidden sm:inline">Appearance</span>
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full z-40 mt-2 flex w-60 flex-col gap-2.5 rounded-card border border-chartborder bg-surface p-3 shadow-md">
+          <ThemePresetPicker />
+          <AccentPicker />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Header() {
+  return (
+    <header className="sticky top-0 z-30 border-b border-chartborder bg-surface">
+      <div className="mx-auto flex w-full max-w-[1320px] flex-wrap items-center gap-x-5 px-6 lg:px-10">
+        <Link to="/games" className="flex h-14 items-center gap-2.5">
+          <Logo />
+          <span className="text-sm font-semibold tracking-tight text-ink-primary">Prospect</span>
+          <span className="hidden text-[11px] text-ink-muted lg:inline">Steam market intel</span>
+        </Link>
+
+        {/* Below sm the nav wraps to its own row under the logo (order-last + w-full);
+            no hamburger/drawer — four links fit fine as a second row. */}
+        <nav className="order-last flex w-full items-center gap-1 pb-2.5 sm:order-none sm:w-auto sm:pb-0">
+          {NAV_ITEMS.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              className={({ isActive }) =>
+                clsx(
+                  "rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors",
+                  isActive
+                    ? "bg-brand-tint text-brand"
+                    : "text-ink-secondary hover:bg-surface2 hover:text-ink-primary",
+                )
+              }
+            >
+              {item.label}
+            </NavLink>
+          ))}
+        </nav>
+
+        <div className="ml-auto flex h-14 items-center gap-2">
+          <ThemeToggle />
+          <AppearancePopover />
+          <NavLink
+            to="/chat"
+            className={({ isActive }) =>
+              clsx(
+                "rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg shadow-xs transition-colors hover:bg-brand-hover",
+                isActive && "ring-2 ring-brand/30",
+              )
+            }
+          >
+            Use in Claude
+          </NavLink>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+/** The data-freshness signal, relocated from the old sidebar into the footer. Hover for
+ * the exact mart version + build timestamp — the authoritative "data as of". */
 function HealthRow() {
   const { data, isError, isLoading } = useHealth();
   const ok = !!data && data.status === "ok";
@@ -168,57 +234,22 @@ function HealthRow() {
     ? `${label}${data.mart_version ? ` — mart ${data.mart_version}` : ""}${data.built_at ? ` (built ${data.built_at})` : ""}`
     : label;
   return (
-    <div
-      className="flex items-center gap-2 rounded-lg bg-surface2 px-2.5 py-1.5 text-[11px] font-medium text-ink-secondary"
-      title={title}
-    >
+    <div className="flex items-center gap-2 text-[11px] text-ink-muted" title={title}>
       <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-      <span className="truncate">{label}</span>
-      {data?.mart_version && <span className="ml-auto shrink-0 text-ink-muted">mart {data.mart_version}</span>}
+      <span className="truncate">
+        {label}
+        {data?.mart_version && <span> · mart {data.mart_version}</span>}
+      </span>
     </div>
   );
 }
 
-function Sidebar() {
+function Footer() {
   return (
-    <aside className="flex w-60 shrink-0 flex-col border-r border-chartborder bg-surface">
-      <Link to="/games" className="flex items-center gap-2.5 px-5 py-[18px]">
-        <Logo />
-        <div className="leading-tight">
-          <div className="text-sm font-semibold tracking-tight text-ink-primary">Prospect</div>
-          <div className="text-[11px] text-ink-muted">Steam market intel</div>
-        </div>
-      </Link>
-
-      <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-3 pb-3">
-        {NAV_ITEMS.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            className={({ isActive }) =>
-              clsx(
-                "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] font-medium transition-colors",
-                isActive
-                  ? "bg-brand-tint text-brand"
-                  : "text-ink-secondary hover:bg-surface2 hover:text-ink-primary",
-              )
-            }
-          >
-            <Icon name={item.icon} />
-            <span className="truncate min-w-0">{item.label}</span>
-          </NavLink>
-        ))}
-      </nav>
-
-      <div className="border-t border-chartborder p-3">
+    <footer className="border-t border-chartborder bg-surface">
+      <div className="mx-auto flex w-full max-w-[1320px] flex-wrap items-center justify-between gap-x-6 gap-y-1.5 px-6 py-3 lg:px-10">
         <HealthRow />
-        <ThemePresetPicker />
-        <AccentPicker />
-        <div className="mt-2.5 flex items-center justify-between gap-2.5 px-1 py-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">Mode</span>
-          <ThemeToggle />
-        </div>
-        <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-[10px] text-ink-muted">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-ink-muted">
           <Link to="/docs" className="hover:text-ink-secondary">
             Docs
           </Link>
@@ -232,19 +263,20 @@ function Sidebar() {
           </Link>
         </div>
       </div>
-    </aside>
+    </footer>
   );
 }
 
 function AppShell() {
   return (
-    <div className="flex h-full bg-page">
-      <Sidebar />
-      <main className="min-w-0 flex-1 overflow-y-auto">
+    <div className="flex min-h-full flex-col bg-page">
+      <Header />
+      <main className="flex-1">
         <div className="mx-auto w-full max-w-[1320px] px-6 py-8 lg:px-10">
           <Outlet />
         </div>
       </main>
+      <Footer />
     </div>
   );
 }
@@ -273,10 +305,11 @@ export default function App() {
         <Route element={<AppShell />}>
           <Route path="/games" element={<GameSearch />} />
           <Route path="/games/:appid" element={<GameProfile />} />
-          {/* Developer/publisher career profiles — reached from game-profile credit links,
-              deliberately NOT a sidebar item (the four-surface trim stands). Entity names
-              carry slashes/unicode, so the name rides ?name=, not the path. */}
+          {/* Developer/publisher career profiles — reached from game-profile credit links
+              and the Studios browse table. Entity names carry slashes/unicode, so the name
+              rides ?name=, not the path. */}
           <Route path="/entity/:role" element={<EntityProfile />} />
+          <Route path="/studios" element={<Studios />} />
           <Route path="/timing" element={<LaunchTiming />} />
           <Route path="/chat" element={<Chat />} />
           <Route path="/datalog" element={<DataLog />} />

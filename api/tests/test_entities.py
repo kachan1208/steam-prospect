@@ -52,6 +52,39 @@ def test_search_rejects_unknown_role(client):
     assert r.status_code == 422  # Literal["developer","publisher"] validation
 
 
+def test_search_rows_carry_n_recent_24m(client):
+    # The Studios browse table renders an Active badge off this without a profile fetch.
+    r = client.get("/api/entities/search", params={"q": "solo dev"})
+    assert r.status_code == 200
+    assert r.json()["items"][0]["n_recent_24m"] == 1
+
+
+def test_search_without_q_browses_by_total_rev(client):
+    # BROWSE mode: no q at all — the full role roster, best career revenue first.
+    r = client.get("/api/entities/search", params={"role": "developer"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 4
+    names = [e["name"] for e in body["items"]]
+    assert names == ["Studio B", "Pixel Forge Collective", "Solo Dev A", "Big Studio D"]
+
+
+def test_search_min_games_floor(client):
+    # min_games=3 keeps single-release entities out of the browse ranking; the floor
+    # also constrains `total`, so the count stays honest about what's listable.
+    r = client.get("/api/entities/search", params={"role": "developer", "min_games": 3})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 1
+    assert [e["name"] for e in body["items"]] == ["Pixel Forge Collective"]
+
+
+def test_search_min_games_applies_with_q_too(client):
+    r = client.get("/api/entities/search", params={"q": "o", "role": "developer", "min_games": 2})
+    assert r.status_code == 200
+    assert [e["name"] for e in r.json()["items"]] == ["Pixel Forge Collective"]
+
+
 # ---- /api/entities/profile --------------------------------------------------------------
 
 def test_profile_joins_games_in_seq_order(client):

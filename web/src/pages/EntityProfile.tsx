@@ -23,9 +23,8 @@ function entityHref(role: EntityRole, name: string): string {
 }
 
 /**
- * Developer/publisher career profile at /entity/:role?name=… — deliberately NOT in the
- * sidebar (the four-surface trim is intentional); it's reached from the credit links on
- * game profiles.
+ * Developer/publisher career profile at /entity/:role?name=… — reached from the credit
+ * links on game profiles and from the Studios browse table (/studios).
  */
 export default function EntityProfile() {
   const { role: roleParam } = useParams<{ role: string }>();
