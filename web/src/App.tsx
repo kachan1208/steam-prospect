@@ -8,6 +8,7 @@ import { useTheme, ACCENTS, PRESETS } from "./lib/theme";
 import LaunchTiming from "./pages/LaunchTiming";
 import GameSearch from "./pages/GameSearch";
 import GameProfile from "./pages/GameProfile";
+import EntityProfile from "./pages/EntityProfile";
 import Chat from "./pages/Chat";
 import DataLog from "./pages/DataLog";
 import Docs from "./pages/Docs";
@@ -272,6 +273,10 @@ export default function App() {
         <Route element={<AppShell />}>
           <Route path="/games" element={<GameSearch />} />
           <Route path="/games/:appid" element={<GameProfile />} />
+          {/* Developer/publisher career profiles — reached from game-profile credit links,
+              deliberately NOT a sidebar item (the four-surface trim stands). Entity names
+              carry slashes/unicode, so the name rides ?name=, not the path. */}
+          <Route path="/entity/:role" element={<EntityProfile />} />
           <Route path="/timing" element={<LaunchTiming />} />
           <Route path="/chat" element={<Chat />} />
           <Route path="/datalog" element={<DataLog />} />

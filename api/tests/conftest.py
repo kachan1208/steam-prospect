@@ -101,6 +101,37 @@ GAMES = [
 ]
 
 
+# Entity marts (api/app/routers/entities.py) — one row per (role, name) with career
+# aggregates, plus the (role, name, appid, seq) release map. Single-game entities mirror the
+# developers/publishers strings on GAMES above; "Pixel Forge Collective" is a deliberate
+# multi-game entity (spanning 1006/1005/1003, out of appid order) so tests can pin ORDER BY
+# seq and the mart_game JOIN — the router never cross-checks mart_game's credit strings.
+ENTITIES = [
+    # role, name, n_games, first_release_year, last_release_year, n_recent_24m, total_rev,
+    # median_rev, hit_rate_200k, median_reviews, median_positive_ratio,
+    # self_published_share, top_genres, n_partners (contract: NULL for developers)
+    ("developer", "Solo Dev A", 1, 2024, 2024, 1, 150000.0, 150000.0, 0.0, 500.0, 0.88, 1.0, ["Roguelike"], None),
+    ("developer", "Studio B", 1, 2023, 2023, 0, 900000.0, 900000.0, 1.0, 1200.0, 0.92, 0.0, ["Roguelike"], None),
+    ("developer", "Big Studio D", 1, 2022, 2022, 0, 0.0, 0.0, 0.0, 3000.0, 0.81, 0.0, ["Action"], None),
+    ("developer", "Pixel Forge Collective", 3, 2021, 2025, 2, 273000.0, 20000.0, 1 / 3, 80.0, 0.65, 1.0, ["Simulation", "Roguelike"], None),
+    ("publisher", "Indie Publisher B", 1, 2023, 2023, 0, 900000.0, 900000.0, 1.0, 1200.0, 0.92, 0.0, ["Roguelike"], 1),
+    ("publisher", "Big Publisher D", 1, 2022, 2022, 0, 0.0, 0.0, 0.0, 3000.0, 0.81, 0.0, ["Action"], 1),
+]
+
+# (role, name, appid, seq) — seq 1 = the entity's earliest release (1006 is 2021, 1005 is
+# 2024, 1003 is 2025 for the collective).
+ENTITY_GAMES = [
+    ("developer", "Solo Dev A", 1001, 1),
+    ("developer", "Studio B", 1002, 1),
+    ("developer", "Big Studio D", 1004, 1),
+    ("developer", "Pixel Forge Collective", 1006, 1),
+    ("developer", "Pixel Forge Collective", 1005, 2),
+    ("developer", "Pixel Forge Collective", 1003, 3),
+    ("publisher", "Indie Publisher B", 1002, 1),
+    ("publisher", "Big Publisher D", 1004, 1),
+]
+
+
 def _build_fixture_mart(path: Path) -> None:
     con = duckdb.connect(str(path))
     try:
@@ -108,6 +139,7 @@ def _build_fixture_mart(path: Path) -> None:
         _create_mart_niche(con)
         _create_mart_market_boxleiter(con)
         _create_mart_meta(con)
+        _create_mart_entity(con)
     finally:
         con.close()  # MUST close before analytics_db opens its own read_only connection
 
@@ -257,6 +289,28 @@ def _create_mart_market_boxleiter(con: duckdb.DuckDBPyConnection) -> None:
             ("Action", 1, 70.0, 70.0, 70.0, 70.0, 0.0),  # deliberately outside the cited 20-55 band
         ],
     )
+
+
+def _create_mart_entity(con: duckdb.DuckDBPyConnection) -> None:
+    """The developer/publisher entity marts, exactly per the ETL schema contract that
+    api/app/routers/entities.py reads (mart_entity full row + mart_entity_games map)."""
+    con.execute("""
+        CREATE TABLE mart_entity (
+            role VARCHAR, name VARCHAR, n_games INTEGER, first_release_year INTEGER,
+            last_release_year INTEGER, n_recent_24m INTEGER, total_rev DOUBLE,
+            median_rev DOUBLE, hit_rate_200k DOUBLE, median_reviews DOUBLE,
+            median_positive_ratio DOUBLE, self_published_share DOUBLE,
+            top_genres VARCHAR[], n_partners INTEGER
+        )
+    """)
+    con.executemany(f"INSERT INTO mart_entity VALUES ({', '.join(['?'] * 14)})", ENTITIES)
+
+    con.execute("""
+        CREATE TABLE mart_entity_games (
+            role VARCHAR, name VARCHAR, appid INTEGER, seq INTEGER
+        )
+    """)
+    con.executemany("INSERT INTO mart_entity_games VALUES (?, ?, ?, ?)", ENTITY_GAMES)
 
 
 def _create_mart_meta(con: duckdb.DuckDBPyConnection) -> None:

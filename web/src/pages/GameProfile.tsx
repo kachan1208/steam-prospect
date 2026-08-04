@@ -23,6 +23,7 @@ import {
   useLaunchCurve,
   useMarketBenchmarks,
 } from "../lib/api";
+import { splitEntities } from "../lib/entities";
 import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
 import { CSS_VAR } from "../lib/palette";
 
@@ -35,6 +36,28 @@ type TabKey = (typeof TABS)[number]["key"];
 /** DuckDB TIMESTAMP strings ("2017-03-06 23:59:53" / "...53.255353") -> "2017-03-06". */
 function dateOnly(s: string | null): string {
   return s ? s.slice(0, 10) : "—";
+}
+
+/** The credit line's comma-joined developers/publishers string as per-entity links to
+ * /entity/:role?name=… — split via splitEntities (suffix-aware; "Studio, Inc." stays ONE
+ * link), never a naive split(","). */
+function CreditLinks({ role, joined }: { role: "developer" | "publisher"; joined: string }) {
+  return (
+    <>
+      {splitEntities(joined).map((n, i) => (
+        <span key={`${n}-${i}`}>
+          {i > 0 && ", "}
+          <Link
+            to={`/entity/${role}?name=${encodeURIComponent(n)}`}
+            title={`View ${role} profile`}
+            className="underline decoration-chartborder decoration-dotted underline-offset-2 hover:text-ink-primary hover:decoration-solid"
+          >
+            {n}
+          </Link>
+        </span>
+      ))}
+    </>
+  );
 }
 
 export default function GameProfile() {
@@ -152,8 +175,17 @@ export default function GameProfile() {
                   )}
                 </div>
                 <div className="mt-1 text-xs text-ink-secondary">
-                  {profile.developers ?? "Unknown developer"}
-                  {profile.publishers && profile.publishers !== profile.developers ? ` · ${profile.publishers}` : ""}
+                  {profile.developers ? (
+                    <CreditLinks role="developer" joined={profile.developers} />
+                  ) : (
+                    "Unknown developer"
+                  )}
+                  {profile.publishers && profile.publishers !== profile.developers && (
+                    <>
+                      {" · "}
+                      <CreditLinks role="publisher" joined={profile.publishers} />
+                    </>
+                  )}
                 </div>
               </div>
             </div>
