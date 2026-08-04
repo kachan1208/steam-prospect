@@ -252,6 +252,34 @@ TAG_TIER: dict[str, str] = {
 CURVE_MIN_REVIEWS = 10           # sampled first-year reviews a game needs to enter the curve
 CURVE_MIN_GAMES = 30             # a genre needs this many eligible games to publish a curve
 
+# --------------------------------------------------------------------------------------
+# Launch & Timing marts (mart_timing.sql) — built from `review_histogram`, the TRUE
+# uncapped monthly review counts Steam publishes per game (scraped for every game with
+# >=50 total reviews, ~40K games). Unlike the sampled `reviews` table these are exact
+# per-month totals, so they support honest demand/decay reads. Guarded staging
+# (create_timing_staging below): older source DBs without the table build empty marts.
+# --------------------------------------------------------------------------------------
+TIMING_DEMAND_YEARS = 5          # demand pools over the last N COMPLETE calendar years
+                                 # (complete years only — a partial year would overweight
+                                 #  the months it has already lived through)
+TIMING_LAUNCH_EXCLUDE_MONTHS = 2 # demand EXCLUDES each game's first N calendar months
+                                 # since release. WHY: launch spikes cluster wherever the
+                                 # genre's releases cluster, so without this a popular
+                                 # launch window would masquerade as "seasonal demand" by
+                                 # construction. What survives is post-launch/catalog
+                                 # buying — the closest thing to when players ACTUALLY buy.
+TIMING_DEMAND_MIN_GAMES = 50     # a genre needs >= this many contributing games to get a
+                                 # demand curve (else its shares are a few titles' noise)
+TIMING_CONGESTION_YEARS = 3      # congestion averages releases over the last N complete years
+TIMING_BIG_REV = 200_000         # est_rev_reviews >= this = a "big" release (mirrors the
+                                 # hit_rate_200k threshold used across the niche marts)
+TIMING_DECAY_MONTHS = 24         # payout-decay horizon: months 0..23 since release
+TIMING_DECAY_MIN_REVIEWS = 50    # a game's first-24-months histogram total must reach this
+                                 # to enter the decay stats (coverage floor: tiny games'
+                                 # shares are quantized garbage — 3 reviews = 33% steps)
+TIMING_DECAY_MIN_GAMES = 30      # a (genre) needs >= this many eligible games for a
+                                 # decay curve (mirrors CURVE_MIN_GAMES)
+
 # Phase 2 — game deep-dive tunables.
 TOP_TAGS_PER_GAME = 10           # tag-vector length stored per game (drives on-demand comparables)
 GAME_DETAIL_MIN_REVIEWS = 10     # sampled reviews a game needs for mart_game_reviews_* facets
@@ -647,6 +675,11 @@ MART_FILES = [
     "mart_market.sql",
     "mart_seasonality.sql",
     "mart_launch_curve.sql",
+    "mart_timing.sql",   # Launch & Timing rework: demand/congestion/decay over the TRUE
+                         # monthly review histograms (stg_review_histogram — guarded
+                         # staging, empty marts on sources without `review_histogram`).
+                         # Additive: mart_seasonality/mart_launch_curve stay for their
+                         # existing consumers.
     "mart_game_reviews.sql",
     "mart_game_trends.sql",
     "mart_lang.sql",
@@ -704,6 +737,15 @@ def build_params() -> dict[str, str]:
         "UMBRELLA_N_GAMES": UMBRELLA_N_GAMES,
         "CURVE_MIN_REVIEWS": CURVE_MIN_REVIEWS,
         "CURVE_MIN_GAMES": CURVE_MIN_GAMES,
+        "TIMING_DEMAND_YEARS": TIMING_DEMAND_YEARS,
+        "TIMING_LAUNCH_EXCLUDE_MONTHS": TIMING_LAUNCH_EXCLUDE_MONTHS,
+        "TIMING_DEMAND_MIN_GAMES": TIMING_DEMAND_MIN_GAMES,
+        "TIMING_CONGESTION_YEARS": TIMING_CONGESTION_YEARS,
+        "TIMING_BIG_REV": TIMING_BIG_REV,
+        "TIMING_DECAY_MONTHS": TIMING_DECAY_MONTHS,
+        "TIMING_DECAY_LAST": TIMING_DECAY_MONTHS - 1,
+        "TIMING_DECAY_MIN_REVIEWS": TIMING_DECAY_MIN_REVIEWS,
+        "TIMING_DECAY_MIN_GAMES": TIMING_DECAY_MIN_GAMES,
         "TOP_TAGS_PER_GAME": TOP_TAGS_PER_GAME,
         "GAME_DETAIL_MIN_REVIEWS": GAME_DETAIL_MIN_REVIEWS,
         "LANG_TOP_N": LANG_TOP_N,
@@ -1198,6 +1240,30 @@ def create_ccu_staging(con: duckdb.DuckDBPyConnection) -> bool:
         )
         return True
     con.execute("CREATE TEMP TABLE stg_player_count_latest (appid INTEGER, live_players INTEGER, captured_at TIMESTAMP)")
+    return False
+
+
+def create_timing_staging(con: duckdb.DuckDBPyConnection) -> bool:
+    """TRUE monthly review counts per game from the scraper's `review_histogram` table
+    (Steam's own per-month review-graph totals — uncapped, unlike the sampled `reviews`
+    table; covers every game with >=50 total reviews, ~40K appids). Guarded exactly like
+    create_marketing_staging()/create_ccu_staging(): builds stg_review_histogram when the
+    table exists, else an empty typed table so mart_timing.sql builds empty marts (never
+    crashes) on an older source DB. n_reviews = up + down votes — demand is measured as
+    review-WRITING velocity regardless of verdict."""
+    if _sqlite_table_exists(con, "review_histogram"):
+        con.execute(
+            """
+            CREATE TEMP TABLE stg_review_histogram AS
+            SELECT rh.appid,
+                CAST(rh.period || '-01' AS DATE) AS period_month,
+                COALESCE(rh.recommendations_up, 0) + COALESCE(rh.recommendations_down, 0) AS n_reviews
+            FROM src.review_histogram rh
+            WHERE rh.period IS NOT NULL;
+            """
+        )
+        return True
+    con.execute("CREATE TEMP TABLE stg_review_histogram (appid INTEGER, period_month DATE, n_reviews BIGINT)")
     return False
 
 
@@ -1744,6 +1810,10 @@ def main() -> int:
         have_ccu = create_ccu_staging(con)
         print("[etl] player_counts (live CCU): "
               + ("found" if have_ccu else "ABSENT — live_players will be NULL"))
+
+        have_timing = create_timing_staging(con)
+        print("[etl] review_histogram (true monthly review counts): "
+              + ("found" if have_timing else "ABSENT — mart_timing_* will be empty"))
 
         if _sentiment_cache_enabled():
             print(f"[etl] sentiment cache  : {data_dir / SENTIMENT_CACHE_DB_NAME}")

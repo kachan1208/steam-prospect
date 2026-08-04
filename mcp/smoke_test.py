@@ -101,14 +101,30 @@ def main() -> None:
     show('game_search(q="Hollow Knight")', search)
     assert any(g["appid"] == 367520 for g in search["games"])
 
-    # 7. launch_shape + best_launch_timing.
+    # 7. launch_shape + best_launch_timing. Timing is tolerant on purpose: the
+    # mart_timing_* trio only exists once the ETL that added it (and a source DB with
+    # review_histogram) has rebuilt current.duckdb — absence must yield the tool's clear
+    # re-run-ETL error dict, never a crash (post-ETL the assertions are real).
     shape = srv.launch_shape("Action")
     show('launch_shape("Action")', shape)
     assert "error" not in shape
 
     timing = srv.best_launch_timing("Action")
     show('best_launch_timing("Action")', timing)
-    assert "error" not in timing
+    if "error" in timing:
+        assert "mart_timing" in timing["error"], f"unexpected best_launch_timing error: {timing['error']!r}"
+        print("\n[OK] best_launch_timing degraded cleanly (mart_timing_* not built yet — run `task etl`)")
+    else:
+        assert len(timing["demand_by_month"]) == 12
+        assert len(timing["congestion_by_month"]) == 12
+        assert timing["recommendation"] and len(timing["recommendation"]["best_months"]) >= 2
+        assert timing["decay"] is not None
+        d = timing["decay"]["share_of_first_24m_reviews"]
+        assert d["months_0_2"] > d["months_3_5"], "decay must be front-loaded"
+        # clean() rounds floats to 4 decimals, so the 4 windows sum to 1 +- rounding.
+        assert abs(sum(d.values()) - 1.0) < 1e-3, "decay windows must renormalize to ~1"
+        print(f"\n[OK] best_launch_timing: best months {timing['recommendation']['best_months']}, "
+              f"first-3-months share {d['months_0_2']:.2f}")
 
     # 8. revenue_distribution.
     dist = srv.revenue_distribution("revenue", "Action", "all")

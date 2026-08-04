@@ -273,6 +273,78 @@ export function useLaunchCurve(genre: string) {
   return useQuery(launchCurveQueryOptions(genre));
 }
 
+// ---- launch & timing overview (mart_timing_* — TRUE monthly review histograms) -----------
+export interface TimingDemandPoint {
+  month: number; // 1-12
+  demand_share: number | null;
+  month_reviews: number | null;
+  n_games: number;
+}
+
+export interface TimingCongestionPoint {
+  month: number;
+  avg_releases: number;
+  avg_big_releases: number;
+  n_years: number;
+}
+
+export interface TimingDecayPoint {
+  month_since_release: number; // 0-23
+  median_share: number | null;
+  mean_share: number | null;
+  n_games: number;
+}
+
+export interface TimingDecaySummary {
+  first_3_months_share: number | null;
+  first_6_months_share: number | null;
+  first_12_months_share: number | null;
+  n_games: number;
+}
+
+export interface TimingWindowScore {
+  month: number;
+  month_name: string;
+  demand_share: number | null;
+  demand_index: number | null; // 1.0 = an average month
+  avg_releases: number | null;
+  avg_big_releases: number | null;
+  congestion_index: number | null; // 1.0 = an average month
+  score: number | null; // demand_index - congestion_index
+}
+
+export interface TimingWindowRecommendation {
+  best_months: number[];
+  best_month_names: string[];
+  rationale: string;
+  method: string;
+  months: TimingWindowScore[];
+}
+
+export interface TimingOverview {
+  genre: string;
+  demand: TimingDemandPoint[];
+  congestion: TimingCongestionPoint[];
+  decay: TimingDecayPoint[];
+  decay_summary: TimingDecaySummary | null;
+  window_recommendation: TimingWindowRecommendation | null;
+  notes: string[];
+}
+
+export function useTimingOverview(genre: string) {
+  return useQuery({
+    queryKey: ["timing-overview", genre],
+    queryFn: () => request<TimingOverview>(`/timing/overview${qs({ genre })}`),
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000,
+    // 503 = marts not built yet, 404 = genre below the size floors — both are stable
+    // answers; surface them immediately instead of retrying for seconds.
+    retry: (failureCount, error) =>
+      !(error instanceof ApiError && (error.status === 503 || error.status === 404)) &&
+      failureCount < 2,
+  });
+}
+
 // ---- games (Phase 2) --------------------------------------------------------------------
 export interface GameSearchRow {
   appid: number;
