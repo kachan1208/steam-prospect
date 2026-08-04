@@ -37,6 +37,14 @@ export default function EntityProfile() {
   const profileQ = useEntityProfile(role, name);
   const entity = profileQ.data?.entity;
 
+  // Same-name entity in the OTHER role. Self-publishing devs exist under both roles with
+  // different game sets (e.g. a dev with 4 titles who self-published only 2 — the publisher
+  // view is "missing" games unless we say where the rest live). Quiet lookup: 404 = no
+  // counterpart, render nothing.
+  const otherRole: EntityRole = role === "developer" ? "publisher" : "developer";
+  const otherQ = useEntityProfile(role && name ? otherRole : null, name);
+  const other = otherQ.data?.entity;
+
   // Portfolio table rows: latest release first (seq DESC) — the API sends seq ASC.
   const tableGames = useMemo(
     () => [...(profileQ.data?.games ?? [])].sort((a, b) => b.seq - a.seq),
@@ -129,6 +137,19 @@ export default function EntityProfile() {
       <Link to="/games" className="text-xs text-ink-muted hover:text-ink-primary">
         ← Back to games
       </Link>
+
+      {other && (
+        <div className="flex items-center gap-2 rounded-card border border-chartborder bg-brand-tint px-3.5 py-2.5 text-xs text-ink-secondary">
+          <span>
+            <span className="font-semibold text-ink-primary">{entity.name}</span> is also a {otherRole} —{" "}
+            {other.n_games} game{other.n_games === 1 ? "" : "s"}
+            {entity.role === "publisher" ? " (their full development career)" : " (titles they self-published)"}.
+          </span>
+          <Link to={entityHref(otherRole, entity.name)} className="ml-auto shrink-0 font-medium text-brand hover:underline">
+            View {otherRole} profile →
+          </Link>
+        </div>
+      )}
 
       <Card>
         <div className="flex flex-wrap items-start justify-between gap-3">
