@@ -580,7 +580,6 @@ CREATOR_PITCH_MIN_MENTIONS = 1    # a (creator, genre) needs >= this many mentio
                                   # not 3 -- channel collection is new/low-volume; raise once
                                   # real volume exists).
 
-<<<<<<< HEAD
 # --------------------------------------------------------------------------------------
 # Entity marts (mart_entity.sql) — corporate-suffix re-merge for the developers/publishers
 # comma-split. mart_game.developers/publishers are comma-JOINED strings, and corporate
@@ -631,7 +630,6 @@ ENTITY_CORP_SUFFIXES = [
     #             legit ", AB" row ("Underground Alien Studios, AB") is the cost.
     #             ("Gamatron AB" has no comma and is never split — unaffected.)
 ]
-=======
 # JTBD — tag-combination lift (see mart_tag_lift.sql; runs LAST in MART_FILES so it can
 # read mart_game.top_tags and mart_niche's solo-tag baselines instead of re-deriving them).
 TAG_PAIR_MIN_GAMES = 15           # an unordered tag PAIR needs >= this many qualifying games
@@ -639,7 +637,6 @@ TAG_PAIR_MIN_GAMES = 15           # an unordered tag PAIR needs >= this many qua
                                   # median over fewer games is noise, not signal (mirrors
                                   # MIN_NICHE_GAMES's role at the pair grain, floored lower
                                   # because pairs slice the population much thinner).
->>>>>>> origin/main
 
 MART_FILES = [
     "mart_game.sql",
@@ -756,17 +753,14 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
     con.executemany("INSERT INTO denylist_buzz_term VALUES (?)", [(t,) for t in DENYLIST_BUZZ_TERM])
     con.execute("CREATE TEMP TABLE denylist_buzz_word(word VARCHAR)")
     con.executemany("INSERT INTO denylist_buzz_word VALUES (?)", [(w,) for w in DENYLIST_BUZZ_WORD])
-<<<<<<< HEAD
     # Corporate-suffix tokens for the developers/publishers comma-split re-merge (see
     # ENTITY_CORP_SUFFIXES above; consumed by mart_entity.sql via lower(trim(token))).
     con.execute("CREATE TEMP TABLE entity_suffix(token VARCHAR)")
     con.executemany("INSERT INTO entity_suffix VALUES (?)", [(s,) for s in ENTITY_CORP_SUFFIXES])
-=======
     # Curated tag tiers (niche-score v2) — read by mart_niche.sql; unmapped tags fall back
     # to the UMBRELLA_N_GAMES size heuristic there.
     con.execute("CREATE TEMP TABLE tag_tier(tag VARCHAR, tier VARCHAR)")
     con.executemany("INSERT INTO tag_tier VALUES (?, ?)", list(TAG_TIER.items()))
->>>>>>> origin/main
 
     staging_sql = render(
         """
