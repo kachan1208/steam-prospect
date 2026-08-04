@@ -23,6 +23,7 @@ import {
   useLaunchCurve,
   useMarketBenchmarks,
 } from "../lib/api";
+import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
 import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
 import { CSS_VAR } from "../lib/palette";
@@ -36,6 +37,38 @@ type TabKey = (typeof TABS)[number]["key"];
 /** DuckDB TIMESTAMP strings ("2017-03-06 23:59:53" / "...53.255353") -> "2017-03-06". */
 function dateOnly(s: string | null): string {
   return s ? s.slice(0, 10) : "—";
+}
+
+/** Header add/remove-from-compare toggle — the profile-page twin of the search rows'
+ * per-row button. Visibly flips state via the brand tint + label. */
+function CompareToggle({ appid, name }: { appid: number; name: string | null }) {
+  const list = useCompareList();
+  const inList = list.some((e) => e.appid === appid);
+  const full = !inList && list.length >= COMPARE_CAP;
+  return (
+    <button
+      type="button"
+      onClick={() => toggleCompare(appid, name)}
+      disabled={full}
+      aria-pressed={inList}
+      title={
+        inList
+          ? "Remove from compare list"
+          : full
+            ? `Compare list is full (max ${COMPARE_CAP})`
+            : "Add to the compare list (tray at the bottom of the screen)"
+      }
+      className={clsx(
+        "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors",
+        inList
+          ? "border-brand bg-brand-tint text-brand"
+          : "border-chartborder text-ink-secondary hover:border-brand hover:text-brand",
+        full && "cursor-not-allowed opacity-40",
+      )}
+    >
+      {inList ? "✓ Comparing" : "+ Compare"}
+    </button>
+  );
 }
 
 /** The credit line's comma-joined developers/publishers string as per-entity links to
@@ -156,6 +189,7 @@ export default function GameProfile() {
                   >
                     View on Steam ↗
                   </a>
+                  <CompareToggle appid={profile.appid} name={profile.name} />
                 </div>
                 <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-ink-muted">
                   {profile.primary_genre && <Badge color={CSS_VAR.demand}>{profile.primary_genre}</Badge>}
