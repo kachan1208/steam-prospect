@@ -295,8 +295,18 @@ games clearing the review floor).
   global scalar stats. -> `market_benchmarks`, `revenue_distribution`, `estimate_revenue`.
 - **mart_launch_curve / mart_game_launch_curve** — cumulative share of a genre's (or one
   game's) first-year reviews landed by day-since-release. -> `launch_shape`.
-- **mart_seasonality** — release-timing outcomes by month / weekday / month×weekday.
-  -> `best_launch_timing`.
+- **mart_timing_demand / mart_timing_congestion / mart_timing_decay** — launch-window
+  intelligence over the TRUE uncapped monthly review histograms (Steam's own per-month
+  review-graph totals, ~40K games — exact counts, unlike the sampled `reviews` table).
+  demand = share of a genre's pooled monthly review velocity per calendar month, each
+  game's first 2 months EXCLUDED so launch spikes don't read as seasonal demand;
+  congestion = avg releases (and $200K+ releases) per calendar month over the last 3
+  complete years; decay = median per-game share of first-24-months reviews landing in
+  each month since release (per-game normalized first). -> `best_launch_timing`.
+- **mart_seasonality** — release-month/weekday OUTCOME medians (median revenue of games
+  launched then). Web heatmap legacy; superseded for launch advice by the mart_timing_*
+  trio above (launch-month medians are composition-confounded — they reflect what kind
+  of game launches then, not the calendar).
 - **mart_game** — one row per game: metadata, revenue/owners, percentile-vs-genre, top
   tags, review velocity. -> `game_search`, `game_profile`, `find_comparables` (closest
   competitors, ranked on demand by tag-Jaccard over `top_tags` within the same primary
@@ -1074,70 +1084,139 @@ def launch_shape(genre: str = "__all__") -> dict:
     return clean({"genre": genre, "n_games": n_games, "windows": windows})
 
 
+_TIMING_MONTH_NAMES = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
 @mcp.tool()
-def best_launch_timing(genre: str = "__all__", min_scored: int = 30) -> dict:
-    """Best release timing by month and weekday, from historical outcomes (median est.
-    revenue among games clearing the review floor; n_scored = sample size backing that
-    median — always check it before trusting a cell). Directly answers "when should I
-    launch":
-      - best_month / best_weekday: the single highest-median-revenue month/weekday among
-        cells with n_scored >= min_scored (a reliability floor).
-      - top_month_weekday_combos: top 3 specific (month, weekday) cells by median
-        revenue, same reliability floor.
-      - by_month / by_weekday: the full marginal tables, for context.
-    genre="__all__" for the whole catalog, or an exact Steam genre label. Release-timing
-    effects are usually MILD — treat this as a minor tiebreaker, not a strategy,  and
-    remember it's correlational: a high-median month may reflect WHAT KIND of game
-    typically launches then (e.g. big open-world titles cluster in fall) rather than the
-    calendar date itself mattering.
+def best_launch_timing(genre: str = "__all__") -> dict:
+    """When to launch in a genre, from the TRUE uncapped monthly review histograms
+    (Steam's own per-month review-graph totals for ~40K games — exact counts, not the
+    sampled `reviews` table). Three reads plus a transparent recommendation:
+      - demand_by_month: share of the genre's pooled monthly review velocity landing in
+        each calendar month over the last 5 complete years — when players in this genre
+        ACTUALLY BUY. Each game's first 2 calendar months since release are EXCLUDED, so
+        launch spikes can't masquerade as seasonal demand (without that exclusion a
+        popular launch window would "demand" itself into the data by construction).
+      - congestion_by_month: average releases (and BIG releases, est. revenue >= $200K)
+        per calendar month over the last 3 complete years — how crowded each window is.
+        Demand high + congestion low = good window.
+      - decay: median share of a game's first-24-months review total landing in months
+        0-2 / 3-5 / 6-11 / 12-23 since release (per-game normalized FIRST, then median —
+        big games don't dominate), plus the month-0 median share. How long a launch pays
+        out, i.e. how much of the payoff rides on the window you pick.
+      - recommendation: per-month score = demand_share/(1/12) -
+        avg_releases/mean(avg_releases) — both components returned per month so the
+        arithmetic is auditable — with the best 2-3 months and a plain-language
+        rationale.
+    genre="__all__" for the whole catalog, or an exact Steam genre label.
+    FALSIFICATION CAVEATS: seasonal effects are real but SECOND-ORDER vs. game quality
+    and wishlist momentum — timing tilts odds, it never rescues a weak game. Congestion
+    is genre-wide, not niche-level: your actual shelf competition may look nothing like
+    the genre average. Reviews proxy sales (Boxleiter) and everything here is
+    correlational. There is deliberately no weekday read anymore — the old month×weekday
+    medians were composition noise ("a tiebreaker, not a strategy" was the honest label).
     """
-    months = query(
-        "SELECT month, n_releases, n_scored, median_rev, median_positive_ratio "
-        "FROM mart_seasonality WHERE grain = 'month' AND genre = ? ORDER BY month",
-        [genre],
-    )
-    weekdays = query(
-        "SELECT weekday, n_releases, n_scored, median_rev, median_positive_ratio "
-        "FROM mart_seasonality WHERE grain = 'weekday' AND genre = ? ORDER BY weekday",
-        [genre],
-    )
-    if not months and not weekdays:
-        return {"error": f"no seasonality data for genre={genre!r}. Try '__all__' or an exact Steam genre label."}
-
-    month_names = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    weekday_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]  # DuckDB dayofweek: 0=Sun..6=Sat
-
-    for m in months:
-        m["month_name"] = month_names[int(m["month"])]
-    for w in weekdays:
-        w["weekday_name"] = weekday_names[int(w["weekday"])]
-
-    combos = query(
-        "SELECT month, weekday, n_releases, n_scored, median_rev FROM mart_seasonality "
-        "WHERE grain = 'month_weekday' AND genre = ? AND n_scored >= ? "
-        "ORDER BY median_rev DESC NULLS LAST LIMIT 3",
-        [genre, min_scored],
-    )
-    for c in combos:
-        c["month_name"] = month_names[int(c["month"])]
-        c["weekday_name"] = weekday_names[int(c["weekday"])]
-
-    reliable_months = [m for m in months if m["n_scored"] >= min_scored]
-    reliable_weekdays = [w for w in weekdays if w["n_scored"] >= min_scored]
-    best_month = max(reliable_months, key=lambda m: m["median_rev"] or 0, default=None)
-    best_weekday = max(reliable_weekdays, key=lambda w: w["median_rev"] or 0, default=None)
-
-    return clean(
-        {
-            "genre": genre,
-            "min_scored": min_scored,
-            "best_month": best_month,
-            "best_weekday": best_weekday,
-            "top_month_weekday_combos": combos,
-            "by_month": months,
-            "by_weekday": weekdays,
+    try:
+        demand = query(
+            "SELECT month, demand_share, n_games FROM mart_timing_demand "
+            "WHERE genre = ? ORDER BY month",
+            [genre],
+        )
+        congestion = query(
+            "SELECT month, avg_releases, avg_big_releases, n_years FROM mart_timing_congestion "
+            "WHERE genre = ? ORDER BY month",
+            [genre],
+        )
+        decay = query(
+            "SELECT month_since_release, median_share, n_games FROM mart_timing_decay "
+            "WHERE genre = ? ORDER BY month_since_release",
+            [genre],
+        )
+    except duckdb.CatalogException:
+        return {
+            "error": "mart_timing_demand/mart_timing_congestion/mart_timing_decay are not "
+            "present in this analytics DB — they are built by a newer ETL than the one that "
+            "produced it. Re-run `task etl` in the prospect checkout (needs a source "
+            "steam_games.db with the review_histogram table), then retry."
         }
-    )
+    if not demand and not congestion and not decay:
+        return {
+            "error": f"no timing data for genre={genre!r} — it may be below the per-genre "
+            "size floors. Try '__all__' or an exact Steam genre label."
+        }
+
+    for d in demand:
+        d["month_name"] = _TIMING_MONTH_NAMES[int(d["month"])]
+    for c in congestion:
+        c["month_name"] = _TIMING_MONTH_NAMES[int(c["month"])]
+
+    # Transparent window score — same arithmetic as /api/timing/overview.
+    recommendation = None
+    d_by_m = {int(d["month"]): d for d in demand if d["demand_share"] is not None}
+    c_by_m = {int(c["month"]): c for c in congestion}
+    if len(d_by_m) == 12 and len(c_by_m) == 12:
+        mean_rel = sum(c["avg_releases"] for c in c_by_m.values()) / 12
+        months = []
+        for m in range(1, 13):
+            demand_index = d_by_m[m]["demand_share"] * 12
+            congestion_index = c_by_m[m]["avg_releases"] / mean_rel if mean_rel > 0 else None
+            months.append({
+                "month": m,
+                "month_name": _TIMING_MONTH_NAMES[m],
+                "demand_index": demand_index,
+                "congestion_index": congestion_index,
+                "score": demand_index - congestion_index if congestion_index is not None else None,
+            })
+        scored = [w for w in months if w["score"] is not None]
+        if scored:
+            best = sorted(scored, key=lambda w: w["score"], reverse=True)[:3]
+            top = best[0]
+            label = "the catalog" if genre == "__all__" else genre
+            recommendation = {
+                "best_months": [w["month_name"] for w in best],
+                "method": "score = demand_share/(1/12) - avg_releases/mean(avg_releases)",
+                "rationale": (
+                    f"{', '.join(w['month_name'] for w in best)} look best for {label}: in "
+                    f"{top['month_name']}, players do {top['demand_index']:.2f}x an average "
+                    f"month's buying while release traffic runs "
+                    f"{top['congestion_index']:.2f}x the monthly average — demand outruns "
+                    "crowding there. Timing tilts odds; it doesn't rescue a weak game."
+                ),
+                "months": months,
+            }
+
+    # Decay condensed to windows (the full 24-point curve lives on /api/timing/overview).
+    decay_summary = None
+    med = {int(r["month_since_release"]): r["median_share"] for r in decay
+           if r["median_share"] is not None}
+    total = sum(med.values())
+    if med and total > 0:
+        def _win(a: int, b: int) -> float:  # [a, b) renormalized share
+            return sum(s for m, s in med.items() if a <= m < b) / total
+        decay_summary = {
+            "n_games": decay[0]["n_games"],
+            "month_0_median_share": med.get(0),
+            "share_of_first_24m_reviews": {
+                "months_0_2": _win(0, 3),
+                "months_3_5": _win(3, 6),
+                "months_6_11": _win(6, 12),
+                "months_12_23": _win(12, 24),
+            },
+            "note": "per-game normalized medians, renormalized to sum to 1 across the 24 months",
+        }
+
+    return clean({
+        "genre": genre,
+        "recommendation": recommendation,
+        "demand_by_month": demand,
+        "congestion_by_month": congestion,
+        "decay": decay_summary,
+        "caveats": (
+            "Seasonal effects are second-order vs. game quality; congestion is genre-wide, "
+            "not niche-level; reviews proxy sales; correlational throughout."
+        ),
+    })
 
 
 # ==========================================================================================
