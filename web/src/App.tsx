@@ -1,6 +1,6 @@
 import { Link, NavLink, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import clsx from "clsx";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { useHealth } from "./lib/api";
 import { initAnalytics, trackPageview } from "./lib/analytics";
@@ -24,11 +24,63 @@ import Privacy from "./pages/Privacy";
 // a peer nav item. Everything else the old nav carried — niches, benchmarks, the
 // estimator, marketing pitch lists — is still fully answerable, but through the MCP
 // against current.duckdb rather than a page of its own.
-const NAV_ITEMS: { to: string; label: string }[] = [
-  { to: "/games", label: "Games" },
-  { to: "/studios", label: "Studios" },
-  { to: "/timing", label: "Timing" },
-  { to: "/datalog", label: "Data" },
+// 24x24 stroke icons, same family as the Logo mark. grid/calendar/history are the
+// originals from the sidebar era; "building" is new for Studios.
+const ICONS: Record<string, ReactNode> = {
+  grid: (
+    <>
+      <rect x="3.5" y="3.5" width="7" height="7" rx="1.5" />
+      <rect x="13.5" y="3.5" width="7" height="7" rx="1.5" />
+      <rect x="3.5" y="13.5" width="7" height="7" rx="1.5" />
+      <rect x="13.5" y="13.5" width="7" height="7" rx="1.5" />
+    </>
+  ),
+  building: (
+    <>
+      <rect x="4.5" y="3.5" width="10" height="17" rx="1.5" />
+      <path d="M14.5 9.5h4a1 1 0 0 1 1 1v10" />
+      <path d="M3 20.5h18" />
+      <path d="M8 7.5h3M8 11h3M8 14.5h3" />
+    </>
+  ),
+  calendar: (
+    <>
+      <rect x="3.5" y="5" width="17" height="15.5" rx="2" />
+      <line x1="3.5" y1="9.5" x2="20.5" y2="9.5" />
+      <line x1="8" y1="3" x2="8" y2="6.5" />
+      <line x1="16" y1="3" x2="16" y2="6.5" />
+    </>
+  ),
+  history: (
+    <>
+      <path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />
+      <path d="M3 4.5V9h4.5" />
+      <path d="M12 7.8v4.4l2.9 1.7" />
+    </>
+  ),
+};
+
+function NavIcon({ name }: { name: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-4 w-4 shrink-0"
+    >
+      {ICONS[name]}
+    </svg>
+  );
+}
+
+const NAV_ITEMS: { to: string; label: string; icon: string }[] = [
+  { to: "/games", label: "Games", icon: "grid" },
+  { to: "/studios", label: "Studios", icon: "building" },
+  { to: "/timing", label: "Launch & Timing", icon: "calendar" },
+  { to: "/datalog", label: "Data log", icon: "history" },
 ];
 
 function Logo() {
@@ -191,13 +243,14 @@ function Header() {
               to={item.to}
               className={({ isActive }) =>
                 clsx(
-                  "rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors",
+                  "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors",
                   isActive
                     ? "bg-brand-tint text-brand"
                     : "text-ink-secondary hover:bg-surface2 hover:text-ink-primary",
                 )
               }
             >
+              <NavIcon name={item.icon} />
               {item.label}
             </NavLink>
           ))}
