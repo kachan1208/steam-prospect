@@ -20,7 +20,7 @@ import Privacy from "./pages/Privacy";
 // the surfaces that earn their pixels: Games (teardown charts), Studios (developer/
 // publisher track records — added by user request: publisher scouting needs a discoverable
 // entry point, not a link buried in game credits), Timing (the seasonality heatmap), Data
-// (the freshness receipt), and Docs in the footer. "Use in Claude" is the primary CTA, not
+// (the freshness receipt), and Docs in the footer. "MCP" is the primary CTA, not
 // a peer nav item. Everything else the old nav carried — niches, benchmarks, the
 // estimator, marketing pitch lists — is still fully answerable, but through the MCP
 // against current.duckdb rather than a page of its own.
@@ -215,7 +215,7 @@ function Header() {
               )
             }
           >
-            Use in Claude
+            MCP
           </NavLink>
         </div>
       </div>
