@@ -149,7 +149,15 @@ mcp = FastMCP(
         "under-served niches, benchmark the market, estimate revenue, check launch "
         "timing, look up/compare games, and find press/creator pitch targets across every "
         "marketing channel (Press, YouTube, Reddit, Twitch, X). Read the "
-        "prospect-data-dictionary resource first."
+        "prospect-data-dictionary resource first. For 'what should I build' questions, "
+        "keep find_niches' defaults (24m window, opportunity_v2 sort, micro+theme tags "
+        "only) and apply its falsification rules: low competition with negative "
+        "saturation_yoy is usually a market in DECLINE (everyone stopped entering), not "
+        "an opportunity — check entrant_ratio (catalog-median tag ~1.08; <1 = recent "
+        "entrants underearn) before recommending; winner_concentration > 0.85 means "
+        "winner-take-most (judge by the median, not the hits); and for solo devs check "
+        "solo_viability (~0.9 is the norm; below ~0.8 leans multiplayer — e.g. Extraction "
+        "Shooter — and is not solo-buildable without flagging it)."
     ),
 )
 
@@ -186,7 +194,50 @@ against every other niche in the SAME cut:
 - **quality_gap** (aka `beatable_share`) = percentile(share of incumbents that are weak:
   low rating OR thin review count). Higher = easier to out-execute the field.
 - **opportunity** = clamp(0.5 x demand − 0.35 x competition + 0.3 x quality_gap, 0, 100).
-  The headline ranking metric in `find_niches`.
+  The ORIGINAL score, kept for continuity. KNOWN FAILURE MODE: it rewards low
+  competition without asking WHY it's low — a niche everyone abandoned scores like an
+  open market.
+- **opportunity_v2** = opportunity x decline_gate. `find_niches`' default ranking
+  metric. The gate (returned as `decline_gate`, in [0.5, 1]) shrinks linearly with the
+  WORSE of two decline signals and never penalizes on missing data:
+  - sat_severity = clamp(−saturation_yoy / 0.30, 0, 1) — full penalty at a −30%/yr
+    release-pipeline decline.
+  - entrant_severity = clamp((1 − entrant_ratio) / 0.5, 0, 1) — full penalty at
+    entrant_ratio 0.5.
+  - decline_gate = 1 − 0.5 x max(sat_severity, entrant_severity).
+  MAX (either-signal) semantics on purpose: entrant_ratio >= 1 is the catalog NORM (see
+  below), so it must not excuse a collapsing release pipeline.
+
+### Niche-score v2 fields (mart_niche, additive)
+
+- **entrant_ratio** = (24m median_rev) / (all-time median_rev) for the same (dimension,
+  key, min_reviews) — same value on both window rows. INTERPRET AGAINST THE NORM: the
+  catalog-median tag sits at ~1.08 (price inflation + the review floor filters recent
+  releases harder), so ~1.0-1.3 is unremarkable; <1 is a real warning that newcomers
+  earn less than the back catalog did; a high ratio over a SHRINKING pipeline (few
+  self-selected survivors) is not health. NULL = no 24m cut or a zero/missing all-time
+  median (treated as no evidence, not as decline).
+- **solo_viability** = share of the cut's scored games playable single-player (Steam's
+  own `categories` field, community-tag fallback), computed per cut. Catalog norm ~0.9;
+  below ~0.8 the niche leans multiplayer (Extraction Shooter ~0.6, MMORPG ~0.35) — a
+  multiplayer-dependent niche is NOT solo-buildable without netcode/servers/live
+  player-base plans, flag it for solo devs.
+- **tier** (tags; genre rows get 'genre') = 'micro' (buildable game concept: Colony Sim,
+  Souls-like), 'theme' (setting/aesthetic you attach TO a game: Vikings, Pixel
+  Graphics), 'umbrella' (genre/mechanic/mode container: Open World, Sandbox, Turn-Based
+  — NOT buildable), 'meta' (reception/store tags: Great Soundtrack, Nostalgia — never
+  buildable). Curated map + size heuristic (all-time n_games >= 400 -> umbrella) in
+  etl/build_marts.py. `find_niches` EXCLUDES umbrella/meta by default because
+  recommending them was a real, user-rejected failure mode; a 'theme' answer still needs
+  a micro-genre attached to be an actionable recommendation.
+- **decline_gate** — the opportunity_v2 multiplier itself, exposed so every score is
+  inspectable.
+
+Interpretation playbook for "what should I build": keep the 24m default window (that IS
+the market a new entrant faces), require the decline gate near 1.0 or understand exactly
+why it isn't, verify recent entrants get paid (24m median_rev, hit_rate_200k, n_recent),
+check winner_concentration (> 0.85 = winner-take-most: expect the median outcome, not
+the hits), and check solo_viability when the asker builds solo.
 
 ### Absolute market size (the "pie") — separate from `demand`
 
@@ -274,65 +325,119 @@ games clearing the review floor).
 # Niche / opportunity tools
 # ==========================================================================================
 _NICHE_SORTABLE = {
-    "opportunity", "demand", "competition", "quality_gap",
+    "opportunity", "opportunity_v2", "demand", "competition", "quality_gap",
     "market_size", "total_owners", "total_rev", "total_reviews",
     "median_rev", "median_reviews", "median_price", "median_owners",
     "median_positive_ratio", "recent_velocity",
     "n_games", "n_recent", "hit_rate_200k", "hit_rate_500k",
     "beatable_share", "saturation_yoy", "self_pub_share", "winner_concentration",
+    "entrant_ratio", "solo_viability",
 }
+_NICHE_TIERS = {"micro", "umbrella", "theme", "meta"}
+# Default tier filter (tags only): buildable micro-genres + themes. Umbrella containers
+# (Open World, Sandbox, RPG...) and meta/reception tags (Great Soundtrack, Nostalgia...)
+# are EXCLUDED by default — they aren't things a developer can build. Pass
+# include_tiers=None to see everything, or an explicit list to widen/narrow.
+_DEFAULT_INCLUDE_TIERS = ["micro", "theme"]
+
+# Shared soft-fail message: the v2 columns only exist once the ETL that added them has
+# rebuilt current.duckdb. Same degrade-cleanly idiom as tag_combos/mart_tag_lift.
+_NICHE_V2_MISSING = (
+    "mart_niche is missing the niche-score v2 columns (opportunity_v2 / entrant_ratio / "
+    "solo_viability / tier / decline_gate) — this analytics DB was built by an older ETL. "
+    "Re-run the ETL (`task etl` in the main prospect checkout) and retry."
+)
 
 
 @mcp.tool()
 def find_niches(
     dimension: Literal["tag", "genre"] = "tag",
-    window: Literal["all", "24m"] = "all",
+    window: Literal["all", "24m"] = "24m",
     min_reviews: Literal[50, 100] = 50,
     min_median_rev: float | None = None,
     max_competition: float | None = None,
     min_total_owners: float | None = None,
-    sort: str = "opportunity",
+    include_tiers: list[str] | None = _DEFAULT_INCLUDE_TIERS,
+    sort: str = "opportunity_v2",
     limit: int = 15,
 ) -> dict:
-    """Rank niches (Steam community tags, or Steam genres) by opportunity score. THE
-    headline tool — start here for "what should I build" questions.
+    """Rank niches (Steam community tags, or Steam genres) by growth-gated opportunity.
+    THE headline tool — start here for "what should I build" questions. Defaults are
+    tuned for exactly that question: window="24m" (the market a new entrant actually
+    faces), sort="opportunity_v2" (decline-gated), include_tiers=["micro","theme"]
+    (buildable concepts only). This docstring is an INTERPRETATION PLAYBOOK — the numbers
+    lie in specific, known ways; the falsification rules below are how you catch them.
 
-    opportunity fuses three 0-100 percentile components (see the prospect-data-dictionary
-    resource for exact formulas):
-      - demand: bigger/hotter market (revenue + owners + recent review velocity).
-      - competition: how crowded/winner-take-most the niche is — HIGH is bad for a new
-        entrant.
-      - quality_gap: share of incumbents that are weak (low rating / thin reviews) — HIGH
-        means it's easier to out-execute the field.
-    opportunity = 0.5*demand − 0.35*competition + 0.3*quality_gap, clamped [0,100].
+    THE SCORES
+      - opportunity = 0.5*demand − 0.35*competition + 0.3*quality_gap, clamped [0,100]
+        (all three are 0-100 percentiles vs other niches in the same cut — exact formulas
+        in the prospect-data-dictionary resource). KNOWN FAILURE MODE: it rewards LOW
+        competition without asking WHY competition is low.
+      - opportunity_v2 = opportunity * decline_gate, where decline_gate (in [0.5, 1],
+        returned per row) shrinks linearly with the WORSE of two decline signals:
+        saturation_yoy below 0 (release pipeline shrinking; full penalty at −30%/yr) and
+        entrant_ratio below 1 (recent entrants underearn the niche's history; full
+        penalty at 0.5). Sort by this, not by raw opportunity, for build decisions.
+
+    FALSIFICATION RULES — run these before recommending a niche:
+      1. Low competition + negative saturation_yoy usually means a market in DECLINE —
+         everyone STOPPED entering — not a cracked-open opportunity. Check entrant_ratio
+         and the niche_detail saturation_trend before recommending. (This exact failure
+         put Naval/Transportation/Diplomacy — new releases shrinking 15-37%/yr — at the
+         top of the old raw-opportunity ranking.)
+      2. entrant_ratio reads AGAINST THE NORM, not against 1.0: the catalog-median tag
+         sits at ~1.08 (price inflation + the review floor filters recent releases
+         harder), so ~1.0-1.3 is unremarkable and <1 is a real warning that newcomers
+         earn less than the back catalog did. A high ratio over a shrinking pipeline
+         (few, self-selected survivors) is NOT health — trust saturation_yoy first.
+      3. Verify recent entrants actually get paid: with window="24m", median_rev IS the
+         recent-entrant median. Cross-check hit_rate_200k and n_recent (a great median
+         over 30 games is thinner evidence than a good median over 300).
+      4. winner_concentration > 0.85 = winner-take-most: the niche's revenue lives in a
+         few hits, so the MEDIAN outcome (not the visible winners) is what a new entrant
+         should expect. Check the revenue_histogram in niche_detail.
+      5. If the asker is a solo dev, check solo_viability (share of the niche's scored
+         games playable single-player; catalog norm ~0.9). Below ~0.8 the niche leans
+         multiplayer (e.g. Extraction Shooter ~0.6): a multiplayer-dependent game needs
+         netcode, servers, and a live player base a solo dev usually can't fund — do not
+         recommend it for solo builds without flagging that.
+      6. tier: rows are 'micro' (buildable game concept), 'theme' (setting/aesthetic you
+         attach TO a game), 'umbrella' (genre/mechanic container — NOT buildable: "build
+         an Open World game" is not a plan), 'meta' (reception tags like Great
+         Soundtrack — never buildable), or 'genre' (dimension="genre" rows). Umbrella and
+         meta are EXCLUDED by default because recommending them was the second failure
+         mode this tool had; pass include_tiers=None (everything) or an explicit subset
+         of ["micro","theme","umbrella","meta"] to widen. The filter only applies when
+         dimension="tag". A 'theme' answer means "make a game ABOUT this" and still needs
+         a micro-genre attached to be a real recommendation.
 
     ABSOLUTE SIZE (the "pie"), distinct from the percentile-of-medians `demand`:
-      - total_owners: SUM of owners across the niche's scored games — total consumer base.
-      - total_rev / total_reviews: total est. gross revenue / total reviews in the niche.
-      - market_size: total_owners expressed as a 0-100 percentile vs other niches (same
-        cut), so it's comparable to demand/competition.
-    Use these when a small share of a BIG niche beats a big share of a small one — sort by
-    "total_owners" or "market_size", or floor with min_total_owners, to find large-audience
-    niches a solo dev can take a sliver of.
+      - total_owners / total_rev / total_reviews: summed over the niche's scored games.
+      - market_size: total_owners as a 0-100 percentile vs other niches (same cut).
+    Use these (or min_total_owners) when a small share of a BIG niche beats a big share
+    of a small one — the solo-dev sizing lens.
 
-    dimension="tag" = SteamSpy's large community-tag vocabulary (specific micro-niches
-    like "Souls-like", "Deckbuilder" — usually more actionable); "genre" = Steam's small
-    fixed genre list. window="all" scores full history; "24m" restricts to games released
-    in the last 24 months (current-market read, smaller n — use this to catch niches
-    heating up NOW). min_reviews is the per-game review floor (50=broader/noisier,
-    100=stricter/cleaner) — only these two values are precomputed, and they must stay in
-    sync with MIN_REVIEWS_LEVELS in etl/build_marts.py: a value the ETL didn't materialise
-    silently matches no rows and returns an empty list rather than an error.
+    EXACT MATERIALISATION: only the precomputed cuts exist — window in {"all","24m"} x
+    min_reviews in {50,100} (must stay in sync with MIN_REVIEWS_LEVELS in
+    etl/build_marts.py; a value the ETL didn't materialise matches no rows and returns an
+    empty list, not an error). window="all" scores full history — use it for context, not
+    for entry decisions. min_reviews=50 is broader/noisier, 100 stricter/cleaner.
 
-    min_median_rev / max_competition / min_total_owners are optional post-filters, e.g.
-    min_median_rev=200000 to require a real revenue floor, max_competition=50 to exclude the
-    most saturated niches, or min_total_owners=1000000 to require a large total audience.
-    sort is any returned numeric field (default "opportunity"). Returns compact
-    rows only — call niche_detail(dimension, key) for one niche's saturation trend,
-    revenue histogram, and representative games.
+    min_median_rev / max_competition / min_total_owners are optional post-filters
+    (e.g. min_median_rev=200000, max_competition=50, min_total_owners=1000000). sort is
+    any returned numeric field. Returns compact rows only — call niche_detail(dimension,
+    key) for one niche's saturation trend, revenue histogram, and representative games.
+    Returns an {"error": ...} asking you to re-run the ETL if the analytics DB predates
+    the v2 columns.
     """
     if sort not in _NICHE_SORTABLE:
         return {"error": f"sort must be one of {sorted(_NICHE_SORTABLE)}"}
+    if include_tiers is not None:
+        bad = [t for t in include_tiers if t not in _NICHE_TIERS]
+        if bad:
+            return {"error": f"include_tiers entries must be in {sorted(_NICHE_TIERS)}, got {bad}"}
+        if not include_tiers:
+            return {"error": "include_tiers must be None or a non-empty list"}
 
     where = ["dimension = ?", "win = ?", "min_reviews = ?"]
     params: list = [dimension, window, min_reviews]
@@ -345,26 +450,36 @@ def find_niches(
     if min_total_owners is not None:
         where.append("total_owners >= ?")
         params.append(min_total_owners)
+    tiers_applied = None
+    if dimension == "tag" and include_tiers is not None:
+        tiers_applied = list(include_tiers)
+        where.append(f"tier IN ({','.join('?' for _ in tiers_applied)})")
+        params.extend(tiers_applied)
     limit = max(1, min(limit, 50))
 
-    rows = query(
-        f"""
-        SELECT key, n_games, n_recent, opportunity, demand, competition, quality_gap,
-               market_size, total_owners, total_rev, total_reviews,
-               median_rev, median_reviews, median_price, median_positive_ratio,
-               median_owners, recent_velocity, hit_rate_200k, hit_rate_500k,
-               saturation_yoy, winner_concentration
-        FROM mart_niche
-        WHERE {" AND ".join(where)}
-        ORDER BY {sort} DESC NULLS LAST, n_games DESC
-        LIMIT ?
-        """,
-        params + [limit],
-    )
+    try:
+        rows = query(
+            f"""
+            SELECT key, tier, n_games, n_recent, opportunity_v2, opportunity, decline_gate,
+                   entrant_ratio, solo_viability, demand, competition, quality_gap,
+                   market_size, total_owners, total_rev, total_reviews,
+                   median_rev, median_reviews, median_price, median_positive_ratio,
+                   median_owners, recent_velocity, hit_rate_200k, hit_rate_500k,
+                   saturation_yoy, winner_concentration
+            FROM mart_niche
+            WHERE {" AND ".join(where)}
+            ORDER BY {sort} DESC NULLS LAST, n_games DESC
+            LIMIT ?
+            """,
+            params + [limit],
+        )
+    except (duckdb.BinderException, duckdb.CatalogException):
+        return {"error": _NICHE_V2_MISSING}
     return {
         "dimension": dimension,
         "window": window,
         "min_reviews": min_reviews,
+        "include_tiers": tiers_applied,
         "sort": sort,
         "n_returned": len(rows),
         "niches": clean_rows(rows),
@@ -375,10 +490,17 @@ def find_niches(
 def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
     """Deep dive on one niche (get valid `key` values from find_niches — exact match,
     case-sensitive). Returns:
-      - variants: this niche's opportunity/demand/competition/etc at all 4 precomputed
-        cuts — (all|24m) x (min_reviews 50|100).
+      - tier: 'micro' | 'theme' | 'umbrella' | 'meta' (tags) or 'genre' — an 'umbrella'
+        or 'meta' key is a container/reception tag, not a buildable niche.
+      - variants: this niche's opportunity_v2/opportunity/demand/competition/etc at all
+        4 precomputed cuts — (all|24m) x (min_reviews 50|100) — including entrant_ratio
+        (24m-vs-all-time median revenue; catalog-median tag is ~1.08, so <1 means recent
+        entrants genuinely underearn), solo_viability (share of scored games playable
+        single-player; ~0.9 is the catalog norm, below ~0.8 leans multiplayer — a red
+        flag for solo devs), and decline_gate (the opportunity_v2 multiplier, 0.5-1.0).
       - saturation_trend: yearly release counts + median revenue, oldest-first — is this
-        niche heating up or cooling off?
+        niche heating up or cooling off? A shrinking n_releases pipeline is DECLINE even
+        when competition looks invitingly low.
       - revenue_histogram: log-scale bucketed distribution of est. lifetime revenue
         across the niche (min_reviews=50 population) — the full shape, not just the
         median.
@@ -387,23 +509,28 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
         (share of games clearing $200K/$500K est. revenue), median_rev, n_games,
         winner_concentration.
     Returns {"error": ...} if dimension/key doesn't match any niche (call find_niches to
-    get exact valid keys — spelling and case must match precisely).
+    get exact valid keys — spelling and case must match precisely), or asking you to
+    re-run the ETL if the analytics DB predates the v2 columns.
     """
     # NOTE: `win` is selected un-aliased (not `AS window`) because `window` is a reserved
     # word in DuckDB SQL (window functions) and can't be used unquoted in ORDER BY — same
     # reason api/app/routers/niches.py renames win -> window in Python, after the fetch,
     # rather than in SQL.
-    variants = query(
-        """
-        SELECT win, min_reviews, n_games, n_recent, opportunity, demand,
-               competition, quality_gap, market_size, total_owners, total_rev,
-               total_reviews, median_rev, median_reviews, median_price,
-               median_positive_ratio, median_owners, recent_velocity, hit_rate_200k,
-               hit_rate_500k, beatable_share, saturation_yoy, winner_concentration
-        FROM mart_niche WHERE dimension = ? AND key = ? ORDER BY win, min_reviews
-        """,
-        [dimension, key],
-    )
+    try:
+        variants = query(
+            """
+            SELECT win, min_reviews, tier, n_games, n_recent, opportunity_v2, opportunity,
+                   decline_gate, entrant_ratio, solo_viability, demand,
+                   competition, quality_gap, market_size, total_owners, total_rev,
+                   total_reviews, median_rev, median_reviews, median_price,
+                   median_positive_ratio, median_owners, recent_velocity, hit_rate_200k,
+                   hit_rate_500k, beatable_share, saturation_yoy, winner_concentration
+            FROM mart_niche WHERE dimension = ? AND key = ? ORDER BY win, min_reviews
+            """,
+            [dimension, key],
+        )
+    except (duckdb.BinderException, duckdb.CatalogException):
+        return {"error": _NICHE_V2_MISSING}
     if not variants:
         return {
             "error": f"no niche found for dimension={dimension!r} key={key!r}. "
@@ -432,6 +559,7 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
     return {
         "dimension": dimension,
         "key": key,
+        "tier": headline.get("tier"),
         "variants": clean_rows(variants),
         "saturation_trend": clean_rows(trend),
         "revenue_histogram": clean_rows(hist),
