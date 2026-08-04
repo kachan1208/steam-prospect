@@ -122,6 +122,41 @@ def main() -> None:
     buzz = srv.buzz_trends("rising", limit=10)
     show('buzz_trends("rising")', buzz)
 
+    # 9b. entity_profile + publisher_pitch_list — tolerant: mart_entity/mart_entity_games
+    # only exist once the ETL that added them has run, and their absence must yield the
+    # tools' clear "rebuild the marts" error dict, never a crash.
+    ep = srv.entity_profile("Electronic Arts", "publisher")
+    if "error" in ep:
+        assert "mart_entity" in ep["error"], f"unexpected entity_profile error: {ep['error']!r}"
+        show('entity_profile("Electronic Arts", "publisher") [degraded]', ep)
+        print("\n[OK] entity tools degraded cleanly (mart_entity not built yet — run `task etl`)")
+    else:
+        show('entity_profile("Electronic Arts", "publisher")', ep)
+        assert ep["entity"]["n_games"] >= 50, "EA should have a large publisher catalog"
+        assert ep["games"] and ep["games"][0]["seq"] == 1, "games must be seq-ordered from 1"
+        assert ep["trajectory"]["debut"]["seq"] == 1
+        print(f"\n[OK] entity_profile: EA published {ep['entity']['n_games']} games, "
+              f"{ep['entity']['n_recent_24m']} in the last 24m, {ep['entity']['n_partners']} partners")
+
+        dev = srv.entity_profile("Gamatron AB")  # role defaults to developer
+        show('entity_profile("Gamatron AB")', dev)
+        assert any(g["name"] == "Songs of Syx" for g in dev["games"])
+        print("\n[OK] entity_profile: Gamatron AB -> Songs of Syx")
+
+        miss = srv.entity_profile("Zzz No Such Studio Zzz")
+        assert "error" in miss and "suggestions" in miss
+        near = srv.entity_profile("FromSoftware, In")  # near-miss must suggest the real entity
+        assert "error" in near and any("FromSoftware" in s["name"] for s in near["suggestions"])
+        print(f"\n[OK] entity_profile miss -> suggestions ({[s['name'] for s in near['suggestions']]})")
+
+        ppl = srv.publisher_pitch_list("RPG", min_games=3, limit=10)
+        show('publisher_pitch_list("RPG")', ppl)
+        assert ppl["n_returned"] > 0 and all(p["n_in_genre"] >= 1 for p in ppl["publishers"])
+        assert all(p["n_games"] >= 3 for p in ppl["publishers"])
+        assert ppl["publishers"][0]["active"], "active publishers must rank first"
+        print(f"\n[OK] publisher_pitch_list: {ppl['n_returned']} RPG publishers, top "
+              f"{ppl['publishers'][0]['name']!r} ({ppl['publishers'][0]['n_in_genre']} RPG games)")
+
     # 10. data dictionary resource — call the underlying function directly (not through
     # the resource-read protocol, same "decorator returns fn unchanged" property as tools).
     dd = srv.data_dictionary()
