@@ -147,9 +147,10 @@ mcp = FastMCP(
     instructions=(
         "Steam market-intelligence tools over Prospect's curated DuckDB marts: find "
         "under-served niches, benchmark the market, estimate revenue, check launch "
-        "timing, look up/compare games, and find press/creator pitch targets across every "
-        "marketing channel (Press, YouTube, Reddit, Twitch, X). Read the "
-        "prospect-data-dictionary resource first."
+        "timing, look up/compare games, profile developers/publishers and scout "
+        "publishers active in a genre (entity_profile, publisher_pitch_list), and find "
+        "press/creator pitch targets across every marketing channel (Press, YouTube, "
+        "Reddit, Twitch, X). Read the prospect-data-dictionary resource first."
     ),
 )
 
@@ -232,6 +233,15 @@ games clearing the review floor).
   -> `best_launch_timing`.
 - **mart_game** — one row per game: metadata, revenue/owners, percentile-vs-genre, top
   tags, review velocity. -> `game_search`, `game_profile`.
+- **mart_entity / mart_entity_games** — one row per (role, developer/publisher name),
+  normalized out of mart_game's comma-joined developers/publishers strings (corporate
+  suffixes like ", Inc." / ", Ltd." are re-merged into the name instead of becoming fake
+  entities), plus a thin (role, name, appid, seq) map where seq 1 = the entity's earliest
+  release. Carries game counts, first/last release year, n_recent_24m (the active/dormant
+  signal), revenue medians/hit rate, self_published_share, top genres, and (publishers)
+  n_partners = distinct developer names published. Names are self-reported strings — the
+  same studio under variant spellings ("Ubisoft" vs "UBISOFT") counts as separate
+  entities. -> `entity_profile`, `publisher_pitch_list`.
 - **mart_game_review_aspects / mart_genre_aspect_baseline / mart_game_press_summary /
   mart_game_press_by_source / mart_game_press_timeline / mart_game_press_notable** —
   per-game praise/complaint aspect mining (10 fixed aspects) + press footprint.
@@ -931,6 +941,246 @@ def game_teardown(appid: int) -> dict:
             "caveats": caveats,
         }
     )
+
+
+# ==========================================================================================
+# Developer / publisher entity tools
+# ==========================================================================================
+_ENTITY_MARTS_MISSING = {
+    "error": "mart_entity / mart_entity_games are not present in this analytics DB — they "
+    "are built by a newer ETL than the one that produced this current.duckdb. Rebuild the "
+    "marts (`task etl` in the main prospect checkout) and retry."
+}
+
+# entity_profile games-list / trajectory compaction: entities up to this many games get the
+# full per-game list and per-seq trajectory; bigger ones (top publishers run to ~550 games)
+# get head+tail games and a bucketed trajectory so the response stays token-lean.
+_ENTITY_FULL_LIST_MAX = 40
+_ENTITY_HEAD_TAIL = 20        # games kept from each end when truncating
+_ENTITY_TRAJ_BUCKETS = 20     # per-seq trajectory buckets when n_games > _ENTITY_FULL_LIST_MAX
+
+
+def _median_of(vals: list) -> float | None:
+    vals = [v for v in vals if v is not None]
+    if not vals:
+        return None
+    import statistics
+    return float(statistics.median(vals))
+
+
+def _entity_trajectory(games: list[dict]) -> dict:
+    """Release-trajectory summary from the seq-ordered games list: debut vs latest, early-
+    vs-recent median revenue, and a per-seq revenue series (bucketed for large entities) so
+    an agent can see the debut -> latest arc without re-fetching anything."""
+    n = len(games)
+
+    def _pt(g: dict) -> dict:
+        return {"seq": g["seq"], "name": g["name"], "release_year": g["release_year"],
+                "est_rev_reviews": g["est_rev_reviews"]}
+
+    out: dict = {
+        "debut": _pt(games[0]),
+        "latest": _pt(games[-1]),
+        "first5_median_rev": _median_of([g["est_rev_reviews"] for g in games[:5]]),
+        "last5_median_rev": _median_of([g["est_rev_reviews"] for g in games[-5:]]),
+    }
+    if n <= _ENTITY_FULL_LIST_MAX:
+        out["per_seq"] = [
+            {"seq": g["seq"], "release_year": g["release_year"], "est_rev_reviews": g["est_rev_reviews"]}
+            for g in games
+        ]
+    else:
+        buckets = []
+        per = max(1, -(-n // _ENTITY_TRAJ_BUCKETS))  # ceil division
+        for i in range(0, n, per):
+            chunk = games[i:i + per]
+            years = [g["release_year"] for g in chunk if g["release_year"] is not None]
+            buckets.append({
+                "seq_from": chunk[0]["seq"], "seq_to": chunk[-1]["seq"], "n": len(chunk),
+                "year_from": min(years) if years else None,
+                "year_to": max(years) if years else None,
+                "median_rev": _median_of([g["est_rev_reviews"] for g in chunk]),
+            })
+        out["per_seq_bucketed"] = buckets
+    return out
+
+
+@mcp.tool()
+def entity_profile(name: str, role: Literal["developer", "publisher"] = "developer") -> dict:
+    """Profile one developer or publisher ENTITY by exact name: aggregate track record
+    (n_games, first/last release year, n_recent_24m — releases in the last 24 months, the
+    active/dormant signal — total/median est. revenue, hit_rate_200k, median reviews/
+    rating, self_published_share, top genres, and for publishers n_partners = distinct
+    developer names they've published), its games (oldest first by seq: appid, name,
+    release_year, price, total_reviews, positive_ratio, est_rev_reviews, primary_genre),
+    and a release-trajectory summary (per-seq revenue: debut -> latest arc, plus first-5
+    vs last-5 median revenue). Entities with more than 40 games return the earliest +
+    latest 20 games and a BUCKETED trajectory (games_omitted says how many middle games
+    were elided) — the aggregates always cover ALL games.
+
+    Entities come from mart_game's self-reported developers/publishers strings, split on
+    commas with corporate suffixes re-merged (", Inc."/", Ltd." never become entities) —
+    but NO fuzzy identity resolution: the same studio under variant spellings/branding
+    ("Ubisoft" vs "UBISOFT", "FromSoftware, Inc." vs "FromSoftware") counts as SEPARATE
+    entities, so a famous studio's numbers may be split across variants — check the
+    suggestions on a miss, and sum variants yourself when it matters. Revenue is
+    est_rev_reviews (Boxleiter-style gross lifetime ESTIMATE), never ground truth.
+    self_published_share = share of its games where the same name is on both sides
+    (developer AND publisher).
+
+    name must match EXACTLY (trimmed, case-sensitive). On a miss, returns {"error": ...}
+    with up to 5 close-match suggestions (substring, case-insensitive) — and says so if
+    the exact name exists under the OTHER role (e.g. a publisher-only entity queried as
+    a developer)."""
+    try:
+        ent = query_one(
+            """
+            SELECT role, name, n_games, first_release_year, last_release_year, n_recent_24m,
+                   total_rev, median_rev, hit_rate_200k, median_reviews, median_positive_ratio,
+                   self_published_share, top_genres, n_partners
+            FROM mart_entity WHERE role = ? AND name = ?
+            """,
+            [role, name],
+        )
+    except duckdb.CatalogException:
+        return dict(_ENTITY_MARTS_MISSING)
+
+    if ent is None:
+        other_role = "publisher" if role == "developer" else "developer"
+        hints = []
+        if query_one("SELECT 1 FROM mart_entity WHERE role = ? AND name = ?", [other_role, name]):
+            hints.append(f"{name!r} exists as a {other_role} — call entity_profile(name, role={other_role!r}).")
+        suggestions = query(
+            "SELECT name, n_games FROM mart_entity WHERE role = ? AND name ILIKE ? "
+            "ORDER BY n_games DESC, name LIMIT 5",
+            [role, f"%{name}%"],
+        )
+        return {
+            "error": f"no {role} named {name!r} (exact match, case-sensitive). "
+            + (hints[0] + " " if hints else "")
+            + ("Close matches in `suggestions` — retry with one of those exact names."
+               if suggestions else "No close matches either — try a shorter substring."),
+            "suggestions": suggestions,
+        }
+
+    games = query(
+        """
+        SELECT meg.seq, g.appid, g.name, g.release_year, g.price_initial AS price,
+               g.total_reviews, g.positive_ratio, g.est_rev_reviews, g.primary_genre
+        FROM mart_entity_games meg
+        JOIN mart_game g ON g.appid = meg.appid
+        WHERE meg.role = ? AND meg.name = ?
+        ORDER BY meg.seq
+        """,
+        [role, name],
+    )
+
+    trajectory = _entity_trajectory(games) if games else {}
+    games_omitted = 0
+    if len(games) > _ENTITY_FULL_LIST_MAX:
+        games_omitted = len(games) - 2 * _ENTITY_HEAD_TAIL
+        games = games[:_ENTITY_HEAD_TAIL] + games[-_ENTITY_HEAD_TAIL:]
+
+    return clean(
+        {
+            "entity": ent,
+            "games": games,
+            "games_omitted": games_omitted,
+            "trajectory": trajectory,
+            "caveats": [
+                "Revenue is est_rev_reviews — a Boxleiter-style gross lifetime ESTIMATE.",
+                "Entity names are self-reported strings; variant spellings of the same "
+                "studio are separate entities (no fuzzy identity resolution).",
+                "Population is the full live catalog including 0-review games — medians "
+                "and hit_rate_200k are computed over games with revenue estimates only.",
+            ],
+        }
+    )
+
+
+@mcp.tool()
+def publisher_pitch_list(genre: str, min_games: int = 3, limit: int = 15) -> dict:
+    """Which publishers to pitch for one Steam genre (exact PRIMARY-genre label, e.g.
+    "RPG", "Strategy" — see game_profile/market_benchmarks for valid labels): publishers
+    with >= min_games total releases and >= 1 in this genre, ACTIVE ones first (active =
+    any release in the last 24 months; dormant publishers rank below every active one —
+    check the flag before pitching), then by games in this genre. Per row: n_games (total),
+    n_in_genre, n_recent_24m, active, median_rev_in_genre (median est. revenue of THEIR
+    games in this genre), example_game (their top-earning title in the genre — name-drop /
+    fit-check it), n_partners (distinct developer names they've published — a proxy for
+    how many external studios they actually work with), and self_published_share.
+
+    Read the numbers with these falsification rules in mind:
+      - Revenue is est_rev_reviews — a Boxleiter-style ESTIMATE, not ground truth.
+      - A publisher's median outcome is NOT publisher value-add: good publishers SELECT
+        good games (selection bias) — a high median_rev_in_genre says "they pick/attract
+        winners", not "they will make yours one".
+      - Entity names are self-reported strings; the same publisher under variant
+        spellings counts as separate rows.
+      - Self-published games are NOT excluded (Steam lists the dev as its own publisher),
+        so a "publisher" with self_published_share ~1.0 is really a self-publishing dev
+        who has never taken third-party games — filter those out when scouting for an
+        actual publishing partner (that's why the share is surfaced per row).
+
+    An empty list is a real answer (no publisher meets the floors in this genre) — but
+    double-check the genre label first: it must be an exact Steam PRIMARY genre, not a
+    community tag ("Roguelike" is a tag; its games' primary genre is usually "Action" or
+    "Strategy"). Use entity_profile(name, role="publisher") to deep-dive a row."""
+    min_games = max(1, min_games)
+    limit = max(1, min(limit, 50))
+    try:
+        rows = query(
+            """
+            WITH in_genre AS (
+                SELECT meg.name,
+                    COUNT(*) AS n_in_genre,
+                    median(g.est_rev_reviews) AS median_rev_in_genre,
+                    arg_max(g.name, COALESCE(g.est_rev_reviews, -1)) AS example_game
+                FROM mart_entity_games meg
+                JOIN mart_game g ON g.appid = meg.appid
+                WHERE meg.role = 'publisher' AND g.primary_genre = ?
+                GROUP BY meg.name
+            )
+            SELECT e.name, e.n_games, ig.n_in_genre, e.n_recent_24m,
+                   (e.n_recent_24m > 0) AS active,
+                   ig.median_rev_in_genre, ig.example_game,
+                   e.n_partners, e.self_published_share
+            FROM mart_entity e
+            JOIN in_genre ig ON ig.name = e.name
+            WHERE e.role = 'publisher' AND e.n_games >= ?
+            ORDER BY active DESC, ig.n_in_genre DESC, e.n_recent_24m DESC, e.n_games DESC, e.name
+            LIMIT ?
+            """,
+            [genre, min_games, limit],
+        )
+    except duckdb.CatalogException:
+        return dict(_ENTITY_MARTS_MISSING)
+
+    caveats = [
+        "Revenue is est_rev_reviews — a Boxleiter-style gross lifetime ESTIMATE.",
+        "Selection bias: a publisher's median outcome reflects the games they pick, not "
+        "the value they add — descriptive, not a promise for YOUR game.",
+        "Entity names are self-reported; the same publisher under variant spellings "
+        "counts as separate rows.",
+        "Self-published rows are kept: self_published_share ~1.0 means a self-publishing "
+        "dev, not a publishing partner — filter on it when scouting.",
+        "active = any release in the last 24 months; dormant (active=false) rows may no "
+        "longer sign games.",
+    ]
+    if not rows:
+        caveats.insert(
+            0,
+            f"No publisher meets the floors for genre '{genre}'. genre must be an exact "
+            "Steam PRIMARY-genre label (not a community tag) — check spelling/case via "
+            "game_profile or market_benchmarks' boxleiter_by_genre.",
+        )
+    return {
+        "genre": genre,
+        "min_games": min_games,
+        "n_returned": len(rows),
+        "publishers": clean_rows(rows),
+        "caveats": caveats,
+    }
 
 
 # ==========================================================================================
