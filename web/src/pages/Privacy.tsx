@@ -11,6 +11,7 @@ const PRIVACY_MD = `*This is a general-purpose template pending review by a qual
 - **Things you create**: saved views and API keys (the API key itself is hashed — we can't read it back after it's created).
 - **Preferences**: your theme/accent choice and whether you've completed the welcome tour, stored in your browser's local storage, not on our servers.
 - **Standard server logs**: request timestamps, IP address, and route, for debugging and abuse prevention — the same baseline logging any web service keeps.
+- **MCP queries**: when you use the public MCP endpoint, we log the tool called and its arguments (e.g. a tag or game name) so we can see which research questions the product should serve better. These entries carry no user identifier and are not linked to server request logs.
 
 We do **not** currently collect payment information — billing isn't live yet.
 

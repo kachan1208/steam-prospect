@@ -48,26 +48,67 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
         server.settings.transport_security = TransportSecuritySettings(
             enable_dns_rebinding_protection=False,
         )
-        # Per-tool usage counter → the default Prometheus registry, so it shows at the app's
-        # existing /metrics. Wraps ToolManager.call_tool — the single choke point every tool
-        # invocation passes through. Best-effort; never let metrics break the MCP.
+        # Per-tool usage counter (Prometheus, at the app's existing /metrics) + a content log
+        # of what people actually ask (tool name + arguments as JSONL, no user identifiers —
+        # the MCP transport doesn't even hand us one here). Both wrap ToolManager.call_tool —
+        # the single choke point every tool invocation passes through. Best-effort throughout;
+        # observability must never break the MCP.
         try:
             from prometheus_client import Counter as _Counter
 
             _tool_calls = _Counter("mcp_tool_calls_total", "MCP tool calls by tool name", ["tool"])
-            _orig_call = server._tool_manager.call_tool
+        except Exception as _exc:  # noqa: BLE001
+            _tool_calls = None
+            print(f"[api] MCP: per-tool metrics off ({_exc!r}).")
 
-            async def _counted_call(name, arguments, *a, **kw):
+        _log_path = settings.mcp_call_log_path
+
+        def _log_call(name: str, arguments: Any, ok: bool, ms: int) -> None:
+            if not _log_path:
+                return
+            try:
+                import json
+                from datetime import datetime, timezone
+
+                args_json = json.dumps(arguments, ensure_ascii=False, default=str)
+                if len(args_json) > 2000:  # one hostile call can't bloat the log
+                    args_json = args_json[:2000] + "…"
+                line = json.dumps(
+                    {
+                        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "tool": name,
+                        "args": args_json,
+                        "ok": ok,
+                        "ms": ms,
+                    },
+                    ensure_ascii=False,
+                )
+                with open(_log_path, "a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+            except Exception:
+                pass
+
+        _orig_call = server._tool_manager.call_tool
+
+        async def _observed_call(name, arguments, *a, **kw):
+            if _tool_calls is not None:
                 try:
                     _tool_calls.labels(tool=name).inc()
                 except Exception:
                     pass
-                return await _orig_call(name, arguments, *a, **kw)
+            import time as _time
 
-            server._tool_manager.call_tool = _counted_call
-            print("[api] MCP: per-tool metrics on (mcp_tool_calls_total).")
-        except Exception as _exc:  # noqa: BLE001
-            print(f"[api] MCP: per-tool metrics off ({_exc!r}).")
+            t0 = _time.monotonic()
+            try:
+                result = await _orig_call(name, arguments, *a, **kw)
+            except Exception:
+                _log_call(name, arguments, ok=False, ms=int((_time.monotonic() - t0) * 1000))
+                raise
+            _log_call(name, arguments, ok=True, ms=int((_time.monotonic() - t0) * 1000))
+            return result
+
+        server._tool_manager.call_tool = _observed_call
+        print(f"[api] MCP: tool-call observability on (metrics={'yes' if _tool_calls else 'no'}, log={_log_path or 'off'}).")
         asgi_app = server.streamable_http_app()  # also lazily creates server.session_manager
 
         print("[api] MCP: mounted 'prospect-market-intel' at /mcp (Streamable HTTP, stateless).")
