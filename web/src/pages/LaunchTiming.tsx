@@ -4,6 +4,7 @@ import clsx from "clsx";
 
 import { LaunchShapeBars } from "../components/charts/LaunchShapeBars";
 import { Histogram } from "../components/charts/Histogram";
+import { SeasonalityHeatmap } from "../components/charts/SeasonalityHeatmap";
 import { TimingBars } from "../components/charts/TimingBars";
 import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -12,6 +13,7 @@ import {
   launchCurveQueryOptions,
   useGenres,
   useMarketDistribution,
+  useSeasonality,
   useTimingOverview,
   type TimingOverview,
 } from "../lib/api";
@@ -116,6 +118,7 @@ export default function LaunchTiming() {
   const genres = useGenres();
   const [timingGenre, setTimingGenre] = useState("__all__");
   const { data: overview, isLoading: timingLoading, error: timingError } = useTimingOverview(timingGenre);
+  const { data: seasonality, isLoading: seasonLoading } = useSeasonality(timingGenre);
 
   const [curveGenres, setCurveGenres] = useState<string[]>(DEFAULT_CURVE_GENRES);
   const curveResults = useQueries({
@@ -214,6 +217,30 @@ export default function LaunchTiming() {
         ) : (
           timingStatus
         )}
+      </Card>
+
+      <Card
+        title={`Release day × month — ${genreLabel}`}
+        subtitle="Median estimated revenue (or release count) by the calendar month and weekday games shipped — where past releases landed well, and where the catalog piles up"
+      >
+        {seasonLoading && !seasonality && (
+          <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading…</div>
+        )}
+        {seasonality &&
+          (seasonality.month_weekday.length > 0 ? (
+            <>
+              <SeasonalityHeatmap cells={seasonality.month_weekday} />
+              <p className="mt-2 text-[11px] text-ink-muted">
+                Outcomes by release date, not by when players buy (that&apos;s the demand chart above). Weekday reads are
+                mostly about who ships when — big titles favor Thu/Fri — so treat day-of-week as descriptive, not causal.
+              </p>
+            </>
+          ) : (
+            <EmptyState
+              title="No release-date data for this genre"
+              description="This genre is below the seasonality sample floor. Try All genres, or a larger genre."
+            />
+          ))}
       </Card>
 
       <Card
