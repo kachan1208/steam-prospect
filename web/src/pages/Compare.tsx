@@ -196,7 +196,7 @@ export default function Compare() {
                                   onClick={() => remove(id)}
                                   aria-label={`Remove ${names.get(id)} from comparison`}
                                   title="Remove from comparison"
-                                  className="text-xs text-ink-muted hover:text-ink-primary"
+                                  className="-m-1.5 flex h-6 w-6 items-center justify-center rounded-full text-xs text-ink-muted hover:bg-page hover:text-ink-primary"
                                 >
                                   ✕
                                 </button>
@@ -206,7 +206,7 @@ export default function Compare() {
                               )}
                               <Link
                                 to={`/games/${id}`}
-                                className="text-[13px] font-semibold leading-tight text-ink-primary hover:text-series-1 hover:underline"
+                                className="text-[13px] font-semibold leading-tight text-ink-primary hover:text-brand hover:underline"
                               >
                                 {names.get(id)}
                               </Link>
@@ -215,7 +215,7 @@ export default function Compare() {
                                   {p.release_year ?? "—"} · {fmtPrice(p.price_initial)}
                                 </span>
                               ) : (
-                                <span className="text-[11px] text-status-serious">Not in catalog</span>
+                                <span className="text-[11px] text-verdict-serious">Not in catalog</span>
                               )}
                             </div>
                           </th>
@@ -247,14 +247,17 @@ export default function Compare() {
                                 key={id}
                                 className={clsx(
                                   "tabular px-3 py-2 text-sm",
-                                  bestIds.has(id) ? "font-semibold text-status-good" : "text-ink-secondary",
+                                  bestIds.has(id) ? "font-semibold text-verdict-good" : "text-ink-secondary",
                                 )}
                               >
                                 {p ? row.fmt(p) : "—"}
                                 {bestIds.has(id) && (
-                                  <span aria-hidden className="ml-1 text-[10px] text-status-good" title="Best in this row">
-                                    ▲
-                                  </span>
+                                  <>
+                                    <span aria-hidden className="ml-1 text-[10px] text-verdict-good" title="Best in this row">
+                                      ▲
+                                    </span>
+                                    <span className="sr-only"> (best in this row)</span>
+                                  </>
                                 )}
                               </td>
                             );

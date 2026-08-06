@@ -89,7 +89,7 @@ export default function Studios() {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder={`Search ${roleNoun} by name…`}
-            className="w-64 rounded-md border border-chartborder bg-page px-2.5 py-1.5 text-xs text-ink-primary outline-none placeholder:text-ink-muted focus:border-series-1"
+            className="w-64 rounded-md border border-chartborder bg-page px-2.5 py-1.5 text-xs text-ink-primary outline-none placeholder:text-ink-muted focus:border-brand"
           />
         </div>
       </Card>
@@ -108,7 +108,7 @@ export default function Studios() {
           />
         )}
         {isError && !is503 && (
-          <div className="p-6 text-sm text-status-serious">
+          <div className="p-6 text-sm text-verdict-serious">
             Failed to load studios{error instanceof Error ? `: ${error.message}` : "."}
           </div>
         )}
@@ -130,10 +130,10 @@ export default function Studios() {
                   <th className="whitespace-nowrap px-3 py-2 font-medium" title="Released something in the last 24 months">
                     Active
                   </th>
-                  <th className="whitespace-nowrap px-3 py-2 font-medium">Total est. rev</th>
-                  <th className="whitespace-nowrap px-3 py-2 font-medium">Median rev</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">Total est. revenue</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">Median est. revenue</th>
                   <th className="whitespace-nowrap px-3 py-2 font-medium" title="Share of releases clearing $200K est. revenue">
-                    Hit rate ($200K+)
+                    Hit rate ≥ $200K
                   </th>
                   <th className="whitespace-nowrap px-3 py-2 font-medium">Top genres</th>
                 </tr>
@@ -149,7 +149,7 @@ export default function Studios() {
                       <Link
                         to={entityHref(e.role, e.name)}
                         onClick={(ev) => ev.stopPropagation()}
-                        className="block truncate font-medium text-ink-primary hover:text-series-1 hover:underline"
+                        className="block truncate font-medium text-ink-primary hover:text-brand hover:underline"
                         title={e.name}
                       >
                         {e.name}

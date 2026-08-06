@@ -73,7 +73,7 @@ function SentimentColumn({
       </div>
       {q.isLoading && <div className="text-xs text-ink-muted">Loading…</div>}
       {q.isError && (
-        <div className="text-xs text-status-serious">
+        <div className="text-xs text-verdict-serious">
           Failed to load{q.error instanceof Error ? `: ${q.error.message}` : "."}
         </div>
       )}

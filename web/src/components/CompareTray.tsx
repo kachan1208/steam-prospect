@@ -30,14 +30,14 @@ export function CompareTray() {
                 type="button"
                 onClick={() => removeFromCompare(e.appid)}
                 aria-label={`Remove ${e.name ?? e.appid} from compare`}
-                className="shrink-0 text-ink-muted hover:text-ink-primary"
+                className="-my-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-ink-muted hover:bg-page hover:text-ink-primary"
               >
                 ✕
               </button>
             </span>
           ))}
           {list.length < COMPARE_CAP && (
-            <span className="text-[10px] text-ink-muted">{COMPARE_CAP - list.length} more fit</span>
+            <span className="text-[10px] text-ink-muted">room for {COMPARE_CAP - list.length} more</span>
           )}
         </div>
         <button

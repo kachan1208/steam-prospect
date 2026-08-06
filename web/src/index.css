@@ -57,6 +57,12 @@
   --status-warning: #fab219;
   --status-serious: #ec835a;
   --status-critical: #d03b3b;
+  /* text-safe verdict variants — the status hues above were validated as MARK colors and
+     fail WCAG AA as small light-theme text (good 3.35:1, serious 2.64:1). These darker
+     companions pass (good-text 5.32:1, serious-text 4.95:1 on white); the dark theme
+     aliases the originals, which already pass on the dark surfaces. */
+  --status-good-text: #0a7d0a;
+  --status-serious-text: #b9502a;
 
   /* sequential (blue), steps 100 (low) -> 700 (high) */
   --seq-100: #cde2fb;
@@ -113,6 +119,9 @@
   --status-warning: #fab219;
   --status-serious: #ec835a;
   --status-critical: #d03b3b;
+  /* dark theme: the mark hues already pass as text on the dark surfaces */
+  --status-good-text: #0ca30c;
+  --status-serious-text: #ec835a;
 
   --diverging-neutral: #383835;
 

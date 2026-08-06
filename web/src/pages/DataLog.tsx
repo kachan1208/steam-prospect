@@ -97,7 +97,7 @@ export default function DataLog() {
       {isLoading ? (
         <Card className="py-10 text-center text-sm text-ink-muted">Loading…</Card>
       ) : isError ? (
-        <Card className="py-10 text-center text-sm text-status-critical">Couldn’t load the refresh log.</Card>
+        <Card className="py-10 text-center text-sm text-verdict-serious">Couldn’t load the refresh log.</Card>
       ) : runs.length === 0 ? (
         <Card className="flex flex-col items-center gap-2 py-12 text-center">
           <p className="text-sm font-medium text-ink-primary">No refreshes recorded yet</p>
@@ -116,7 +116,7 @@ export default function DataLog() {
                 <div className="flex items-center justify-between gap-3">
                   <div className="flex items-center gap-2">
                     <span
-                      className={`inline-block h-2 w-2 rounded-full ${ok ? "text-status-good" : "text-status-critical"}`}
+                      className={`inline-block h-2 w-2 rounded-full ${ok ? "text-verdict-good" : "text-verdict-serious"}`}
                       style={{ backgroundColor: "currentColor" }}
                     />
                     <span className="text-sm font-semibold text-ink-primary">{relTime(r.finished_at)}</span>
@@ -127,7 +127,7 @@ export default function DataLog() {
                     </span>
                   </div>
                   <span
-                    className={`rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${ok ? "text-status-good" : "text-status-critical"}`}
+                    className={`rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${ok ? "text-verdict-good" : "text-verdict-serious"}`}
                   >
                     {ok ? "success" : "failed"}
                   </span>
@@ -144,7 +144,7 @@ export default function DataLog() {
                   {r.counts?.games !== undefined && <span>{nf.format(r.counts.games)} games total</span>}
                   {r.counts?.reviews !== undefined && <span>{nf.format(r.counts.reviews)} reviews total</span>}
                   {r.duration_s !== undefined && <span>took {fmtDur(r.duration_s)}</span>}
-                  {!ok && r.step && <span className="text-status-critical">stopped at: {r.step}</span>}
+                  {!ok && r.step && <span className="text-verdict-serious">stopped at: {r.step}</span>}
                 </div>
               </Card>
             );

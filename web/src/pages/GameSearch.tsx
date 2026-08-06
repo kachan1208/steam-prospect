@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import clsx from "clsx";
 
@@ -208,7 +208,7 @@ function fmtReleaseDate(iso: string | null, year: number | null): string {
 }
 
 const inputCls =
-  "rounded-md border border-chartborder bg-page px-2.5 py-1.5 text-xs text-ink-primary outline-none placeholder:text-ink-muted focus:border-series-1";
+  "rounded-md border border-chartborder bg-page px-2.5 py-1.5 text-xs text-ink-primary outline-none placeholder:text-ink-muted focus:border-brand";
 
 /** Any / yes / no segmented control for the boolean-ish mart flags. */
 function TriToggle({
@@ -258,7 +258,7 @@ function FilterChip({ label, onClear }: { label: string; onClear: () => void }) 
       type="button"
       onClick={onClear}
       title="Remove filter"
-      className="group inline-flex items-center gap-1 rounded-full border border-series-1/50 bg-page px-2 py-0.5 text-[11px] font-medium text-ink-primary hover:border-series-1"
+      className="group inline-flex items-center gap-1 rounded-full border border-brand/50 bg-page px-2 py-0.5 text-[11px] font-medium text-ink-primary hover:border-brand"
     >
       {label}
       <span aria-hidden className="text-ink-muted group-hover:text-ink-primary">✕</span>
@@ -469,9 +469,11 @@ export default function GameSearch() {
         cell: (info) => {
           const g = info.row.original;
           return (
-            <button
-              type="button"
-              onClick={() => navigate(`/games/${g.appid}`)}
+            // A real link (not a navigate() button) so middle-click / cmd-click "open in
+            // new tab" works — opening several candidates in tabs IS the research workflow.
+            <Link
+              to={`/games/${g.appid}`}
+              onClick={(e) => e.stopPropagation()}
               className="flex items-center gap-2 text-left"
             >
               {g.header_image && (
@@ -483,14 +485,14 @@ export default function GameSearch() {
                 />
               )}
               <span className="min-w-0">
-                <span className="block truncate font-medium text-ink-primary hover:text-series-1 hover:underline">
+                <span className="block truncate font-medium text-ink-primary hover:text-brand hover:underline">
                   {g.name ?? `App ${g.appid}`}
                 </span>
                 <span className="block truncate text-[11px] text-ink-muted">
                   {g.primary_genre ?? "—"} · {g.release_year ?? "—"}
                 </span>
               </span>
-            </button>
+            </Link>
           );
         },
       }),
@@ -656,7 +658,7 @@ export default function GameSearch() {
           <select
             value={filters.genre}
             onChange={(e) => patchParams({ genre: e.target.value === "__all__" ? null : e.target.value })}
-            className="rounded-md border border-chartborder bg-page px-2 py-1.5 text-xs text-ink-primary outline-none focus:border-series-1"
+            className="rounded-md border border-chartborder bg-page px-2 py-1.5 text-xs text-ink-primary outline-none focus:border-brand"
           >
             {genres.map((g) => (
               <option key={g.value} value={g.value}>
@@ -685,7 +687,7 @@ export default function GameSearch() {
               patchParams(v !== null ? { window: v, sort: "release_date", order: "desc" } : { window: null });
             }}
             title="Show only recently released games (by Steam release date)"
-            className="rounded-md border border-chartborder bg-page px-2 py-1.5 text-xs text-ink-primary outline-none focus:border-series-1"
+            className="rounded-md border border-chartborder bg-page px-2 py-1.5 text-xs text-ink-primary outline-none focus:border-brand"
           >
             {RELEASE_WINDOWS.map((w) => (
               <option key={w.label} value={w.days ?? ""}>
@@ -700,7 +702,7 @@ export default function GameSearch() {
             className={clsx(
               "ml-auto inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors",
               moreOpen || advancedCount > 0
-                ? "border-series-1 text-ink-primary"
+                ? "border-brand text-ink-primary"
                 : "border-chartborder text-ink-muted hover:text-ink-secondary",
             )}
           >
@@ -785,7 +787,7 @@ export default function GameSearch() {
                 className={clsx(
                   "rounded-full border px-2 py-0.5 text-[10px] font-medium transition-colors",
                   filters.tag === t
-                    ? "border-series-1 bg-page text-ink-primary"
+                    ? "border-brand bg-page text-ink-primary"
                     : "border-chartborder text-ink-muted hover:text-ink-secondary",
                 )}
               >
@@ -799,7 +801,7 @@ export default function GameSearch() {
       <Card className={clsx("!p-0", isFetching && "opacity-90 transition-opacity")}>
         {isLoading && <div className="p-6 text-sm text-ink-muted">Loading games…</div>}
         {isError && (
-          <div className="p-6 text-sm text-status-serious">
+          <div className="p-6 text-sm text-verdict-serious">
             Failed to load games{error instanceof Error ? `: ${error.message}` : "."}
           </div>
         )}
@@ -853,7 +855,7 @@ export default function GameSearch() {
                     { keepOffset: true },
                   )
                 }
-                className="rounded-md border border-chartborder px-2.5 py-1 font-medium text-ink-secondary disabled:opacity-40"
+                className="rounded-md border border-chartborder px-2.5 py-1 font-medium text-ink-secondary transition-colors hover:bg-page hover:text-ink-primary disabled:opacity-40 disabled:hover:bg-transparent"
               >
                 Prev
               </button>
@@ -861,7 +863,7 @@ export default function GameSearch() {
                 type="button"
                 disabled={filters.offset + LIMIT >= total}
                 onClick={() => patchParams({ offset: String(filters.offset + LIMIT) }, { keepOffset: true })}
-                className="rounded-md border border-chartborder px-2.5 py-1 font-medium text-ink-secondary disabled:opacity-40"
+                className="rounded-md border border-chartborder px-2.5 py-1 font-medium text-ink-secondary transition-colors hover:bg-page hover:text-ink-primary disabled:opacity-40 disabled:hover:bg-transparent"
               >
                 Next
               </button>

@@ -4,8 +4,9 @@ import { Link } from "react-router-dom";
 import { Card } from "../components/ui/Card";
 
 // The live deployment. The MCP server is served from the same origin at /mcp/.
-const APP_URL = "https://142-93-49-69.nip.io";
-const MCP_URL = "https://142-93-49-69.nip.io/mcp/";
+// Derived, not hardcoded — a domain move must not silently break every copy-paste snippet.
+const APP_URL = window.location.origin;
+const MCP_URL = `${window.location.origin}/mcp/`;
 
 // ---- small building blocks --------------------------------------------------------------
 
@@ -173,7 +174,7 @@ export default function Docs() {
           <span>
             Live at{" "}
             <a href={APP_URL} target="_blank" rel="noreferrer" className="text-brand hover:underline">
-              142-93-49-69.nip.io
+              {APP_URL.replace(/^https?:\/\//, "")}
             </a>
           </span>
           <span aria-hidden>·</span>

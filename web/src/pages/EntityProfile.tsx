@@ -57,7 +57,7 @@ export default function EntityProfile() {
   if (!role || !name) {
     return (
       <Card>
-        <div className="py-8 text-center text-sm text-status-serious">
+        <div className="py-8 text-center text-sm text-verdict-serious">
           {!role ? "Invalid entity role in the URL (expected developer or publisher)." : "Missing ?name= in the URL."}
         </div>
       </Card>
@@ -116,7 +116,7 @@ export default function EntityProfile() {
     return (
       <Card>
         <div className="flex flex-col items-center gap-2 py-8 text-center text-sm">
-          <span className="text-status-serious">
+          <span className="text-verdict-serious">
             Failed to load {role}{err instanceof Error ? `: ${err.message}` : "."}
           </span>
           <Link to="/games" className="text-series-1 hover:underline">
@@ -200,7 +200,7 @@ export default function EntityProfile() {
         <StatTile label="Median est. revenue" valueClassName="text-brand" value={fmtUsd(entity.median_rev)} sub="Per release" />
         <StatTile
           label="Hit rate ≥ $200K"
-          valueClassName={(entity.hit_rate_200k ?? 0) >= 0.25 ? "text-status-good" : undefined}
+          valueClassName={(entity.hit_rate_200k ?? 0) >= 0.25 ? "text-verdict-good" : undefined}
           value={fmtPct(entity.hit_rate_200k, 0)}
           sub="Share of releases clearing $200K est."
         />
@@ -252,10 +252,14 @@ export default function EntityProfile() {
             </thead>
             <tbody>
               {tableGames.map((g) => (
-                <tr key={g.appid} className="border-b border-chartborder/60 last:border-0 hover:bg-page">
+                <tr
+                  key={g.appid}
+                  className="cursor-pointer border-b border-chartborder/60 last:border-0 hover:bg-page"
+                  onClick={() => navigate(`/games/${g.appid}`)}
+                >
                   <td className="tabular px-2 py-1.5 text-ink-muted">{g.seq}</td>
                   <td className="max-w-[240px] truncate px-2 py-1.5 font-medium" title={g.name ?? undefined}>
-                    <Link to={`/games/${g.appid}`} className="text-ink-primary hover:text-series-1 hover:underline">
+                    <Link to={`/games/${g.appid}`} className="text-ink-primary hover:text-brand hover:underline">
                       {g.name ?? `App ${g.appid}`}
                     </Link>
                   </td>

@@ -58,7 +58,7 @@ function GenreSelect({
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="rounded-md border border-chartborder bg-page px-2 py-1.5 text-xs text-ink-primary outline-none focus:border-series-1"
+      className="rounded-md border border-chartborder bg-page px-2 py-1.5 text-xs text-ink-primary outline-none focus:border-brand"
     >
       {genres.map((g) => (
         <option key={g.value} value={g.value}>
@@ -156,7 +156,7 @@ export default function LaunchTiming() {
       </Card>
 
       <Card
-        title="When players buy"
+        title={`When players buy — ${genreLabel}`}
         subtitle={`Share of ${genreLabel === "All genres" ? "the catalog's" : `${genreLabel}'s`} monthly review volume landing in each calendar month — pooled over the last 5 complete years, each game's first 2 months excluded so launch spikes don't read as seasonal demand`}
       >
         {overview ? (
@@ -184,7 +184,7 @@ export default function LaunchTiming() {
       </Card>
 
       <Card
-        title="How crowded each window is"
+        title={`How crowded each window is — ${genreLabel}`}
         subtitle="Average releases landing in each calendar month over the last 3 complete years — with $200K+ releases on the right axis (the competition that actually takes shelf space)"
       >
         {overview ? (
@@ -244,7 +244,7 @@ export default function LaunchTiming() {
       </Card>
 
       <Card
-        title="How long a launch pays out"
+        title={`How long a launch pays out — ${genreLabel}`}
         subtitle="Median share of a game's first-24-months review total landing in each month since release — per-game normalized first, so big games don't dominate"
       >
         {overview ? (
@@ -289,7 +289,7 @@ export default function LaunchTiming() {
               className={clsx(
                 "rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors",
                 curveGenres.includes(g.value)
-                  ? "border-series-1 bg-page text-ink-primary"
+                  ? "border-brand bg-page text-ink-primary"
                   : "border-chartborder text-ink-muted hover:text-ink-secondary",
               )}
             >
@@ -311,7 +311,9 @@ export default function LaunchTiming() {
                   <span className="text-xs font-semibold text-ink-primary">{label}</span>
                   {result?.data && <span className="text-[10px] text-ink-muted">{result.data.points[0]?.n_games ?? 0} games</span>}
                 </div>
-                {result?.isLoading && <div className="flex h-32 items-center justify-center text-xs text-ink-muted">…</div>}
+                {result?.isLoading && (
+                  <div className="flex h-32 items-center justify-center text-xs text-ink-muted">Loading…</div>
+                )}
                 {result?.data && <LaunchShapeBars points={result.data.points} height={140} />}
               </div>
             );

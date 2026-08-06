@@ -97,6 +97,14 @@ export function tierColor(tier: string, theme: Theme): string {
   return steps[idx >= 0 ? idx : 0];
 }
 
+// Genre/tag chip tints (lib/heat.ts genreTintStyle) — a DOCUMENTED EXCEPTION to the
+// fixed-order rule above: slots are hash-assigned per genre name because the genre set is
+// open-ended (hundreds of tags, 7 usable slots — collisions are the norm, so same hue ≠
+// same genre). Safe because color there is tint-only (13% bg / 55% border) under neutral
+// ink text (measured 6.06–6.83:1 light, 7.44–7.99:1 dark across all slots), is never the
+// sole encoding (the chip always prints the name), and slot 4 is excluded as visually
+// near status-good. Any future non-tint use of hashed slots must go through the validator.
+
 // Marketing channel categorical order (Track M) — fixed order, reuses the app's existing
 // validated series slots (never a generated/ad-hoc hue) rather than each platform's own
 // brand color, per the dataviz skill's "assign categorical hues in fixed order" rule. Slots
