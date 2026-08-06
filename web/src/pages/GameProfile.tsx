@@ -26,7 +26,7 @@ import {
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
 import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
-import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
+import { genreTintStyle, heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { CSS_VAR } from "../lib/palette";
 
 const TABS = [
@@ -229,7 +229,11 @@ export default function GameProfile() {
             )}
             <div className="mt-2 flex flex-wrap gap-1">
               {profile.top_tags.map((t) => (
-                <span key={t} className="rounded-full border border-chartborder px-2 py-0.5 text-[10px] text-ink-secondary">
+                <span
+                  key={t}
+                  className="rounded-full border px-2 py-0.5 text-[10px] text-ink-secondary"
+                  style={genreTintStyle(t)}
+                >
                   {t}
                 </span>
               ))}

@@ -7,7 +7,7 @@ import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ApiError, useEntitySearch, type EntityRole, type EntitySearchRow } from "../lib/api";
 import { fmtInt, fmtPct, fmtUsd } from "../lib/format";
-import { heatDomain, heatStyle } from "../lib/heat";
+import { genreTintStyle, heatDomain, heatStyle } from "../lib/heat";
 import { CSS_VAR } from "../lib/palette";
 import { useDebounced } from "../lib/useDebounced";
 
@@ -175,11 +175,22 @@ export default function Studios() {
                       </span>
                     </td>
                     <td className="tabular px-3 py-2 align-middle">{fmtUsd(e.median_rev)}</td>
-                    <td className="tabular px-3 py-2 align-middle">{fmtPct(e.hit_rate_200k, 0)}</td>
+                    <td className="tabular px-3 py-2 align-middle">
+                      <span
+                        className="rounded px-1.5 py-0.5"
+                        style={heatStyle(e.hit_rate_200k, ...heatDomain(data.items, (x) => x.hit_rate_200k), "linear")}
+                      >
+                        {fmtPct(e.hit_rate_200k, 0)}
+                      </span>
+                    </td>
                     <td className="px-3 py-2 align-middle">
                       <div className="flex max-w-[220px] flex-wrap gap-1">
                         {e.top_genres.slice(0, 3).map((g) => (
-                          <span key={g} className="rounded-full border border-chartborder px-1.5 py-0.5 text-[10px] text-ink-secondary">
+                          <span
+                            key={g}
+                            className="rounded-full border px-1.5 py-0.5 text-[10px] text-ink-secondary"
+                            style={genreTintStyle(g)}
+                          >
                             {g}
                           </span>
                         ))}

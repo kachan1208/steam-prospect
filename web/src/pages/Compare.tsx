@@ -9,6 +9,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { gameProfileQueryOptions, type GameProfile } from "../lib/api";
 import { COMPARE_CAP, removeFromCompare, useCompareList } from "../lib/compareList";
 import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtRevenue } from "../lib/format";
+import { genreTintStyle } from "../lib/heat";
 
 /**
  * Side-by-side comparison for 2-6 games. The ids ride the URL (?ids=1,2,3) so a
@@ -278,8 +279,11 @@ export default function Compare() {
                                     "rounded-full border px-1.5 py-0.5 text-[10px]",
                                     sharedTags.has(t)
                                       ? "border-brand bg-brand-tint font-medium text-brand"
-                                      : "border-chartborder text-ink-secondary",
+                                      : "text-ink-secondary",
                                   )}
+                                  // Shared tags keep the brand highlight (that's the signal on this
+                                  // page); only the rest wear their categorical genre tint.
+                                  style={sharedTags.has(t) ? undefined : genreTintStyle(t)}
                                 >
                                   {t}
                                 </span>
