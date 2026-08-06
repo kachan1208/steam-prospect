@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     # the stdio MCP via .mcp.json) is untouched; the container image turns it on.
     enable_mcp: bool = False
 
+    # Content log of hosted MCP tool calls (tool name + arguments, NO user identifiers),
+    # appended as JSONL by the /mcp mount so we can see what people actually ask the data.
+    # Lives in the mounted data dir so it survives redeploys. Empty string disables logging.
+    mcp_call_log_path: str = str(REPO_ROOT / "data" / "mcp_calls.jsonl")
+    # Bearer-style token gating the /api/analytics/mcp-log viewer. Unset (default) = the
+    # endpoint 404s — the call log is never publicly readable by accident.
+    admin_token: str | None = None
+
     # Data-refresh changelog: newline-delimited JSON written by the Droplet's refresh cron
     # (one record per run, with data deltas). Served read-only by /api/refresh/history and
     # rendered on the in-app "Data log" page. Default sits in the (mounted) data dir.

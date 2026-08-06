@@ -7,10 +7,15 @@ cardinality), so the worst a bad client can do is inflate a known counter, never
 """
 from __future__ import annotations
 
-from fastapi import APIRouter
+import hmac
+import json
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .. import analytics_metrics
+from ..config import settings
 
 router = APIRouter(tags=["analytics"])
 
@@ -34,3 +39,32 @@ def collect(batch: AnalyticsBatch) -> None:
             analytics_metrics.record_pageview(ev.path)
         elif ev.type == "event" and ev.name:
             analytics_metrics.record_event(ev.name)
+
+
+@router.get("/api/analytics/mcp-log", include_in_schema=False)
+def mcp_log(token: str = Query(""), limit: int = Query(100, ge=1, le=500)) -> dict:
+    """Owner-only viewer for the hosted MCP call log (what people ask the data).
+
+    Gated by PROSPECT_ADMIN_TOKEN: with the token unset the endpoint 404s, so the log can
+    never be exposed by a config that merely forgot to set it. Entries carry no user
+    identifiers — see mcp_mount._log_call.
+    """
+    if not settings.admin_token:
+        raise HTTPException(status_code=404)
+    if not hmac.compare_digest(token, settings.admin_token):
+        raise HTTPException(status_code=403)
+
+    path = Path(settings.mcp_call_log_path) if settings.mcp_call_log_path else None
+    if path is None or not path.exists():
+        return {"total": 0, "entries": []}
+
+    with path.open(encoding="utf-8") as fh:
+        lines = fh.readlines()
+    entries = []
+    for line in lines[-limit:]:
+        try:
+            entries.append(json.loads(line))
+        except ValueError:
+            continue
+    entries.reverse()  # newest first
+    return {"total": len(lines), "entries": entries}
