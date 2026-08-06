@@ -246,12 +246,12 @@ export default function Compare() {
                                 key={id}
                                 className={clsx(
                                   "tabular px-3 py-2 text-sm",
-                                  bestIds.has(id) ? "font-semibold text-ink-primary" : "text-ink-secondary",
+                                  bestIds.has(id) ? "font-semibold text-status-good" : "text-ink-secondary",
                                 )}
                               >
                                 {p ? row.fmt(p) : "—"}
                                 {bestIds.has(id) && (
-                                  <span aria-hidden className="ml-1 text-[10px] text-brand" title="Best in this row">
+                                  <span aria-hidden className="ml-1 text-[10px] text-status-good" title="Best in this row">
                                     ▲
                                   </span>
                                 )}

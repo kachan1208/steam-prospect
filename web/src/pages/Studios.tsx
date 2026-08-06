@@ -7,6 +7,7 @@ import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ApiError, useEntitySearch, type EntityRole, type EntitySearchRow } from "../lib/api";
 import { fmtInt, fmtPct, fmtUsd } from "../lib/format";
+import { heatDomain, heatStyle } from "../lib/heat";
 import { CSS_VAR } from "../lib/palette";
 import { useDebounced } from "../lib/useDebounced";
 
@@ -165,7 +166,14 @@ export default function Studios() {
                         <span className="text-ink-muted">—</span>
                       )}
                     </td>
-                    <td className="tabular px-3 py-2 align-middle font-medium text-ink-primary">{fmtUsd(e.total_rev)}</td>
+                    <td className="tabular px-3 py-2 align-middle font-medium text-ink-primary">
+                      <span
+                        className="rounded px-1.5 py-0.5"
+                        style={heatStyle(e.total_rev, ...heatDomain(data.items, (x) => x.total_rev))}
+                      >
+                        {fmtUsd(e.total_rev)}
+                      </span>
+                    </td>
                     <td className="tabular px-3 py-2 align-middle">{fmtUsd(e.median_rev)}</td>
                     <td className="tabular px-3 py-2 align-middle">{fmtPct(e.hit_rate_200k, 0)}</td>
                     <td className="px-3 py-2 align-middle">

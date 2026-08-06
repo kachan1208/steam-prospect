@@ -8,6 +8,7 @@ import { TagAutocomplete } from "../components/TagAutocomplete";
 import { useGameSearch, useGenres, type GameSearchRow, type GameSortKey } from "../lib/api";
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
+import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { useDebounced } from "../lib/useDebounced";
 
 const LIMIT = 25;
@@ -447,6 +448,17 @@ export default function GameSearch() {
     ["price", "min_positive", "min_revenue", "years", "self_pub", "indie"].includes(c.key),
   ).length;
 
+  // Per-column log-scale domains over the loaded page — the heat tints are relative to
+  // what's on screen (this result set), which is the comparison the researcher is making.
+  const heat = useMemo(() => {
+    const rows = data?.items ?? [];
+    return {
+      rev: heatDomain(rows, (g) => g.est_rev_reviews),
+      reviews: heatDomain(rows, (g) => g.total_reviews),
+      owners: heatDomain(rows, (g) => g.owners_mid),
+    };
+  }, [data]);
+
   const columnHelper = useMemo(() => createColumnHelper<GameSearchRow>(), []);
   const columns = useMemo(
     () => [
@@ -520,7 +532,11 @@ export default function GameSearch() {
             onSort={toggleSort}
           />
         ),
-        cell: (info) => <span className="tabular">{fmtCompact(info.getValue())}</span>,
+        cell: (info) => (
+          <span className="tabular rounded px-1.5 py-0.5" style={heatStyle(info.getValue(), ...heat.owners)}>
+            {fmtCompact(info.getValue())}
+          </span>
+        ),
       }),
       columnHelper.accessor("live_players", {
         header: () => (
@@ -547,7 +563,11 @@ export default function GameSearch() {
             onSort={toggleSort}
           />
         ),
-        cell: (info) => <span className="tabular">{fmtInt(info.getValue())}</span>,
+        cell: (info) => (
+          <span className="tabular rounded px-1.5 py-0.5" style={heatStyle(info.getValue(), ...heat.reviews)}>
+            {fmtInt(info.getValue())}
+          </span>
+        ),
       }),
       columnHelper.accessor("positive_ratio", {
         header: () => (
@@ -559,7 +579,9 @@ export default function GameSearch() {
             onSort={toggleSort}
           />
         ),
-        cell: (info) => <span className="tabular">{fmtPct(info.getValue())}</span>,
+        cell: (info) => (
+          <span className={clsx("tabular", positiveRatioClass(info.getValue()))}>{fmtPct(info.getValue())}</span>
+        ),
       }),
       columnHelper.accessor("est_rev_reviews", {
         header: () => (
@@ -572,7 +594,10 @@ export default function GameSearch() {
           />
         ),
         cell: (info) => (
-          <span className="tabular font-medium text-ink-primary">
+          <span
+            className="tabular rounded px-1.5 py-0.5 font-medium text-ink-primary"
+            style={heatStyle(info.getValue(), ...heat.rev)}
+          >
             {fmtRevenue(info.getValue(), info.row.original.price_initial === 0)}
           </span>
         ),
@@ -597,7 +622,7 @@ export default function GameSearch() {
       }),
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [columnHelper, filters.sort, filters.order, navigate],
+    [columnHelper, filters.sort, filters.order, navigate, heat],
   );
 
   const table = useReactTable({ data: data?.items ?? [], columns, getCoreRowModel: getCoreRowModel() });
