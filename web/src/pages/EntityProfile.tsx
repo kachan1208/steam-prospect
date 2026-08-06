@@ -12,7 +12,10 @@ import {
   type EntityNotFoundDetail,
   type EntityRole,
 } from "../lib/api";
+import clsx from "clsx";
+
 import { fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
+import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { CSS_VAR } from "../lib/palette";
 
 const ROLES: EntityRole[] = ["developer", "publisher"];
@@ -190,7 +193,7 @@ export default function EntityProfile() {
           value={fmtUsd(entity.total_rev)}
           sub="Boxleiter gross across the catalog"
         />
-        <StatTile label="Median est. revenue" value={fmtUsd(entity.median_rev)} sub="Per release" />
+        <StatTile label="Median est. revenue" valueClassName="text-brand" value={fmtUsd(entity.median_rev)} sub="Per release" />
         <StatTile
           label="Hit rate ≥ $200K"
           value={fmtPct(entity.hit_rate_200k, 0)}
@@ -198,6 +201,7 @@ export default function EntityProfile() {
         />
         <StatTile
           label="Median rating"
+          valueClassName={positiveRatioClass(entity.median_positive_ratio)}
           value={fmtPct(entity.median_positive_ratio, 0)}
           sub={entity.median_reviews != null ? `${fmtInt(entity.median_reviews)} median reviews` : undefined}
         />
@@ -254,8 +258,17 @@ export default function EntityProfile() {
                   <td className="px-2 py-1.5">{g.primary_genre ?? "—"}</td>
                   <td className="tabular px-2 py-1.5">{fmtPrice(g.price_initial)}</td>
                   <td className="tabular px-2 py-1.5">{fmtInt(g.total_reviews)}</td>
-                  <td className="tabular px-2 py-1.5">{fmtPct(g.positive_ratio)}</td>
-                  <td className="tabular px-2 py-1.5">{fmtRevenue(g.est_rev_reviews, g.price_initial === 0)}</td>
+                  <td className={clsx("tabular px-2 py-1.5", positiveRatioClass(g.positive_ratio))}>
+                    {fmtPct(g.positive_ratio)}
+                  </td>
+                  <td className="tabular px-2 py-1.5">
+                    <span
+                      className="rounded px-1.5 py-0.5"
+                      style={heatStyle(g.est_rev_reviews, ...heatDomain(tableGames, (x) => x.est_rev_reviews))}
+                    >
+                      {fmtRevenue(g.est_rev_reviews, g.price_initial === 0)}
+                    </span>
+                  </td>
                 </tr>
               ))}
             </tbody>

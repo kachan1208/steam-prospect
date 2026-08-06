@@ -14,6 +14,7 @@ export function StatTile({
   value,
   sub,
   className,
+  valueClassName,
   onClick,
   active,
 }: {
@@ -21,6 +22,8 @@ export function StatTile({
   value: ReactNode;
   sub?: ReactNode;
   className?: string;
+  /** Extra classes on the value line — hero-metric accent or verdict color. */
+  valueClassName?: string;
   onClick?: () => void;
   active?: boolean;
 }) {
@@ -49,7 +52,7 @@ export function StatTile({
       )}
     >
       <div className="text-xs text-ink-muted">{label}</div>
-      <div className="mt-1 text-2xl font-semibold text-ink-primary">{value}</div>
+      <div className={clsx("mt-1 text-2xl font-semibold text-ink-primary", valueClassName)}>{value}</div>
       {sub && <div className="mt-1 text-xs text-ink-secondary">{sub}</div>}
     </div>
   );

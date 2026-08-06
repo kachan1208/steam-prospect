@@ -26,6 +26,7 @@ import {
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
 import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
+import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { CSS_VAR } from "../lib/palette";
 
 const TABS = [
@@ -240,6 +241,7 @@ export default function GameProfile() {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatTile
           label="Est. revenue (Boxleiter range)"
+          valueClassName="text-brand"
           value={fmtRevenue(revenueRange ? revenueRange.mid : profile.est_rev_reviews, profile.price_initial === 0)}
           sub={
             profile.price_initial === 0
@@ -266,6 +268,7 @@ export default function GameProfile() {
         />
         <StatTile
           label="Positive rating"
+          valueClassName={positiveRatioClass(profile.positive_ratio)}
           value={fmtPct(profile.positive_ratio)}
           sub={profile.metacritic_score ? `Metacritic ${profile.metacritic_score}` : undefined}
         />
@@ -503,7 +506,7 @@ export default function GameProfile() {
                 </tr>
               </thead>
               <tbody>
-                {comparablesQ.data.items.map((c) => (
+                {comparablesQ.data.items.map((c, _i, all) => (
                   <tr
                     key={c.appid}
                     className="cursor-pointer border-b border-chartborder/60 last:border-0 hover:bg-page"
@@ -515,8 +518,17 @@ export default function GameProfile() {
                     <td className="tabular px-2 py-1.5">{c.release_year ?? "—"}</td>
                     <td className="tabular px-2 py-1.5">{fmtPrice(c.price_initial)}</td>
                     <td className="tabular px-2 py-1.5">{fmtInt(c.total_reviews)}</td>
-                    <td className="tabular px-2 py-1.5">{fmtPct(c.positive_ratio)}</td>
-                    <td className="tabular px-2 py-1.5">{fmtRevenue(c.est_rev_reviews, c.price_initial === 0)}</td>
+                    <td className={clsx("tabular px-2 py-1.5", positiveRatioClass(c.positive_ratio))}>
+                      {fmtPct(c.positive_ratio)}
+                    </td>
+                    <td className="tabular px-2 py-1.5">
+                      <span
+                        className="rounded px-1.5 py-0.5"
+                        style={heatStyle(c.est_rev_reviews, ...heatDomain(all, (x) => x.est_rev_reviews))}
+                      >
+                        {fmtRevenue(c.est_rev_reviews, c.price_initial === 0)}
+                      </span>
+                    </td>
                     <td className="px-2 py-1.5">
                       <div className="flex items-center gap-1.5" title={c.shared_tags.join(", ")}>
                         <Meter value={c.jaccard * 100} color={CSS_VAR.competition} />
