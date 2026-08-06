@@ -87,7 +87,7 @@ export function TagAutocomplete({ onSelect }: { onSelect: (tag: string) => void 
         onFocus={() => setOpen(true)}
         onKeyDown={onKeyDown}
         placeholder="Add tag filter…"
-        className="w-44 rounded-md border border-chartborder bg-page px-2.5 py-1.5 text-xs text-ink-primary outline-none placeholder:text-ink-muted focus:border-series-1"
+        className="w-44 rounded-md border border-chartborder bg-page px-2.5 py-1.5 text-xs text-ink-primary outline-none placeholder:text-ink-muted focus:border-brand"
       />
       {open && items.length > 0 && (
         <ul

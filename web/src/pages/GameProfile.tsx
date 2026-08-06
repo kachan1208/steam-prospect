@@ -138,7 +138,7 @@ export default function GameProfile() {
   if (!validAppid) {
     return (
       <Card>
-        <div className="py-8 text-center text-sm text-status-serious">Invalid game ID in the URL.</div>
+        <div className="py-8 text-center text-sm text-verdict-serious">Invalid game ID in the URL.</div>
       </Card>
     );
   }
@@ -151,7 +151,7 @@ export default function GameProfile() {
     return (
       <Card>
         <div className="flex flex-col items-center gap-2 py-8 text-center text-sm">
-          <span className="text-status-serious">
+          <span className="text-verdict-serious">
             Game not found{profileQ.error instanceof Error ? `: ${profileQ.error.message}` : "."}
           </span>
           <Link to="/games" className="text-series-1 hover:underline">
@@ -242,7 +242,7 @@ export default function GameProfile() {
         </div>
       </Card>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <StatTile
           label="Est. revenue (Boxleiter range)"
           valueClassName="text-brand"
@@ -321,18 +321,20 @@ export default function GameProfile() {
         </Card>
       )}
 
-      <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Game profile sections">
+      {/* Plain toggled buttons, not ARIA tabs — the full tabs contract (tabpanel ids,
+          arrow-key nav) isn't implemented, and half a tab widget is worse for screen
+          readers than honest pressed-state buttons. */}
+      <div className="flex flex-wrap gap-1.5" aria-label="Game profile sections">
         {TABS.map((t) => (
           <button
             key={t.key}
             type="button"
-            role="tab"
-            aria-selected={tab === t.key}
+            aria-pressed={tab === t.key}
             onClick={() => setTab(t.key)}
             className={clsx(
               "rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
               tab === t.key
-                ? "border-series-1 bg-page text-ink-primary"
+                ? "border-brand bg-page text-ink-primary"
                 : "border-chartborder text-ink-muted hover:text-ink-secondary",
             )}
           >
@@ -373,7 +375,9 @@ export default function GameProfile() {
             valueLabel={profile.owners_pct_in_genre !== null ? `P${Math.round(profile.owners_pct_in_genre)}` : "—"}
           />
         </div>
-        {profile.is_free === 1 && (
+        {/* Keyed on price, not is_free — fmtRevenue's R6-Siege case: is_free can be set on
+            titles with a real price and real revenue. */}
+        {profile.price_initial === 0 && (
           <p className="mt-3 text-[11px] italic text-ink-muted">
             Revenue percentile isn't meaningful for free-to-play titles (box revenue is $0 at price $0) — read
             review-count and owners percentile instead.
@@ -381,6 +385,23 @@ export default function GameProfile() {
         )}
       </Card>
 
+      <Card
+        title="Review timeline"
+        subtitle="From the sampled reviews table (not Steam's full review count) — a recency-biased sample for older/popular titles"
+      >
+        {reviewsQ.isLoading && <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading…</div>}
+        {reviewsQ.data && <ReviewsTimelineChart points={reviewsQ.data.timeline} />}
+      </Card>
+
+      <Card
+        title="Momentum over time"
+        subtitle="Monthly review velocity, live players, Twitch viewers, and creator mentions — the signals Prospect tracks over time (CCU/Twitch thicken as snapshots accumulate)"
+      >
+        <GameTrendsChart appid={profile.appid} />
+      </Card>
+
+      {/* Genre-level benchmark card sits AFTER the game's own timeline/momentum — a game
+          profile should lead with the game's own story, then the genre yardstick. */}
       <Card
         title="Launch shape — front-loaded vs. slow-burn"
         subtitle="How fast games in this genre earn their first-year reviews (a sales-momentum proxy) — tells you whether to bet on a big launch splash or a sustained slow-burn."
@@ -420,24 +441,9 @@ export default function GameProfile() {
               profile.primary_genre !== "__all__"
               ? profile.primary_genre
               : ""}{" "}
-            titles — a benchmark for this title's own month-by-month trajectory, shown on the Momentum card below.
+            titles — a benchmark for this title's own month-by-month trajectory, shown on the Momentum card above.
           </p>
         )}
-      </Card>
-
-      <Card
-        title="Review timeline"
-        subtitle="From the sampled reviews table (not Steam's full review count) — a recency-biased sample for older/popular titles"
-      >
-        {reviewsQ.isLoading && <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading…</div>}
-        {reviewsQ.data && <ReviewsTimelineChart points={reviewsQ.data.timeline} />}
-      </Card>
-
-      <Card
-        title="Momentum over time"
-        subtitle="Monthly review velocity, live players, Twitch viewers, and creator mentions — the signals Prospect tracks over time (CCU/Twitch thicken as snapshots accumulate)"
-      >
-        <GameTrendsChart appid={profile.appid} />
       </Card>
 
       <Card title="Language split" subtitle="Share of sampled reviews by language — a localization reference">
@@ -516,8 +522,16 @@ export default function GameProfile() {
                     className="cursor-pointer border-b border-chartborder/60 last:border-0 hover:bg-page"
                     onClick={() => navigate(`/games/${c.appid}`)}
                   >
-                    <td className="max-w-[200px] truncate px-2 py-1.5 font-medium text-ink-primary" title={c.name ?? undefined}>
-                      {c.name ?? `App ${c.appid}`}
+                    <td className="max-w-[200px] truncate px-2 py-1.5 font-medium" title={c.name ?? undefined}>
+                      {/* Focusable link so the table is keyboard-reachable; row onClick stays as a
+                          mouse convenience. */}
+                      <Link
+                        to={`/games/${c.appid}`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-ink-primary hover:text-brand hover:underline"
+                      >
+                        {c.name ?? `App ${c.appid}`}
+                      </Link>
                     </td>
                     <td className="tabular px-2 py-1.5">{c.release_year ?? "—"}</td>
                     <td className="tabular px-2 py-1.5">{fmtPrice(c.price_initial)}</td>
@@ -565,7 +579,7 @@ export default function GameProfile() {
               <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading…</div>
             )}
             {teardownQ.isError && (
-              <div className="text-xs text-status-serious">
+              <div className="text-xs text-verdict-serious">
                 Failed to load teardown{teardownQ.error instanceof Error ? `: ${teardownQ.error.message}` : "."}
               </div>
             )}

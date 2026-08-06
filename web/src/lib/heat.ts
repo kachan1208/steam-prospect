@@ -3,8 +3,10 @@ import type { CSSProperties } from "react";
 /**
  * Heat tint for magnitude cells in dense tables — the number stays normal ink, the cell
  * background carries the percentile, so a column reads as a gradient (same job as the
- * seasonality heatmap, but with text on top: tint alpha is capped at 42% so ink contrast
- * survives in both themes; color-mix against transparent keeps it theme-aware for free).
+ * seasonality heatmap, but with text on top: tint alpha is capped at 42%, which keeps
+ * PRIMARY ink comfortably AA in both themes — 9.2:1 light / 8.5:1 dark at full tint.
+ * Secondary/muted ink over a full tint dips under AA, so heat cells must use primary ink.
+ * color-mix against transparent keeps it theme-aware for free).
  *
  * Log-scaled: revenue/reviews/owners are log-distributed, so a linear ramp would leave
  * every non-outlier row at ~0 and one megahit fully saturated.
@@ -34,14 +36,19 @@ export function heatStyle(
 
 /**
  * Stable categorical tint for genre/tag chips — hashes the name into one of the app's
- * validated series slots and returns border+background tints (low alpha, neutral text on
- * top), so the same genre wears the same hue on every page. Color here is a recognition
- * aid, never the sole encoding — the chip text always names the genre.
+ * series slots and returns border+background tints (low alpha, neutral text on top), so
+ * the same genre wears the same hue on every page. With far more genres than slots,
+ * collisions are the norm: same hue does NOT imply same genre — color here is only a
+ * recognition aid, never the sole encoding; the chip text always names the genre.
+ * Slot 4 (#008300) is excluded: it is visually near status-good, and a green-hashed chip
+ * sitting beside an "Active" badge or verdict text would read as a status signal.
  */
+const GENRE_SLOTS = [1, 2, 3, 5, 6, 7, 8] as const;
+
 export function genreTintStyle(name: string): CSSProperties {
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-  const slot = (h % 8) + 1;
+  const slot = GENRE_SLOTS[h % GENRE_SLOTS.length];
   return {
     borderColor: `color-mix(in srgb, var(--series-${slot}) 55%, transparent)`,
     backgroundColor: `color-mix(in srgb, var(--series-${slot}) 13%, transparent)`,
@@ -69,7 +76,7 @@ export function heatDomain<T>(rows: T[], pick: (row: T) => number | null | undef
  */
 export function positiveRatioClass(ratio: number | null | undefined): string {
   if (ratio == null) return "";
-  if (ratio >= 0.8) return "text-status-good";
-  if (ratio < 0.7) return "text-status-serious";
+  if (ratio >= 0.8) return "text-verdict-good";
+  if (ratio < 0.7) return "text-verdict-serious";
   return "";
 }

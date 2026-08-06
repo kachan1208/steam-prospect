@@ -41,6 +41,12 @@ export default {
           serious: "var(--status-serious)",
           critical: "var(--status-critical)",
         },
+        // Text-safe verdict pair — use for colored TEXT (verdicts, errors); the status.*
+        // hues above are mark colors and fail AA as small light-theme text.
+        verdict: {
+          good: "var(--status-good-text)",
+          serious: "var(--status-serious-text)",
+        },
       },
       fontFamily: {
         sans: ['"Inter Variable"', "Inter", "system-ui", "-apple-system", "Segoe UI", "sans-serif"],

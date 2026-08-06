@@ -62,7 +62,7 @@ export function CompareTrendsChart({ ids, names }: { ids: number[]; names: Map<n
   }
   if (trendsQ.isError || !trendsQ.data) {
     return (
-      <div className="flex h-24 items-center justify-center text-xs text-status-serious">
+      <div className="flex h-24 items-center justify-center text-xs text-verdict-serious">
         Failed to load trends{trendsQ.error instanceof Error ? `: ${trendsQ.error.message}` : "."}
       </div>
     );

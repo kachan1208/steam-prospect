@@ -35,7 +35,7 @@ function CopyField({ value, label }: { value: string; label?: string }) {
       <button
         type="button"
         onClick={copy}
-        className="shrink-0 self-start rounded-md bg-series-1 px-3 py-2 text-[11px] font-semibold text-white transition-opacity hover:opacity-90"
+        className="shrink-0 self-start rounded-md bg-brand px-3 py-2 text-[11px] font-semibold text-brand-fg transition-opacity hover:opacity-90"
       >
         {copied ? "Copied" : label ?? "Copy"}
       </button>

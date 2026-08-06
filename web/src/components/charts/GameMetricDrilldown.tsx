@@ -520,7 +520,7 @@ export function GameMetricDrilldown({
   }
   if (trendsQuery.isError) {
     return (
-      <div className="flex h-24 items-center justify-center text-center text-xs text-status-serious">
+      <div className="flex h-24 items-center justify-center text-center text-xs text-verdict-serious">
         {trendsQuery.error instanceof Error ? trendsQuery.error.message : "Failed to load trend data."}
       </div>
     );
