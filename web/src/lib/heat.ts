@@ -13,15 +13,39 @@ export function heatStyle(
   value: number | null | undefined,
   min: number,
   max: number,
+  scale: "log" | "linear" = "log",
 ): CSSProperties | undefined {
   if (value == null || !Number.isFinite(value) || value <= 0) return undefined;
-  const lo = Math.log10(Math.max(1, min));
-  const hi = Math.log10(Math.max(1, max));
-  if (hi <= lo) return undefined;
-  const t = Math.max(0, Math.min(1, (Math.log10(value) - lo) / (hi - lo)));
-  const pct = Math.round(t * 42);
+  let t: number;
+  if (scale === "linear") {
+    // For bounded ratios (hit rate, shares) — a log ramp would crush the top end.
+    if (max <= min) return undefined;
+    t = (value - min) / (max - min);
+  } else {
+    const lo = Math.log10(Math.max(1, min));
+    const hi = Math.log10(Math.max(1, max));
+    if (hi <= lo) return undefined;
+    t = (Math.log10(value) - lo) / (hi - lo);
+  }
+  const pct = Math.round(Math.max(0, Math.min(1, t)) * 42);
   if (pct < 4) return undefined; // below the ramp floor a tint just reads as dirt
   return { backgroundColor: `color-mix(in srgb, var(--series-1) ${pct}%, transparent)` };
+}
+
+/**
+ * Stable categorical tint for genre/tag chips — hashes the name into one of the app's
+ * validated series slots and returns border+background tints (low alpha, neutral text on
+ * top), so the same genre wears the same hue on every page. Color here is a recognition
+ * aid, never the sole encoding — the chip text always names the genre.
+ */
+export function genreTintStyle(name: string): CSSProperties {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  const slot = (h % 8) + 1;
+  return {
+    borderColor: `color-mix(in srgb, var(--series-${slot}) 55%, transparent)`,
+    backgroundColor: `color-mix(in srgb, var(--series-${slot}) 13%, transparent)`,
+  };
 }
 
 /** Min/max over the non-null positive values of one column — feed to heatStyle per row. */

@@ -15,7 +15,7 @@ import {
 import clsx from "clsx";
 
 import { fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
-import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
+import { genreTintStyle, heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { CSS_VAR } from "../lib/palette";
 
 const ROLES: EntityRole[] = ["developer", "publisher"];
@@ -176,7 +176,11 @@ export default function EntityProfile() {
             {entity.top_genres.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-1">
                 {entity.top_genres.map((g) => (
-                  <span key={g} className="rounded-full border border-chartborder px-2 py-0.5 text-[10px] text-ink-secondary">
+                  <span
+                    key={g}
+                    className="rounded-full border px-2 py-0.5 text-[10px] text-ink-secondary"
+                    style={genreTintStyle(g)}
+                  >
                     {g}
                   </span>
                 ))}
@@ -196,6 +200,7 @@ export default function EntityProfile() {
         <StatTile label="Median est. revenue" valueClassName="text-brand" value={fmtUsd(entity.median_rev)} sub="Per release" />
         <StatTile
           label="Hit rate ≥ $200K"
+          valueClassName={(entity.hit_rate_200k ?? 0) >= 0.25 ? "text-status-good" : undefined}
           value={fmtPct(entity.hit_rate_200k, 0)}
           sub="Share of releases clearing $200K est."
         />
@@ -255,7 +260,18 @@ export default function EntityProfile() {
                     </Link>
                   </td>
                   <td className="tabular px-2 py-1.5">{g.release_year ?? "—"}</td>
-                  <td className="px-2 py-1.5">{g.primary_genre ?? "—"}</td>
+                  <td className="px-2 py-1.5">
+                    {g.primary_genre ? (
+                      <span
+                        className="rounded-full border px-1.5 py-0.5 text-[10px] text-ink-secondary"
+                        style={genreTintStyle(g.primary_genre)}
+                      >
+                        {g.primary_genre}
+                      </span>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
                   <td className="tabular px-2 py-1.5">{fmtPrice(g.price_initial)}</td>
                   <td className="tabular px-2 py-1.5">{fmtInt(g.total_reviews)}</td>
                   <td className={clsx("tabular px-2 py-1.5", positiveRatioClass(g.positive_ratio))}>

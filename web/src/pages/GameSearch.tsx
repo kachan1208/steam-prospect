@@ -8,7 +8,7 @@ import { TagAutocomplete } from "../components/TagAutocomplete";
 import { useGameSearch, useGenres, type GameSearchRow, type GameSortKey } from "../lib/api";
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
-import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
+import { genreTintStyle, heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { useDebounced } from "../lib/useDebounced";
 
 const LIMIT = 25;
@@ -608,7 +608,11 @@ export default function GameSearch() {
         cell: (info) => (
           <div className="flex max-w-[260px] flex-wrap gap-1">
             {info.row.original.top_tags.slice(0, 3).map((t) => (
-              <span key={t} className="rounded-full border border-chartborder px-1.5 py-0.5 text-[10px] text-ink-secondary">
+              <span
+                key={t}
+                className="rounded-full border px-1.5 py-0.5 text-[10px] text-ink-secondary"
+                style={genreTintStyle(t)}
+              >
                 {t}
               </span>
             ))}
