@@ -13,6 +13,7 @@ export function StatTile({
   label,
   value,
   sub,
+  help,
   className,
   valueClassName,
   onClick,
@@ -21,6 +22,9 @@ export function StatTile({
   label: string;
   value: ReactNode;
   sub?: ReactNode;
+  /** Plain-language "how to read this" — rendered as a hover tooltip (title) plus a
+   * small ⓘ affordance next to the label so users know there IS an explanation. */
+  help?: string;
   className?: string;
   /** Extra classes on the value line — hero-metric accent or verdict color. */
   valueClassName?: string;
@@ -44,6 +48,7 @@ export function StatTile({
       aria-pressed={interactive ? active ?? false : undefined}
       onClick={onClick}
       onKeyDown={onKeyDown}
+      title={help}
       className={clsx(
         "rounded-card border bg-surface p-4 transition-colors",
         active ? "border-brand bg-brand-tint" : "border-chartborder",
@@ -51,7 +56,14 @@ export function StatTile({
         className,
       )}
     >
-      <div className="text-xs text-ink-muted">{label}</div>
+      <div className="text-xs text-ink-muted">
+        {label}
+        {help && (
+          <span aria-hidden className="ml-1 cursor-help text-[10px] text-ink-muted/70">
+            ⓘ
+          </span>
+        )}
+      </div>
       <div className={clsx("mt-1 text-2xl font-semibold text-ink-primary", valueClassName)}>{value}</div>
       {sub && <div className="mt-1 text-xs text-ink-secondary">{sub}</div>}
     </div>

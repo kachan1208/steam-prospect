@@ -247,6 +247,7 @@ export default function GameProfile() {
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <StatTile
+          help="Estimated lifetime GROSS revenue: reviews × an owners-per-review ratio (~20-55, genre-fitted) × launch price. An estimate with real error bars — the sub-line shows the low-high range. Not net of Steam's cut, refunds or discounts."
           label="Est. revenue (Boxleiter range)"
           valueClassName="text-brand"
           value={fmtRevenue(revenueRange ? revenueRange.mid : profile.est_rev_reviews, profile.price_initial === 0)}
@@ -261,12 +262,14 @@ export default function GameProfile() {
           active={selectedMetric === "revenue"}
         />
         <StatTile
+          help="Estimated copies owned (SteamSpy midpoint, review-modeled for coarse buckets). Owned ≠ played ≠ paid full price."
           label="Owners (est.)"
           value={fmtCompact(profile.owners_mid)}
           onClick={() => toggleMetric("owners")}
           active={selectedMetric === "owners"}
         />
         <StatTile
+          help="The game's true Steam review count (from Steam's own API where backfilled). The trailing-30d sub-line is a live is-it-still-selling signal."
           label="Total reviews"
           value={fmtInt(profile.total_reviews)}
           sub={`${fmtInt(profile.n_reviews_trailing_30d)} sampled in trailing 30d`}
@@ -274,12 +277,14 @@ export default function GameProfile() {
           active={selectedMetric === "reviews"}
         />
         <StatTile
+          help="Share of Steam reviews that are positive. Below ~80% starts costing visibility (Steam's 'Mostly Positive' threshold)."
           label="Positive rating"
           valueClassName={positiveRatioClass(profile.positive_ratio)}
           value={fmtPct(profile.positive_ratio)}
           sub={profile.metacritic_score ? `Metacritic ${profile.metacritic_score}` : undefined}
         />
         <StatTile
+          help="Concurrent players at our last nightly capture (~21-22:00 UTC) — a point sample, NOT the daily peak (peak charts run higher). Click for the daily history."
           label="Live players (now)"
           value={profile.live_players != null ? fmtCompact(profile.live_players) : "—"}
           sub={

@@ -40,7 +40,9 @@ const TIER_TITLE: Record<NicheTier, string> = {
   meta: "Reception tags (Great Soundtrack…) — never buildable",
 };
 
-/** A clickable column header that drives the server-side sort, with a direction arrow. */
+/** A clickable column header that drives the server-side sort, with a direction arrow.
+ * `help` is the column's plain-language "how to read this" — it becomes the hover tooltip
+ * (with the sort hint appended) so every metric column explains itself in place. */
 function SortLabel({
   label,
   col,
@@ -48,6 +50,7 @@ function SortLabel({
   order,
   onSort,
   color,
+  help,
 }: {
   label: string;
   col: SortKey;
@@ -55,12 +58,13 @@ function SortLabel({
   order: "asc" | "desc";
   onSort: (col: SortKey) => void;
   color?: string;
+  help?: string;
 }) {
   return (
     <button
       type="button"
       onClick={() => onSort(col)}
-      title={`Sort by ${label}`}
+      title={help ? `${help}\n\nClick to sort by ${label}.` : `Sort by ${label}`}
       className={clsx(
         "group inline-flex items-center gap-1 font-semibold uppercase tracking-wide transition-colors",
         active ? "text-ink-primary" : "text-ink-muted hover:text-ink-secondary",
@@ -68,6 +72,11 @@ function SortLabel({
     >
       {color && <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: color }} />}
       {label}
+      {help && (
+        <span aria-hidden className="cursor-help text-[10px] normal-case text-ink-muted/70">
+          ⓘ
+        </span>
+      )}
       <span
         aria-hidden
         className={clsx("text-[10px] leading-none", active ? "opacity-100" : "opacity-0 group-hover:opacity-40")}
@@ -163,7 +172,7 @@ export default function NicheFinder() {
     () => [
       columnHelper.accessor("key", {
         header: () => (
-          <SortLabel label="Niche" col="key" active={sort === "key"} order={order} onSort={toggleSort} />
+          <SortLabel label="Niche" help="A Steam community tag or Steam genre. The small badge marks non-buildable tiers (theme = a setting you attach to a game; umbrella = a genre container; meta = a reception tag)." col="key" active={sort === "key"} order={order} onSort={toggleSort} />
         ),
         cell: (info) => {
           const tier = info.row.original.tier;
@@ -190,14 +199,14 @@ export default function NicheFinder() {
       }),
       columnHelper.accessor("n_games", {
         header: () => (
-          <SortLabel label="Games" col="n_games" active={sort === "n_games"} order={order} onSort={toggleSort} />
+          <SortLabel label="Games" help="Scored games in this cut (released inside the window, at or above the review floor). Small counts = thin evidence." col="n_games" active={sort === "n_games"} order={order} onSort={toggleSort} />
         ),
         cell: (info) => <span className="tabular text-ink-secondary">{fmtInt(info.getValue())}</span>,
       }),
       columnHelper.accessor((row) => row.p90_rev ?? null, {
         id: "p90_rev",
         header: () => (
-          <SortLabel label="P90 rev" col="p90_rev" active={sort === "p90_rev"} order={order} onSort={toggleSort} />
+          <SortLabel label="P90 rev" help="90th-percentile estimated lifetime revenue — what the niche's SUCCESSFUL titles earn (1 in 10 does better). The median (typical outcome) is in the deep dive. Boxleiter-style estimate, not reported sales." col="p90_rev" active={sort === "p90_rev"} order={order} onSort={toggleSort} />
         ),
         cell: (info) => {
           const v = info.getValue();
@@ -215,11 +224,11 @@ export default function NicheFinder() {
         id: "opportunity_bars",
         header: () => (
           <span className="flex items-center gap-1.5 whitespace-nowrap">
-            <SortLabel label="Demand" col="demand" color={legColor("demand")} active={sort === "demand"} order={order} onSort={toggleSort} />
+            <SortLabel label="Demand" help="0-100 percentile vs other niches: how much the typical game here earns/sells (median revenue + owners + recent review velocity). Higher = hotter market." col="demand" color={legColor("demand")} active={sort === "demand"} order={order} onSort={toggleSort} />
             <span className="text-ink-muted/40">/</span>
-            <SortLabel label="Comp." col="competition" color={legColor("competition")} active={sort === "competition"} order={order} onSort={toggleSort} />
+            <SortLabel label="Comp." help="0-100 percentile: how crowded it is (recent releases + winner concentration). HIGHER IS WORSE for a new entrant." col="competition" color={legColor("competition")} active={sort === "competition"} order={order} onSort={toggleSort} />
             <span className="text-ink-muted/40">/</span>
-            <SortLabel label="Quality gap" col="quality_gap" color={legColor("quality")} active={sort === "quality_gap"} order={order} onSort={toggleSort} />
+            <SortLabel label="Quality gap" help="0-100 percentile: share of incumbents that are weak (low rating or thin reviews). Higher = easier to out-execute the field." col="quality_gap" color={legColor("quality")} active={sort === "quality_gap"} order={order} onSort={toggleSort} />
           </span>
         ),
         cell: (info) => (
@@ -233,7 +242,7 @@ export default function NicheFinder() {
       columnHelper.accessor("opportunity_v2", {
         header: () => (
           <SortLabel
-            label="Opportunity v2"
+            label="Opportunity v2" help="The headline score: 0.5×demand − 0.35×competition + 0.3×quality gap, floored at 0, then × the decline gate (shrinks when the release pipeline contracts or newcomers underearn). 0 with a ×gate = the crowding penalty swamped everything."
             col="opportunity_v2"
             active={sort === "opportunity_v2"}
             order={order}
@@ -242,12 +251,21 @@ export default function NicheFinder() {
         ),
         cell: (info) => {
           const v = info.getValue();
-          const gate = info.row.original.decline_gate;
+          const row = info.row.original;
+          const gate = row.decline_gate;
           const dotColor = v == null ? "var(--gridline)" : sequentialColorAt(v / 100, theme);
+          // A hard 0 means the formula went NEGATIVE and was floored — competition's
+          // penalty outweighed demand + quality gap. Without the note it reads as
+          // missing data instead of the real verdict it is.
+          const floored = v === 0;
+          const title = floored
+            ? `Floored at 0 — the competition penalty (C ${row.competition?.toFixed(0)}) outweighs demand (D ${row.demand?.toFixed(0)}) + quality gap (Q ${row.quality_gap?.toFixed(0)}): a crowded niche whose typical game earns little. Big audience ≠ good entry.`
+            : "0.5×demand − 0.35×competition + 0.3×quality gap, × the decline gate";
           return (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2" title={title}>
               <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: dotColor }} />
               <span className="tabular font-semibold text-ink-primary">{v != null ? v.toFixed(1) : "—"}</span>
+              {floored && <span className="text-[10px] text-ink-muted">floored</span>}
               {gate != null && gate < 0.995 && (
                 <span
                   className="tabular text-[10px] text-verdict-serious"
@@ -263,7 +281,7 @@ export default function NicheFinder() {
       columnHelper.accessor("total_players_now", {
         header: () => (
           <SortLabel
-            label="Playing now"
+            label="Playing now" help="Summed CURRENT concurrent players across the niche's scored games — nightly point samples (~21-22:00 UTC), not daily peaks; each game's last capture counts for up to 7 days. Dominated by the niche's hits."
             col="total_players_now"
             active={sort === "total_players_now"}
             order={order}
@@ -282,7 +300,7 @@ export default function NicheFinder() {
       columnHelper.accessor("players_trend_7d_pct", {
         header: () => (
           <SortLabel
-            label="Players 7d"
+            label="Players 7d" help="Live-player change: last 7 days vs the 7 before, counting only games measured in BOTH windows — so growing data coverage can't fake an audience trend."
             col="players_trend_7d_pct"
             active={sort === "players_trend_7d_pct"}
             order={order}
@@ -306,7 +324,7 @@ export default function NicheFinder() {
       columnHelper.accessor("total_owners", {
         header: () => (
           <SortLabel
-            label="Total owners"
+            label="Total owners" help="Estimated total copies owned across the niche's scored games — the size of the pie. A big pie with a low score means people play the HITS, not that a new entrant gets a slice."
             col="total_owners"
             active={sort === "total_owners"}
             order={order}
@@ -317,13 +335,13 @@ export default function NicheFinder() {
       }),
       columnHelper.accessor("hit_rate_200k", {
         header: () => (
-          <SortLabel label="Hit ≥$200K" col="hit_rate_200k" active={sort === "hit_rate_200k"} order={order} onSort={toggleSort} />
+          <SortLabel label="Hit ≥$200K" help="Share of the niche's scored games clearing $200K estimated lifetime revenue — the odds a serious title 'works' here." col="hit_rate_200k" active={sort === "hit_rate_200k"} order={order} onSort={toggleSort} />
         ),
         cell: (info) => <span className="tabular text-ink-secondary">{fmtPct(info.getValue())}</span>,
       }),
       columnHelper.accessor("saturation_yoy", {
         header: () => (
-          <SortLabel label="Saturation YoY" col="saturation_yoy" active={sort === "saturation_yoy"} order={order} onSort={toggleSort} />
+          <SortLabel label="Saturation YoY" help="Change in yearly release count vs the prior year. Negative = the pipeline is SHRINKING — 'low competition' in a shrinking niche is decline, not opportunity." col="saturation_yoy" active={sort === "saturation_yoy"} order={order} onSort={toggleSort} />
         ),
         cell: (info) => {
           const v = info.getValue();
