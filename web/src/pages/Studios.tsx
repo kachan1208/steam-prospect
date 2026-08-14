@@ -125,12 +125,12 @@ export default function Studios() {
               <thead>
                 <tr className="border-b border-chartborder text-left text-xs text-ink-muted">
                   <th className="whitespace-nowrap px-3 py-2 font-medium">Name</th>
-                  <th className="whitespace-nowrap px-3 py-2 font-medium">Games</th>
-                  <th className="whitespace-nowrap px-3 py-2 font-medium">Years</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium" title="Released games credited to this entity in the catalog">Games</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium" title="First to latest release year — the career span">Years</th>
                   <th className="whitespace-nowrap px-3 py-2 font-medium" title="Released something in the last 24 months">
                     Active
                   </th>
-                  <th className="whitespace-nowrap px-3 py-2 font-medium">Total est. revenue</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium" title="Summed estimated lifetime gross across all releases (Boxleiter-style estimate, not reported figures)">Total est. revenue</th>
                   <th
                     className="whitespace-nowrap px-3 py-2 font-medium"
                     title="90th-percentile est. lifetime revenue per release — what the entity's successful titles earn"
@@ -140,7 +140,7 @@ export default function Studios() {
                   <th className="whitespace-nowrap px-3 py-2 font-medium" title="Share of releases clearing $200K est. revenue">
                     Hit rate ≥ $200K
                   </th>
-                  <th className="whitespace-nowrap px-3 py-2 font-medium">Top genres</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium" title="The genres this entity ships most">Top genres</th>
                 </tr>
               </thead>
               <tbody>

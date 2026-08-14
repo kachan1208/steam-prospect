@@ -269,17 +269,17 @@ export function NicheDetailDrawer({
             />
             <div className="grid flex-1 grid-cols-3 gap-2 text-center">
               <div>
-                <div className="text-[10px] text-ink-muted">Demand</div>
+                <div className="text-[10px] text-ink-muted" title="0-100 percentile vs other niches: median revenue + owners + recent review velocity. Higher = hotter market.">Demand</div>
                 <div className="tabular text-sm font-semibold text-ink-primary">{fmtCompact(activeVariant.demand)}</div>
               </div>
               <div>
-                <div className="text-[10px] text-ink-muted">Competition</div>
+                <div className="text-[10px] text-ink-muted" title="0-100 percentile: recent releases + winner concentration. HIGHER IS WORSE for a new entrant.">Competition</div>
                 <div className="tabular text-sm font-semibold text-ink-primary">
                   {fmtCompact(activeVariant.competition)}
                 </div>
               </div>
               <div>
-                <div className="text-[10px] text-ink-muted">Quality gap</div>
+                <div className="text-[10px] text-ink-muted" title="0-100 percentile: share of incumbents that are weak (low rating or thin reviews). Higher = easier to out-execute.">Quality gap</div>
                 <div className="tabular text-sm font-semibold text-ink-primary">
                   {fmtCompact(activeVariant.quality_gap)}
                 </div>
@@ -294,6 +294,12 @@ export function NicheDetailDrawer({
               </div>
             </div>
           </div>
+          {activeVariant.opportunity === 0 && (
+            <p className="mt-1.5 text-[11px] text-ink-muted">
+              Floored at 0: the score formula (0.5×demand − 0.35×competition + 0.3×quality gap) went negative — the
+              crowding penalty outweighs what the typical game here earns. A big audience doesn't make it a good entry.
+            </p>
+          )}
         </section>
 
         <section>
@@ -303,11 +309,13 @@ export function NicheDetailDrawer({
           <div className="rounded-card border border-chartborder p-3">
             <div className="mb-3 grid grid-cols-3 gap-3">
               <StatTile
+                help="Summed current concurrent players across the niche's scored games. Nightly point samples (~21-22:00 UTC), not daily peaks; a game's last capture counts for up to 7 days. Dominated by the niche's biggest games."
                 label="Playing now"
                 value={players?.total_players_now != null ? fmtCompact(players.total_players_now) : "—"}
                 sub={players?.n_games_panel != null ? `${fmtInt(players.n_games_panel)} games measured` : undefined}
               />
               <StatTile
+                help="Last 7 days vs the 7 before, counting only games measured in BOTH windows — growing data coverage can't fake an audience trend."
                 label="7-day trend"
                 valueClassName={
                   players?.players_trend_7d_pct == null
@@ -324,6 +332,7 @@ export function NicheDetailDrawer({
                 sub="same-panel vs prior 7d"
               />
               <StatTile
+                help="Share of the playing-now total that was actually measured in the last 2 days (the rest is carried forward from recent captures). Low coverage = trust the total less."
                 label="Coverage"
                 value={players?.players_coverage != null ? fmtPct(players.players_coverage) : "—"}
                 sub="measured fresh (≤2d)"
@@ -339,9 +348,10 @@ export function NicheDetailDrawer({
         </section>
 
         <div className="grid grid-cols-3 gap-3">
-          <StatTile label="Median revenue" value={fmtUsd(activeVariant.median_rev)} sub="the typical outcome" />
-          <StatTile label="P75 revenue" value={fmtUsd(activeVariant.p75_rev)} />
+          <StatTile label="Median revenue" value={fmtUsd(activeVariant.median_rev)} sub="the typical outcome" help="Half the niche's scored games earn less than this (estimated lifetime gross). This is what a REALISTIC entry should expect — not what the hits earn." />
+          <StatTile label="P75 revenue" value={fmtUsd(activeVariant.p75_rev)} help="A quarter of the niche's games earn more than this — a good-but-not-exceptional outcome." />
           <StatTile
+            help="Only 1 game in 10 earns more than this — what the niche's successful titles make. Estimates are Boxleiter-style (reviews × owners-per-review × price), not reported sales."
             label="P90 revenue"
             value={activeVariant.p90_rev != null ? fmtUsd(activeVariant.p90_rev) : "—"}
             sub="the successful tail"
@@ -350,16 +360,19 @@ export function NicheDetailDrawer({
 
         <div className="grid grid-cols-3 gap-3">
           <StatTile
+            help="Estimated copies owned across all the niche's scored games — the size of the pie. Big pie + weak median = people play the hits; it doesn't hand a new entrant players."
             label="Total owners"
             value={fmtCompact(activeVariant.total_owners)}
             sub={activeVariant.market_size != null ? `market size p${Math.round(activeVariant.market_size)}` : undefined}
           />
           <StatTile
-            label="Entrant ratio"
+            help="Median revenue of games released in the last 24 months vs the niche's all-time median. The catalog-wide norm is ~1.08×, so read against that: meaningfully below 1 = recent entrants genuinely underearn the back catalog."
+            label="Newcomers earn"
             value={activeVariant.entrant_ratio != null ? `${activeVariant.entrant_ratio.toFixed(2)}×` : "—"}
-            sub="24m vs all-time median (norm ~1.08)"
+            sub="of the back catalog's median (norm ~1.08×; below 1 = recent games earn less)"
           />
           <StatTile
+            help="Share of the niche's scored games that are playable single-player (catalog norm ~90%). Below ~80% the niche leans multiplayer — netcode, servers and a live player base become table stakes."
             label="Solo viability"
             value={fmtPct(activeVariant.solo_viability)}
             sub="playable single-player (norm ~90%)"
@@ -429,6 +442,10 @@ export function NicheDetailDrawer({
           {detail && (
             <Histogram buckets={detail.revenue_histogram} color={CSS_VAR.demand} formatX={fmtUsd} height={200} />
           )}
+          <p className="mt-1.5 text-[11px] text-ink-muted">
+            Every scored game in the niche, bucketed by estimated lifetime revenue (log scale — each step is a big
+            jump). Mass on the left = most games earn little; a long right tail = winner-take-most.
+          </p>
         </section>
 
         {detail && detail.themes.length > 0 && (
