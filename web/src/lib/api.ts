@@ -155,6 +155,8 @@ export interface NicheRow {
   hit_rate_500k: number | null;
   beatable_share: number | null;
   saturation_yoy: number | null;
+  n_recent_year?: number | null;
+  n_prior_year?: number | null;
   demand: number | null;
   competition: number | null;
   quality_gap: number | null;

@@ -413,6 +413,8 @@ class NicheRow(BaseModel):
     hit_rate_500k: Optional[float] = None
     beatable_share: Optional[float] = None
     saturation_yoy: Optional[float] = None
+    n_recent_year: Optional[int] = None
+    n_prior_year: Optional[int] = None
     demand: Optional[float] = None
     competition: Optional[float] = None
     quality_gap: Optional[float] = None

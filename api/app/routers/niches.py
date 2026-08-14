@@ -75,7 +75,7 @@ _BASE_COLS = [
     "total_owners", "total_rev", "total_reviews", "market_size",
     "recent_velocity",
     "self_pub_share", "winner_concentration", "hit_rate_200k", "hit_rate_500k",
-    "beatable_share", "saturation_yoy", "demand", "competition", "quality_gap",
+    "beatable_share", "saturation_yoy", "n_recent_year", "n_prior_year", "demand", "competition", "quality_gap",
     "opportunity", "opportunity_v2", "decline_gate", "entrant_ratio",
     "solo_viability", "tier",
 ]
