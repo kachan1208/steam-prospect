@@ -59,17 +59,24 @@ def main() -> None:
     # ---- niches: find_niches() default call + niche_detail("tag", OWSC) -----------------
     # All 4 precomputed (window, min_reviews) cuts for the OWSC key itself...
     con.execute(f"CREATE TABLE mart_niche AS SELECT * FROM real.mart_niche WHERE dimension='tag' AND key='{OWSC}'")
-    # ...plus 9 more REAL tag/all/10 rows ranked just below it, so it naturally lands #1 in
-    # this fixture (today's real #1/#2, "Naval"/"Naval Combat", score higher — OFFSET 2
-    # starts right at OWSC's own real rank, no per-key exclusion list to maintain).
+    # ...plus 9 more REAL tag/all/50 rows ranked just below it, so it naturally lands #1 in
+    # this fixture (OFFSET 2 starts right at OWSC's own real rank, no per-key exclusion
+    # list to maintain). min_reviews=50 matches MIN_REVIEWS_LEVELS=[50,100] in
+    # etl/build_marts.py — the original =10 filler predates that change and matched
+    # nothing on newer marts.
     con.execute(f"""
         INSERT INTO mart_niche
         SELECT * FROM real.mart_niche
-        WHERE dimension='tag' AND win='all' AND min_reviews=10 AND key != '{OWSC}'
+        WHERE dimension='tag' AND win='all' AND min_reviews=50 AND key != '{OWSC}'
         ORDER BY opportunity DESC NULLS LAST, n_games DESC LIMIT 9 OFFSET 2
     """)
     for tbl in ("mart_niche_top", "mart_niche_hist", "mart_niche_trend"):
         con.execute(f"CREATE TABLE {tbl} AS SELECT * FROM real.{tbl} WHERE dimension='tag' AND key='{OWSC}'")
+    # Live-player (CCU) daily marts — game_player_history(367520) + niche_player_history
+    # ("tag", OWSC). mart_game/mart_niche SELECT-* copies above/below pick up the players_*
+    # columns automatically on marts that have them.
+    con.execute("CREATE TABLE mart_game_players_daily AS SELECT * FROM real.mart_game_players_daily WHERE appid=367520")
+    con.execute(f"CREATE TABLE mart_niche_players AS SELECT * FROM real.mart_niche_players WHERE dimension='tag' AND key='{OWSC}'")
 
     # ---- game: game_teardown/game_profile/game_search(367520 = Hollow Knight) ------------
     con.execute("CREATE TABLE mart_game AS SELECT * FROM real.mart_game WHERE appid=367520")

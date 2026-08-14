@@ -96,6 +96,11 @@ SELECT
     COALESCE(v.n_reviews_trailing_30d, 0) AS n_reviews_trailing_30d,
     v.playtime_p25, v.playtime_p50, v.playtime_p75,
     cc.live_players,
+    -- Daily-series summaries from mart_players.sql's _game_players_summary TEMP (runs
+    -- before this file): trailing-7d average of the nightly point samples + same-window
+    -- trend vs the prior 7d. NULL until a game has measured days (see mart_players.sql).
+    gps.players_7d_avg,
+    round(gps.players_trend_7d_pct, 2) AS players_trend_7d_pct,
     COALESCE(tw.twitch_viewers, 0) AS twitch_viewers,
     COALESCE(tw.twitch_streams, 0) AS twitch_streams
 FROM stg_game g
@@ -104,5 +109,6 @@ LEFT JOIN pct_ranks pr ON pr.appid = g.appid
 LEFT JOIN top_tags_agg tt ON tt.appid = g.appid
 LEFT JOIN velocity v ON v.appid = g.appid
 LEFT JOIN ccu cc ON cc.appid = g.appid
+LEFT JOIN _game_players_summary gps ON gps.appid = g.appid
 LEFT JOIN twitch tw ON tw.appid = g.appid
 LEFT JOIN src.games gh ON gh.appid = g.appid;

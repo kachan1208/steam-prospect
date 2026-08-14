@@ -40,6 +40,11 @@ def main() -> None:
         assert not bad_tiers, f"default include_tiers leaked tiers: {bad_tiers}"
         assert all(n["opportunity_v2"] <= n["opportunity"] + 1e-9 for n in niches["niches"]), \
             "opportunity_v2 must never exceed opportunity (gate is <= 1)"
+        # Live-player columns ride along exactly when the mart carries them (values may
+        # be None — e.g. a fixture whose one capture day is > 7d stale).
+        if srv._HAS_PLAYERS:
+            for field in ("total_players_now", "players_trend_7d_pct", "players_coverage"):
+                assert field in top, f"missing players field {field!r} in find_niches rows"
         print(f"\n[OK] top niche is {top['key']!r} (tier={top['tier']}, "
               f"opportunity_v2={top['opportunity_v2']}, gate={top['decline_gate']})")
 
@@ -55,8 +60,10 @@ def main() -> None:
         assert "error" not in detail
         assert detail["tier"] in ("micro", "umbrella", "theme", "meta", "genre")
         assert all("entrant_ratio" in v and "solo_viability" in v for v in detail["variants"])
+        assert "players" in detail, "niche_detail must always carry the players key (may be None)"
         print(f"\n[OK] niche_detail returned {len(detail['representative_games'])} representative games, "
-              f"{len(detail['saturation_trend'])} trend years, {len(detail['revenue_histogram'])} hist buckets")
+              f"{len(detail['saturation_trend'])} trend years, {len(detail['revenue_histogram'])} hist buckets, "
+              f"players={'yes' if detail['players'] else 'None'}")
 
     # 2b. tag_combos — tolerant: mart_tag_lift only exists once the ETL that added it has
     # run, and its absence must yield the tool's clear error dict, never a crash.
@@ -100,6 +107,34 @@ def main() -> None:
     search = srv.game_search(q="Hollow Knight", limit=5)
     show('game_search(q="Hollow Knight")', search)
     assert any(g["appid"] == 367520 for g in search["games"])
+
+    # 6b. player-history tools — tolerant: the CCU marts only exist once the ETL that
+    # added them has rebuilt current.duckdb, and their absence must yield the tools'
+    # clear "re-run ETL" error dict, never a crash. Values are shape-checked only (a
+    # fixture may hold a single stale capture day, making summaries None/empty).
+    gph = srv.game_player_history(367520, days=365)
+    show("game_player_history(367520, days=365)", gph)
+    if "error" in gph:
+        assert "live-player" in gph["error"], f"unexpected game_player_history error: {gph['error']!r}"
+        print("\n[OK] game_player_history degraded cleanly (CCU marts not built yet — run `task etl`)")
+    else:
+        assert gph["name"] == "Hollow Knight"
+        assert "summary" in gph and "series" in gph and isinstance(gph["series"], list)
+        assert gph["caveats"], "player tools must always state the point-sample caveats"
+        print(f"\n[OK] game_player_history: {gph['summary'].get('n_days_measured', 0)} measured days, "
+              f"{len(gph['series'])} series rows")
+
+    nph = srv.niche_player_history("tag", detail_key, days=365)
+    show(f"niche_player_history('tag', {detail_key!r}, days=365)", nph)
+    if "error" in nph:
+        assert "live-player" in nph["error"] or "no niche found" in nph["error"], \
+            f"unexpected niche_player_history error: {nph['error']!r}"
+        print("\n[OK] niche_player_history degraded cleanly")
+    else:
+        assert "summary" in nph and "series" in nph and isinstance(nph["series"], list)
+        assert "n_games_panel" in nph["summary"]
+        print(f"\n[OK] niche_player_history: {len(nph['series'])} series rows, "
+              f"panel={nph['summary'].get('n_games_panel')}")
 
     # 7. launch_shape + best_launch_timing. Timing is tolerant on purpose: the
     # mart_timing_* trio only exists once the ETL that added it (and a source DB with

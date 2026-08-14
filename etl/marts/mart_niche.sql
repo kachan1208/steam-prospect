@@ -1,6 +1,8 @@
 -- mart_niche.sql
 -- Builds the niche/opportunity marts from staging tables (stg_game, stg_tag_membership,
--- stg_genre_membership, stg_singleplayer_tag, tag_tier) which build_marts.py creates first.
+-- stg_genre_membership, stg_singleplayer_tag, tag_tier) which build_marts.py creates first,
+-- plus the TEMP _niche_players_now summary created by mart_players.sql (which runs before
+-- this file — see MART_FILES ordering).
 --   mart_niche       one row per (dimension, key, win, min_reviews) with opportunity score
 --   mart_niche_top   top-N representative games per (dimension, key)
 --   mart_niche_hist  revenue histogram per (dimension, key)   [window=all, min_reviews floor]
@@ -43,6 +45,17 @@
 --                   evidence of decline" (COALESCE to the neutral value), never as decline.
 --   opportunity_v2  opportunity * decline_gate — the growth-gated headline score. The
 --                   original `opportunity` is kept unchanged alongside it.
+--
+-- Live-player columns (2026-08, additive — from mart_players.sql's _niche_players_now;
+-- ONE value per (dimension, key), stamped on all 4 cut rows like entrant_ratio; population
+-- = the (win='all', min_reviews=@MIN_REVIEWS_DEFAULT@) scored cut):
+--   total_players_now     summed current CCU of the niche's scored games (each game's
+--                         latest nightly ~21-22:00 UTC point sample, <= 7 days old — NOT
+--                         a daily peak). NULL = never measured / mart predates collection.
+--   players_trend_7d_pct  same-panel last-7d vs prior-7d change (%): only games measured
+--                         in BOTH windows count, so coverage growth can't fake a trend.
+--   players_coverage      share of total_players_now measured fresh (<= 2 days); low
+--                         values mean the total leans on carried tail values.
 
 DROP TABLE IF EXISTS mart_niche;
 DROP TABLE IF EXISTS mart_niche_top;
@@ -216,9 +229,14 @@ SELECT
     round(g.decline_gate, 4) AS decline_gate,
     round(GREATEST(0, LEAST(100,
         @W_DEMAND@ * g.demand - @W_COMPETITION@ * g.competition + @W_QUALITY@ * g.quality_gap))
-        * g.decline_gate, 2) AS opportunity_v2
+        * g.decline_gate, 2) AS opportunity_v2,
+    -- Live-player columns (additive; see header — one value per key across all cuts).
+    np.total_players_now,
+    round(np.players_trend_7d_pct, 2) AS players_trend_7d_pct,
+    round(np.players_coverage, 4) AS players_coverage
 FROM gated g
-LEFT JOIN tag_tier tt ON g.dimension = 'tag' AND tt.tag = g.key;
+LEFT JOIN tag_tier tt ON g.dimension = 'tag' AND tt.tag = g.key
+LEFT JOIN _niche_players_now np ON np.dimension = g.dimension AND np.key = g.key;
 
 CREATE TABLE mart_niche_top AS
 WITH membership AS (

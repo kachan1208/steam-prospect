@@ -476,6 +476,9 @@ export interface GameProfile {
   playtime_p50: number | null;
   playtime_p75: number | null;
   live_players: number | null;
+  // Daily-CCU summaries (absent/null on marts that predate the players marts).
+  players_7d_avg?: number | null;
+  players_trend_7d_pct?: number | null;
   twitch_viewers: number | null;
   twitch_streams: number | null;
   first_seen: string | null;
