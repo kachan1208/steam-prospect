@@ -167,6 +167,7 @@ SELECT
     CAST(COUNT(*) FILTER (WHERE f.is_recent) AS INTEGER) AS n_recent_24m,
     CAST(SUM(f.est_rev_reviews) AS DOUBLE) AS total_rev,
     CAST(median(f.est_rev_reviews) AS DOUBLE) AS median_rev,
+    CAST(quantile_cont(f.est_rev_reviews, 0.90) AS DOUBLE) AS p90_rev,
     CAST(AVG(CASE WHEN f.est_rev_reviews > 200000 THEN 1.0 ELSE 0.0 END)
             FILTER (WHERE f.est_rev_reviews IS NOT NULL) AS DOUBLE) AS hit_rate_200k,
     CAST(median(f.total_reviews) AS DOUBLE) AS median_reviews,

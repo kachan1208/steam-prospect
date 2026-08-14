@@ -131,7 +131,12 @@ export default function Studios() {
                     Active
                   </th>
                   <th className="whitespace-nowrap px-3 py-2 font-medium">Total est. revenue</th>
-                  <th className="whitespace-nowrap px-3 py-2 font-medium">Median est. revenue</th>
+                  <th
+                    className="whitespace-nowrap px-3 py-2 font-medium"
+                    title="90th-percentile est. lifetime revenue per release — what the entity's successful titles earn"
+                  >
+                    P90 est. revenue
+                  </th>
                   <th className="whitespace-nowrap px-3 py-2 font-medium" title="Share of releases clearing $200K est. revenue">
                     Hit rate ≥ $200K
                   </th>
@@ -174,7 +179,9 @@ export default function Studios() {
                         {fmtUsd(e.total_rev)}
                       </span>
                     </td>
-                    <td className="tabular px-3 py-2 align-middle">{fmtUsd(e.median_rev)}</td>
+                    <td className="tabular px-3 py-2 align-middle">
+                      {e.p90_rev != null ? fmtUsd(e.p90_rev) : "—"}
+                    </td>
                     <td className="tabular px-3 py-2 align-middle">
                       <span
                         className="rounded px-1.5 py-0.5"

@@ -101,6 +101,7 @@ agg AS (
         median(est_rev_reviews) AS median_rev,
         quantile_cont(est_rev_reviews, 0.25) AS p25_rev,
         quantile_cont(est_rev_reviews, 0.75) AS p75_rev,
+        quantile_cont(est_rev_reviews, 0.90) AS p90_rev,
         median(total_reviews) AS median_reviews,
         quantile_cont(total_reviews, 0.25) AS p25_reviews,
         quantile_cont(total_reviews, 0.75) AS p75_reviews,
@@ -199,7 +200,7 @@ gated AS (
 SELECT
     g.dimension, g.key, g.win, g.min_reviews,
     g.n_games, g.n_recent,
-    g.median_rev, g.p25_rev, g.p75_rev,
+    g.median_rev, g.p25_rev, g.p75_rev, g.p90_rev,
     g.median_reviews, g.p25_reviews, g.p75_reviews,
     g.median_price, g.p25_price, g.p75_price,
     g.median_positive_ratio,

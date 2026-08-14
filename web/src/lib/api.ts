@@ -83,6 +83,7 @@ export type SortKey =
   | "total_rev"
   | "total_reviews"
   | "median_rev"
+  | "p90_rev"
   | "median_reviews"
   | "median_price"
   | "median_owners"
@@ -138,6 +139,7 @@ export interface NicheRow {
   median_rev: number | null;
   p25_rev: number | null;
   p75_rev: number | null;
+  p90_rev?: number | null; // absent on marts that predate 2026-08-14
   median_reviews: number | null;
   median_price: number | null;
   median_positive_ratio: number | null;
@@ -901,6 +903,7 @@ export interface EntitySearchRow {
   n_recent_24m: number | null;
   total_rev: number | null;
   median_rev: number | null;
+  p90_rev?: number | null; // absent on marts that predate 2026-08-14
   hit_rate_200k: number | null;
   top_genres: string[];
 }
@@ -941,6 +944,7 @@ export interface EntitySummary {
   n_recent_24m: number | null;
   total_rev: number | null;
   median_rev: number | null;
+  p90_rev?: number | null; // absent on marts that predate 2026-08-14
   hit_rate_200k: number | null;
   median_reviews: number | null;
   median_positive_ratio: number | null;
