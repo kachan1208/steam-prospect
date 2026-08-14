@@ -173,6 +173,11 @@ class GameProfile(BaseModel):
     playtime_p75: Optional[float] = None
     # Live traction / reach — CCU snapshot (steam_players_bulk.py) + current Twitch footprint.
     live_players: Optional[int] = None
+    # Daily-CCU summaries (mart_players.sql): trailing-7d average of the nightly point
+    # samples + change vs the prior 7d. Absent (None) on marts that predate the CCU marts —
+    # the router omits the columns there (see games.py::_has_players_summary).
+    players_7d_avg: Optional[float] = None
+    players_trend_7d_pct: Optional[float] = None
     twitch_viewers: Optional[int] = None
     twitch_streams: Optional[int] = None
     first_seen: Optional[str] = None   # when this game first entered our catalog (not Steam's release date)

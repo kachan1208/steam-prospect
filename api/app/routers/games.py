@@ -73,6 +73,26 @@ _PROFILE_COLS = (
 )
 
 
+@lru_cache(maxsize=1)
+def _has_players_summary() -> bool:
+    """Whether the current mart carries the daily-CCU summary columns (players_7d_avg /
+    players_trend_7d_pct from mart_players.sql). Gated like _has_name_lower(): the columns
+    only appear after the ETL that added them rebuilds the mart, and this app can boot
+    against an older mart (e.g. the App Platform path downloads a published duckdb) — the
+    profile must not 500 there. Cached for the same swap-then-restart reason."""
+    rows = analytics_db.query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_game' AND column_name = 'players_7d_avg'"
+    )
+    return bool(rows)
+
+
+def _profile_cols() -> str:
+    if _has_players_summary():
+        return _PROFILE_COLS + ", players_7d_avg, players_trend_7d_pct"
+    return _PROFILE_COLS
+
+
 @router.get("/search", response_model=GameSearchList)
 def search_games(
     q: str | None = Query(None),
@@ -225,7 +245,7 @@ def suggest_tags(
 def game_profile(
     appid: int,
 ) -> GameProfile:
-    row = analytics_db.query_one(f"SELECT {_PROFILE_COLS} FROM mart_game WHERE appid = ?", [appid])
+    row = analytics_db.query_one(f"SELECT {_profile_cols()} FROM mart_game WHERE appid = ?", [appid])
     if row is None:
         raise HTTPException(status_code=404, detail=f"game not found: {appid}")
     return GameProfile(**row)

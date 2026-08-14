@@ -25,6 +25,8 @@ Data caveats (surfaced so the UI can caption the chart honestly):
 """
 from __future__ import annotations
 
+from functools import lru_cache
+
 from fastapi import APIRouter, HTTPException, Query
 
 from pydantic import BaseModel
@@ -148,6 +150,78 @@ def _build_comps(requested: list[int]) -> GameTrendsComps:
         cohort = [CohortTrendPoint(**r) for r in cohort_rows]
 
     return GameTrendsComps(requested=requested, matched=matched, series=series, cohort=cohort)
+
+
+# ------------------------------------------------------------------------------------------
+# Daily live-player (CCU) series — GET /api/games/{appid}/players
+# ------------------------------------------------------------------------------------------
+@lru_cache(maxsize=1)
+def _has_players_daily() -> bool:
+    """Whether the current mart carries the daily CCU marts (mart_players.sql). Gated so
+    the endpoint degrades to available=False (not a 500) when the app boots against an
+    older mart — same capability idiom as games.py::_has_name_lower. Cached: the DB is
+    swapped + app restarted on each ETL build."""
+    rows = analytics_db.query(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'mart_game_players_daily'"
+    )
+    return bool(rows)
+
+
+class GamePlayersPoint(BaseModel):
+    date: str  # 'YYYY-MM-DD' (UTC capture date)
+    players: int  # LAST capture of that date — a ~21-22:00 UTC point sample, NOT a daily peak
+
+
+class GamePlayersSummary(BaseModel):
+    live_players: int | None = None  # latest capture (mart_game.live_players)
+    players_7d_avg: float | None = None  # trailing-7d average of the point samples
+    players_trend_7d_pct: float | None = None  # vs the prior 7d (measured days only)
+    n_days_measured: int = 0  # measured days in the FULL retained history
+    first_date: str | None = None  # bounds of that history
+    last_date: str | None = None
+
+
+class GamePlayersResponse(BaseModel):
+    appid: int
+    days: int
+    available: bool  # False when the mart predates the CCU marts (UI: hide the panel)
+    summary: GamePlayersSummary | None = None
+    points: list[GamePlayersPoint]  # measured days only — a gap is "unmeasured", never zero
+
+
+@router.get("/{appid}/players", response_model=GamePlayersResponse)
+def game_players(
+    appid: int,
+    days: int = Query(90, ge=7, le=365, description="Series window in days (summary always covers full history)."),
+) -> GamePlayersResponse:
+    exists = analytics_db.scalar("SELECT COUNT(*) FROM mart_game WHERE appid = ?", [appid])
+    if not exists:
+        raise HTTPException(status_code=404, detail=f"game not found: {appid}")
+    if not _has_players_daily():
+        return GamePlayersResponse(appid=appid, days=days, available=False, summary=None, points=[])
+
+    # days is Query-validated (7-365), safe to interpolate into the INTERVAL literal.
+    rows = analytics_db.query(
+        f"SELECT CAST(date AS VARCHAR) AS date, players FROM mart_game_players_daily "
+        f"WHERE appid = ? AND date >= CURRENT_DATE - INTERVAL {days} DAY ORDER BY date ASC",
+        [appid],
+    )
+    game = analytics_db.query_one(
+        "SELECT live_players, players_7d_avg, players_trend_7d_pct FROM mart_game WHERE appid = ?",
+        [appid],
+    )
+    bounds = analytics_db.query_one(
+        "SELECT COUNT(*) AS n_days_measured, CAST(MIN(date) AS VARCHAR) AS first_date, "
+        "CAST(MAX(date) AS VARCHAR) AS last_date FROM mart_game_players_daily WHERE appid = ?",
+        [appid],
+    )
+    return GamePlayersResponse(
+        appid=appid,
+        days=days,
+        available=True,
+        summary=GamePlayersSummary(**(game or {}), **(bounds or {})),
+        points=[GamePlayersPoint(**r) for r in rows],
+    )
 
 
 @router.get("/{appid}/trends", response_model=GameTrendsResponse)

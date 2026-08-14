@@ -43,6 +43,19 @@ MARKET_MIN_REVIEWS = 1           # market distribution floor: >=1 review = measu
                                  # (deliberately lower than the niche floor so the long tail
                                  #  and the cited $249 / $100K benchmark marks stay visible)
 
+# Live-player (CCU) daily/niche series — see mart_players.sql. The collector captures a
+# fixed top-8k head nightly and rotates the tail every ~3-8 nights, so per-game daily
+# coverage is intentionally sparse below the head; these knobs make that sparsity honest.
+CCU_STALE_DAYS = 7               # LOCF carry-forward cap: a game's last capture counts toward
+                                 # niche totals for at most this many days, then it drops out
+                                 # (must comfortably cover the tail rotation cycle)
+CCU_FRESH_DAYS = 2               # "fresh" for players_coverage: captured within the last
+                                 # nightly cycle or two
+PLAYERS_TREND_DAYS = 7           # trend windows: last 7d vs prior 7d, same-panel only
+PLAYERS_HISTORY_DAYS = 365       # rolling window kept in the players marts (SQLite retains all)
+NICHE_PLAYERS_MIN_MEASURED = 10  # a niche needs >= this many ever-measured games for a series;
+                                 # also the same-panel floor for niche players_trend_7d_pct
+
 # Review-count reconciliation (SteamSpy vs. the actual scraped `reviews` table). SteamSpy
 # lags badly for new releases -- it can sit at total_reviews=0 for weeks/months after
 # launch while our own scraper already holds real, current review data for the same game.
@@ -667,6 +680,11 @@ TAG_PAIR_MIN_GAMES = 15           # an unordered tag PAIR needs >= this many qua
                                   # because pairs slice the population much thinner).
 
 MART_FILES = [
+    "mart_players.sql",  # FIRST on purpose: reads only staging (stg_player_counts_daily,
+                         # stg_player_count_latest, stg_game, stg_tag/genre_membership) and
+                         # creates TEMP summary tables (_game_players_summary,
+                         # _niche_players_now) that mart_game.sql and mart_niche.sql join —
+                         # so it must precede both. TEMPs persist across files (one connection).
     "mart_game.sql",
     "mart_entity.sql",   # reads ONLY mart_game (+ the entity_suffix temp table) — must
                          # come anywhere after mart_game.sql; kept adjacent since it's
@@ -763,6 +781,12 @@ def build_params() -> dict[str, str]:
         "CREATOR_MIN_CONFIDENCE": CREATOR_MIN_CONFIDENCE,
         "CREATOR_PITCH_MIN_MENTIONS": CREATOR_PITCH_MIN_MENTIONS,
         "TAG_PAIR_MIN_GAMES": TAG_PAIR_MIN_GAMES,
+        "CCU_STALE_DAYS": CCU_STALE_DAYS,
+        "CCU_FRESH_DAYS": CCU_FRESH_DAYS,
+        "PLAYERS_TREND_DAYS": PLAYERS_TREND_DAYS,
+        "PLAYERS_TREND_DAYS_X2": PLAYERS_TREND_DAYS * 2,
+        "PLAYERS_HISTORY_DAYS": PLAYERS_HISTORY_DAYS,
+        "NICHE_PLAYERS_MIN_MEASURED": NICHE_PLAYERS_MIN_MEASURED,
         "CUR_YEAR": cur_year,
         "RECENT_YEAR": cur_year - 1,
         "PRIOR_YEAR": cur_year - 2,
@@ -1222,11 +1246,17 @@ def create_marketing_staging(con: duckdb.DuckDBPyConnection) -> bool:
 
 
 def create_ccu_staging(con: duckdb.DuckDBPyConnection) -> bool:
-    """Latest live concurrent-player count per game from the scraper's `player_counts` table
+    """Live concurrent-player staging from the scraper's `player_counts` table
     (steam_players_bulk.py — keyless GetNumberOfCurrentPlayers snapshots). Guarded exactly like
-    create_marketing_staging(): builds stg_player_count_latest from the newest snapshot per game
-    when the table exists, else an empty typed table so mart_game never crashes on an older source
-    DB. This is REAL live traction, distinct from SteamSpy's stale daily-peak stg_game.ccu."""
+    create_marketing_staging(): builds real staging when the table exists, else empty typed
+    tables so downstream marts never crash on an older source DB. Two tables:
+
+      stg_player_count_latest — newest snapshot per game (mart_game.live_players);
+      stg_player_counts_daily — one row per (appid, UTC capture date): the LAST capture of the
+          day (max_by), i.e. a stable evening point sample at the nightly ~21-22:00 UTC sweep —
+          deliberately NOT a daily peak. Feeds mart_players.sql (daily/niche series).
+
+    This is REAL live traction, distinct from SteamSpy's stale daily-peak stg_game.ccu."""
     if _sqlite_table_exists(con, "player_counts"):
         con.execute(
             """
@@ -1236,10 +1266,20 @@ def create_ccu_staging(con: duckdb.DuckDBPyConnection) -> bool:
                     row_number() OVER (PARTITION BY appid ORDER BY captured_at DESC) AS rn
                 FROM src.player_counts
             ) WHERE rn = 1;
+
+            CREATE TEMP TABLE stg_player_counts_daily AS
+            SELECT appid,
+                CAST(TRY_CAST(captured_at AS TIMESTAMP) AS DATE) AS cap_date,
+                max_by(player_count, TRY_CAST(captured_at AS TIMESTAMP)) AS players,
+                COUNT(*) AS n_captures
+            FROM src.player_counts
+            WHERE TRY_CAST(captured_at AS TIMESTAMP) IS NOT NULL AND player_count IS NOT NULL
+            GROUP BY 1, 2;
             """
         )
         return True
     con.execute("CREATE TEMP TABLE stg_player_count_latest (appid INTEGER, live_players INTEGER, captured_at TIMESTAMP)")
+    con.execute("CREATE TEMP TABLE stg_player_counts_daily (appid INTEGER, cap_date DATE, players INTEGER, n_captures INTEGER)")
     return False
 
 
@@ -1726,6 +1766,12 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
     boxleiter_slope = con.execute(
         "SELECT slope FROM stg_genre_boxleiter WHERE genre = '__all__'"
     ).fetchone()[0]
+    # CCU coverage at a glance (mart_players.sql runs before write_meta, so both exist —
+    # zero on sources without player_counts).
+    ccu_panel_games = con.execute("SELECT COUNT(*) FROM _pl_panel").fetchone()[0]
+    ccu_history_days = con.execute(
+        "SELECT COUNT(DISTINCT date) FROM mart_game_players_daily"
+    ).fetchone()[0]
 
     rows = {
         "mart_version": mart_version,
@@ -1744,6 +1790,8 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
             f"sat_full_decline={GATE_SAT_FULL_DECLINE},entrant_full={GATE_ENTRANT_FULL},"
             f"umbrella_n_games={UMBRELLA_N_GAMES}"
         ),
+        "ccu_panel_games": str(ccu_panel_games),
+        "ccu_history_days": str(ccu_history_days),
     }
     con.execute("DROP TABLE IF EXISTS mart_meta")
     con.execute("CREATE TABLE mart_meta(key VARCHAR, value VARCHAR)")

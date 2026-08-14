@@ -280,9 +280,14 @@ export default function GameProfile() {
           label="Live players (now)"
           value={profile.live_players != null ? fmtCompact(profile.live_players) : "—"}
           sub={
-            profile.twitch_viewers
-              ? `${fmtCompact(profile.twitch_viewers)} watching on Twitch`
-              : undefined
+            [
+              profile.players_trend_7d_pct != null
+                ? `${profile.players_trend_7d_pct >= 0 ? "+" : ""}${profile.players_trend_7d_pct.toFixed(1)}% vs prior 7d`
+                : null,
+              profile.twitch_viewers ? `${fmtCompact(profile.twitch_viewers)} watching on Twitch` : null,
+            ]
+              .filter(Boolean)
+              .join(" · ") || undefined
           }
           onClick={() => toggleMetric("live_players")}
           active={selectedMetric === "live_players"}

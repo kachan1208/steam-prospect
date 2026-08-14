@@ -71,7 +71,7 @@ export const DRILLDOWN_META: Record<DrilldownMetric, { title: string; subtitle: 
   },
   live_players: {
     title: "Live players — over time, and who's watching where",
-    subtitle: "Average concurrent players by month, Twitch reach alongside it, and today's split.",
+    subtitle: "Daily concurrent-player samples (nightly, not peaks), Twitch reach alongside, and today's split.",
   },
 };
 
@@ -92,6 +92,29 @@ interface TrendsResponse {
   appid: number;
   eligible: boolean;
   points: GameTrendPoint[];
+}
+
+/** GET /api/games/{appid}/players — daily CCU point samples (mart_game_players_daily). */
+interface PlayersPoint {
+  date: string; // 'YYYY-MM-DD'
+  players: number;
+}
+
+interface PlayersSummary {
+  live_players: number | null;
+  players_7d_avg: number | null;
+  players_trend_7d_pct: number | null;
+  n_days_measured: number;
+  first_date: string | null;
+  last_date: string | null;
+}
+
+interface PlayersResponse {
+  appid: number;
+  days: number;
+  available: boolean; // false = mart predates the daily CCU marts -> fall back to monthly
+  summary: PlayersSummary | null;
+  points: PlayersPoint[];
 }
 
 interface SeriesPoint {
@@ -371,11 +394,13 @@ function RevenueDrilldown({
 
 function LivePlayersDrilldown({
   points,
+  daily,
   livePlayers,
   twitchViewers,
   thin,
 }: {
   points: GameTrendPoint[];
+  daily: PlayersResponse | null;
   livePlayers: number | null;
   twitchViewers: number | null;
   thin: boolean;
@@ -384,53 +409,97 @@ function LivePlayersDrilldown({
   const hasCcu = points.some((p) => p.ccu_avg != null);
   const splitMax = Math.max(livePlayers ?? 0, twitchViewers ?? 0, 1);
   const noSplitSnapshot = livePlayers == null && twitchViewers == null;
+  // Daily point samples when the mart carries them (mart_game_players_daily); otherwise the
+  // pre-existing monthly ccu_avg fallback so older marts still show something.
+  const dailyPoints = daily?.available ? daily.points : [];
+  const useDaily = dailyPoints.length > 0;
+  const summary = daily?.summary ?? null;
+  const trendPct = summary?.players_trend_7d_pct ?? null;
 
   return (
     <div className="flex flex-col gap-4">
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div>
-          <div className="mb-1 text-xs text-ink-muted">Live players (avg CCU) / month</div>
+          <div className="mb-1 text-xs text-ink-muted">
+            {useDaily ? "Live players (nightly sample) / day" : "Live players (avg CCU) / month"}
+          </div>
           <ResponsiveContainer width="100%" height={168}>
-            <LineChart data={points} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-              <CartesianGrid stroke="var(--gridline)" vertical={false} />
-              <XAxis {...XAXIS_PROPS} />
-              <YAxis
-                tick={{ fontSize: 10 }}
-                tickFormatter={(v: number) => fmtCompact(v)}
-                tickLine={false}
-                axisLine={false}
-                width={40}
-              />
-              <Tooltip
-                cursor={{ stroke: "var(--baseline)" }}
-                content={({ active, payload, label }) => {
-                  if (!active || !payload || payload.length === 0) return null;
-                  const p = payload[0].payload as GameTrendPoint;
-                  return (
-                    <TooltipPanel
-                      title={String(label)}
-                      rows={[
-                        {
-                          label: "Live players (avg)",
-                          value: p.ccu_avg != null ? fmtCompact(p.ccu_avg) : "no snapshot",
-                          color: CSS_VAR.demand,
-                        },
-                      ]}
-                    />
-                  );
-                }}
-              />
-              {/* No connectNulls: a month with no player-count snapshot is a genuine gap in
-                  monitoring, not zero players, so the line honestly breaks there instead of
-                  interpolating across it. */}
-              <Line
-                type="monotone"
-                dataKey="ccu_avg"
-                stroke={CSS_VAR.demand}
-                strokeWidth={2}
-                dot={{ r: 3, fill: CSS_VAR.demand, strokeWidth: 0 }}
-              />
-            </LineChart>
+            {useDaily ? (
+              <LineChart data={dailyPoints} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid stroke="var(--gridline)" vertical={false} />
+                <XAxis {...XAXIS_PROPS} dataKey="date" tickFormatter={(v: string) => v.slice(5)} />
+                <YAxis
+                  tick={{ fontSize: 10 }}
+                  tickFormatter={(v: number) => fmtCompact(v)}
+                  tickLine={false}
+                  axisLine={false}
+                  width={40}
+                />
+                <Tooltip
+                  cursor={{ stroke: "var(--baseline)" }}
+                  content={({ active, payload, label }) => {
+                    if (!active || !payload || payload.length === 0) return null;
+                    const p = payload[0].payload as PlayersPoint;
+                    return (
+                      <TooltipPanel
+                        title={String(label)}
+                        rows={[{ label: "Live players (sample)", value: fmtCompact(p.players), color: CSS_VAR.demand }]}
+                      />
+                    );
+                  }}
+                />
+                {/* Measured days only — unmeasured days simply aren't in the data, so the
+                    line spans the real samples without fabricating zeros between them. */}
+                <Line
+                  type="monotone"
+                  dataKey="players"
+                  stroke={CSS_VAR.demand}
+                  strokeWidth={2}
+                  dot={dailyPoints.length <= 45 ? { r: 2.5, fill: CSS_VAR.demand, strokeWidth: 0 } : false}
+                />
+              </LineChart>
+            ) : (
+              <LineChart data={points} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid stroke="var(--gridline)" vertical={false} />
+                <XAxis {...XAXIS_PROPS} />
+                <YAxis
+                  tick={{ fontSize: 10 }}
+                  tickFormatter={(v: number) => fmtCompact(v)}
+                  tickLine={false}
+                  axisLine={false}
+                  width={40}
+                />
+                <Tooltip
+                  cursor={{ stroke: "var(--baseline)" }}
+                  content={({ active, payload, label }) => {
+                    if (!active || !payload || payload.length === 0) return null;
+                    const p = payload[0].payload as GameTrendPoint;
+                    return (
+                      <TooltipPanel
+                        title={String(label)}
+                        rows={[
+                          {
+                            label: "Live players (avg)",
+                            value: p.ccu_avg != null ? fmtCompact(p.ccu_avg) : "no snapshot",
+                            color: CSS_VAR.demand,
+                          },
+                        ]}
+                      />
+                    );
+                  }}
+                />
+                {/* No connectNulls: a month with no player-count snapshot is a genuine gap in
+                    monitoring, not zero players, so the line honestly breaks there instead of
+                    interpolating across it. */}
+                <Line
+                  type="monotone"
+                  dataKey="ccu_avg"
+                  stroke={CSS_VAR.demand}
+                  strokeWidth={2}
+                  dot={{ r: 3, fill: CSS_VAR.demand, strokeWidth: 0 }}
+                />
+              </LineChart>
+            )}
           </ResponsiveContainer>
         </div>
         <div>
@@ -484,13 +553,29 @@ function LivePlayersDrilldown({
             valueLabel={twitchViewers != null ? fmtCompact(twitchViewers) : "—"}
           />
         </div>
+        {summary?.players_7d_avg != null && (
+          <p className="mt-2 text-xs text-ink-secondary">
+            7-day average {fmtCompact(summary.players_7d_avg)} players
+            {trendPct != null && (
+              <span className={trendPct >= 0 ? "text-verdict-good" : "text-verdict-serious"}>
+                {" "}
+                ({trendPct >= 0 ? "+" : ""}
+                {trendPct.toFixed(1)}% vs prior 7d)
+              </span>
+            )}
+          </p>
+        )}
         {noSplitSnapshot && <p className="mt-2 text-[11px] italic text-ink-muted">No live snapshot yet for this title.</p>}
       </div>
 
       <p className="text-[11px] italic text-ink-muted">
-        ccu_avg is left blank for months with no player-count snapshot — gaps in the line above are real gaps in
-        monitoring, not zero players.{!hasCcu ? " This title has no CCU snapshot at all yet, and" : " Live-player and"}{" "}
-        Twitch snapshots are recent collectors, so these series typically thicken as more months accumulate.
+        {useDaily
+          ? "Each dot is one nightly capture (~21-22:00 UTC) — a point sample, not the day's peak, so peak charts " +
+            "elsewhere run higher. Missing days are real gaps in monitoring (this title may be on the capture " +
+            "rotation), never zero players."
+          : "ccu_avg is left blank for months with no player-count snapshot — gaps in the line above are real gaps in " +
+            `monitoring, not zero players.${!hasCcu ? " This title has no CCU snapshot at all yet, and" : " Live-player and"} ` +
+            "Twitch snapshots are recent collectors, so these series typically thicken as more months accumulate."}
         <ThinDataNote thin={thin} />
       </p>
     </div>
@@ -512,6 +597,15 @@ export function GameMetricDrilldown({
     queryKey: ["game-trends", appid],
     queryFn: () => request<TrendsResponse>(`/games/${appid}/trends`),
     enabled: Number.isFinite(appid),
+    staleTime: 5 * 60_000,
+  });
+  // Daily CCU samples — only fetched for the live_players drilldown; the endpoint answers
+  // available=false on marts that predate the daily CCU marts (we then fall back to the
+  // monthly ccu_avg series above).
+  const playersQuery = useQuery({
+    queryKey: ["game-players", appid],
+    queryFn: () => request<PlayersResponse>(`/games/${appid}/players?days=90`),
+    enabled: Number.isFinite(appid) && metric === "live_players",
     staleTime: 5 * 60_000,
   });
 
@@ -563,6 +657,7 @@ export function GameMetricDrilldown({
       return (
         <LivePlayersDrilldown
           points={points}
+          daily={playersQuery.data ?? null}
           livePlayers={profile.live_players}
           twitchViewers={profile.twitch_viewers}
           thin={thin}

@@ -66,6 +66,42 @@ _HAS_NAME_LOWER = bool(
     )
 )
 
+# Whether the mart carries the live-player (CCU) marts/columns (mart_players.sql — daily
+# per-game history, niche rollup, and the players_* summary columns on mart_game/mart_niche).
+# Both column sets land in the same ETL build; checked together so a half-present state
+# (impossible via the atomic mart swap) still degrades safely. Same read-once idiom as
+# _HAS_NAME_LOWER.
+_HAS_PLAYERS = bool(
+    query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_game' AND column_name = 'players_7d_avg'"
+    )
+) and bool(
+    query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_niche' AND column_name = 'total_players_now'"
+    )
+)
+
+_PLAYERS_MISSING = (
+    "this analytics DB predates the live-player (CCU) marts (mart_game_players_daily / "
+    "mart_niche_players and the players_* columns on mart_game/mart_niche) — it was built "
+    "by an older ETL. Re-run the ETL (`task etl` in the main prospect checkout) and retry."
+)
+
+# Shared caveats for every players/CCU read — the two ways these series lie if unstated.
+_PLAYERS_POINT_SAMPLE_CAVEAT = (
+    "players values are nightly point samples (one capture per game per day, ~21-22:00 UTC "
+    "sweep) — NOT daily peaks. SteamDB-style peak numbers run higher (our sample is "
+    "typically ~60-90% of the daily peak)."
+)
+_PLAYERS_HISTORY_CAVEAT = (
+    "History starts 2026-07-18. Games outside the top-8k-by-reviews head are captured on a "
+    "~3-8 night rotation, so their daily series have gaps — a gap means UNMEASURED, never "
+    "zero. Tail games are especially sparse before ~2026-08-14 (pre-rotation collector); "
+    "do not read that sparsity as player decline."
+)
+
 
 def _round(v: Any, nd: int) -> Any:
     if isinstance(v, float):
@@ -160,7 +196,12 @@ mcp = FastMCP(
         "winner_concentration > 0.85 means winner-take-most (judge by the median, not "
         "the hits); and for solo devs check solo_viability (~0.9 is the norm; below ~0.8 "
         "leans multiplayer — e.g. Extraction Shooter — and is not solo-buildable without "
-        "flagging it)."
+        "flagging it). "
+        "For 'is this niche HOT right now' questions use the live-player lens: "
+        "find_niches sort=total_players_now (where the players are) or "
+        "players_trend_7d_pct (what's heating up), then niche_player_history / "
+        "game_player_history for the daily series — nightly point samples, not daily "
+        "peaks, and totals are dominated by each niche's biggest games."
     ),
 )
 
@@ -261,6 +302,34 @@ last 24 months (current-market read, smaller sample). `min_reviews` is the per-g
 review floor before a title counts toward niche stats (10 = broad/noisy, 50 =
 stricter/cleaner).
 
+### Live players (CCU) — current traction, not an estimate
+
+Unlike owners/revenue (lifetime ESTIMATES), live players are direct measurements: Steam's
+keyless GetNumberOfCurrentPlayers, captured by a nightly ~21-22:00 UTC sweep since
+2026-07-18. Semantics that matter for interpretation:
+
+- **Point sample, not peak**: one capture per game per day (the LAST of the UTC date) at
+  a consistent evening hour — typically ~60-90% of a SteamDB-style daily peak. Compare
+  values to each other, never to peak charts.
+- **Coverage model**: the top-8k games by reviews are captured EVERY night (they hold
+  ~99% of all Steam CCU); the rest of the >=50-review universe rotates every ~3-8
+  nights. A missing day = unmeasured, never zero. Tail games are sparse before
+  ~2026-08-14 (pre-rotation collector).
+- **Niche rollup (mart_niche_players)**: per (dimension, key, date), total_players sums
+  scored member games' values with each game's last capture carried forward up to 7 days
+  (LOCF) so rotation gaps don't read as dips; games staler than 7d drop out.
+  measured_players / n_games_measured sit alongside as the no-carry reality check.
+- **mart_niche columns** (one value per key, identical on all 4 cut rows, like
+  entrant_ratio): total_players_now (summed latest captures <= 7d old),
+  players_trend_7d_pct (last-7d vs prior-7d, SAME-PANEL — only games measured in both
+  windows count, so coverage growth can't fake a trend), players_coverage (share of the
+  total measured <= 2d fresh; low = leaning on carried tail values).
+- **mart_game columns**: live_players (latest capture), players_7d_avg,
+  players_trend_7d_pct (same window semantics, measured days only, no LOCF).
+- **Interpretation trap**: a niche's total is its HITS — top-heavy by construction. A
+  huge total_players_now says people play the niche's biggest games, not that a new
+  entrant will get players; read it with winner_concentration and the median columns.
+
 ## Revenue & owners estimates
 
 `est_rev_reviews` (the primary revenue figure used throughout) = owners_mid x
@@ -308,9 +377,15 @@ games clearing the review floor).
   trio above (launch-month medians are composition-confounded — they reflect what kind
   of game launches then, not the calendar).
 - **mart_game** — one row per game: metadata, revenue/owners, percentile-vs-genre, top
-  tags, review velocity. -> `game_search`, `game_profile`, `find_comparables` (closest
-  competitors, ranked on demand by tag-Jaccard over `top_tags` within the same primary
-  genre + a price band — no precomputed pairwise mart).
+  tags, review velocity, live players (latest + 7d avg/trend). -> `game_search`,
+  `game_profile`, `find_comparables` (closest competitors, ranked on demand by
+  tag-Jaccard over `top_tags` within the same primary genre + a price band — no
+  precomputed pairwise mart).
+- **mart_game_players_daily / mart_niche_players** — daily live-player (CCU) history:
+  per-game measured days (point samples, gaps = unmeasured), and the per-niche daily
+  rollup (LOCF <= 7d, with measured_players/n_games_measured coverage columns). See the
+  "Live players (CCU)" section above. -> `game_player_history`, `niche_player_history`
+  (+ the players columns in `find_niches`/`niche_detail`/`game_profile`).
 - **mart_entity / mart_entity_games** — one row per (role, developer/publisher name),
   normalized out of mart_game's comma-joined developers/publishers strings (corporate
   suffixes like ", Inc." / ", Ltd." are re-merged into the name instead of becoming fake
@@ -369,7 +444,11 @@ _NICHE_SORTABLE = {
     "n_games", "n_recent", "hit_rate_200k", "hit_rate_500k",
     "beatable_share", "saturation_yoy", "self_pub_share", "winner_concentration",
     "entrant_ratio", "solo_viability",
+    "total_players_now", "players_trend_7d_pct", "players_coverage",
 }
+# The subset of _NICHE_SORTABLE that only exists on marts with the players columns
+# (sorting/filtering on them needs _HAS_PLAYERS; everything else works on older marts).
+_NICHE_PLAYERS_COLS = {"total_players_now", "players_trend_7d_pct", "players_coverage"}
 _NICHE_TIERS = {"micro", "umbrella", "theme", "meta"}
 # Default tier filter (tags only): buildable micro-genres + themes. Umbrella containers
 # (Open World, Sandbox, RPG...) and meta/reception tags (Great Soundtrack, Nostalgia...)
@@ -394,6 +473,7 @@ def find_niches(
     min_median_rev: float | None = None,
     max_competition: float | None = None,
     min_total_owners: float | None = None,
+    min_total_players: float | None = None,
     include_tiers: list[str] | None = _DEFAULT_INCLUDE_TIERS,
     sort: str = "opportunity_v2",
     limit: int = 15,
@@ -454,6 +534,23 @@ def find_niches(
     Use these (or min_total_owners) when a small share of a BIG niche beats a big share
     of a small one — the solo-dev sizing lens.
 
+    LIVE PLAYERS (the "is it hot RIGHT NOW" lens — direct current traction, unlike the
+    ownership/revenue estimates above; one value per key, identical across cuts):
+      - total_players_now: summed current concurrent players (CCU) of the niche's scored
+        games — each game's latest nightly ~21-22:00 UTC point sample (<= 7 days old),
+        NOT a daily peak. Sort by this for "where are the players today".
+      - players_trend_7d_pct: last-7d vs prior-7d change (%), SAME-PANEL (only games
+        measured in both windows count, so coverage growth can't fake a trend). Sort by
+        this for "what's heating up this week".
+      - players_coverage: share of total_players_now measured fresh (<= 2 days). Low
+        values mean the total leans on carried-forward tail captures — trust it less.
+      NULL on all three = players never measured for the niche (or the mart predates CCU
+      collection). min_total_players is the matching optional post-filter. Follow up with
+      niche_player_history(dimension, key) for the daily series. CAVEAT: a niche's total
+      is dominated by its biggest games (the top-12k games hold ~99% of all Steam CCU) —
+      a huge total_players_now says people play the niche's HITS, not that a new entrant
+      gets players.
+
     EXACT MATERIALISATION: only the precomputed cuts exist — window in {"all","24m"} x
     min_reviews in {50,100} (must stay in sync with MIN_REVIEWS_LEVELS in
     etl/build_marts.py; a value the ETL didn't materialise matches no rows and returns an
@@ -469,6 +566,8 @@ def find_niches(
     """
     if sort not in _NICHE_SORTABLE:
         return {"error": f"sort must be one of {sorted(_NICHE_SORTABLE)}"}
+    if not _HAS_PLAYERS and (sort in _NICHE_PLAYERS_COLS or min_total_players is not None):
+        return {"error": _PLAYERS_MISSING}
     if include_tiers is not None:
         bad = [t for t in include_tiers if t not in _NICHE_TIERS]
         if bad:
@@ -487,6 +586,9 @@ def find_niches(
     if min_total_owners is not None:
         where.append("total_owners >= ?")
         params.append(min_total_owners)
+    if min_total_players is not None:
+        where.append("total_players_now >= ?")
+        params.append(min_total_players)
     tiers_applied = None
     if dimension == "tag" and include_tiers is not None:
         tiers_applied = list(include_tiers)
@@ -494,6 +596,11 @@ def find_niches(
         params.extend(tiers_applied)
     limit = max(1, min(limit, 50))
 
+    players_cols = (
+        ",\n                   total_players_now, players_trend_7d_pct, players_coverage"
+        if _HAS_PLAYERS
+        else ""
+    )
     try:
         rows = query(
             f"""
@@ -502,7 +609,7 @@ def find_niches(
                    market_size, total_owners, total_rev, total_reviews,
                    median_rev, median_reviews, median_price, median_positive_ratio,
                    median_owners, recent_velocity, hit_rate_200k, hit_rate_500k,
-                   saturation_yoy, winner_concentration
+                   saturation_yoy, winner_concentration{players_cols}
             FROM mart_niche
             WHERE {" AND ".join(where)}
             ORDER BY {sort} DESC NULLS LAST, n_games DESC
@@ -545,6 +652,14 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
       - hit_rates: headline (window="all", min_reviews=50) hit_rate_200k / hit_rate_500k
         (share of games clearing $200K/$500K est. revenue), median_rev, n_games,
         winner_concentration.
+      - players: the niche's LIVE-player snapshot — latest daily row (date,
+        total_players, measured_players, n_games_measured, n_games_covered,
+        n_games_panel) + history bounds (first_date, last_date, n_days). total_players
+        is summed current CCU (nightly ~21-22:00 UTC point samples, <= 7d carry-forward
+        for rotation gaps — not daily peaks). The variants rows also carry
+        total_players_now / players_trend_7d_pct / players_coverage (same value on all 4
+        cuts). None = never measured or the mart predates CCU collection; call
+        niche_player_history(dimension, key) for the full daily series.
     Returns {"error": ...} if dimension/key doesn't match any niche (call find_niches to
     get exact valid keys — spelling and case must match precisely), or asking you to
     re-run the ETL if the analytics DB predates the v2 columns.
@@ -553,15 +668,20 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
     # word in DuckDB SQL (window functions) and can't be used unquoted in ORDER BY — same
     # reason api/app/routers/niches.py renames win -> window in Python, after the fetch,
     # rather than in SQL.
+    players_cols = (
+        ",\n                   total_players_now, players_trend_7d_pct, players_coverage"
+        if _HAS_PLAYERS
+        else ""
+    )
     try:
         variants = query(
-            """
+            f"""
             SELECT win, min_reviews, tier, n_games, n_recent, opportunity_v2, opportunity,
                    decline_gate, entrant_ratio, solo_viability, demand,
                    competition, quality_gap, market_size, total_owners, total_rev,
                    total_reviews, median_rev, median_reviews, median_price,
                    median_positive_ratio, median_owners, recent_velocity, hit_rate_200k,
-                   hit_rate_500k, beatable_share, saturation_yoy, winner_concentration
+                   hit_rate_500k, beatable_share, saturation_yoy, winner_concentration{players_cols}
             FROM mart_niche WHERE dimension = ? AND key = ? ORDER BY win, min_reviews
             """,
             [dimension, key],
@@ -592,12 +712,44 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
         "WHERE dimension = ? AND key = ? ORDER BY rank_in_niche LIMIT 8",
         [dimension, key],
     )
+    # Live-player snapshot (daily series lives in niche_player_history; here just the
+    # latest row + bounds). None when the mart predates CCU or the niche was never
+    # measured — a real answer, not an error.
+    players = None
+    if _HAS_PLAYERS:
+        try:
+            latest = query_one(
+                "SELECT date, total_players, measured_players, n_games_measured, "
+                "n_games_covered, n_games_panel FROM mart_niche_players "
+                "WHERE dimension = ? AND key = ? ORDER BY date DESC LIMIT 1",
+                [dimension, key],
+            )
+            if latest is not None:
+                bounds = query_one(
+                    "SELECT MIN(date) AS first_date, MAX(date) AS last_date, "
+                    "COUNT(*) AS n_days FROM mart_niche_players "
+                    "WHERE dimension = ? AND key = ?",
+                    [dimension, key],
+                )
+                latest["date"] = str(latest["date"])
+                players = {
+                    **clean(latest),
+                    "history": {
+                        "first_date": str(bounds["first_date"]),
+                        "last_date": str(bounds["last_date"]),
+                        "n_days": bounds["n_days"],
+                    },
+                }
+        except duckdb.CatalogException:
+            players = None
+
     headline = next((v for v in variants if v["window"] == "all" and v["min_reviews"] == 50), variants[0])
     return {
         "dimension": dimension,
         "key": key,
         "tier": headline.get("tier"),
         "variants": clean_rows(variants),
+        "players": players,
         "saturation_trend": clean_rows(trend),
         "revenue_histogram": clean_rows(hist),
         "representative_games": clean_rows(games),
@@ -1295,12 +1447,21 @@ def game_profile(appid: int) -> dict:
     rank vs OTHER games in the same primary genre (rev_pct_in_genre, reviews_pct_in_genre,
     owners_pct_in_genre — all 0-100), top community tags, and review-velocity (reviews
     landed in the first 30/90/365 days post-release, plus current trailing-30d velocity —
-    a live "is this still getting attention" signal). Use game_search to find an appid by
-    name first. Returns {"error": ...} if the appid isn't in the catalog or didn't clear
-    the >=10-review analysis floor (mart_game only carries scored games).
+    a live "is this still getting attention" signal). Also live players when the mart
+    carries them: live_players (latest nightly ~21-22:00 UTC point sample — NOT a daily
+    peak), players_7d_avg (trailing-7d average of those samples) and players_trend_7d_pct
+    (vs the prior 7d); NULL = not yet measured — call game_player_history(appid) for the
+    daily series. Use game_search to find an appid by name first. Returns {"error": ...}
+    if the appid isn't in the catalog or didn't clear the >=10-review analysis floor
+    (mart_game only carries scored games).
     """
+    players_cols = (
+        ",\n               live_players, players_7d_avg, players_trend_7d_pct"
+        if _HAS_PLAYERS
+        else ""
+    )
     row = query_one(
-        """
+        f"""
         SELECT appid, name, release_year, release_date, price_initial, is_free,
                primary_genre, developers, publishers, self_published, is_indie,
                owners_mid, total_reviews, positive_ratio, est_rev_reviews, est_rev_owners,
@@ -1308,7 +1469,7 @@ def game_profile(appid: int) -> dict:
                short_description, rev_pct_in_genre, reviews_pct_in_genre,
                owners_pct_in_genre, top_tags, n_reviews_first_30d, n_reviews_first_90d,
                n_reviews_first_365d, n_reviews_trailing_30d, playtime_p25, playtime_p50,
-               playtime_p75
+               playtime_p75{players_cols}
         FROM mart_game WHERE appid = ?
         """,
         [appid],
@@ -1318,7 +1479,10 @@ def game_profile(appid: int) -> dict:
             "error": f"appid {appid} not found in mart_game — either not in the catalog, "
             "or has fewer than 10 sampled reviews and didn't clear the analysis floor."
         }
-    return clean(row)
+    out = clean(row)
+    if _HAS_PLAYERS:
+        out["caveats"] = [_PLAYERS_POINT_SAMPLE_CAVEAT]
+    return out
 
 
 @mcp.tool()
@@ -2012,6 +2176,186 @@ def channel_buzz(direction: Literal["rising", "cooling"] = "rising", limit: int 
             "month is excluded.",
             "Restricted to Steam's tag/genre vocabulary (word-level match), same as buzz_trends.",
         ],
+    }
+
+
+# ==========================================================================================
+# Live-player (CCU) history tools — daily point-sample series from mart_players.sql
+# ==========================================================================================
+@mcp.tool()
+def game_player_history(appid: int, days: int = 30) -> dict:
+    """Daily concurrent-player (CCU) history for one game — REAL current traction over
+    time, the direct "are people actually playing this" signal (unlike owners/revenue,
+    which are lifetime estimates). One value per day: the LAST capture of the UTC date
+    from the nightly ~21-22:00 UTC sweep of Steam's keyless GetNumberOfCurrentPlayers —
+    a point sample, NOT the daily peak (SteamDB-style peaks run higher). Gaps in the
+    series = unmeasured days, never zero: collection started 2026-07-18 and games outside
+    the top-8k-by-reviews head are captured on a ~3-8 night rotation.
+
+    days (clamped 7-365) bounds the returned series. summary always describes the FULL
+    measured history (latest sample, trailing-7d avg vs prior-7d trend, window peak,
+    measured-day count, first/last measured dates) so a short series still gets context.
+    Use game_search to find the appid by name. A game with no history at all is a real
+    answer (never captured: below the 50-review CCU floor, or not yet reached by the
+    rotation), not an error. Returns {"error": ...} for an unknown appid or a mart that
+    predates the CCU marts (re-run the ETL).
+    """
+    if not _HAS_PLAYERS:
+        return {"error": _PLAYERS_MISSING}
+    days = max(7, min(days, 365))
+    game = query_one(
+        "SELECT appid, name, live_players, players_7d_avg, players_trend_7d_pct "
+        "FROM mart_game WHERE appid = ?",
+        [appid],
+    )
+    if game is None:
+        return {
+            "error": f"appid {appid} not found in mart_game — either not in the catalog, "
+            "or below the >=10-review analysis floor. Use game_search to find valid appids."
+        }
+
+    series = query(
+        f"SELECT date, players, n_captures FROM mart_game_players_daily "
+        f"WHERE appid = ? AND date >= CURRENT_DATE - INTERVAL {days} DAY ORDER BY date",
+        [appid],
+    )
+    for r in series:
+        r["date"] = str(r["date"])
+
+    stats = query_one(
+        f"""
+        SELECT COUNT(*) AS n_days_measured,
+               MIN(date) AS first_date, MAX(date) AS last_date,
+               max_by(players, date) AS latest_players,
+               MAX(players) FILTER (WHERE date >= CURRENT_DATE - INTERVAL {days} DAY) AS window_peak,
+               max_by(date, players) FILTER (WHERE date >= CURRENT_DATE - INTERVAL {days} DAY) AS peak_date,
+               AVG(players) FILTER (WHERE date >  CURRENT_DATE - INTERVAL 7 DAY) AS avg_recent_7d,
+               AVG(players) FILTER (WHERE date <= CURRENT_DATE - INTERVAL 7 DAY
+                                      AND date >  CURRENT_DATE - INTERVAL 14 DAY) AS avg_prior_7d
+        FROM mart_game_players_daily WHERE appid = ?
+        """,
+        [appid],
+    )
+    notes: list[str] = []
+    if not stats or not stats["n_days_measured"]:
+        notes.append(
+            "never captured — the game is below the 50-review CCU collection floor, or the "
+            "capture rotation hasn't reached it yet."
+        )
+        summary = {"n_days_measured": 0}
+    else:
+        summary = {
+            "latest": {"date": str(stats["last_date"]), "players": stats["latest_players"]},
+            # Prefer the mart's precomputed values (tool and mart must never disagree);
+            # the live-computed fallback only covers a NULL mart value.
+            "players_7d_avg": game["players_7d_avg"] if game["players_7d_avg"] is not None else stats["avg_recent_7d"],
+            "players_prior_7d_avg": stats["avg_prior_7d"],
+            "players_trend_7d_pct": game["players_trend_7d_pct"],
+            "window_peak": {"date": str(stats["peak_date"]), "players": stats["window_peak"]},
+            "n_days_measured": stats["n_days_measured"],
+            "history": {"first_date": str(stats["first_date"]), "last_date": str(stats["last_date"])},
+        }
+        if not series:
+            notes.append(
+                f"measured history exists but none in the last {days} days "
+                f"(last measured {stats['last_date']}) — likely rotated out or delisted."
+            )
+
+    return {
+        "appid": appid,
+        "name": game["name"],
+        "days": days,
+        "summary": clean(summary),
+        "series": clean_rows(series),
+        "caveats": [_PLAYERS_POINT_SAMPLE_CAVEAT, _PLAYERS_HISTORY_CAVEAT] + notes,
+    }
+
+
+@mcp.tool()
+def niche_player_history(dimension: Literal["tag", "genre"], key: str, days: int = 30) -> dict:
+    """Daily total-live-players series for one niche — the direct "is this niche hot,
+    and which way is it moving" signal. Sums the niche's scored games' (>= 50 reviews)
+    daily CCU point samples; each game's last capture is carried forward up to 7 days
+    (LOCF) so the collector's tail rotation doesn't read as audience dips — games staler
+    than 7 days drop out of the sum. measured_players / n_games_measured expose the raw
+    same-day coverage next to the carried total, so the carry is always inspectable.
+
+    Returns summary (the niche's mart_niche players columns: total_players_now,
+    players_trend_7d_pct — SAME-PANEL, only games measured in both 7d windows count —
+    and players_coverage, the fresh-measured share) + series of {date, total_players,
+    measured_players, n_games_measured} rows (days clamped 7-365) + n_games_panel (niche
+    games ever measured). An empty series for a real niche is a real answer: fewer than
+    10 of its games have ever been measured. Get exact keys from find_niches (exact
+    match, case-sensitive); returns {"error": ...} for an unknown niche or a mart that
+    predates the CCU marts (re-run the ETL). CAVEAT: totals are dominated by the niche's
+    biggest games (the top-12k games hold ~99% of all Steam CCU) — a big total says
+    people play the niche's HITS, not that a new entrant gets players.
+    """
+    if not _HAS_PLAYERS:
+        return {"error": _PLAYERS_MISSING}
+    days = max(7, min(days, 365))
+    niche = query_one(
+        "SELECT total_players_now, players_trend_7d_pct, players_coverage "
+        "FROM mart_niche WHERE dimension = ? AND key = ? LIMIT 1",
+        [dimension, key],
+    )
+    if niche is None:
+        return {
+            "error": f"no niche found for dimension={dimension!r} key={key!r}. "
+            "Call find_niches to list valid keys — spelling/case must match exactly."
+        }
+
+    series = query(
+        f"SELECT date, total_players, measured_players, n_games_measured "
+        f"FROM mart_niche_players WHERE dimension = ? AND key = ? "
+        f"AND date >= CURRENT_DATE - INTERVAL {days} DAY ORDER BY date",
+        [dimension, key],
+    )
+    panel = query_one(
+        "SELECT MAX(n_games_panel) AS n_games_panel, MIN(date) AS first_date, "
+        "MAX(date) AS last_date, COUNT(*) AS n_days FROM mart_niche_players "
+        "WHERE dimension = ? AND key = ?",
+        [dimension, key],
+    )
+    for r in series:
+        r["date"] = str(r["date"])
+
+    notes: list[str] = []
+    if not panel or not panel["n_days"]:
+        notes.append(
+            "no players series for this niche — fewer than 10 of its games have ever been "
+            "measured (below the CCU floor / not yet rotated in), or the niche is under the "
+            "30-scored-games floor."
+        )
+        history = None
+    else:
+        history = {
+            "first_date": str(panel["first_date"]),
+            "last_date": str(panel["last_date"]),
+            "n_days": panel["n_days"],
+        }
+
+    return {
+        "dimension": dimension,
+        "key": key,
+        "days": days,
+        "summary": clean(
+            {
+                "total_players_now": niche["total_players_now"],
+                "players_trend_7d_pct": niche["players_trend_7d_pct"],
+                "players_coverage": niche["players_coverage"],
+                "n_games_panel": panel["n_games_panel"] if panel else None,
+                "history": history,
+            }
+        ),
+        "series": clean_rows(series),
+        "caveats": [
+            _PLAYERS_POINT_SAMPLE_CAVEAT,
+            _PLAYERS_HISTORY_CAVEAT,
+            "total_players carries each game's last capture forward up to 7 days (LOCF); "
+            "players_trend_7d_pct is same-panel (games measured in BOTH windows), so "
+            "coverage growth can't masquerade as audience growth.",
+        ] + notes,
     }
 
 
