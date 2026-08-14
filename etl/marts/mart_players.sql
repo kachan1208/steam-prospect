@@ -131,6 +131,60 @@ SELECT appid,
 FROM _pl_game_windows;
 
 -- ---------------------------------------------------------------------------------------
+-- All-sources player history (additive, 2026-08-14). Three measures, one table, a `source`
+-- discriminator and a `grain` column — NEVER aggregated across sources:
+--   steamcharts_monthly  month-start dates, avg + true monthly peak (back to 2012)
+--   steamcharts_daily    daily averages for roughly the trailing 90 days
+--   prospect_sample      our own nightly ~21-22:00 UTC point samples (daily grain)
+-- External rows come from steamcharts_backfill.py (top-8k-by-reviews only — coverage is
+-- deliberately partial; the tail has no external history).
+-- ---------------------------------------------------------------------------------------
+DROP TABLE IF EXISTS mart_game_players_history;
+CREATE TABLE mart_game_players_history AS
+SELECT appid, date, source,
+    CASE WHEN source = 'steamcharts_monthly' THEN 'monthly' ELSE 'daily' END AS grain,
+    avg_players, peak_players
+FROM stg_player_history_external
+UNION ALL
+SELECT appid, cap_date AS date, 'prospect_sample' AS source, 'daily' AS grain,
+    CAST(players AS DOUBLE) AS avg_players, NULL AS peak_players
+FROM stg_player_counts_daily;
+
+-- Niche audience over the YEARS: monthly summed averages of the niche's scored games,
+-- steamcharts_monthly only (our own history is weeks deep; mixing measures is forbidden).
+-- Same membership + floors as mart_niche_players. Coverage caveat: external history covers
+-- only the top-8k games — totals describe the niche's measured HEAD, not its whole tail.
+DROP TABLE IF EXISTS mart_niche_players_monthly;
+CREATE TABLE mart_niche_players_monthly AS
+WITH membership AS (
+    SELECT 'tag' AS dimension, tag AS key, appid FROM stg_tag_membership
+    UNION ALL
+    SELECT 'genre' AS dimension, genre AS key, appid FROM stg_genre_membership
+),
+scored_floor AS (
+    SELECT m.dimension, m.key
+    FROM membership m
+    JOIN stg_game g ON g.appid = m.appid
+    WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@ AND g.est_rev_reviews IS NOT NULL
+    GROUP BY 1, 2
+    HAVING COUNT(*) >= @MIN_NICHE_GAMES@
+),
+ext_monthly AS (
+    SELECT h.appid, h.date AS month, h.avg_players
+    FROM stg_player_history_external h
+    JOIN stg_game g ON g.appid = h.appid
+    WHERE h.source = 'steamcharts_monthly' AND g.total_reviews >= @MIN_REVIEWS_DEFAULT@
+)
+SELECT m.dimension, m.key, e.month,
+    CAST(SUM(e.avg_players) AS BIGINT) AS avg_players_sum,
+    COUNT(DISTINCT e.appid) AS n_games_measured
+FROM membership m
+JOIN scored_floor s ON s.dimension = m.dimension AND s.key = m.key
+JOIN ext_monthly e  ON e.appid = m.appid
+GROUP BY 1, 2, 3
+HAVING COUNT(DISTINCT e.appid) >= @NICHE_PLAYERS_MIN_MEASURED@;
+
+-- ---------------------------------------------------------------------------------------
 -- Niche "now" summary -> TEMP joined by mart_niche.sql (stamped on all 4 cut rows of a
 -- key, same one-value-per-key convention as entrant_ratio; population = the all/50 cut).
 --   total_players_now     sum of each scored member's latest capture, <= @CCU_STALE_DAYS@d old

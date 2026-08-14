@@ -167,6 +167,16 @@ def _has_players_daily() -> bool:
     return bool(rows)
 
 
+@lru_cache(maxsize=1)
+def _has_players_history() -> bool:
+    """mart_game_players_history (all-sources history incl. steamcharts monthly) — landed
+    after the daily marts, so it gets its own gate."""
+    rows = analytics_db.query(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'mart_game_players_history'"
+    )
+    return bool(rows)
+
+
 class GamePlayersPoint(BaseModel):
     date: str  # 'YYYY-MM-DD' (UTC capture date)
     players: int  # LAST capture of that date — a ~21-22:00 UTC point sample, NOT a daily peak
@@ -181,12 +191,24 @@ class GamePlayersSummary(BaseModel):
     last_date: str | None = None
 
 
+class GamePlayersMonthlyPoint(BaseModel):
+    """One month of EXTERNAL history (steamcharts monthly): a period AVERAGE plus the true
+    monthly peak — a different measure from our nightly point samples, never blended."""
+
+    month: str  # 'YYYY-MM-DD' (month start)
+    avg_players: float
+    peak_players: int | None = None
+
+
 class GamePlayersResponse(BaseModel):
     appid: int
     days: int
     available: bool  # False when the mart predates the CCU marts (UI: hide the panel)
     summary: GamePlayersSummary | None = None
     points: list[GamePlayersPoint]  # measured days only — a gap is "unmeasured", never zero
+    # Deep monthly history (top-8k games only; empty when the mart predates it or the game
+    # has no external coverage). Source: steamcharts.com monthly averages/peaks.
+    monthly: list[GamePlayersMonthlyPoint] = []
 
 
 @router.get("/{appid}/players", response_model=GamePlayersResponse)
@@ -215,12 +237,24 @@ def game_players(
         "CAST(MAX(date) AS VARCHAR) AS last_date FROM mart_game_players_daily WHERE appid = ?",
         [appid],
     )
+    monthly: list[GamePlayersMonthlyPoint] = []
+    if _has_players_history():
+        monthly = [
+            GamePlayersMonthlyPoint(**r)
+            for r in analytics_db.query(
+                "SELECT CAST(date AS VARCHAR) AS month, avg_players, peak_players "
+                "FROM mart_game_players_history "
+                "WHERE appid = ? AND grain = 'monthly' ORDER BY date ASC",
+                [appid],
+            )
+        ]
     return GamePlayersResponse(
         appid=appid,
         days=days,
         available=True,
         summary=GamePlayersSummary(**(game or {}), **(bounds or {})),
         points=[GamePlayersPoint(**r) for r in rows],
+        monthly=monthly,
     )
 
 

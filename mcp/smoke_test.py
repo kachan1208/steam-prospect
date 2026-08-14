@@ -120,6 +120,7 @@ def main() -> None:
     else:
         assert gph["name"] == "Hollow Knight"
         assert "summary" in gph and "series" in gph and isinstance(gph["series"], list)
+        assert "monthly" in gph and isinstance(gph["monthly"], list)  # may be empty pre-backfill
         assert gph["caveats"], "player tools must always state the point-sample caveats"
         print(f"\n[OK] game_player_history: {gph['summary'].get('n_days_measured', 0)} measured days, "
               f"{len(gph['series'])} series rows")

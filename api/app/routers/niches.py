@@ -37,6 +37,7 @@ from ..schemas import (
     NicheGame,
     NicheList,
     NichePlayers,
+    NichePlayersMonthlyPoint,
     NichePlayersPoint,
     NichePress,
     NichePressOutlet,
@@ -269,6 +270,20 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
             "SELECT MAX(n_games_panel) FROM mart_niche_players WHERE dimension = ? AND key = ?",
             [dimension, key],
         )
+        # Deep monthly history (steamcharts, top-8k games) — its mart landed after the
+        # daily one, so it degrades independently.
+        monthly: list[NichePlayersMonthlyPoint] = []
+        try:
+            monthly = [
+                NichePlayersMonthlyPoint(**r)
+                for r in analytics_db.query(
+                    "SELECT CAST(month AS VARCHAR) AS month, avg_players_sum, n_games_measured "
+                    "FROM mart_niche_players_monthly WHERE dimension = ? AND key = ? ORDER BY month",
+                    [dimension, key],
+                )
+            ]
+        except duckdb.CatalogException:
+            monthly = []
         head = variants[0]
         players = NichePlayers(
             total_players_now=head.get("total_players_now"),
@@ -276,6 +291,7 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
             players_coverage=head.get("players_coverage"),
             n_games_panel=panel,
             series=[NichePlayersPoint(**s) for s in series],
+            monthly=monthly,
         )
 
     # Pooled review themes (vote-based family), biggest signal first. Membership is

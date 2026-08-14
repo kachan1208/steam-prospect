@@ -465,6 +465,15 @@ class NichePlayersPoint(BaseModel):
     n_games_measured: int
 
 
+class NichePlayersMonthlyPoint(BaseModel):
+    """One month of the niche's summed EXTERNAL player history (steamcharts monthly
+    averages, top-8k games only) — years deep, a different measure from the daily series."""
+
+    month: str  # 'YYYY-MM-DD' (month start)
+    avg_players_sum: float
+    n_games_measured: int
+
+
 class NichePlayers(BaseModel):
     """The niche's live-player block: mart_niche summary columns + the daily series."""
 
@@ -473,6 +482,7 @@ class NichePlayers(BaseModel):
     players_coverage: Optional[float] = None
     n_games_panel: Optional[int] = None
     series: list[NichePlayersPoint] = Field(default_factory=list)
+    monthly: list[NichePlayersMonthlyPoint] = Field(default_factory=list)
 
 
 class NicheTheme(BaseModel):

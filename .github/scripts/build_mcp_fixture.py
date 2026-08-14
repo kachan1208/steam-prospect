@@ -77,6 +77,13 @@ def main() -> None:
     # columns automatically on marts that have them.
     con.execute("CREATE TABLE mart_game_players_daily AS SELECT * FROM real.mart_game_players_daily WHERE appid=367520")
     con.execute(f"CREATE TABLE mart_niche_players AS SELECT * FROM real.mart_niche_players WHERE dimension='tag' AND key='{OWSC}'")
+    # Deep-history marts landed later than the daily ones — copy them only when the source
+    # mart has them, so regeneration keeps working against slightly older builds.
+    try:
+        con.execute("CREATE TABLE mart_game_players_history AS SELECT * FROM real.mart_game_players_history WHERE appid=367520")
+        con.execute(f"CREATE TABLE mart_niche_players_monthly AS SELECT * FROM real.mart_niche_players_monthly WHERE dimension='tag' AND key='{OWSC}'")
+    except duckdb.CatalogException:
+        pass
 
     # ---- game: game_teardown/game_profile/game_search(367520 = Hollow Knight) ------------
     con.execute("CREATE TABLE mart_game AS SELECT * FROM real.mart_game WHERE appid=367520")

@@ -83,6 +83,12 @@ _HAS_PLAYERS = bool(
     )
 )
 
+_HAS_PLAYERS_HISTORY = bool(
+    query(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'mart_game_players_history'"
+    )
+)
+
 _PLAYERS_MISSING = (
     "this analytics DB predates the live-player (CCU) marts (mart_game_players_daily / "
     "mart_niche_players and the players_* columns on mart_game/mart_niche) — it was built "
@@ -386,6 +392,12 @@ games clearing the review floor).
   rollup (LOCF <= 7d, with measured_players/n_games_measured coverage columns). See the
   "Live players (CCU)" section above. -> `game_player_history`, `niche_player_history`
   (+ the players columns in `find_niches`/`niche_detail`/`game_profile`).
+- **mart_game_players_history / mart_niche_players_monthly** — DEEP player history from
+  steamcharts.com (monthly averages + true monthly peaks back to 2012; daily averages for
+  the trailing ~90 days), top-8k-by-reviews games only, `source`/`grain` discriminated.
+  A different MEASURE from our point samples — the tools return it as a separate
+  `monthly` block and it must never be averaged with the daily series. -> the `monthly`
+  blocks of `game_player_history` / `niche_player_history`.
 - **mart_entity / mart_entity_games** — one row per (role, developer/publisher name),
   normalized out of mart_game's comma-joined developers/publishers strings (corporate
   suffixes like ", Inc." / ", Ltd." are re-merged into the name instead of becoming fake
@@ -2261,12 +2273,27 @@ def game_player_history(appid: int, days: int = 30) -> dict:
                 f"(last measured {stats['last_date']}) — likely rotated out or delisted."
             )
 
+    monthly: list[dict] = []
+    if _HAS_PLAYERS_HISTORY:
+        monthly = query(
+            "SELECT CAST(date AS VARCHAR) AS month, avg_players, peak_players "
+            "FROM mart_game_players_history WHERE appid = ? AND grain = 'monthly' ORDER BY date",
+            [appid],
+        )
+        if monthly:
+            notes.append(
+                "monthly = EXTERNAL history via steamcharts.com (period averages + true monthly "
+                "peaks, back to the game's launch) — a different measure from the nightly point "
+                "samples in `series`; never blend them."
+            )
+
     return {
         "appid": appid,
         "name": game["name"],
         "days": days,
         "summary": clean(summary),
         "series": clean_rows(series),
+        "monthly": clean_rows(monthly),
         "caveats": [_PLAYERS_POINT_SAMPLE_CAVEAT, _PLAYERS_HISTORY_CAVEAT] + notes,
     }
 
@@ -2335,6 +2362,23 @@ def niche_player_history(dimension: Literal["tag", "genre"], key: str, days: int
             "n_days": panel["n_days"],
         }
 
+    monthly: list[dict] = []
+    if _HAS_PLAYERS_HISTORY:
+        try:
+            monthly = query(
+                "SELECT CAST(month AS VARCHAR) AS month, avg_players_sum, n_games_measured "
+                "FROM mart_niche_players_monthly WHERE dimension = ? AND key = ? ORDER BY month",
+                [dimension, key],
+            )
+        except duckdb.CatalogException:
+            monthly = []
+        if monthly:
+            notes.append(
+                "monthly = the niche's summed steamcharts monthly AVERAGES (top-8k games only — "
+                "the measured HEAD, not the tail; rising early-years values are partly new games "
+                "entering measurement). Different measure from the daily series; never blend."
+            )
+
     return {
         "dimension": dimension,
         "key": key,
@@ -2349,6 +2393,7 @@ def niche_player_history(dimension: Literal["tag", "genre"], key: str, days: int
             }
         ),
         "series": clean_rows(series),
+        "monthly": clean_rows(monthly),
         "caveats": [
             _PLAYERS_POINT_SAMPLE_CAVEAT,
             _PLAYERS_HISTORY_CAVEAT,

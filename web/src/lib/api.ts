@@ -227,12 +227,20 @@ export interface NichePlayersPoint {
   n_games_measured: number;
 }
 
+export interface NichePlayersMonthlyPoint {
+  month: string; // 'YYYY-MM-DD' (month start)
+  avg_players_sum: number;
+  n_games_measured: number;
+}
+
 export interface NichePlayers {
   total_players_now: number | null;
   players_trend_7d_pct: number | null;
   players_coverage: number | null;
   n_games_panel: number | null;
   series: NichePlayersPoint[];
+  // Years-deep summed monthly averages (steamcharts, top-8k games only).
+  monthly?: NichePlayersMonthlyPoint[];
 }
 
 export interface NicheTheme {
