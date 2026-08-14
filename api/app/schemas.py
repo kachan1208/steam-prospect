@@ -455,6 +455,7 @@ class TrendPoint(BaseModel):
     n_releases: int
     n_scored: int
     median_rev: Optional[float] = None
+    p90_rev: Optional[float] = None  # absent on marts that predate 2026-08-14
 
 
 class NichePlayersPoint(BaseModel):

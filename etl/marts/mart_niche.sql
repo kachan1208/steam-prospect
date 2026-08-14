@@ -298,7 +298,8 @@ counts AS ( SELECT dimension, key, COUNT(*) n FROM membership GROUP BY 1,2 HAVIN
 SELECT m.dimension, m.key, g.release_year AS year,
     COUNT(*) AS n_releases,
     COUNT(*) FILTER (WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@) AS n_scored,
-    median(g.est_rev_reviews) FILTER (WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@) AS median_rev
+    median(g.est_rev_reviews) FILTER (WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@) AS median_rev,
+    quantile_cont(g.est_rev_reviews, 0.90) FILTER (WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@) AS p90_rev
 FROM membership m
 JOIN stg_game g ON g.appid = m.appid
 JOIN counts c ON c.dimension = m.dimension AND c.key = m.key
