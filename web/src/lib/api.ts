@@ -217,6 +217,7 @@ export interface TrendPoint {
   n_releases: number;
   n_scored: number;
   median_rev: number | null;
+  p90_rev?: number | null; // absent on marts that predate 2026-08-14
 }
 
 export interface NichePlayersPoint {

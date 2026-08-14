@@ -100,6 +100,17 @@ def _has_p90() -> bool:
     return bool(rows)
 
 
+@lru_cache(maxsize=1)
+def _has_p90_trend() -> bool:
+    """mart_niche_trend.p90_rev (yearly p90 for the saturation-trend chart) — gated
+    separately from mart_niche.p90_rev because they can land in different ETL builds."""
+    rows = analytics_db.query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_niche_trend' AND column_name = 'p90_rev'"
+    )
+    return bool(rows)
+
+
 def _cols() -> list[str]:
     cols = list(_BASE_COLS)
     if _has_p90():
@@ -226,8 +237,9 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
         raise HTTPException(status_code=404, detail=f"niche not found: {dimension}/{key}")
     variants.sort(key=lambda v: (v["win"], v["min_reviews"]))
 
+    trend_cols = "year, n_releases, n_scored, median_rev" + (", p90_rev" if _has_p90_trend() else "")
     trend = analytics_db.query(
-        "SELECT year, n_releases, n_scored, median_rev FROM mart_niche_trend "
+        f"SELECT {trend_cols} FROM mart_niche_trend "
         "WHERE dimension = ? AND key = ? ORDER BY year",
         [dimension, key],
     )

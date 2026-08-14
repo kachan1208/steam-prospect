@@ -11,6 +11,9 @@ import { TooltipPanel } from "./TooltipPanel";
  * (reward, blue). Each measure keeps its own scale and its own chart.
  */
 export function SaturationTrend({ points }: { points: TrendPoint[] }) {
+  // p90_rev only exists on marts built after 2026-08-14 — fall back to the median line
+  // (with its honest label) until the ETL materializes it.
+  const hasP90 = points.some((p) => p.p90_rev != null);
   if (points.length === 0) {
     return (
       <div className="flex h-32 items-center justify-center text-xs text-ink-muted">
@@ -56,7 +59,7 @@ export function SaturationTrend({ points }: { points: TrendPoint[] }) {
         </ResponsiveContainer>
       </div>
       <div>
-        <div className="mb-1 text-xs text-ink-muted">Median revenue per year</div>
+        <div className="mb-1 text-xs text-ink-muted">{hasP90 ? "P90 revenue per year" : "Median revenue per year"}</div>
         <ResponsiveContainer width="100%" height={140}>
           <LineChart data={points} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
             <CartesianGrid stroke="var(--gridline)" vertical={false} />
@@ -76,14 +79,21 @@ export function SaturationTrend({ points }: { points: TrendPoint[] }) {
                 return (
                   <TooltipPanel
                     title={String(label)}
-                    rows={[{ label: "Median revenue", value: fmtUsd(p.median_rev), color: CSS_VAR.demand }]}
+                    rows={
+                      hasP90
+                        ? [
+                            { label: "P90 revenue", value: fmtUsd(p.p90_rev ?? null), color: CSS_VAR.demand },
+                            { label: "Median revenue", value: fmtUsd(p.median_rev) },
+                          ]
+                        : [{ label: "Median revenue", value: fmtUsd(p.median_rev), color: CSS_VAR.demand }]
+                    }
                   />
                 );
               }}
             />
             <Line
               type="monotone"
-              dataKey="median_rev"
+              dataKey={hasP90 ? "p90_rev" : "median_rev"}
               stroke={CSS_VAR.demand}
               strokeWidth={2}
               dot={{ r: 4, fill: CSS_VAR.demand, strokeWidth: 2, stroke: "var(--surface-1)" }}
