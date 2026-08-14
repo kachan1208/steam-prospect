@@ -17,6 +17,7 @@ import {
   useNicheDetail,
   type Dimension,
   type NichePlayers,
+  type NichePlayersMonthlyPoint,
   type NichePlayersPoint,
   type NichePressPoint,
   type NicheRow,
@@ -339,6 +340,56 @@ export function NicheDetailDrawer({
               />
             </div>
             <PlayersSeriesChart points={players?.series ?? []} />
+            {(players?.monthly?.length ?? 0) >= 6 && (
+              <div className="mt-4">
+                <div className="mb-1 text-xs text-ink-muted">
+                  Niche audience over the years — summed monthly average players
+                </div>
+                <ResponsiveContainer width="100%" height={150}>
+                  <LineChart data={players!.monthly} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
+                    <CartesianGrid stroke="var(--gridline)" vertical={false} />
+                    <XAxis
+                      dataKey="month"
+                      tick={{ fontSize: 10 }}
+                      tickFormatter={(v: string) => v.slice(0, 7)}
+                      interval="preserveStartEnd"
+                      minTickGap={40}
+                      tickLine={false}
+                      axisLine={{ stroke: "var(--baseline)" }}
+                    />
+                    <YAxis
+                      tick={{ fontSize: 10 }}
+                      tickFormatter={(v: number) => fmtCompact(v)}
+                      tickLine={false}
+                      axisLine={false}
+                      width={44}
+                    />
+                    <Tooltip
+                      cursor={{ stroke: "var(--baseline)" }}
+                      content={({ active, payload, label }) => {
+                        if (!active || !payload || payload.length === 0) return null;
+                        const p = payload[0].payload as NichePlayersMonthlyPoint;
+                        return (
+                          <TooltipPanel
+                            title={String(label).slice(0, 7)}
+                            rows={[
+                              { label: "Avg players (sum)", value: fmtCompact(p.avg_players_sum), color: CSS_VAR.demand },
+                              { label: "Games measured", value: fmtInt(p.n_games_measured) },
+                            ]}
+                          />
+                        );
+                      }}
+                    />
+                    <Line type="monotone" dataKey="avg_players_sum" stroke={CSS_VAR.demand} strokeWidth={2} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+                <p className="mt-1 text-[11px] italic text-ink-muted">
+                  Historical monthly averages via steamcharts.com, summed over the niche's measured games — covers the
+                  top ~8k games by reviews only, so this is the niche's HEAD, and rising coverage over the years is
+                  partly new games entering measurement.
+                </p>
+              </div>
+            )}
             <p className="mt-2 text-[11px] italic text-ink-muted">
               Nightly ~21–22:00 UTC point samples, not daily peaks; each game's last capture carries forward up to 7
               days so the capture rotation doesn't read as audience dips. Totals are dominated by the niche's biggest

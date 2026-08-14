@@ -109,12 +109,20 @@ interface PlayersSummary {
   last_date: string | null;
 }
 
+interface PlayersMonthlyPoint {
+  month: string; // 'YYYY-MM-DD' (month start)
+  avg_players: number;
+  peak_players: number | null;
+}
+
 interface PlayersResponse {
   appid: number;
   days: number;
   available: boolean; // false = mart predates the daily CCU marts -> fall back to monthly
   summary: PlayersSummary | null;
   points: PlayersPoint[];
+  // Deep monthly history via steamcharts (top-8k games; empty when uncovered/absent).
+  monthly?: PlayersMonthlyPoint[];
 }
 
 interface SeriesPoint {
@@ -567,6 +575,60 @@ function LivePlayersDrilldown({
         )}
         {noSplitSnapshot && <p className="mt-2 text-[11px] italic text-ink-muted">No live snapshot yet for this title.</p>}
       </div>
+
+      {(daily?.monthly?.length ?? 0) >= 3 && (
+        <div>
+          <div className="mb-1 text-xs text-ink-muted">Full history — monthly average & peak players</div>
+          <ResponsiveContainer width="100%" height={170}>
+            <LineChart data={daily!.monthly} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+              <CartesianGrid stroke="var(--gridline)" vertical={false} />
+              <XAxis
+                dataKey="month"
+                tick={{ fontSize: 10 }}
+                tickFormatter={(v: string) => v.slice(0, 7)}
+                interval="preserveStartEnd"
+                minTickGap={40}
+                tickLine={false}
+                axisLine={{ stroke: "var(--baseline)" }}
+              />
+              <YAxis
+                tick={{ fontSize: 10 }}
+                tickFormatter={(v: number) => fmtCompact(v)}
+                tickLine={false}
+                axisLine={false}
+                width={44}
+              />
+              <Tooltip
+                cursor={{ stroke: "var(--baseline)" }}
+                content={({ active, payload, label }) => {
+                  if (!active || !payload || payload.length === 0) return null;
+                  const p = payload[0].payload as PlayersMonthlyPoint;
+                  return (
+                    <TooltipPanel
+                      title={String(label).slice(0, 7)}
+                      rows={[
+                        { label: "Monthly average", value: fmtCompact(p.avg_players), color: CSS_VAR.demand },
+                        {
+                          label: "Monthly peak",
+                          value: p.peak_players != null ? fmtCompact(p.peak_players) : "—",
+                          color: CSS_VAR.competition,
+                        },
+                      ]}
+                    />
+                  );
+                }}
+              />
+              <Line type="monotone" dataKey="peak_players" stroke={CSS_VAR.competition} strokeWidth={1} dot={false} strokeOpacity={0.6} connectNulls />
+              <Line type="monotone" dataKey="avg_players" stroke={CSS_VAR.demand} strokeWidth={2} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+          <p className="mt-1 text-[11px] italic text-ink-muted">
+            Historical monthly figures via steamcharts.com (hourly polling of Steam's API since 2012) — period
+            AVERAGES and true monthly peaks, a different measure from the nightly samples above; the two are never
+            mixed.
+          </p>
+        </div>
+      )}
 
       <p className="text-[11px] italic text-ink-muted">
         {useDaily

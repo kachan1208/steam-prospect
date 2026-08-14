@@ -1291,10 +1291,35 @@ def create_ccu_staging(con: duckdb.DuckDBPyConnection) -> bool:
             GROUP BY 1, 2;
             """
         )
-        return True
-    con.execute("CREATE TEMP TABLE stg_player_count_latest (appid INTEGER, live_players INTEGER, captured_at TIMESTAMP)")
-    con.execute("CREATE TEMP TABLE stg_player_counts_daily (appid INTEGER, cap_date DATE, players INTEGER, n_captures INTEGER)")
-    return False
+        have = True
+    else:
+        con.execute("CREATE TEMP TABLE stg_player_count_latest (appid INTEGER, live_players INTEGER, captured_at TIMESTAMP)")
+        con.execute("CREATE TEMP TABLE stg_player_counts_daily (appid INTEGER, cap_date DATE, players INTEGER, n_captures INTEGER)")
+        have = False
+
+    # Externally-sourced player HISTORY (steamcharts_backfill.py -> player_history_external):
+    # period AVERAGES (+ monthly peaks), a DIFFERENT measure from our instantaneous point
+    # samples — never blended, the `source` column stays the discriminator all the way to
+    # the charts. Guarded separately: the table only exists once the backfill has run.
+    if _sqlite_table_exists(con, "player_history_external"):
+        con.execute(
+            """
+            CREATE TEMP TABLE stg_player_history_external AS
+            SELECT appid,
+                TRY_CAST(date AS DATE) AS date,
+                CAST(avg_players AS DOUBLE) AS avg_players,
+                CAST(peak_players AS INTEGER) AS peak_players,
+                source
+            FROM src.player_history_external
+            WHERE TRY_CAST(date AS DATE) IS NOT NULL AND avg_players IS NOT NULL;
+            """
+        )
+    else:
+        con.execute(
+            "CREATE TEMP TABLE stg_player_history_external "
+            "(appid INTEGER, date DATE, avg_players DOUBLE, peak_players INTEGER, source VARCHAR)"
+        )
+    return have
 
 
 def create_timing_staging(con: duckdb.DuckDBPyConnection) -> bool:
