@@ -295,6 +295,17 @@ export function NicheDetailDrawer({
               </div>
             </div>
           </div>
+          {activeVariant.demand != null && activeVariant.competition != null && activeVariant.quality_gap != null && (
+            <p className="mt-1.5 tabular text-[11px] text-ink-muted">
+              = 0.5×{activeVariant.demand.toFixed(1)} − 0.35×{activeVariant.competition.toFixed(1)} + 0.3×
+              {activeVariant.quality_gap.toFixed(1)} ={" "}
+              {(0.5 * activeVariant.demand - 0.35 * activeVariant.competition + 0.3 * activeVariant.quality_gap).toFixed(1)}
+              {0.5 * activeVariant.demand - 0.35 * activeVariant.competition + 0.3 * activeVariant.quality_gap < 0
+                ? " → floored to 0"
+                : ""}
+              {activeVariant.decline_gate != null ? ` → × gate ${activeVariant.decline_gate.toFixed(2)}` : ""}
+            </p>
+          )}
           {activeVariant.opportunity === 0 && (
             <p className="mt-1.5 text-[11px] text-ink-muted">
               Floored at 0: the score formula (0.5×demand − 0.35×competition + 0.3×quality gap) went negative — the

@@ -231,13 +231,16 @@ export default function NicheFinder() {
             <SortLabel label="Quality gap" help="How beatable the field is, 0–100 percentile. Calculated: pctile(share of incumbents that are weak — rating under 80% positive OR fewer than 50 reviews). Higher = easier to out-execute." col="quality_gap" color={legColor("quality")} active={sort === "quality_gap"} order={order} onSort={toggleSort} />
           </span>
         ),
-        cell: (info) => (
-          <OpportunityBars
-            demand={info.row.original.demand}
-            competition={info.row.original.competition}
-            quality_gap={info.row.original.quality_gap}
-          />
-        ),
+        cell: (info) => {
+          const r = info.row.original;
+          return (
+            <div
+              title={`Demand ${r.demand?.toFixed(1) ?? "—"} · Competition ${r.competition?.toFixed(1) ?? "—"} · Quality gap ${r.quality_gap?.toFixed(1) ?? "—"} (each a 0–100 percentile vs other niches in this cut)`}
+            >
+              <OpportunityBars demand={r.demand} competition={r.competition} quality_gap={r.quality_gap} />
+            </div>
+          );
+        },
       }),
       columnHelper.accessor("opportunity_v2", {
         header: () => (
@@ -258,9 +261,19 @@ export default function NicheFinder() {
           // penalty outweighed demand + quality gap. Without the note it reads as
           // missing data instead of the real verdict it is.
           const floored = v === 0;
+          // The row's REAL numbers substituted into the formula, so the hover answers
+          // "why is it this value" without leaving the table.
+          const d = row.demand, c = row.competition, q = row.quality_gap;
+          const raw = d != null && c != null && q != null ? 0.5 * d - 0.35 * c + 0.3 * q : null;
+          const calc =
+            raw != null
+              ? `0.5×${d!.toFixed(1)} − 0.35×${c!.toFixed(1)} + 0.3×${q!.toFixed(1)} = ${raw >= 0 ? "+" : ""}${raw.toFixed(1)}` +
+                (raw < 0 ? " → floored to 0" : "") +
+                (gate != null ? ` → × gate ${gate.toFixed(2)} = ${v != null ? v.toFixed(1) : "—"}` : "")
+              : null;
           const title = floored
-            ? `Floored at 0 — the competition penalty (C ${row.competition?.toFixed(0)}) outweighs demand (D ${row.demand?.toFixed(0)}) + quality gap (Q ${row.quality_gap?.toFixed(0)}): a crowded niche whose typical game earns little. Big audience ≠ good entry.`
-            : "0.5×demand − 0.35×competition + 0.3×quality gap, × the decline gate";
+            ? `${calc}\n\nThe competition penalty (C ${c?.toFixed(0)}) outweighs demand (D ${d?.toFixed(0)}) + quality gap (Q ${q?.toFixed(0)}): a crowded niche whose typical game earns little. Big audience ≠ good entry.`
+            : calc ?? "0.5×demand − 0.35×competition + 0.3×quality gap, × the decline gate";
           return (
             <div className="flex items-center gap-2" title={title}>
               <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: dotColor }} />
@@ -269,7 +282,15 @@ export default function NicheFinder() {
               {gate != null && gate < 0.995 && (
                 <span
                   className="tabular text-[10px] text-verdict-serious"
-                  title={`Decline gate ×${gate.toFixed(2)} — shrinking pipeline or underearning entrants cut the raw score`}
+                  title={(() => {
+                    const satSev = Math.min(1, Math.max(0, -(row.saturation_yoy ?? 0) / 0.3));
+                    const entSev = Math.min(1, Math.max(0, (1 - (row.entrant_ratio ?? 1)) / 0.5));
+                    const driver =
+                      satSev >= entSev
+                        ? `releases ${((row.saturation_yoy ?? 0) * 100).toFixed(1)}%/yr (severity ${satSev.toFixed(2)})`
+                        : `newcomers earn ${(row.entrant_ratio ?? 1).toFixed(2)}× the back catalog (severity ${entSev.toFixed(2)})`;
+                    return `Decline gate ×${gate.toFixed(2)} = 1 − 0.5×max(pipeline, entrants severity) — driven by ${driver}`;
+                  })()}
                 >
                   ×{gate.toFixed(2)}
                 </span>
@@ -337,7 +358,17 @@ export default function NicheFinder() {
         header: () => (
           <SortLabel label="Hit ≥$200K" help="The odds a serious title 'works' here. Calculated: share of the niche's scored games whose estimated lifetime revenue clears $200K." col="hit_rate_200k" active={sort === "hit_rate_200k"} order={order} onSort={toggleSort} />
         ),
-        cell: (info) => <span className="tabular text-ink-secondary">{fmtPct(info.getValue())}</span>,
+        cell: (info) => {
+          const v = info.getValue();
+          const n = info.row.original.n_games;
+          const title =
+            v != null && n ? `${Math.round(v * n)} of ${fmtInt(n)} scored games clear $200K est. lifetime revenue` : undefined;
+          return (
+            <span className="tabular text-ink-secondary" title={title}>
+              {fmtPct(v)}
+            </span>
+          );
+        },
       }),
       columnHelper.accessor("saturation_yoy", {
         header: () => (
@@ -345,8 +376,16 @@ export default function NicheFinder() {
         ),
         cell: (info) => {
           const v = info.getValue();
+          const r = info.row.original;
+          const title =
+            r.n_recent_year != null && r.n_prior_year != null && v != null
+              ? `(${fmtInt(r.n_recent_year)} releases last year − ${fmtInt(r.n_prior_year)} the year before) ÷ ${fmtInt(r.n_prior_year)} = ${(v * 100).toFixed(1)}%${v < -0.05 ? " — the pipeline is shrinking" : ""}`
+              : undefined;
           return (
-            <span className={clsx("tabular", v != null && v < -0.05 ? "text-verdict-serious" : "text-ink-secondary")}>
+            <span
+              title={title}
+              className={clsx("tabular", v != null && v < -0.05 ? "text-verdict-serious" : "text-ink-secondary")}
+            >
               {fmtSigned(v)}
             </span>
           );
