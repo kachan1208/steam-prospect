@@ -6,6 +6,7 @@ import { useHealth } from "./lib/api";
 import { initAnalytics, trackPageview } from "./lib/analytics";
 import { useTheme, ACCENTS, PRESETS } from "./lib/theme";
 import LaunchTiming from "./pages/LaunchTiming";
+import NicheFinder from "./pages/NicheFinder";
 import GameSearch from "./pages/GameSearch";
 import GameProfile from "./pages/GameProfile";
 import Compare from "./pages/Compare";
@@ -18,17 +19,25 @@ import Docs from "./pages/Docs";
 import Terms from "./pages/Terms";
 import Privacy from "./pages/Privacy";
 
-// Five destinations plus one CTA, deliberately. The old 14-page dashboard was trimmed to
-// the surfaces that earn their pixels: Games (teardown charts), Studios (developer/
-// publisher track records — added by user request: publisher scouting needs a discoverable
-// entry point, not a link buried in game credits), Timing (the seasonality heatmap), Data
-// (the freshness receipt), and Docs in the footer. "MCP" is the primary CTA, not
-// a peer nav item. Everything else the old nav carried — niches, benchmarks, the
-// estimator, marketing pitch lists — is still fully answerable, but through the MCP
-// against current.duckdb rather than a page of its own.
+// Six destinations plus one CTA, deliberately. The old 14-page dashboard was trimmed to
+// the surfaces that earn their pixels: Niches (the finder came BACK in 2026-08 — the v2
+// growth-gated scores, live-player columns and the deep-dive drawer made it chart-heavy
+// again), Games (teardown charts), Studios (developer/publisher track records — added by
+// user request: publisher scouting needs a discoverable entry point, not a link buried in
+// game credits), Timing (the seasonality heatmap), Data (the freshness receipt), and Docs
+// in the footer. "MCP" is the primary CTA, not a peer nav item. Everything else the old
+// nav carried — benchmarks, the estimator, marketing pitch lists — is still fully
+// answerable, but through the MCP against current.duckdb rather than a page of its own.
 // 24x24 stroke icons, same family as the Logo mark. grid/calendar/history are the
 // originals from the sidebar era; "building" is new for Studios.
 const ICONS: Record<string, ReactNode> = {
+  target: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <circle cx="12" cy="12" r="4.75" />
+      <circle cx="12" cy="12" r="1.25" fill="currentColor" stroke="none" />
+    </>
+  ),
   grid: (
     <>
       <rect x="3.5" y="3.5" width="7" height="7" rx="1.5" />
@@ -79,6 +88,7 @@ function NavIcon({ name }: { name: string }) {
 }
 
 const NAV_ITEMS: { to: string; label: string; icon: string }[] = [
+  { to: "/niches", label: "Niches", icon: "target" },
   { to: "/games", label: "Games", icon: "grid" },
   { to: "/studios", label: "Studios", icon: "building" },
   { to: "/timing", label: "Launch & Timing", icon: "calendar" },
@@ -360,6 +370,10 @@ export default function App() {
         <Route path="/terms" element={<Terms />} />
         <Route path="/privacy" element={<Privacy />} />
         <Route element={<AppShell />}>
+          {/* Niche Finder — resurrected 2026-08 (removed in the four-surfaces trim) now
+              that it earns pixels again: v2-gated scores, live-player columns and the
+              per-niche deep-dive drawer are chart-heavy, not a table a chat can beat. */}
+          <Route path="/niches" element={<NicheFinder />} />
           <Route path="/games" element={<GameSearch />} />
           <Route path="/games/:appid" element={<GameProfile />} />
           {/* Side-by-side comparison — reached from the CompareTray or a shared ?ids= URL,
@@ -376,8 +390,8 @@ export default function App() {
           <Route path="/docs" element={<Docs />} />
           <Route path="/docs/:slug" element={<Docs />} />
         </Route>
-        {/* Anything else (including the retired /niches, /benchmarks, /estimator,
-            /marketing, /press, /devlog, /settings, /welcome) lands on Games. */}
+        {/* Anything else (including the retired /benchmarks, /estimator, /marketing,
+            /press, /devlog, /settings, /welcome) lands on Games. */}
         <Route path="*" element={<Navigate to="/games" replace />} />
       </Routes>
     </>

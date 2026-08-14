@@ -358,3 +358,114 @@ class AspectReviewsResponse(BaseModel):
     aspect: str
     sentiment: Literal["praise", "complaint"]
     items: list[AspectReviewExcerpt]
+
+
+# ---- niches (Niche Finder — resurrected 2026-08 with v2 scoring + live players) --------
+class NicheRow(BaseModel):
+    dimension: str
+    key: str
+    window: str
+    min_reviews: int
+    n_games: int
+    n_recent: int
+    median_rev: Optional[float] = None
+    p25_rev: Optional[float] = None
+    p75_rev: Optional[float] = None
+    median_reviews: Optional[float] = None
+    median_price: Optional[float] = None
+    median_positive_ratio: Optional[float] = None
+    median_owners: Optional[float] = None
+    total_owners: Optional[float] = None
+    total_rev: Optional[float] = None
+    total_reviews: Optional[float] = None
+    market_size: Optional[float] = None
+    recent_velocity: Optional[float] = None
+    self_pub_share: Optional[float] = None
+    winner_concentration: Optional[float] = None
+    hit_rate_200k: Optional[float] = None
+    hit_rate_500k: Optional[float] = None
+    beatable_share: Optional[float] = None
+    saturation_yoy: Optional[float] = None
+    demand: Optional[float] = None
+    competition: Optional[float] = None
+    quality_gap: Optional[float] = None
+    opportunity: Optional[float] = None
+    # v2 scoring (growth-gated; see etl/marts/mart_niche.sql header).
+    opportunity_v2: Optional[float] = None
+    decline_gate: Optional[float] = None
+    entrant_ratio: Optional[float] = None
+    solo_viability: Optional[float] = None
+    tier: Optional[str] = None
+    # Live players (one value per key, stamped on all cuts; nightly point samples).
+    total_players_now: Optional[float] = None
+    players_trend_7d_pct: Optional[float] = None
+    players_coverage: Optional[float] = None
+
+
+class NicheList(BaseModel):
+    items: list[NicheRow]
+    total: int
+    limit: int
+    offset: int
+
+
+class NicheGame(BaseModel):
+    rank_in_niche: int
+    appid: int
+    name: Optional[str] = None
+    release_year: Optional[int] = None
+    price_initial: Optional[float] = None
+    owners_mid: Optional[float] = None
+    total_reviews: Optional[int] = None
+    positive_ratio: Optional[float] = None
+    est_rev_reviews: Optional[float] = None
+    self_published: Optional[int] = None
+    header_image: Optional[str] = None
+
+
+class TrendPoint(BaseModel):
+    year: int
+    n_releases: int
+    n_scored: int
+    median_rev: Optional[float] = None
+
+
+class NichePlayersPoint(BaseModel):
+    date: str  # 'YYYY-MM-DD'
+    total_players: int  # LOCF <= 7d carry so tail-rotation gaps don't read as dips
+    measured_players: Optional[int] = None  # same-day captures only (the no-carry reality check)
+    n_games_measured: int
+
+
+class NichePlayers(BaseModel):
+    """The niche's live-player block: mart_niche summary columns + the daily series."""
+
+    total_players_now: Optional[float] = None
+    players_trend_7d_pct: Optional[float] = None
+    players_coverage: Optional[float] = None
+    n_games_panel: Optional[int] = None
+    series: list[NichePlayersPoint] = Field(default_factory=list)
+
+
+class NicheTheme(BaseModel):
+    """One review-aspect row pooled to niche level (mart_niche_themes, vote-based family)."""
+
+    aspect: str
+    n_games: int
+    total_mentions: int
+    praise_share: Optional[float] = None
+    complaint_share: Optional[float] = None
+    praise_delta_vs_catalog: Optional[float] = None
+
+
+class NicheDetail(BaseModel):
+    dimension: str
+    key: str
+    tier: Optional[str] = None
+    variants: list[NicheRow]
+    saturation_trend: list[TrendPoint]
+    revenue_histogram: list[HistBucket]
+    representative_games: list[NicheGame]
+    players: Optional[NichePlayers] = None  # None = mart predates the CCU marts
+    themes: list[NicheTheme] = Field(default_factory=list)
+    hit_rates: dict
