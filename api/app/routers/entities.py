@@ -16,6 +16,7 @@ refreshing"), not a raw duckdb.CatalogException 500.
 """
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Literal
 
 import duckdb
@@ -67,6 +68,28 @@ _SEARCH_COLS = (
 )
 
 
+@lru_cache(maxsize=1)
+def _has_p90() -> bool:
+    """Whether the mart carries p90_rev (added 2026-08-14). Gated so the app still boots
+    against an older mart — same capability idiom as games.py::_has_name_lower."""
+    if not analytics_db.is_ready():
+        return False
+    return bool(
+        analytics_db.query(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'mart_entity' AND column_name = 'p90_rev'"
+        )
+    )
+
+
+def _entity_cols() -> str:
+    return _ENTITY_COLS + (", p90_rev" if _has_p90() else "")
+
+
+def _search_cols() -> str:
+    return _SEARCH_COLS + (", p90_rev" if _has_p90() else "")
+
+
 class EntitySearchRow(BaseModel):
     role: Role
     name: str
@@ -76,6 +99,7 @@ class EntitySearchRow(BaseModel):
     n_recent_24m: int | None
     total_rev: float | None
     median_rev: float | None
+    p90_rev: float | None = None  # absent on marts that predate it
     hit_rate_200k: float | None
     top_genres: list[str]
 
@@ -95,6 +119,7 @@ class EntitySummary(BaseModel):
     n_recent_24m: int | None
     total_rev: float | None
     median_rev: float | None
+    p90_rev: float | None = None  # absent on marts that predate it
     hit_rate_200k: float | None
     median_reviews: float | None
     median_positive_ratio: float | None
@@ -145,7 +170,7 @@ def search_entities(
 
     total_rows = _q(f"SELECT COUNT(*) AS n FROM mart_entity {where_sql}", params)
     rows = _q(
-        f"SELECT {_SEARCH_COLS} FROM mart_entity {where_sql} "
+        f"SELECT {_search_cols()} FROM mart_entity {where_sql} "
         "ORDER BY total_rev DESC NULLS LAST, n_games DESC, name ASC LIMIT ?",
         params + [limit],
     )
@@ -161,7 +186,7 @@ def entity_profile(
     role: Role = Query(...),
     name: str = Query(..., min_length=1, description="Exact entity name (query param — names contain slashes/unicode)."),
 ) -> EntityProfileResponse:
-    rows = _q(f"SELECT {_ENTITY_COLS} FROM mart_entity WHERE role = ? AND name = ?", [role, name])
+    rows = _q(f"SELECT {_entity_cols()} FROM mart_entity WHERE role = ? AND name = ?", [role, name])
     if not rows:
         # Structured 404: carry up to 5 near-miss names so the client can render
         # "did you mean" links instead of a dead end.

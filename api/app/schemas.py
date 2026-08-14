@@ -371,6 +371,7 @@ class NicheRow(BaseModel):
     median_rev: Optional[float] = None
     p25_rev: Optional[float] = None
     p75_rev: Optional[float] = None
+    p90_rev: Optional[float] = None  # absent on marts that predate 2026-08-14
     median_reviews: Optional[float] = None
     median_price: Optional[float] = None
     median_positive_ratio: Optional[float] = None
