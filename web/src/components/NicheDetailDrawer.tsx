@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import clsx from "clsx";
-import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { Histogram } from "./charts/Histogram";
 import { OpportunityBars } from "./charts/OpportunityBars";
@@ -18,6 +18,7 @@ import {
   type Dimension,
   type NichePlayers,
   type NichePlayersPoint,
+  type NichePressPoint,
   type NicheRow,
   type Window,
 } from "../lib/api";
@@ -130,6 +131,49 @@ function PlayersSeriesChart({ points }: { points: NichePlayersPoint[] }) {
           dot={points.length <= 45 ? { r: 2.5, fill: CSS_VAR.demand, strokeWidth: 0 } : false}
         />
       </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
+/** Monthly press-mention volume for the niche — same single-hue count-per-period bar shape
+ * (and same aqua hue) as the game page's PressTimelineChart, since both slice the identical
+ * underlying metric (journalist press mentions), just per game vs. pooled per niche. */
+function NichePressChart({ points }: { points: NichePressPoint[] }) {
+  return (
+    <ResponsiveContainer width="100%" height={150}>
+      <BarChart data={points} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+        <CartesianGrid stroke="var(--gridline)" vertical={false} />
+        <XAxis
+          dataKey="month"
+          tick={{ fontSize: 10 }}
+          interval="preserveStartEnd"
+          minTickGap={24}
+          tickLine={false}
+          axisLine={{ stroke: "var(--baseline)" }}
+        />
+        <YAxis
+          tick={{ fontSize: 10 }}
+          tickFormatter={(v: number) => fmtInt(v)}
+          tickLine={false}
+          axisLine={false}
+          width={36}
+          allowDecimals={false}
+        />
+        <Tooltip
+          cursor={{ fill: "var(--gridline)", opacity: 0.5 }}
+          content={({ active, payload, label }) => {
+            if (!active || !payload || payload.length === 0) return null;
+            const p = payload[0].payload as NichePressPoint;
+            return (
+              <TooltipPanel
+                title={String(label)}
+                rows={[{ label: "Articles", value: fmtInt(p.n_articles), color: CSS_VAR.competition }]}
+              />
+            );
+          }}
+        />
+        <Bar dataKey="n_articles" fill={CSS_VAR.competition} radius={[4, 4, 0, 0]} maxBarSize={20} />
+      </BarChart>
     </ResponsiveContainer>
   );
 }
@@ -430,6 +474,46 @@ export function NicheDetailDrawer({
               Review aspects pooled across the niche (vote-weighted). A complaint the whole niche shares is a
               quality-gap opening; a praise pillar is the bar to clear.
             </p>
+          </section>
+        )}
+
+        {detail?.press && detail.press.timeline.length > 0 && (
+          <section>
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-muted">Press coverage</h3>
+            <div className="rounded-card border border-chartborder p-3">
+              <div className="mb-2 text-xs text-ink-secondary">
+                <span className="tabular font-semibold text-ink-primary">{fmtInt(detail.press.total_articles)}</span>{" "}
+                dated press mentions of this niche&apos;s games, by month
+              </div>
+              <NichePressChart points={detail.press.timeline} />
+              {detail.press.top_outlets.length > 0 && (
+                <div className="mt-3 overflow-hidden rounded-card border border-chartborder">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-chartborder text-left text-ink-muted">
+                        <th className="px-2 py-1.5 font-medium">Top outlets</th>
+                        <th className="px-2 py-1.5 font-medium">Articles</th>
+                        <th className="px-2 py-1.5 font-medium">Games covered</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.press.top_outlets.slice(0, 10).map((o) => (
+                        <tr key={o.source} className="border-b border-chartborder/60 last:border-0">
+                          <td className="px-2 py-1.5 font-medium text-ink-primary">{o.source}</td>
+                          <td className="tabular px-2 py-1.5 text-ink-secondary">{fmtInt(o.n_articles)}</td>
+                          <td className="tabular px-2 py-1.5 text-ink-secondary">{fmtInt(o.n_games_covered)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <p className="mt-2 text-[11px] italic text-ink-muted">
+                Journalist coverage only (Steam News excluded), fuzzy-matched with a confidence floor; an article
+                covering two of the niche&apos;s games counts once per game. Press follows games that are already
+                notable — read this as the niche&apos;s visibility and who to pitch, not as what caused the sales.
+              </p>
+            </div>
           </section>
         )}
 

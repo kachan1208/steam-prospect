@@ -343,6 +343,32 @@ class GameTeardown(BaseModel):
     caveats: list[str]
 
 
+# ---- channel mix (Track M — where a genre gets marketing attention) --------------------
+class ChannelMixRow(BaseModel):
+    """One (channel) slice of a genre's marketing-attention mix (mart_channel_mix).
+    share_mentions = this channel's share of raw mention volume; share_reach_weighted
+    weights each mention by the creator's audience size at the time (press = 1.0/article,
+    outlets carry no audience figure) — usually the more decision-relevant read, but a
+    single huge channel can dominate it, so both are returned."""
+
+    channel: str  # 'press' | 'youtube' | 'reddit' | 'twitch' | 'x'
+    n_mentions: int
+    reach_weighted: float
+    share_mentions: Optional[float] = None
+    share_reach_weighted: Optional[float] = None
+
+
+class GameChannelMix(BaseModel):
+    """A game's genre-level channel mix: mart_channel_mix rows for the game's own
+    primary_genre (the mix is a GENRE property — per-game channel data would be too
+    sparse to read). channels is empty when the genre has no rows, the game has no
+    primary_genre, or the mart predates the channel-mix ETL."""
+
+    appid: int
+    genre: Optional[str] = None
+    channels: list[ChannelMixRow] = Field(default_factory=list)
+
+
 # ---- aspect drill-down (Phase 3 — click a teardown bar to read the reviews) -----------
 class AspectReviewExcerpt(BaseModel):
     excerpt: str
@@ -459,6 +485,30 @@ class NicheTheme(BaseModel):
     praise_delta_vs_catalog: Optional[float] = None
 
 
+class NichePressPoint(BaseModel):
+    month: str  # 'YYYY-MM'
+    n_articles: int
+
+
+class NichePressOutlet(BaseModel):
+    source: str
+    n_articles: int
+    n_games_covered: int
+
+
+class NichePress(BaseModel):
+    """The niche's press-coverage block (mart_niche_press / mart_niche_press_outlets):
+    journalist coverage of member games, pooled to niche level. n_articles counts
+    article-mentions (an article covering two member games counts once per game);
+    total_articles sums the dated timeline. Same caveats as every press mart: fuzzy
+    match-confidence filter, selection bias (covered games are already notable), and
+    Steam News excluded."""
+
+    total_articles: int
+    timeline: list[NichePressPoint] = Field(default_factory=list)
+    top_outlets: list[NichePressOutlet] = Field(default_factory=list)
+
+
 class NicheDetail(BaseModel):
     dimension: str
     key: str
@@ -469,4 +519,7 @@ class NicheDetail(BaseModel):
     representative_games: list[NicheGame]
     players: Optional[NichePlayers] = None  # None = mart predates the CCU marts
     themes: list[NicheTheme] = Field(default_factory=list)
+    # None = mart predates mart_niche_press, or the niche has no published press rows
+    # (below the covered-games floor / genuinely uncovered).
+    press: Optional[NichePress] = None
     hit_rates: dict

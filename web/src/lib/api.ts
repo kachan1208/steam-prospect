@@ -243,6 +243,26 @@ export interface NicheTheme {
   praise_delta_vs_catalog: number | null;
 }
 
+export interface NichePressPoint {
+  month: string; // 'YYYY-MM'
+  n_articles: number;
+}
+
+export interface NichePressOutlet {
+  source: string;
+  n_articles: number;
+  n_games_covered: number;
+}
+
+/** The niche's press-coverage block (mart_niche_press): journalist coverage of member
+ * games pooled to niche level. n_articles counts article-mentions (an article covering two
+ * member games counts once per game); total_articles sums the dated timeline. */
+export interface NichePress {
+  total_articles: number;
+  timeline: NichePressPoint[];
+  top_outlets: NichePressOutlet[];
+}
+
 export interface NicheHitRates {
   hit_rate_200k: number | null;
   hit_rate_500k: number | null;
@@ -261,6 +281,9 @@ export interface NicheDetail {
   representative_games: NicheGame[];
   players: NichePlayers | null;
   themes: NicheTheme[];
+  // null = mart predates mart_niche_press, or the niche has no published press rows
+  // (below the covered-games floor / genuinely uncovered).
+  press: NichePress | null;
   hit_rates: NicheHitRates;
 }
 
@@ -843,6 +866,34 @@ export function useGameTeardown(appid: number | null) {
     queryKey: ["game-teardown", appid],
     queryFn: () => request<GameTeardown>(`/games/${appid}/teardown`),
     enabled: appid !== null,
+  });
+}
+
+// ---- channel mix (Track M — where a genre gets marketing attention) ---------------------
+export interface ChannelMixRow {
+  channel: string; // 'press' | 'youtube' | 'reddit' | 'twitch' | 'x'
+  n_mentions: number;
+  reach_weighted: number;
+  share_mentions: number | null;
+  share_reach_weighted: number | null;
+}
+
+export interface GameChannelMix {
+  appid: number;
+  genre: string | null;
+  channels: ChannelMixRow[];
+}
+
+/** The game's GENRE-level marketing-channel mix (mart_channel_mix rows for its
+ * primary_genre — the mix is a genre property, per-game channel data would be too sparse).
+ * `channels` is empty when the game has no primary_genre, the genre has no rows, or the
+ * mart predates the channel-mix ETL. */
+export function useGameChannelMix(appid: number | null) {
+  return useQuery({
+    queryKey: ["game-channel-mix", appid],
+    queryFn: () => request<GameChannelMix>(`/games/${appid}/channel-mix`),
+    enabled: appid !== null,
+    staleTime: 5 * 60_000,
   });
 }
 

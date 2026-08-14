@@ -38,6 +38,9 @@ from ..schemas import (
     NicheList,
     NichePlayers,
     NichePlayersPoint,
+    NichePress,
+    NichePressOutlet,
+    NichePressPoint,
     NicheRow,
     NicheTheme,
     TrendPoint,
@@ -273,6 +276,33 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
         [dimension, key],
     )
 
+    # Press coverage pooled to niche level (mart_niche_press / mart_niche_press_outlets).
+    # None when the mart predates this feature (CatalogException on the missing tables —
+    # same degrade convention as the players block, but the whole TABLE can be absent here,
+    # not just columns) or when the niche has no published rows (below the covered-games
+    # floor / genuinely uncovered). total_articles sums the dated timeline; outlets are
+    # already capped + ordered by volume in the mart.
+    press: NichePress | None = None
+    try:
+        press_timeline = analytics_db.query(
+            "SELECT month, n_articles FROM mart_niche_press "
+            "WHERE dimension = ? AND key = ? ORDER BY month",
+            [dimension, key],
+        )
+        press_outlets = analytics_db.query(
+            "SELECT source, n_articles, n_games_covered FROM mart_niche_press_outlets "
+            "WHERE dimension = ? AND key = ? ORDER BY n_articles DESC, source",
+            [dimension, key],
+        )
+        if press_timeline or press_outlets:
+            press = NichePress(
+                total_articles=sum(int(p["n_articles"]) for p in press_timeline),
+                timeline=[NichePressPoint(**p) for p in press_timeline],
+                top_outlets=[NichePressOutlet(**o) for o in press_outlets],
+            )
+    except duckdb.CatalogException:
+        press = None
+
     # Headline numbers from the all/50 cut (the broadest population that always exists).
     headline = next(
         (v for v in variants if v["win"] == "all" and v["min_reviews"] == 50), variants[0]
@@ -287,6 +317,7 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
         representative_games=[NicheGame(**g) for g in games],
         players=players,
         themes=[NicheTheme(**t) for t in themes],
+        press=press,
         hit_rates={
             "hit_rate_200k": headline["hit_rate_200k"],
             "hit_rate_500k": headline["hit_rate_500k"],

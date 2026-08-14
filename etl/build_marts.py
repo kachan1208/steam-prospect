@@ -320,6 +320,17 @@ NICHE_THEMES_MIN_GAMES = 10      # a (niche, aspect) needs >= this many games wi
                                   # (mirrors MIN_NICHE_GAMES's role, floored lower because the
                                   # teardown-eligible population is much smaller than mart_niche's)
 
+# JTBD — niche press coverage (see mart_niche_press.sql): the per-game press footprint
+# (mart_game_press_timeline / mart_game_press_by_source) rolled up to niche (tag/genre)
+# level — a coverage timeline + "who covers this niche" for the Niche Finder drawer.
+NICHE_PRESS_MIN_GAMES = 5        # a niche needs >= this many press-covered member games to
+                                  # be published — below that, one title's press cycle would
+                                  # read as "the niche's" coverage (mirrors
+                                  # NICHE_THEMES_MIN_GAMES's role, floored lower because
+                                  # journalist coverage is far sparser than review text)
+NICHE_PRESS_TOP_OUTLETS = 15     # outlets kept per niche (top by n_articles) — the drawer
+                                  # shows a short pitch-relevant list, not the full long tail
+
 # Phase 3 — Aspect-level TEXT SENTIMENT (VADER). The teardown's praise/complaint split was
 # historically derived from each review's OVERALL Steam thumbs-up/down vote, so a thumbs-up
 # review that trashes the combat still counted as "praise" for combat. compute_aspect_sentiment()
@@ -707,11 +718,12 @@ MART_FILES = [
     "mart_creator_pitch.sql",
     "mart_channel_mix.sql",
     "mart_channel_buzz.sql",
-    # These two are LAST on purpose: they read marts built above (mart_game, mart_niche,
-    # mart_game_review_aspects, mart_genre_aspect_baseline) rather than staging tables.
-    # They are independent of each other.
+    # These are LAST on purpose: they read marts built above (mart_game, mart_niche,
+    # mart_game_review_aspects, mart_genre_aspect_baseline, mart_game_press_*) rather
+    # than staging tables. They are independent of each other.
     "mart_tag_lift.sql",
     "mart_niche_themes.sql",
+    "mart_niche_press.sql",
 ]
 
 HERE = Path(__file__).resolve().parent
@@ -773,6 +785,8 @@ def build_params() -> dict[str, str]:
         "PRESS_NOTABLE_N": PRESS_NOTABLE_N,
         "ASPECT_REVIEWS_TOP_K": ASPECT_REVIEWS_TOP_K,
         "NICHE_THEMES_MIN_GAMES": NICHE_THEMES_MIN_GAMES,
+        "NICHE_PRESS_MIN_GAMES": NICHE_PRESS_MIN_GAMES,
+        "NICHE_PRESS_TOP_OUTLETS": NICHE_PRESS_TOP_OUTLETS,
         "PRESS_AUTHOR_MIN_ARTICLES": PRESS_AUTHOR_MIN_ARTICLES,
         "BUZZ_TOTAL_MONTHS": BUZZ_TOTAL_MONTHS,
         "BUZZ_RECENT_MONTHS": BUZZ_RECENT_MONTHS,

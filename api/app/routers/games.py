@@ -3,12 +3,15 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
+import duckdb
 from fastapi import APIRouter, HTTPException, Query
 
 from .. import analytics_db
 from ..schemas import (
     AspectReviewExcerpt,
     AspectReviewsResponse,
+    ChannelMixRow,
+    GameChannelMix,
     GameComparable,
     GameComparablesResponse,
     GameLaunchCurvePoint,
@@ -535,3 +538,35 @@ def game_aspect_reviews(
         for r in rows
     ]
     return AspectReviewsResponse(appid=appid, aspect=aspect, sentiment=sentiment, items=items)
+
+
+@router.get("/{appid}/channel-mix", response_model=GameChannelMix)
+def game_channel_mix(appid: int) -> GameChannelMix:
+    """Where this game's GENRE gets marketing attention — mart_channel_mix's per-channel
+    share of mentions / reach-weighted reach (Press vs YouTube vs Reddit vs Twitch vs X)
+    for the game's own primary_genre. The mix is a genre property, not a per-game one
+    (per-game channel data would be too sparse to read); the genre is echoed so the UI can
+    caption it honestly. Degrades to an empty `channels` list when the game has no
+    primary_genre, the genre has no rows, or the mart predates the channel-mix ETL
+    (CatalogException — same convention as the entities/timing routers)."""
+    game = analytics_db.query_one(
+        "SELECT appid, primary_genre FROM mart_game WHERE appid = ?", [appid]
+    )
+    if game is None:
+        raise HTTPException(status_code=404, detail=f"game not found: {appid}")
+
+    genre = game["primary_genre"]
+    rows: list[dict] = []
+    if genre is not None:
+        try:
+            rows = analytics_db.query(
+                "SELECT channel, n_mentions, reach_weighted, share_mentions, "
+                "share_reach_weighted FROM mart_channel_mix WHERE genre = ? "
+                "ORDER BY share_reach_weighted DESC NULLS LAST",
+                [genre],
+            )
+        except duckdb.CatalogException:
+            rows = []
+    return GameChannelMix(
+        appid=appid, genre=genre, channels=[ChannelMixRow(**r) for r in rows]
+    )

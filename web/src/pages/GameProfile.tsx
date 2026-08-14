@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import clsx from "clsx";
 
 import { AspectDivergingBars } from "../components/charts/AspectDivergingBars";
+import { ChannelShareBars } from "../components/charts/ChannelShareBars";
 import { GameMetricDrilldown, DRILLDOWN_META, type DrilldownMetric, type OwnersPerReview } from "../components/charts/GameMetricDrilldown";
 import { LanguageSplitChart } from "../components/charts/LanguageSplitChart";
 import { LaunchShapeBars } from "../components/charts/LaunchShapeBars";
@@ -16,6 +17,7 @@ import { Card } from "../components/ui/Card";
 import { Meter, BulletMeter } from "../components/ui/Meter";
 import { StatTile } from "../components/ui/StatTile";
 import {
+  useGameChannelMix,
   useGameComparables,
   useGameProfile,
   useGameReviewsSummary,
@@ -108,6 +110,7 @@ export default function GameProfile() {
   const genreCurveQ = useLaunchCurve(profileQ.data?.primary_genre ?? "__all__");
   const benchmarksQ = useMarketBenchmarks();
   const teardownQ = useGameTeardown(validAppid ? appid : null);
+  const channelMixQ = useGameChannelMix(validAppid ? appid : null);
 
   const profile = profileQ.data;
 
@@ -450,6 +453,24 @@ export default function GameProfile() {
           </p>
         )}
       </Card>
+
+      {/* Genre-level like Launch shape above: the channel mix is a property of the genre
+          (per-game channel data is too sparse), so it sits with the genre yardsticks. Hidden
+          entirely (no empty card) when the genre has no channel rows or the mart predates
+          the channel-mix ETL — same pattern as NotableCoverageCard on the teardown tab. */}
+      {channelMixQ.data && channelMixQ.data.channels.length > 0 && (
+        <Card
+          title="Where this genre gets attention"
+          subtitle={`Marketing-channel mix for ${channelMixQ.data.genre} — each channel's share of tracked coverage (press articles + YouTube/Reddit/Twitch/X creator mentions), a genre-level read, not this game's own footprint`}
+        >
+          <ChannelShareBars channels={channelMixQ.data.channels} />
+          <p className="mt-3 text-[11px] italic text-ink-muted">
+            One press article = one creator mention = one unit of volume. Hover a channel for its audience-weighted
+            share — that read skews almost entirely toward big-subscriber channels, since a creator mention counts
+            their whole audience while a press article counts 1.
+          </p>
+        </Card>
+      )}
 
       <Card title="Language split" subtitle="Share of sampled reviews by language — a localization reference">
         {reviewsQ.isLoading && <div className="flex h-24 items-center justify-center text-xs text-ink-muted">Loading…</div>}
