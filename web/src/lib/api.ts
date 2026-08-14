@@ -71,9 +71,17 @@ export type Window = "all" | "24m";
 export type SortKey =
   | "key"
   | "opportunity"
+  | "opportunity_v2"
+  | "decline_gate"
+  | "entrant_ratio"
+  | "solo_viability"
   | "demand"
   | "competition"
   | "quality_gap"
+  | "market_size"
+  | "total_owners"
+  | "total_rev"
+  | "total_reviews"
   | "median_rev"
   | "median_reviews"
   | "median_price"
@@ -87,7 +95,13 @@ export type SortKey =
   | "beatable_share"
   | "saturation_yoy"
   | "self_pub_share"
-  | "winner_concentration";
+  | "winner_concentration"
+  | "total_players_now"
+  | "players_trend_7d_pct"
+  | "players_coverage";
+
+export type NicheTier = "micro" | "theme" | "umbrella" | "meta";
+export const NICHE_TIERS: NicheTier[] = ["micro", "theme", "umbrella", "meta"];
 
 export interface HistBucket {
   bucket_index: number;
@@ -111,6 +125,163 @@ export function useHealth() {
     staleTime: 30_000,
     retry: 1,
   });
+}
+
+// ---- niches (Niche Finder — resurrected 2026-08 with v2 scoring + live players) --------
+export interface NicheRow {
+  dimension: string;
+  key: string;
+  window: string;
+  min_reviews: number;
+  n_games: number;
+  n_recent: number;
+  median_rev: number | null;
+  p25_rev: number | null;
+  p75_rev: number | null;
+  median_reviews: number | null;
+  median_price: number | null;
+  median_positive_ratio: number | null;
+  median_owners: number | null;
+  total_owners: number | null;
+  total_rev: number | null;
+  total_reviews: number | null;
+  market_size: number | null;
+  recent_velocity: number | null;
+  self_pub_share: number | null;
+  winner_concentration: number | null;
+  hit_rate_200k: number | null;
+  hit_rate_500k: number | null;
+  beatable_share: number | null;
+  saturation_yoy: number | null;
+  demand: number | null;
+  competition: number | null;
+  quality_gap: number | null;
+  opportunity: number | null;
+  opportunity_v2: number | null;
+  decline_gate: number | null;
+  entrant_ratio: number | null;
+  solo_viability: number | null;
+  tier: string | null;
+  // Live players — absent (undefined) on marts that predate the CCU marts.
+  total_players_now?: number | null;
+  players_trend_7d_pct?: number | null;
+  players_coverage?: number | null;
+}
+
+export interface NicheList {
+  items: NicheRow[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface NicheListParams {
+  dimension: Dimension;
+  window: Window;
+  min_reviews: number;
+  sort: SortKey;
+  order: "asc" | "desc";
+  q?: string;
+  tiers?: string; // comma-joined NicheTier list (tags only)
+  min_total_players?: number;
+  limit: number;
+  offset: number;
+}
+
+export function useNiches(params: NicheListParams) {
+  return useQuery({
+    queryKey: ["niches", params],
+    queryFn: () => request<NicheList>(`/niches${qs(params)}`),
+    placeholderData: keepPreviousData,
+  });
+}
+
+export interface NicheGame {
+  rank_in_niche: number;
+  appid: number;
+  name: string | null;
+  release_year: number | null;
+  price_initial: number | null;
+  owners_mid: number | null;
+  total_reviews: number | null;
+  positive_ratio: number | null;
+  est_rev_reviews: number | null;
+  self_published: number | null;
+  header_image: string | null;
+}
+
+export interface TrendPoint {
+  year: number;
+  n_releases: number;
+  n_scored: number;
+  median_rev: number | null;
+}
+
+export interface NichePlayersPoint {
+  date: string;
+  total_players: number;
+  measured_players: number | null;
+  n_games_measured: number;
+}
+
+export interface NichePlayers {
+  total_players_now: number | null;
+  players_trend_7d_pct: number | null;
+  players_coverage: number | null;
+  n_games_panel: number | null;
+  series: NichePlayersPoint[];
+}
+
+export interface NicheTheme {
+  aspect: string;
+  n_games: number;
+  total_mentions: number;
+  praise_share: number | null;
+  complaint_share: number | null;
+  praise_delta_vs_catalog: number | null;
+}
+
+export interface NicheHitRates {
+  hit_rate_200k: number | null;
+  hit_rate_500k: number | null;
+  median_rev: number | null;
+  n_games: number | null;
+  winner_concentration: number | null;
+}
+
+export interface NicheDetail {
+  dimension: string;
+  key: string;
+  tier: string | null;
+  variants: NicheRow[];
+  saturation_trend: TrendPoint[];
+  revenue_histogram: HistBucket[];
+  representative_games: NicheGame[];
+  players: NichePlayers | null;
+  themes: NicheTheme[];
+  hit_rates: NicheHitRates;
+}
+
+export function useNicheDetail(dimension: Dimension, key: string | null) {
+  return useQuery({
+    queryKey: ["niche-detail", dimension, key],
+    queryFn: () => request<NicheDetail>(`/niches/${dimension}/${encodeURIComponent(key ?? "")}`),
+    enabled: key !== null,
+  });
+}
+
+/** Build a download URL for the niches CSV export (GET, triggered via <a download>). */
+export function nicheExportCsvUrl(params: {
+  dimension: Dimension;
+  window: Window;
+  min_reviews?: number;
+  sort?: SortKey;
+  order?: "asc" | "desc";
+  q?: string;
+  tiers?: string;
+  limit?: number;
+}): string {
+  return `${API_BASE}/niches/export.csv${qs(params)}`;
 }
 
 // ---- market -----------------------------------------------------------------------------

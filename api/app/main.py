@@ -13,7 +13,7 @@ from . import analytics_db
 from .config import settings
 from .observability import setup_observability
 from .routers import (
-    analytics, entities, games, health, market, refresh, seasonality, timing, trends,
+    analytics, entities, games, health, market, niches, refresh, seasonality, timing, trends,
 )
 from .mcp_mount import load_prospect_mcp
 
@@ -58,6 +58,7 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
+app.include_router(niches.router)
 app.include_router(market.router)
 app.include_router(seasonality.router)
 app.include_router(timing.router)
