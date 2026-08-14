@@ -339,9 +339,13 @@ export function NicheDetailDrawer({
         </section>
 
         <div className="grid grid-cols-3 gap-3">
-          <StatTile label="P25 revenue" value={fmtUsd(activeVariant.p25_rev)} />
-          <StatTile label="Median revenue" value={fmtUsd(activeVariant.median_rev)} />
+          <StatTile label="Median revenue" value={fmtUsd(activeVariant.median_rev)} sub="the typical outcome" />
           <StatTile label="P75 revenue" value={fmtUsd(activeVariant.p75_rev)} />
+          <StatTile
+            label="P90 revenue"
+            value={activeVariant.p90_rev != null ? fmtUsd(activeVariant.p90_rev) : "—"}
+            sub="the successful tail"
+          />
         </div>
 
         <div className="grid grid-cols-3 gap-3">

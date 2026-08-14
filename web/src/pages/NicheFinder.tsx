@@ -194,11 +194,22 @@ export default function NicheFinder() {
         ),
         cell: (info) => <span className="tabular text-ink-secondary">{fmtInt(info.getValue())}</span>,
       }),
-      columnHelper.accessor("median_rev", {
+      columnHelper.accessor((row) => row.p90_rev ?? null, {
+        id: "p90_rev",
         header: () => (
-          <SortLabel label="Median rev" col="median_rev" active={sort === "median_rev"} order={order} onSort={toggleSort} />
+          <SortLabel label="P90 rev" col="p90_rev" active={sort === "p90_rev"} order={order} onSort={toggleSort} />
         ),
-        cell: (info) => <span className="tabular text-ink-secondary">{fmtUsd(info.getValue())}</span>,
+        cell: (info) => {
+          const v = info.getValue();
+          return (
+            <span
+              className="tabular text-ink-secondary"
+              title="90th-percentile est. lifetime revenue — what the niche's successful titles earn (median lives in the deep dive)"
+            >
+              {v != null ? fmtUsd(v) : "—"}
+            </span>
+          );
+        },
       }),
       columnHelper.display({
         id: "opportunity_bars",

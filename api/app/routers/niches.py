@@ -61,6 +61,7 @@ SORTABLE = {
     "n_games", "n_recent", "hit_rate_200k", "hit_rate_500k",
     "beatable_share", "saturation_yoy", "self_pub_share", "winner_concentration",
     "total_players_now", "players_trend_7d_pct", "players_coverage",
+    "p90_rev",
 }
 _PLAYERS_COLS = ["total_players_now", "players_trend_7d_pct", "players_coverage"]
 
@@ -88,8 +89,24 @@ def _has_players() -> bool:
     return bool(rows)
 
 
+@lru_cache(maxsize=1)
+def _has_p90() -> bool:
+    """p90_rev landed 2026-08-14; gate it like the players columns so the app still
+    serves a mart built before that ETL."""
+    rows = analytics_db.query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_niche' AND column_name = 'p90_rev'"
+    )
+    return bool(rows)
+
+
 def _cols() -> list[str]:
-    return _BASE_COLS + (_PLAYERS_COLS if _has_players() else [])
+    cols = list(_BASE_COLS)
+    if _has_p90():
+        cols.append("p90_rev")
+    if _has_players():
+        cols.extend(_PLAYERS_COLS)
+    return cols
 
 
 def _row_to_niche(r: dict) -> NicheRow:
@@ -177,6 +194,11 @@ def list_niches(
         raise HTTPException(
             status_code=503,
             detail="mart_niche predates the live-player columns — rebuild the marts (task etl).",
+        )
+    if sort == "p90_rev" and not _has_p90():
+        raise HTTPException(
+            status_code=503,
+            detail="mart_niche predates the p90_rev column — rebuild the marts (task etl).",
         )
     tiers_arg = tiers if tiers else None  # "" (explicit empty) = no tier filter
     where, params = _build_filters(

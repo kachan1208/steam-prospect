@@ -197,7 +197,12 @@ export default function EntityProfile() {
           value={fmtUsd(entity.total_rev)}
           sub="Boxleiter gross across the catalog"
         />
-        <StatTile label="Median est. revenue" valueClassName="text-brand" value={fmtUsd(entity.median_rev)} sub="Per release" />
+        <StatTile
+          label="P90 est. revenue"
+          valueClassName="text-brand"
+          value={entity.p90_rev != null ? fmtUsd(entity.p90_rev) : "—"}
+          sub={`median ${fmtUsd(entity.median_rev)} per release`}
+        />
         <StatTile
           label="Hit rate ≥ $200K"
           valueClassName={(entity.hit_rate_200k ?? 0) >= 0.25 ? "text-verdict-good" : undefined}
