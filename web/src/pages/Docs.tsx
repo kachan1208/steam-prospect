@@ -115,6 +115,8 @@ const TOC: { group: string; items: [string, string][] }[] = [
   {
     group: "The core",
     items: [
+      ["niches", "Niche Finder"],
+      ["opportunity-score", "Reading the Opportunity score"],
       ["games", "Games & teardown"],
       ["studios", "Studios"],
       ["timing", "Launch & Timing"],
@@ -293,6 +295,109 @@ export default function Docs() {
       </Section>
 
       {/* ============================ THE CORE ============================ */}
+      <Section id="niches" kicker="The core" title="Niche Finder">
+        <Feature
+          id="niches-card"
+          name="Niche Finder"
+          where="Header nav “Niches”"
+          to="/niches"
+          question="What should I build — which niches reward a new entrant, and which only look open?"
+        >
+          <p>
+            Ranks every Steam community tag and genre by a growth-gated{" "}
+            <span className="text-ink-primary">Opportunity score</span> (explained in full below), alongside the
+            evidence you should check before believing it: how many games compete there, what the successful ones earn
+            (P90 revenue), how big the total audience is (owners), <span className="text-ink-primary">who is actually
+            playing right now</span> (live concurrent players, updated nightly, with a 7-day trend), and whether the
+            release pipeline is growing or shrinking. Click any niche for the deep dive: decline flags first, then
+            score breakdown, live-player history, revenue distribution, what players praise and complain about, press
+            coverage, and the niche's top games.
+          </p>
+          <ReadBox>
+            Defaults are opinionated on purpose: the <span className="text-ink-primary">last-24-months</span> window
+            (the market a new entrant actually faces, not all of Steam history) and only{" "}
+            <span className="text-ink-primary">buildable tiers</span> (micro-genres and themes — “Open World” is a
+            container, not a plan). Every column header has a ⓘ hover explaining how to read it.
+          </ReadBox>
+        </Feature>
+      </Section>
+
+      <Section id="opportunity-score" kicker="The core" title="Reading the Opportunity score">
+        <Card>
+          <div className="flex flex-col gap-3 text-sm leading-relaxed text-ink-secondary">
+            <p>
+              The score compresses three 0–100 percentiles (each niche ranked against all other niches in the same
+              cut) into one number:
+            </p>
+            <Pre>{`opportunity = 0.5 × demand  −  0.35 × competition  +  0.3 × quality gap   (floored at 0)
+opportunity v2 = opportunity × decline gate                                  (the headline)`}</Pre>
+            <Terms
+              items={[
+                ["Demand", <>What the typical game here earns and sells — median revenue, owners, and recent review velocity. Higher = hotter market.</>],
+                ["Competition", <>How crowded it is — recent releases plus winner concentration. <span className="text-ink-primary">Higher is worse</span> for a new entrant, and it carries a heavy weight.</>],
+                ["Quality gap", <>The share of incumbents that are weak (low rating or thin reviews). Higher = easier to out-execute the field.</>],
+                ["Decline gate", <>A multiplier (0.5–1.0) that shrinks the score when the release pipeline is contracting or when newcomers earn less than the back catalog — “low competition” in a dying niche must not read as opportunity.</>],
+              ]}
+            />
+            <p>
+              <span className="font-semibold text-ink-primary">Why a niche can score 0.0 while millions play it.</span>{" "}
+              The formula can go <em>negative</em> — the crowding penalty outweighing everything else — and negative
+              scores display as “0.0 <span className="text-ink-muted">floored</span>”. That is a real verdict, not
+              missing data. A real example (August 2026 data):
+            </p>
+            <div className="overflow-x-auto rounded-card border border-chartborder">
+              <table className="w-full min-w-[520px] text-xs">
+                <thead>
+                  <tr className="border-b border-chartborder text-left text-ink-muted">
+                    <th className="px-2 py-1.5 font-medium">Niche</th>
+                    <th className="px-2 py-1.5 font-medium">Demand</th>
+                    <th className="px-2 py-1.5 font-medium">Competition</th>
+                    <th className="px-2 py-1.5 font-medium">Quality gap</th>
+                    <th className="px-2 py-1.5 font-medium">Raw score</th>
+                    <th className="px-2 py-1.5 font-medium">Shown</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="border-b border-chartborder/60">
+                    <td className="px-2 py-1.5 font-medium text-ink-primary">Psychological Horror</td>
+                    <td className="tabular px-2 py-1.5">17.6</td>
+                    <td className="tabular px-2 py-1.5">87.5</td>
+                    <td className="tabular px-2 py-1.5">39.1</td>
+                    <td className="tabular px-2 py-1.5 text-verdict-serious">−10.1</td>
+                    <td className="tabular px-2 py-1.5">0.0 floored</td>
+                  </tr>
+                  <tr>
+                    <td className="px-2 py-1.5 font-medium text-ink-primary">Survival Horror</td>
+                    <td className="tabular px-2 py-1.5">38.2</td>
+                    <td className="tabular px-2 py-1.5">80.9</td>
+                    <td className="tabular px-2 py-1.5">78.5</td>
+                    <td className="tabular px-2 py-1.5 text-verdict-good">+14.3</td>
+                    <td className="tabular px-2 py-1.5">12.4 (after ×0.86 gate)</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p>
+              The bars can look similar while the numbers are far apart: Survival Horror's typical game earns{" "}
+              <span className="text-ink-primary">$52K vs $33K</span>, twice the share of its incumbents are beatable
+              (quality gap 78 vs 39), and it has less than half the recent releases (466 vs 1,026). Each demand point
+              moves the score by 0.5 and each quality-gap point by 0.3, so those gaps swing ~22 points — one niche
+              lands above water, the other 10 under. Psychological Horror's 407K concurrent players and 53M owners
+              don't change that: <span className="font-semibold text-ink-primary">a big audience means people play the
+              hits — it doesn't hand a new entrant players.</span>
+            </p>
+            <ReadBox>
+              The score is a <span className="text-ink-primary">screening tool, not a verdict</span>. Before acting on
+              a high score, open the deep dive and let the “Read this first” flags argue with it: a shrinking release
+              pipeline, newcomers earning under the back catalog, winner-take-most concentration, or low
+              solo-viability each veto a pretty number. And a 0.0 doesn't forbid building there — it says you'd be
+              betting on out-executing a crowded field where the typical game earns little, so the bet needs a reason
+              the median doesn't apply to you.
+            </ReadBox>
+          </div>
+        </Card>
+      </Section>
+
       <Section id="timing" kicker="The core" title="Launch & Timing">
         <Feature
           id="timing-card"

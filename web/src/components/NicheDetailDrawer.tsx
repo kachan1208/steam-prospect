@@ -269,17 +269,17 @@ export function NicheDetailDrawer({
             />
             <div className="grid flex-1 grid-cols-3 gap-2 text-center">
               <div>
-                <div className="text-[10px] text-ink-muted" title="0-100 percentile vs other niches: median revenue + owners + recent review velocity. Higher = hotter market.">Demand</div>
+                <div className="text-[10px] text-ink-muted" title="0.4×pctile(median revenue) + 0.3×pctile(median owners) + 0.3×pctile(recent review velocity), ranked 0–100 vs other niches. Higher = hotter market.">Demand</div>
                 <div className="tabular text-sm font-semibold text-ink-primary">{fmtCompact(activeVariant.demand)}</div>
               </div>
               <div>
-                <div className="text-[10px] text-ink-muted" title="0-100 percentile: recent releases + winner concentration. HIGHER IS WORSE for a new entrant.">Competition</div>
+                <div className="text-[10px] text-ink-muted" title="0.6×pctile(recent releases) + 0.4×pctile(winner concentration), ranked 0–100. HIGHER IS WORSE for a new entrant.">Competition</div>
                 <div className="tabular text-sm font-semibold text-ink-primary">
                   {fmtCompact(activeVariant.competition)}
                 </div>
               </div>
               <div>
-                <div className="text-[10px] text-ink-muted" title="0-100 percentile: share of incumbents that are weak (low rating or thin reviews). Higher = easier to out-execute.">Quality gap</div>
+                <div className="text-[10px] text-ink-muted" title="pctile(share of incumbents that are weak — under 80% positive OR under 50 reviews), ranked 0–100. Higher = easier to out-execute.">Quality gap</div>
                 <div className="tabular text-sm font-semibold text-ink-primary">
                   {fmtCompact(activeVariant.quality_gap)}
                 </div>

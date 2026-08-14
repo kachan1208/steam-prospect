@@ -206,7 +206,7 @@ export default function NicheFinder() {
       columnHelper.accessor((row) => row.p90_rev ?? null, {
         id: "p90_rev",
         header: () => (
-          <SortLabel label="P90 rev" help="90th-percentile estimated lifetime revenue — what the niche's SUCCESSFUL titles earn (1 in 10 does better). The median (typical outcome) is in the deep dive. Boxleiter-style estimate, not reported sales." col="p90_rev" active={sort === "p90_rev"} order={order} onSort={toggleSort} />
+          <SortLabel label="P90 rev" help="What the niche's successful titles earn: the 90th percentile of estimated lifetime revenue across its scored games (1 in 10 does better). Each game's estimate = review count × an owners-per-review ratio (~20–55, genre-fitted) × launch price — gross, lifetime, not reported sales. Median (the typical outcome) is in the deep dive." col="p90_rev" active={sort === "p90_rev"} order={order} onSort={toggleSort} />
         ),
         cell: (info) => {
           const v = info.getValue();
@@ -224,11 +224,11 @@ export default function NicheFinder() {
         id: "opportunity_bars",
         header: () => (
           <span className="flex items-center gap-1.5 whitespace-nowrap">
-            <SortLabel label="Demand" help="0-100 percentile vs other niches: how much the typical game here earns/sells (median revenue + owners + recent review velocity). Higher = hotter market." col="demand" color={legColor("demand")} active={sort === "demand"} order={order} onSort={toggleSort} />
+            <SortLabel label="Demand" help="How hot the market is, 0–100 percentile vs other niches in this cut. Calculated: 0.4×pctile(median revenue) + 0.3×pctile(median owners) + 0.3×pctile(recent 24m review velocity)." col="demand" color={legColor("demand")} active={sort === "demand"} order={order} onSort={toggleSort} />
             <span className="text-ink-muted/40">/</span>
-            <SortLabel label="Comp." help="0-100 percentile: how crowded it is (recent releases + winner concentration). HIGHER IS WORSE for a new entrant." col="competition" color={legColor("competition")} active={sort === "competition"} order={order} onSort={toggleSort} />
+            <SortLabel label="Comp." help="How crowded it is, 0–100 percentile. Calculated: 0.6×pctile(recently released games) + 0.4×pctile(winner concentration — the top 5% of titles' revenue share). HIGHER IS WORSE for a new entrant." col="competition" color={legColor("competition")} active={sort === "competition"} order={order} onSort={toggleSort} />
             <span className="text-ink-muted/40">/</span>
-            <SortLabel label="Quality gap" help="0-100 percentile: share of incumbents that are weak (low rating or thin reviews). Higher = easier to out-execute the field." col="quality_gap" color={legColor("quality")} active={sort === "quality_gap"} order={order} onSort={toggleSort} />
+            <SortLabel label="Quality gap" help="How beatable the field is, 0–100 percentile. Calculated: pctile(share of incumbents that are weak — rating under 80% positive OR fewer than 50 reviews). Higher = easier to out-execute." col="quality_gap" color={legColor("quality")} active={sort === "quality_gap"} order={order} onSort={toggleSort} />
           </span>
         ),
         cell: (info) => (
@@ -242,7 +242,7 @@ export default function NicheFinder() {
       columnHelper.accessor("opportunity_v2", {
         header: () => (
           <SortLabel
-            label="Opportunity v2" help="The headline score: 0.5×demand − 0.35×competition + 0.3×quality gap, floored at 0, then × the decline gate (shrinks when the release pipeline contracts or newcomers underearn). 0 with a ×gate = the crowding penalty swamped everything."
+            label="Opportunity v2" help="The headline score. Calculated: 0.5×demand − 0.35×competition + 0.3×quality gap, floored at 0, then × the decline gate (0.5–1.0; shrinks when the release pipeline contracts or newcomers earn under the back catalog). '0.0 floored' = the formula went negative: crowding outweighed demand + quality — a real verdict, not missing data."
             col="opportunity_v2"
             active={sort === "opportunity_v2"}
             order={order}
@@ -281,7 +281,7 @@ export default function NicheFinder() {
       columnHelper.accessor("total_players_now", {
         header: () => (
           <SortLabel
-            label="Playing now" help="Summed CURRENT concurrent players across the niche's scored games — nightly point samples (~21-22:00 UTC), not daily peaks; each game's last capture counts for up to 7 days. Dominated by the niche's hits."
+            label="Playing now" help="Who's playing right now. Calculated: SUM of each scored game's latest nightly player capture (kept up to 7 days). Captures are ~21–22:00 UTC point samples, not daily peaks. Dominated by the niche's hits."
             col="total_players_now"
             active={sort === "total_players_now"}
             order={order}
@@ -300,7 +300,7 @@ export default function NicheFinder() {
       columnHelper.accessor("players_trend_7d_pct", {
         header: () => (
           <SortLabel
-            label="Players 7d" help="Live-player change: last 7 days vs the 7 before, counting only games measured in BOTH windows — so growing data coverage can't fake an audience trend."
+            label="Players 7d" help="Live-player momentum. Calculated: (average players over the last 7 days − average over the prior 7) ÷ the prior 7, summed over games measured in BOTH windows — so growing data coverage can't fake an audience trend."
             col="players_trend_7d_pct"
             active={sort === "players_trend_7d_pct"}
             order={order}
@@ -324,7 +324,7 @@ export default function NicheFinder() {
       columnHelper.accessor("total_owners", {
         header: () => (
           <SortLabel
-            label="Total owners" help="Estimated total copies owned across the niche's scored games — the size of the pie. A big pie with a low score means people play the HITS, not that a new entrant gets a slice."
+            label="Total owners" help="The size of the pie. Calculated: SUM of each scored game's estimated owners (SteamSpy range midpoint; review-modeled where SteamSpy is coarse). A big pie with a low score means people play the HITS — it doesn't hand a new entrant a slice."
             col="total_owners"
             active={sort === "total_owners"}
             order={order}
@@ -335,13 +335,13 @@ export default function NicheFinder() {
       }),
       columnHelper.accessor("hit_rate_200k", {
         header: () => (
-          <SortLabel label="Hit ≥$200K" help="Share of the niche's scored games clearing $200K estimated lifetime revenue — the odds a serious title 'works' here." col="hit_rate_200k" active={sort === "hit_rate_200k"} order={order} onSort={toggleSort} />
+          <SortLabel label="Hit ≥$200K" help="The odds a serious title 'works' here. Calculated: share of the niche's scored games whose estimated lifetime revenue clears $200K." col="hit_rate_200k" active={sort === "hit_rate_200k"} order={order} onSort={toggleSort} />
         ),
         cell: (info) => <span className="tabular text-ink-secondary">{fmtPct(info.getValue())}</span>,
       }),
       columnHelper.accessor("saturation_yoy", {
         header: () => (
-          <SortLabel label="Saturation YoY" help="Change in yearly release count vs the prior year. Negative = the pipeline is SHRINKING — 'low competition' in a shrinking niche is decline, not opportunity." col="saturation_yoy" active={sort === "saturation_yoy"} order={order} onSort={toggleSort} />
+          <SortLabel label="Saturation YoY" help="Is the pipeline growing? Calculated: (releases last calendar year − releases the year before) ÷ the year before. Negative = SHRINKING — 'low competition' in a shrinking niche is decline, not opportunity." col="saturation_yoy" active={sort === "saturation_yoy"} order={order} onSort={toggleSort} />
         ),
         cell: (info) => {
           const v = info.getValue();
