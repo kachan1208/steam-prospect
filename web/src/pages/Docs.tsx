@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import { Card } from "../components/ui/Card";
+import { CSS_VAR } from "../lib/palette";
 
 // The live deployment. The MCP server is served from the same origin at /mcp/.
 // Derived, not hardcoded — a domain move must not silently break every copy-paste snippet.
@@ -99,6 +100,119 @@ function Pre({ children }: { children: ReactNode }) {
     <pre className="overflow-x-auto rounded-md border border-chartborder bg-page px-3 py-2.5 text-[12px] leading-relaxed text-ink-primary">
       {children}
     </pre>
+  );
+}
+
+// ---- score infographic building blocks ---------------------------------------------------
+// The score guide is deliberately visual-first: the formula as a flow of weighted blocks,
+// the worked example as signed contribution bars — prose demoted to captions.
+
+const SCORE_PARTS = [
+  { key: "demand", label: "Demand", weight: "+0.5×", color: CSS_VAR.demand, hint: "what the typical game earns" },
+  { key: "competition", label: "Competition", weight: "−0.35×", color: CSS_VAR.competition, hint: "how crowded it is" },
+  { key: "quality", label: "Quality gap", weight: "+0.3×", color: CSS_VAR.qualityGap, hint: "how beatable the field is" },
+];
+
+function FormulaFlow() {
+  return (
+    <div className="flex flex-wrap items-stretch gap-2">
+      {SCORE_PARTS.map((p, i) => (
+        <div key={p.key} className="flex items-center gap-2">
+          {i > 0 && <span aria-hidden className="text-lg text-ink-muted">{i === 1 ? "−" : "+"}</span>}
+          <div className="rounded-card border border-chartborder bg-surface px-3 py-2 text-center">
+            <div className="flex items-center justify-center gap-1.5">
+              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: p.color }} />
+              <span className="text-xs font-semibold text-ink-primary">{p.label}</span>
+            </div>
+            <div className="tabular mt-0.5 text-[11px] font-semibold" style={{ color: p.color }}>
+              {p.weight} <span className="text-ink-muted">(0–100)</span>
+            </div>
+            <div className="mt-0.5 text-[10px] text-ink-muted">{p.hint}</div>
+          </div>
+        </div>
+      ))}
+      <span aria-hidden className="self-center text-lg text-ink-muted">→</span>
+      <div className="self-center rounded-card border border-chartborder bg-surface2/60 px-3 py-2 text-center">
+        <div className="text-xs font-semibold text-ink-primary">floored at 0</div>
+        <div className="mt-0.5 text-[10px] text-ink-muted">negative = shown as 0.0</div>
+      </div>
+      <span aria-hidden className="self-center text-lg text-ink-muted">×</span>
+      <div className="self-center rounded-card border border-chartborder bg-surface2/60 px-3 py-2 text-center">
+        <div className="text-xs font-semibold text-ink-primary">decline gate 0.5–1.0</div>
+        <div className="mt-0.5 text-[10px] text-ink-muted">shrinking pipeline / underearning newcomers</div>
+      </div>
+      <span aria-hidden className="self-center text-lg text-ink-muted">=</span>
+      <div className="self-center rounded-card border border-brand bg-brand-tint px-3 py-2 text-center">
+        <div className="text-xs font-semibold text-brand">Opportunity v2</div>
+      </div>
+    </div>
+  );
+}
+
+/** One niche's score, decomposed into signed contribution bars around a zero axis.
+ * Bar length is |contribution| / SCALE of the half-width, so the two example cards are
+ * directly comparable at a glance. */
+function ScoreWaterfall({
+  name,
+  d,
+  c,
+  q,
+  gate,
+  final,
+}: {
+  name: string;
+  d: number;
+  c: number;
+  q: number;
+  gate: number;
+  final: number;
+}) {
+  const parts = [
+    { label: "Demand", v: 0.5 * d, detail: `0.5 × ${d.toFixed(1)}`, color: CSS_VAR.demand },
+    { label: "Competition", v: -0.35 * c, detail: `−0.35 × ${c.toFixed(1)}`, color: CSS_VAR.competition },
+    { label: "Quality gap", v: 0.3 * q, detail: `0.3 × ${q.toFixed(1)}`, color: CSS_VAR.qualityGap },
+  ];
+  const raw = parts.reduce((a, p) => a + p.v, 0);
+  const SCALE = 32; // max |contribution| the half-width represents
+  const floored = raw < 0;
+  return (
+    <div className="flex-1 rounded-card border border-chartborder bg-surface p-3">
+      <div className="mb-2 flex items-baseline justify-between gap-2">
+        <span className="text-sm font-semibold text-ink-primary">{name}</span>
+        <span className="tabular text-lg font-bold text-ink-primary">{final.toFixed(1)}</span>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {parts.map((p) => {
+          const pct = Math.min(100, (Math.abs(p.v) / SCALE) * 100) / 2;
+          return (
+            <div key={p.label} className="flex items-center gap-2">
+              <span className="w-20 shrink-0 text-[10px] text-ink-muted">{p.label}</span>
+              <div className="relative h-3.5 flex-1 overflow-hidden rounded bg-surface2">
+                <span aria-hidden className="absolute inset-y-0 left-1/2 w-px bg-[var(--baseline)]" />
+                <span
+                  className="absolute inset-y-0.5 rounded-sm"
+                  style={
+                    p.v >= 0
+                      ? { left: "50%", width: `${pct}%`, backgroundColor: p.color }
+                      : { right: "50%", width: `${pct}%`, backgroundColor: p.color, opacity: 0.85 }
+                  }
+                />
+              </div>
+              <span className="tabular w-24 shrink-0 text-right text-[10px] text-ink-secondary">
+                {p.detail} = {p.v >= 0 ? "+" : ""}
+                {p.v.toFixed(1)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="tabular mt-2 border-t border-chartborder pt-1.5 text-right text-[11px] text-ink-secondary">
+        raw {raw >= 0 ? "+" : ""}
+        {raw.toFixed(1)}
+        {floored && <span className="text-verdict-serious"> → floored to 0</span>} → × gate {gate.toFixed(2)} ={" "}
+        <span className="font-semibold text-ink-primary">{final.toFixed(1)}</span>
+      </div>
+    </div>
   );
 }
 
@@ -324,75 +438,34 @@ export default function Docs() {
 
       <Section id="opportunity-score" kicker="The core" title="Reading the Opportunity score">
         <Card>
-          <div className="flex flex-col gap-3 text-sm leading-relaxed text-ink-secondary">
-            <p>
-              The score compresses three 0–100 percentiles (each niche ranked against all other niches in the same
-              cut) into one number:
+          <div className="flex flex-col gap-4 text-sm leading-relaxed text-ink-secondary">
+            <p className="text-xs text-ink-muted">
+              Three 0–100 percentiles (each niche ranked against all others in the same cut), combined with fixed
+              weights — hover any ⓘ in the finder for the same math with that row's real numbers.
             </p>
-            <Pre>{`opportunity = 0.5 × demand  −  0.35 × competition  +  0.3 × quality gap   (floored at 0)
-opportunity v2 = opportunity × decline gate                                  (the headline)`}</Pre>
-            <Terms
-              items={[
-                ["Demand", <>What the typical game here earns and sells — median revenue, owners, and recent review velocity. Higher = hotter market.</>],
-                ["Competition", <>How crowded it is — recent releases plus winner concentration. <span className="text-ink-primary">Higher is worse</span> for a new entrant, and it carries a heavy weight.</>],
-                ["Quality gap", <>The share of incumbents that are weak (low rating or thin reviews). Higher = easier to out-execute the field.</>],
-                ["Decline gate", <>A multiplier (0.5–1.0) that shrinks the score when the release pipeline is contracting or when newcomers earn less than the back catalog — “low competition” in a dying niche must not read as opportunity.</>],
-              ]}
-            />
-            <p>
-              <span className="font-semibold text-ink-primary">Why a niche can score 0.0 while millions play it.</span>{" "}
-              The formula can go <em>negative</em> — the crowding penalty outweighing everything else — and negative
-              scores display as “0.0 <span className="text-ink-muted">floored</span>”. That is a real verdict, not
-              missing data. A real example (August 2026 data):
-            </p>
-            <div className="overflow-x-auto rounded-card border border-chartborder">
-              <table className="w-full min-w-[520px] text-xs">
-                <thead>
-                  <tr className="border-b border-chartborder text-left text-ink-muted">
-                    <th className="px-2 py-1.5 font-medium">Niche</th>
-                    <th className="px-2 py-1.5 font-medium">Demand</th>
-                    <th className="px-2 py-1.5 font-medium">Competition</th>
-                    <th className="px-2 py-1.5 font-medium">Quality gap</th>
-                    <th className="px-2 py-1.5 font-medium">Raw score</th>
-                    <th className="px-2 py-1.5 font-medium">Shown</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr className="border-b border-chartborder/60">
-                    <td className="px-2 py-1.5 font-medium text-ink-primary">Psychological Horror</td>
-                    <td className="tabular px-2 py-1.5">17.6</td>
-                    <td className="tabular px-2 py-1.5">87.5</td>
-                    <td className="tabular px-2 py-1.5">39.1</td>
-                    <td className="tabular px-2 py-1.5 text-verdict-serious">−10.1</td>
-                    <td className="tabular px-2 py-1.5">0.0 floored</td>
-                  </tr>
-                  <tr>
-                    <td className="px-2 py-1.5 font-medium text-ink-primary">Survival Horror</td>
-                    <td className="tabular px-2 py-1.5">38.2</td>
-                    <td className="tabular px-2 py-1.5">80.9</td>
-                    <td className="tabular px-2 py-1.5">78.5</td>
-                    <td className="tabular px-2 py-1.5 text-verdict-good">+14.3</td>
-                    <td className="tabular px-2 py-1.5">12.4 (after ×0.86 gate)</td>
-                  </tr>
-                </tbody>
-              </table>
+            <FormulaFlow />
+            <div>
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-muted">
+                Why a niche can score 0.0 while millions play it — a real example (Aug 2026)
+              </div>
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <ScoreWaterfall name="Psychological Horror" d={17.6} c={87.5} q={39.1} gate={0.86} final={0} />
+                <ScoreWaterfall name="Survival Horror" d={38.2} c={80.9} q={78.5} gate={0.86} final={12.4} />
+              </div>
+              <p className="mt-2 text-xs text-ink-muted">
+                Same genre family, opposite verdicts: Survival Horror's typical game earns{" "}
+                <span className="text-ink-primary">$52K vs $33K</span>, twice the share of its incumbents are beatable,
+                and it has under half the recent releases (466 vs 1,026). Psychological Horror's 407K live players and
+                53M owners don't rescue it —{" "}
+                <span className="font-semibold text-ink-primary">a big audience means people play the hits, not that a
+                new entrant gets players.</span>
+              </p>
             </div>
-            <p>
-              The bars can look similar while the numbers are far apart: Survival Horror's typical game earns{" "}
-              <span className="text-ink-primary">$52K vs $33K</span>, twice the share of its incumbents are beatable
-              (quality gap 78 vs 39), and it has less than half the recent releases (466 vs 1,026). Each demand point
-              moves the score by 0.5 and each quality-gap point by 0.3, so those gaps swing ~22 points — one niche
-              lands above water, the other 10 under. Psychological Horror's 407K concurrent players and 53M owners
-              don't change that: <span className="font-semibold text-ink-primary">a big audience means people play the
-              hits — it doesn't hand a new entrant players.</span>
-            </p>
             <ReadBox>
-              The score is a <span className="text-ink-primary">screening tool, not a verdict</span>. Before acting on
-              a high score, open the deep dive and let the “Read this first” flags argue with it: a shrinking release
-              pipeline, newcomers earning under the back catalog, winner-take-most concentration, or low
-              solo-viability each veto a pretty number. And a 0.0 doesn't forbid building there — it says you'd be
-              betting on out-executing a crowded field where the typical game earns little, so the bet needs a reason
-              the median doesn't apply to you.
+              A high score is a <span className="text-ink-primary">screening result, not a verdict</span> — open the
+              deep dive and let the “Read this first” flags argue with it (shrinking pipeline, underearning newcomers,
+              winner-take-most, low solo-viability). A 0.0 doesn't forbid building there; it says the bet needs a
+              reason the median doesn't apply to you.
             </ReadBox>
           </div>
         </Card>
