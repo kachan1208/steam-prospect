@@ -170,6 +170,8 @@ export interface NicheRow {
   total_players_now?: number | null;
   players_trend_7d_pct?: number | null;
   players_coverage?: number | null;
+  median_players_now?: number | null;
+  players_top5_share?: number | null;
 }
 
 export interface NicheList {
@@ -235,6 +237,22 @@ export interface NichePlayersMonthlyPoint {
   n_games_measured: number;
 }
 
+export interface NichePlayersTopGame {
+  rank: number;
+  appid: number;
+  name: string | null;
+  players: number;
+  share: number | null;
+}
+
+export interface NichePlayersDistribution {
+  median_players_now: number | null;
+  players_top5_share: number | null;
+  n_games_now: number;
+  histogram: HistBucket[];
+  top_games: NichePlayersTopGame[];
+}
+
 export interface NichePlayers {
   total_players_now: number | null;
   players_trend_7d_pct: number | null;
@@ -243,6 +261,7 @@ export interface NichePlayers {
   series: NichePlayersPoint[];
   // Years-deep summed monthly averages (steamcharts, top-8k games only).
   monthly?: NichePlayersMonthlyPoint[];
+  distribution?: NichePlayersDistribution | null;
 }
 
 export interface NicheTheme {

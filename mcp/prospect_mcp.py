@@ -89,6 +89,13 @@ _HAS_PLAYERS_HISTORY = bool(
     )
 )
 
+_HAS_PLAYERS_DIST = bool(
+    query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_niche' AND column_name = 'players_top5_share'"
+    )
+)
+
 _PLAYERS_MISSING = (
     "this analytics DB predates the live-player (CCU) marts (mart_game_players_daily / "
     "mart_niche_players and the players_* columns on mart_game/mart_niche) — it was built "
@@ -457,10 +464,12 @@ _NICHE_SORTABLE = {
     "beatable_share", "saturation_yoy", "self_pub_share", "winner_concentration",
     "entrant_ratio", "solo_viability",
     "total_players_now", "players_trend_7d_pct", "players_coverage",
+    "median_players_now", "players_top5_share",
 }
 # The subset of _NICHE_SORTABLE that only exists on marts with the players columns
 # (sorting/filtering on them needs _HAS_PLAYERS; everything else works on older marts).
 _NICHE_PLAYERS_COLS = {"total_players_now", "players_trend_7d_pct", "players_coverage"}
+_NICHE_PLAYERS_DIST_COLS = {"median_players_now", "players_top5_share"}
 _NICHE_TIERS = {"micro", "umbrella", "theme", "meta"}
 # Default tier filter (tags only): buildable micro-genres + themes. Umbrella containers
 # (Open World, Sandbox, RPG...) and meta/reception tags (Great Soundtrack, Nostalgia...)
@@ -556,7 +565,12 @@ def find_niches(
         this for "what's heating up this week".
       - players_coverage: share of total_players_now measured fresh (<= 2 days). Low
         values mean the total leans on carried-forward tail captures — trust it less.
-      NULL on all three = players never measured for the niche (or the mart predates CCU
+      - median_players_now: the TYPICAL game's live players — usually brutally small.
+      - players_top5_share: share of the niche's current players held by its top 5 games.
+      FALSIFICATION RULE for the players lens: big total_players_now + players_top5_share
+      above ~0.6 + a tiny median means the audience belongs to the HITS — do not read the
+      total as demand available to a new entrant.
+      NULL on all = players never measured for the niche (or the mart predates CCU
       collection). min_total_players is the matching optional post-filter. Follow up with
       niche_player_history(dimension, key) for the daily series. CAVEAT: a niche's total
       is dominated by its biggest games (the top-12k games hold ~99% of all Steam CCU) —
@@ -579,6 +593,8 @@ def find_niches(
     if sort not in _NICHE_SORTABLE:
         return {"error": f"sort must be one of {sorted(_NICHE_SORTABLE)}"}
     if not _HAS_PLAYERS and (sort in _NICHE_PLAYERS_COLS or min_total_players is not None):
+        return {"error": _PLAYERS_MISSING}
+    if not _HAS_PLAYERS_DIST and sort in _NICHE_PLAYERS_DIST_COLS:
         return {"error": _PLAYERS_MISSING}
     if include_tiers is not None:
         bad = [t for t in include_tiers if t not in _NICHE_TIERS]
@@ -613,6 +629,8 @@ def find_niches(
         if _HAS_PLAYERS
         else ""
     )
+    if _HAS_PLAYERS_DIST:
+        players_cols += ",\n                   median_players_now, players_top5_share"
     try:
         rows = query(
             f"""
@@ -685,6 +703,8 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
         if _HAS_PLAYERS
         else ""
     )
+    if _HAS_PLAYERS_DIST:
+        players_cols += ",\n                   median_players_now, players_top5_share"
     try:
         variants = query(
             f"""
@@ -2321,8 +2341,9 @@ def niche_player_history(dimension: Literal["tag", "genre"], key: str, days: int
     if not _HAS_PLAYERS:
         return {"error": _PLAYERS_MISSING}
     days = max(7, min(days, 365))
+    dist_cols = ", median_players_now, players_top5_share" if _HAS_PLAYERS_DIST else ""
     niche = query_one(
-        "SELECT total_players_now, players_trend_7d_pct, players_coverage "
+        f"SELECT total_players_now, players_trend_7d_pct, players_coverage{dist_cols} "
         "FROM mart_niche WHERE dimension = ? AND key = ? LIMIT 1",
         [dimension, key],
     )
@@ -2379,6 +2400,17 @@ def niche_player_history(dimension: Literal["tag", "genre"], key: str, days: int
                 "entering measurement). Different measure from the daily series; never blend."
             )
 
+    top_games: list[dict] = []
+    if _HAS_PLAYERS_DIST:
+        try:
+            top_games = query(
+                "SELECT rank, appid, name, players, share FROM mart_niche_players_top "
+                "WHERE dimension = ? AND key = ? ORDER BY rank LIMIT 5",
+                [dimension, key],
+            )
+        except duckdb.CatalogException:
+            top_games = []
+
     return {
         "dimension": dimension,
         "key": key,
@@ -2388,10 +2420,13 @@ def niche_player_history(dimension: Literal["tag", "genre"], key: str, days: int
                 "total_players_now": niche["total_players_now"],
                 "players_trend_7d_pct": niche["players_trend_7d_pct"],
                 "players_coverage": niche["players_coverage"],
+                "median_players_now": niche.get("median_players_now") if _HAS_PLAYERS_DIST else None,
+                "players_top5_share": niche.get("players_top5_share") if _HAS_PLAYERS_DIST else None,
                 "n_games_panel": panel["n_games_panel"] if panel else None,
                 "history": history,
             }
         ),
+        "top_games_now": clean_rows(top_games),
         "series": clean_rows(series),
         "monthly": clean_rows(monthly),
         "caveats": [

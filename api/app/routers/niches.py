@@ -37,8 +37,10 @@ from ..schemas import (
     NicheGame,
     NicheList,
     NichePlayers,
+    NichePlayersDistribution,
     NichePlayersMonthlyPoint,
     NichePlayersPoint,
+    NichePlayersTopGame,
     NichePress,
     NichePressOutlet,
     NichePressPoint,
@@ -62,6 +64,7 @@ SORTABLE = {
     "n_games", "n_recent", "hit_rate_200k", "hit_rate_500k",
     "beatable_share", "saturation_yoy", "self_pub_share", "winner_concentration",
     "total_players_now", "players_trend_7d_pct", "players_coverage",
+    "median_players_now", "players_top5_share",
     "p90_rev",
 }
 _PLAYERS_COLS = ["total_players_now", "players_trend_7d_pct", "players_coverage"]
@@ -86,6 +89,17 @@ def _has_players() -> bool:
     rows = analytics_db.query(
         "SELECT 1 FROM information_schema.columns "
         "WHERE table_name = 'mart_niche' AND column_name = 'total_players_now'"
+    )
+    return bool(rows)
+
+
+@lru_cache(maxsize=1)
+def _has_players_dist() -> bool:
+    """median_players_now / players_top5_share (the who-holds-the-players columns) —
+    landed after the first players columns, so they get their own gate."""
+    rows = analytics_db.query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_niche' AND column_name = 'players_top5_share'"
     )
     return bool(rows)
 
@@ -118,6 +132,8 @@ def _cols() -> list[str]:
         cols.append("p90_rev")
     if _has_players():
         cols.extend(_PLAYERS_COLS)
+    if _has_players_dist():
+        cols.extend(["median_players_now", "players_top5_share"])
     return cols
 
 
@@ -207,6 +223,11 @@ def list_niches(
             status_code=503,
             detail="mart_niche predates the live-player columns — rebuild the marts (task etl).",
         )
+    if sort in ("median_players_now", "players_top5_share") and not _has_players_dist():
+        raise HTTPException(
+            status_code=503,
+            detail="mart_niche predates the players-distribution columns — rebuild the marts (task etl).",
+        )
     if sort == "p90_rev" and not _has_p90():
         raise HTTPException(
             status_code=503,
@@ -284,6 +305,32 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
             ]
         except duckdb.CatalogException:
             monthly = []
+        # "Who holds the players" — the distribution marts landed after the daily ones,
+        # so they degrade independently.
+        distribution: NichePlayersDistribution | None = None
+        try:
+            hist = analytics_db.query(
+                "SELECT bucket_index, x_min, x_max, count FROM mart_niche_players_hist "
+                "WHERE dimension = ? AND key = ? ORDER BY bucket_index",
+                [dimension, key],
+            )
+            top_games = analytics_db.query(
+                "SELECT rank, appid, name, players, share FROM mart_niche_players_top "
+                "WHERE dimension = ? AND key = ? ORDER BY rank",
+                [dimension, key],
+            )
+            head0 = variants[0]
+            if hist or top_games:
+                distribution = NichePlayersDistribution(
+                    median_players_now=head0.get("median_players_now"),
+                    players_top5_share=head0.get("players_top5_share"),
+                    n_games_now=sum(int(h["count"]) for h in hist),
+                    histogram=[HistBucket(**h) for h in hist],
+                    top_games=[NichePlayersTopGame(**t) for t in top_games],
+                )
+        except duckdb.CatalogException:
+            distribution = None
+
         head = variants[0]
         players = NichePlayers(
             total_players_now=head.get("total_players_now"),
@@ -292,6 +339,7 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
             n_games_panel=panel,
             series=[NichePlayersPoint(**s) for s in series],
             monthly=monthly,
+            distribution=distribution,
         )
 
     # Pooled review themes (vote-based family), biggest signal first. Membership is

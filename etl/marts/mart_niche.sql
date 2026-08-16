@@ -234,7 +234,9 @@ SELECT
     -- Live-player columns (additive; see header — one value per key across all cuts).
     np.total_players_now,
     round(np.players_trend_7d_pct, 2) AS players_trend_7d_pct,
-    round(np.players_coverage, 4) AS players_coverage
+    round(np.players_coverage, 4) AS players_coverage,
+    round(np.median_players_now, 1) AS median_players_now,
+    round(np.players_top5_share, 4) AS players_top5_share
 FROM gated g
 LEFT JOIN tag_tier tt ON g.dimension = 'tag' AND tt.tag = g.key
 LEFT JOIN _niche_players_now np ON np.dimension = g.dimension AND np.key = g.key;
