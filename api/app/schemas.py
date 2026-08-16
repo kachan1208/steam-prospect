@@ -429,6 +429,8 @@ class NicheRow(BaseModel):
     total_players_now: Optional[float] = None
     players_trend_7d_pct: Optional[float] = None
     players_coverage: Optional[float] = None
+    median_players_now: Optional[float] = None  # the TYPICAL game's live players
+    players_top5_share: Optional[float] = None  # top-5 games' share of the niche total
 
 
 class NicheList(BaseModel):
@@ -476,6 +478,26 @@ class NichePlayersMonthlyPoint(BaseModel):
     n_games_measured: int
 
 
+class NichePlayersTopGame(BaseModel):
+    rank: int
+    appid: int
+    name: Optional[str] = None
+    players: int
+    share: Optional[float] = None  # of the niche's current total
+
+
+class NichePlayersDistribution(BaseModel):
+    """Who holds the niche's players RIGHT NOW — the measurable form of "a big total
+    means people play the hits": the typical game's live players, the top-5 games'
+    share, a log histogram, and the named holders."""
+
+    median_players_now: Optional[float] = None
+    players_top5_share: Optional[float] = None
+    n_games_now: int = 0
+    histogram: list[HistBucket] = Field(default_factory=list)
+    top_games: list[NichePlayersTopGame] = Field(default_factory=list)
+
+
 class NichePlayers(BaseModel):
     """The niche's live-player block: mart_niche summary columns + the daily series."""
 
@@ -485,6 +507,7 @@ class NichePlayers(BaseModel):
     n_games_panel: Optional[int] = None
     series: list[NichePlayersPoint] = Field(default_factory=list)
     monthly: list[NichePlayersMonthlyPoint] = Field(default_factory=list)
+    distribution: Optional[NichePlayersDistribution] = None  # None until the dist marts exist
 
 
 class NicheTheme(BaseModel):

@@ -401,6 +401,57 @@ export function NicheDetailDrawer({
                 </p>
               </div>
             )}
+            {players?.distribution && players.distribution.top_games.length > 0 && (
+              <div className="mt-4">
+                <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+                  <div className="text-xs text-ink-muted">Хто тримає гравців — прямо зараз</div>
+                  <div className="text-xs text-ink-secondary">
+                    типова гра: <b className="tabular">{fmtCompact(players.distribution.median_players_now)}</b> онлайн
+                    {players.distribution.players_top5_share != null && (
+                      <>
+                        {" "}· топ-5 ігор тримають{" "}
+                        <b className="tabular text-verdict-serious">{fmtPct(players.distribution.players_top5_share)}</b>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  {players.distribution.top_games.slice(0, 5).map((g) => (
+                    <div key={g.appid} className="flex items-center gap-2 text-xs">
+                      <Link
+                        to={`/games/${g.appid}`}
+                        className="w-40 shrink-0 truncate font-medium text-ink-primary hover:text-brand"
+                        title={g.name ?? undefined}
+                      >
+                        {g.name ?? `App ${g.appid}`}
+                      </Link>
+                      <div className="relative h-3 flex-1 overflow-hidden rounded bg-surface2">
+                        <span
+                          className="absolute inset-y-0 left-0 rounded"
+                          style={{ width: `${Math.max(1, (g.share ?? 0) * 100)}%`, backgroundColor: CSS_VAR.demand }}
+                        />
+                      </div>
+                      <span className="tabular w-24 shrink-0 text-right text-ink-secondary">
+                        {fmtCompact(g.players)} · {fmtPct(g.share)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {players.distribution.histogram.length > 0 && (
+                  <div className="mt-3">
+                    <div className="mb-1 text-[11px] text-ink-muted">
+                      Розподіл онлайну по {fmtInt(players.distribution.n_games_now)} іграх ніші (лог-шкала)
+                    </div>
+                    <Histogram
+                      buckets={players.distribution.histogram}
+                      color={CSS_VAR.competition}
+                      formatX={fmtCompact}
+                      height={140}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
             <p className="mt-2 text-[11px] italic text-ink-muted">
               Nightly ~21–22:00 UTC point samples, not daily peaks; each game's last capture carries forward up to 7
               days so the capture rotation doesn't read as audience dips. Totals are dominated by the niche's biggest

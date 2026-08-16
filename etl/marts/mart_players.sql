@@ -193,7 +193,10 @@ HAVING COUNT(DISTINCT e.appid) >= @NICHE_PLAYERS_MIN_MEASURED@;
 --   players_trend_7d_pct  SAME-PANEL trend: only games measured in BOTH 7d windows count,
 --                         so growth in *coverage* can never masquerade as audience growth
 -- ---------------------------------------------------------------------------------------
-CREATE TEMP TABLE _niche_players_now AS
+-- The member-game CURRENT values (latest capture <= @CCU_STALE_DAYS@d, scored pop) —
+-- materialized once because FOUR readers derive from it: the "now" summary, the
+-- distribution columns, the per-niche players histogram, and the top-holders list.
+CREATE TEMP TABLE _niche_player_current AS
 WITH membership AS (
     SELECT 'tag' AS dimension, tag AS key, appid FROM stg_tag_membership
     UNION ALL
@@ -205,13 +208,68 @@ lat AS (
     FROM stg_player_count_latest l
     JOIN stg_game g ON g.appid = l.appid
     WHERE l.live_players IS NOT NULL AND g.total_reviews >= @MIN_REVIEWS_DEFAULT@
+)
+SELECT m.dimension, m.key, m.appid, la.live_players AS players, la.staleness
+FROM membership m
+JOIN lat la ON la.appid = m.appid
+WHERE la.staleness <= @CCU_STALE_DAYS@;
+
+-- "Who holds the players": log-bucketed distribution of CURRENT players across each
+-- niche's games (same bucket convention as mart_niche_hist so the web Histogram
+-- component renders it unchanged), + the top games by current players with their share.
+-- This is the measurable form of the core caveat: a big total says people play the
+-- HITS — median_players_now and players_top5_share (below) make that checkable per niche.
+DROP TABLE IF EXISTS mart_niche_players_hist;
+CREATE TABLE mart_niche_players_hist AS
+WITH counts AS (
+    SELECT dimension, key FROM _niche_player_current
+    GROUP BY 1, 2 HAVING COUNT(*) >= @NICHE_PLAYERS_MIN_MEASURED@
 ),
-now_agg AS (
-    SELECT m.dimension, m.key,
-        SUM(CASE WHEN la.staleness <= @CCU_STALE_DAYS@ THEN la.live_players END) AS total_players_now,
-        SUM(CASE WHEN la.staleness <= @CCU_FRESH_DAYS@ THEN la.live_players END) AS fresh_players_now
-    FROM membership m
-    JOIN lat la ON la.appid = m.appid
+bucketed AS (
+    SELECT c.dimension, c.key,
+        CAST(floor(log10(GREATEST(c.players, 1)) * 2) AS INTEGER) AS bkt
+    FROM _niche_player_current c
+    JOIN counts n ON n.dimension = c.dimension AND n.key = c.key
+)
+SELECT dimension, key, bkt AS bucket_index,
+    pow(10, bkt / 2.0) AS x_min,
+    pow(10, (bkt + 1) / 2.0) AS x_max,
+    COUNT(*) AS count
+FROM bucketed
+GROUP BY dimension, key, bkt;
+
+DROP TABLE IF EXISTS mart_niche_players_top;
+CREATE TABLE mart_niche_players_top AS
+WITH ranked AS (
+    SELECT c.dimension, c.key, c.appid, c.players,
+        SUM(c.players) OVER (PARTITION BY c.dimension, c.key) AS niche_total,
+        row_number() OVER (PARTITION BY c.dimension, c.key ORDER BY c.players DESC) AS rank
+    FROM _niche_player_current c
+)
+SELECT r.dimension, r.key, r.rank, r.appid, g.name, r.players,
+    r.players * 1.0 / NULLIF(r.niche_total, 0) AS share
+FROM ranked r
+JOIN stg_game g ON g.appid = r.appid
+WHERE r.rank <= 8 AND r.niche_total > 0;
+
+CREATE TEMP TABLE _niche_players_now AS
+WITH now_agg AS (
+    SELECT c.dimension, c.key,
+        SUM(c.players) AS total_players_now,
+        SUM(CASE WHEN c.staleness <= @CCU_FRESH_DAYS@ THEN c.players END) AS fresh_players_now,
+        median(c.players) AS median_players_now,
+        COUNT(*) AS n_games_now
+    FROM _niche_player_current c
+    GROUP BY 1, 2
+),
+top5 AS (
+    SELECT dimension, key, SUM(players) AS top5_players
+    FROM (
+        SELECT dimension, key, players,
+            row_number() OVER (PARTITION BY dimension, key ORDER BY players DESC) AS rn
+        FROM _niche_player_current
+    )
+    WHERE rn <= 5
     GROUP BY 1, 2
 ),
 tr AS (
@@ -219,7 +277,11 @@ tr AS (
         SUM(w.avg_recent) AS sum_recent,
         SUM(w.avg_prior)  AS sum_prior,
         COUNT(*) AS n_games_trend
-    FROM membership m
+    FROM (
+        SELECT 'tag' AS dimension, tag AS key, appid FROM stg_tag_membership
+        UNION ALL
+        SELECT 'genre' AS dimension, genre AS key, appid FROM stg_genre_membership
+    ) m
     JOIN _pl_game_windows w ON w.appid = m.appid
     JOIN stg_game g ON g.appid = m.appid
     WHERE w.avg_recent IS NOT NULL AND w.avg_prior IS NOT NULL
@@ -231,6 +293,9 @@ SELECT n.dimension, n.key,
     n.fresh_players_now * 1.0 / NULLIF(n.total_players_now, 0) AS players_coverage,
     CASE WHEN t.sum_prior > 0 AND t.n_games_trend >= @NICHE_PLAYERS_MIN_MEASURED@
          THEN 100.0 * (t.sum_recent - t.sum_prior) / t.sum_prior END AS players_trend_7d_pct,
-    t.n_games_trend
+    t.n_games_trend,
+    CAST(n.median_players_now AS DOUBLE) AS median_players_now,
+    t5.top5_players * 1.0 / NULLIF(n.total_players_now, 0) AS players_top5_share
 FROM now_agg n
-LEFT JOIN tr t ON t.dimension = n.dimension AND t.key = n.key;
+LEFT JOIN tr t ON t.dimension = n.dimension AND t.key = n.key
+LEFT JOIN top5 t5 ON t5.dimension = n.dimension AND t5.key = n.key;

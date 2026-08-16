@@ -134,6 +134,7 @@ def main() -> None:
     else:
         assert "summary" in nph and "series" in nph and isinstance(nph["series"], list)
         assert "n_games_panel" in nph["summary"]
+        assert "top_games_now" in nph and isinstance(nph["top_games_now"], list)  # may be empty pre-dist-marts
         print(f"\n[OK] niche_player_history: {len(nph['series'])} series rows, "
               f"panel={nph['summary'].get('n_games_panel')}")
 
