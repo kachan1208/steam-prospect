@@ -1,21 +1,22 @@
 -- mart_game_reviews.sql
--- Per-appid review time-series/breakdown marts, for games with >= @GAME_DETAIL_MIN_REVIEWS@
--- SAMPLED reviews (stg_review — a per-game sample, not Steam's true review set; counts here
--- describe the sample). Powers GET /api/games/{appid}/reviews-summary.
+-- Per-appid review time-series/breakdown marts. Powers GET /api/games/{appid}/reviews-summary.
+--
+-- SOURCE POLICY (2026-08-18): HISTORIC series must never come from a partial sample — a
+-- capped/recency-biased sample lies about SHAPE. So:
 --   mart_game_reviews_timeline  monthly review volume + a trailing 3-month positive-rating
---                                trajectory (rating-over-time AND review-velocity share one
---                                series). cum_reviews/cum_positive/cum_positive_share are
---                                also kept (all-time running total, e.g. for a future "total
---                                reviews to date" read) but cum_positive_share is NOT charted
---                                any more: an all-time-to-date ratio mathematically converges
---                                as cum_reviews grows, so it always flattens to a plateau and
---                                stops moving for any game with real history (same failure
---                                mode the launch curve had before LaunchShapeBars.tsx replaced
---                                it with a marginal/windowed view — see ReviewsTimelineChart.tsx).
---                                trailing_positive_share is the fix: a bounded trailing window
---                                that can rise AND fall.
---   mart_game_reviews_lang      per-game top languages (localization reference)
---   mart_game_reviews_playtime  playtime-at-review percentile distribution
+--                                trajectory, built from stg_review_histogram — Steam's own
+--                                FULL-history monthly up/down counts (uncapped). Games the
+--                                histogram doesn't cover fall back to the stg_review sample
+--                                ONLY when the sample provably covers the game's reconciled
+--                                true total (>= 0.95 — i.e. the sample IS the full set);
+--                                otherwise the game simply has no timeline (the chart hides).
+--                                cum_* columns kept for a future "total to date" read;
+--                                cum_positive_share is NOT charted (converges to a plateau —
+--                                see ReviewsTimelineChart.tsx); trailing_positive_share is
+--                                the bounded window that can rise AND fall.
+--   mart_game_reviews_lang      per-game top languages — sample-based (a COMPOSITION, not a
+--                                time series; labeled as sampled downstream)
+--   mart_game_reviews_playtime  playtime-at-review percentiles — sample-based, same reasoning
 -- Placeholder tokens are substituted by build_marts.py.
 
 DROP TABLE IF EXISTS mart_game_reviews_timeline;
@@ -29,14 +30,39 @@ GROUP BY appid
 HAVING COUNT(*) >= @GAME_DETAIL_MIN_REVIEWS@;
 
 CREATE TABLE mart_game_reviews_timeline AS
-WITH monthly AS (
+WITH hist_all AS (
+    -- TRUE monthly series (Steam's review graph, uncapped, full history).
+    SELECT appid, period_month AS period,
+        SUM(n_reviews) AS n_reviews,
+        SUM(n_positive) AS n_positive
+    FROM stg_review_histogram
+    GROUP BY appid, period_month
+),
+hist_elig AS (
+    SELECT appid FROM hist_all GROUP BY appid
+    HAVING SUM(n_reviews) >= @GAME_DETAIL_MIN_REVIEWS@
+),
+hist AS (
+    SELECT h.* FROM hist_all h JOIN hist_elig e ON e.appid = h.appid
+),
+sample_fallback AS (
+    -- Histogram-less games (below the histogram scrape's floor) chart from the sample
+    -- ONLY when it provably covers the reconciled true total — then sample == full set.
     SELECT r.appid, date_trunc('month', r.review_date) AS period,
         COUNT(*) AS n_reviews,
         SUM(CASE WHEN r.voted_up = 1 THEN 1 ELSE 0 END) AS n_positive
     FROM stg_review r
     JOIN _gr_elig e ON e.appid = r.appid
+    JOIN stg_game g ON g.appid = r.appid
     WHERE r.review_date IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM hist h WHERE h.appid = r.appid)
+      AND e.n_sampled >= 0.95 * g.total_reviews
     GROUP BY r.appid, date_trunc('month', r.review_date)
+),
+monthly AS (
+    SELECT * FROM hist
+    UNION ALL
+    SELECT * FROM sample_fallback
 ),
 cum AS (
     SELECT appid, period, n_reviews, n_positive,

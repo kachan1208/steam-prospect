@@ -8,9 +8,14 @@ import { TooltipPanel } from "./TooltipPanel";
 /**
  * Two single-axis small multiples (same dual-axis-avoidance move as SaturationTrend)
  * rather than one combo chart: a trailing 3-month positive-rating trajectory (blue line
- * — "how is it landing, and is that changing") and sampled reviews per month (aqua bars
- * — "how much signal / velocity"). Different scales (a narrow %-band vs. a count), so
- * each gets its own axis instead of a second y-scale on one plot.
+ * — "how is it landing, and is that changing") and reviews per month (aqua bars — "how
+ * much signal / velocity"). Different scales (a narrow %-band vs. a count), so each
+ * gets its own axis instead of a second y-scale on one plot.
+ *
+ * DATA SOURCE (2026-08-18): Steam's own full-history monthly review counts (the store
+ * review graph — uncapped), never the text sample; a capped/recency-biased sample lies
+ * about historic shape, so games without full data show no timeline at all rather than
+ * a misleading one (see mart_game_reviews.sql SOURCE POLICY).
  *
  * The line deliberately charts trailing_positive_share, NOT cum_positive_share: an
  * all-time cumulative share mathematically converges as cum_reviews grows (each new
@@ -30,7 +35,7 @@ export function ReviewsTimelineChart({ points }: { points: ReviewTimelinePoint[]
   if (points.length === 0) {
     return (
       <div className="flex h-32 items-center justify-center text-xs text-ink-muted">
-        Not enough sampled reviews to chart a timeline.
+        No full review history for this title yet — the timeline only charts complete data.
       </div>
     );
   }
@@ -87,7 +92,7 @@ export function ReviewsTimelineChart({ points }: { points: ReviewTimelinePoint[]
         </ResponsiveContainer>
       </div>
       <div>
-        <div className="mb-1 text-xs text-ink-muted">Sampled reviews per month</div>
+        <div className="mb-1 text-xs text-ink-muted">Reviews per month — Steam's full history</div>
         <ResponsiveContainer width="100%" height={160}>
           <BarChart data={points} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
             <CartesianGrid stroke="var(--gridline)" vertical={false} />
