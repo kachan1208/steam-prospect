@@ -13,3 +13,11 @@ def test_niches_lifetime_sort_503_on_old_mart(client):
 def test_niches_rejects_unknown_sort_still(client):
     r = client.get("/api/niches", params={"sort": "lifetime_x; DROP TABLE mart_niche--"})
     assert r.status_code == 400
+
+
+def test_niches_no_floor_cut_503_on_old_mart(client):
+    # The fixture mart_niche has no min_reviews=0 rows — the no-floor cut must degrade
+    # to an explicit 503 (row-probe gate), not silently return an empty list.
+    r = client.get("/api/niches", params={"min_reviews": 0})
+    assert r.status_code == 503
+    assert "no-floor" in r.json()["detail"]
