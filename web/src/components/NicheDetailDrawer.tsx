@@ -23,7 +23,7 @@ import {
   type NicheRow,
   type Window,
 } from "../lib/api";
-import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtSigned, fmtUsd, titleCase } from "../lib/format";
+import { fmtCompact, fmtInt, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtSigned, fmtUsd, titleCase } from "../lib/format";
 import { CSS_VAR } from "../lib/palette";
 
 function variantLabel(v: NicheRow): string {
@@ -65,6 +65,12 @@ function declineFlags(v: NicheRow, players: NichePlayers | null): { serious: boo
     flags.push({
       serious: v.solo_viability < 0.6,
       text: `Leans multiplayer (${fmtPct(v.solo_viability)} of games playable single-player; norm ~90%) — netcode, servers and a live player base are table stakes.`,
+    });
+  }
+  if (v.lifetime_survival_12m != null && v.lifetime_survival_12m < 0.5) {
+    flags.push({
+      serious: true,
+      text: "Short-lived niche: fewer than half of its 100+-player games still hold 10+ a year later.",
     });
   }
   if (players?.players_trend_7d_pct != null && players.players_trend_7d_pct < -10) {
@@ -450,6 +456,32 @@ export function NicheDetailDrawer({
                     />
                   </div>
                 )}
+              </div>
+            )}
+            {(activeVariant.lifetime_survival_12m != null || activeVariant.lifetime_median_dead_months != null) && (
+              <div className="mt-3 flex flex-wrap items-baseline justify-between gap-2">
+                <div
+                  className="text-xs text-ink-muted"
+                  title="Lifetime = months from a game's first month averaging 100+ concurrent players to its first full month under 10. Fixed-horizon survival counts only games whose 100+ month is at least 12 months old; steamcharts top-8k coverage."
+                >
+                  How long games live here
+                </div>
+                <div className="text-xs text-ink-secondary">
+                  {activeVariant.lifetime_survival_12m != null && (
+                    <>
+                      alive a year after reaching 100+ players:{" "}
+                      <b className="tabular">{fmtPct(activeVariant.lifetime_survival_12m)}</b>
+                    </>
+                  )}
+                  {activeVariant.lifetime_survival_12m != null &&
+                    activeVariant.lifetime_median_dead_months != null &&
+                    " · "}
+                  {activeVariant.lifetime_median_dead_months != null && (
+                    <>
+                      dead ones lasted ~<b className="tabular">{fmtMonths(activeVariant.lifetime_median_dead_months)}</b>
+                    </>
+                  )}
+                </div>
               </div>
             )}
             <p className="mt-2 text-[11px] italic text-ink-muted">

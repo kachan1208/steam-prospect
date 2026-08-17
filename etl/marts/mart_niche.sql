@@ -236,10 +236,16 @@ SELECT
     round(np.players_trend_7d_pct, 2) AS players_trend_7d_pct,
     round(np.players_coverage, 4) AS players_coverage,
     round(np.median_players_now, 1) AS median_players_now,
-    round(np.players_top5_share, 4) AS players_top5_share
+    round(np.players_top5_share, 4) AS players_top5_share,
+    -- Lifetime columns (additive; from mart_players.sql _niche_lifetime — 100+-reaching
+    -- games only, steamcharts top-8k coverage; NULL = too few covered games, "unknown").
+    nl.lifetime_n_games,
+    nl.lifetime_survival_12m,
+    nl.lifetime_median_dead_months
 FROM gated g
 LEFT JOIN tag_tier tt ON g.dimension = 'tag' AND tt.tag = g.key
-LEFT JOIN _niche_players_now np ON np.dimension = g.dimension AND np.key = g.key;
+LEFT JOIN _niche_players_now np ON np.dimension = g.dimension AND np.key = g.key
+LEFT JOIN _niche_lifetime nl ON nl.dimension = g.dimension AND nl.key = g.key;
 
 CREATE TABLE mart_niche_top AS
 WITH membership AS (

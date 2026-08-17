@@ -89,6 +89,10 @@ def main() -> None:
         con.execute(f"CREATE TABLE mart_niche_players_top AS SELECT * FROM real.mart_niche_players_top WHERE dimension='tag' AND key='{OWSC}'")
     except duckdb.CatalogException:
         pass
+    try:
+        con.execute("CREATE TABLE mart_market_lifetime AS SELECT * FROM real.mart_market_lifetime")
+    except duckdb.CatalogException:
+        pass
 
     # ---- game: game_teardown/game_profile/game_search(367520 = Hollow Knight) ------------
     con.execute("CREATE TABLE mart_game AS SELECT * FROM real.mart_game WHERE appid=367520")

@@ -45,6 +45,10 @@ def main() -> None:
         if srv._HAS_PLAYERS:
             for field in ("total_players_now", "players_trend_7d_pct", "players_coverage"):
                 assert field in top, f"missing players field {field!r} in find_niches rows"
+        # Lifetime columns ride along exactly when the mart carries them (values may be
+        # None pre-mart — e.g. fewer than 5 steamcharts-covered games in the niche).
+        if srv._HAS_LIFETIME:
+            assert "lifetime_survival_12m" in top, "missing lifetime field in find_niches rows"
         print(f"\n[OK] top niche is {top['key']!r} (tier={top['tier']}, "
               f"opportunity_v2={top['opportunity_v2']}, gate={top['decline_gate']})")
 
@@ -167,6 +171,19 @@ def main() -> None:
     dist = srv.revenue_distribution("revenue", "Action", "all")
     show('revenue_distribution("revenue", "Action", "all")', dist)
     assert dist["n"] > 0
+
+    # 8b. lifetime_curve — tolerant: mart_market_lifetime only exists once the lifetime
+    # ETL has rebuilt current.duckdb; absence must yield the tool's clear "re-run ETL"
+    # error dict, never a crash (curve/milestones may be empty/None pre-mart).
+    lc = srv.lifetime_curve()
+    show("lifetime_curve()", lc)
+    if "error" in lc:
+        assert "game-lifetime" in lc["error"], f"unexpected lifetime_curve error: {lc['error']!r}"
+        print("\n[OK] lifetime_curve degraded cleanly (mart_market_lifetime not built yet — run `task etl`)")
+    else:
+        assert isinstance(lc["curve"], list) and isinstance(lc["milestones"], dict)
+        print(f"\n[OK] lifetime_curve: {len(lc['curve'])} points, m12={lc['milestones'].get('m12')}, "
+              f"median_months={lc['median_months']}")
 
     # 9. press_pitch_list + buzz_trends.
     pitch = srv.press_pitch_list("RPG", limit=5)

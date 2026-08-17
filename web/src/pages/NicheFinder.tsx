@@ -16,7 +16,7 @@ import {
   type SortKey,
   type Window,
 } from "../lib/api";
-import { fmtCompact, fmtInt, fmtPct, fmtSigned, fmtUsd } from "../lib/format";
+import { fmtCompact, fmtInt, fmtMonths, fmtPct, fmtSigned, fmtUsd } from "../lib/format";
 import { sequentialColorAt } from "../lib/palette";
 import { useDebounced } from "../lib/useDebounced";
 import { useTheme } from "../lib/theme";
@@ -342,6 +342,31 @@ export default function NicheFinder() {
           );
         },
       }),
+      columnHelper.accessor((row) => row.lifetime_survival_12m ?? null, {
+        id: "lifetime_survival_12m",
+        header: () => (
+          <SortLabel
+            label="Longevity" help="Of this niche's games that ever reached 100+ concurrent players, the share still holding 10+ a year later. Calculated: fixed-horizon survival — games whose 100+ month is at least 12 months old only; steamcharts top-8k coverage."
+            col="lifetime_survival_12m"
+            active={sort === "lifetime_survival_12m"}
+            order={order}
+            onSort={toggleSort}
+          />
+        ),
+        cell: (info) => {
+          const v = info.getValue();
+          if (v == null) return <span className="text-ink-muted">—</span>;
+          const m = info.row.original.lifetime_median_dead_months;
+          const title =
+            `${fmtPct(v)} of its 100+ games still alive after a year` +
+            (m != null ? ` · dead ones lasted ~${fmtMonths(m)}` : "");
+          return (
+            <span className="tabular text-ink-secondary" title={title}>
+              {fmtPct(v)}
+            </span>
+          );
+        },
+      }),
       columnHelper.accessor("total_owners", {
         header: () => (
           <SortLabel
@@ -530,7 +555,7 @@ export default function NicheFinder() {
         )}
         {data && data.items.length > 0 && (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1080px] border-collapse text-sm">
+            <table className="w-full min-w-[1160px] border-collapse text-sm">
               <thead>
                 {table.getHeaderGroups().map((hg) => (
                   <tr key={hg.id} className="border-b border-chartborder bg-surface2/50 text-left text-[11px]">

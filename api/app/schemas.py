@@ -116,6 +116,11 @@ class GameSearchRow(BaseModel):
     header_image: Optional[str] = None
     top_tags: list[str] = Field(default_factory=list)
     first_seen: Optional[str] = None   # when this game first entered our catalog
+    # Lifetime (steamcharts top-8k coverage): months from the first 100+-avg-CCU month to
+    # the first full month under 10. None = unknown (no coverage / never reached 100+ /
+    # mart predates the lifetime ETL — see games.py::_has_lifetime_game).
+    lifetime_months: Optional[int] = None
+    lifetime_alive: Optional[bool] = None
 
 
 class GameSearchList(BaseModel):
@@ -181,6 +186,13 @@ class GameProfile(BaseModel):
     twitch_viewers: Optional[int] = None
     twitch_streams: Optional[int] = None
     first_seen: Optional[str] = None   # when this game first entered our catalog (not Steam's release date)
+    # Lifetime (steamcharts monthly, top-8k coverage): t0 = first month averaging 100+
+    # concurrent players, death = first full month under 10. None = unknown, never zero
+    # (no steamcharts coverage / never reached 100+ / mart predates the lifetime ETL).
+    lifetime_first_100_month: Optional[str] = None  # 'YYYY-MM-DD' (month start)
+    lifetime_died_month: Optional[str] = None       # None while still alive
+    lifetime_months: Optional[int] = None           # alive games: months so far
+    lifetime_alive: Optional[bool] = None
 
 
 class PriceBand(BaseModel):
@@ -431,6 +443,10 @@ class NicheRow(BaseModel):
     players_coverage: Optional[float] = None
     median_players_now: Optional[float] = None  # the TYPICAL game's live players
     players_top5_share: Optional[float] = None  # top-5 games' share of the niche total
+    # Lifetime (steamcharts top-8k; 100+-reaching games only). Absent on older marts.
+    lifetime_n_games: Optional[int] = None            # covered games that ever hit 100+
+    lifetime_survival_12m: Optional[float] = None     # share still >=10 a year after t0
+    lifetime_median_dead_months: Optional[float] = None  # median life of the already-dead (biased LOW)
 
 
 class NicheList(BaseModel):

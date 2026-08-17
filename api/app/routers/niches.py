@@ -65,9 +65,11 @@ SORTABLE = {
     "beatable_share", "saturation_yoy", "self_pub_share", "winner_concentration",
     "total_players_now", "players_trend_7d_pct", "players_coverage",
     "median_players_now", "players_top5_share",
+    "lifetime_survival_12m", "lifetime_median_dead_months",
     "p90_rev",
 }
 _PLAYERS_COLS = ["total_players_now", "players_trend_7d_pct", "players_coverage"]
+_LIFETIME_COLS = ["lifetime_n_games", "lifetime_survival_12m", "lifetime_median_dead_months"]
 
 # Ordered base column list (single source of truth for SELECT + CSV header); the players
 # columns are appended when the mart carries them.
@@ -105,6 +107,18 @@ def _has_players_dist() -> bool:
 
 
 @lru_cache(maxsize=1)
+def _has_lifetime() -> bool:
+    """lifetime_n_games / lifetime_survival_12m / lifetime_median_dead_months (how long a
+    game keeps an audience) — landed after the players-distribution columns, so they get
+    their own gate."""
+    rows = analytics_db.query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_niche' AND column_name = 'lifetime_survival_12m'"
+    )
+    return bool(rows)
+
+
+@lru_cache(maxsize=1)
 def _has_p90() -> bool:
     """p90_rev landed 2026-08-14; gate it like the players columns so the app still
     serves a mart built before that ETL."""
@@ -134,6 +148,8 @@ def _cols() -> list[str]:
         cols.extend(_PLAYERS_COLS)
     if _has_players_dist():
         cols.extend(["median_players_now", "players_top5_share"])
+    if _has_lifetime():
+        cols.extend(_LIFETIME_COLS)
     return cols
 
 
@@ -228,6 +244,11 @@ def list_niches(
             status_code=503,
             detail="mart_niche predates the players-distribution columns — rebuild the marts (task etl).",
         )
+    if sort in _LIFETIME_COLS and not _has_lifetime():
+        raise HTTPException(
+            status_code=503,
+            detail="mart_niche predates the lifetime columns — rebuild the marts (task etl).",
+        )
     if sort == "p90_rev" and not _has_p90():
         raise HTTPException(
             status_code=503,
@@ -309,7 +330,9 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
         # so they degrade independently.
         distribution: NichePlayersDistribution | None = None
         try:
-            hist = analytics_db.query(
+            # NB: a distinct local name — this must NOT rebind the revenue `hist` above,
+            # which previously leaked the players histogram into revenue_histogram.
+            players_hist = analytics_db.query(
                 "SELECT bucket_index, x_min, x_max, count FROM mart_niche_players_hist "
                 "WHERE dimension = ? AND key = ? ORDER BY bucket_index",
                 [dimension, key],
@@ -320,12 +343,12 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
                 [dimension, key],
             )
             head0 = variants[0]
-            if hist or top_games:
+            if players_hist or top_games:
                 distribution = NichePlayersDistribution(
                     median_players_now=head0.get("median_players_now"),
                     players_top5_share=head0.get("players_top5_share"),
-                    n_games_now=sum(int(h["count"]) for h in hist),
-                    histogram=[HistBucket(**h) for h in hist],
+                    n_games_now=sum(int(h["count"]) for h in players_hist),
+                    histogram=[HistBucket(**h) for h in players_hist],
                     top_games=[NichePlayersTopGame(**t) for t in top_games],
                 )
         except duckdb.CatalogException:

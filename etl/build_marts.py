@@ -56,6 +56,14 @@ PLAYERS_HISTORY_DAYS = 365       # rolling window kept in the players marts (SQL
 NICHE_PLAYERS_MIN_MEASURED = 10  # a niche needs >= this many ever-measured games for a series;
                                  # also the same-panel floor for niche players_trend_7d_pct
 
+# Game lifetime (steamcharts monthly, top-8k coverage) — see mart_players.sql _game_lifetime.
+LIFETIME_ALIVE_CCU = 100         # a game "has an audience" from its first month AVERAGING
+                                 # >= this many concurrent players
+LIFETIME_DEAD_CCU = 10           # ...and is "dead" from its first FULL month averaging below
+                                 # this — the "how long does a game live" 100+ -> <10 metric
+LIFETIME_MIN_NICHE_GAMES = 5     # a niche needs >= this many 100+-reaching games before its
+                                 # lifetime columns are stamped (tiny samples are noise)
+
 # Review-count reconciliation (SteamSpy vs. the actual scraped `reviews` table). SteamSpy
 # lags badly for new releases -- it can sit at total_reviews=0 for weeks/months after
 # launch while our own scraper already holds real, current review data for the same game.
@@ -801,6 +809,9 @@ def build_params() -> dict[str, str]:
         "PLAYERS_TREND_DAYS_X2": PLAYERS_TREND_DAYS * 2,
         "PLAYERS_HISTORY_DAYS": PLAYERS_HISTORY_DAYS,
         "NICHE_PLAYERS_MIN_MEASURED": NICHE_PLAYERS_MIN_MEASURED,
+        "LIFETIME_ALIVE_CCU": LIFETIME_ALIVE_CCU,
+        "LIFETIME_DEAD_CCU": LIFETIME_DEAD_CCU,
+        "LIFETIME_MIN_NICHE_GAMES": LIFETIME_MIN_NICHE_GAMES,
         "CUR_YEAR": cur_year,
         "RECENT_YEAR": cur_year - 1,
         "PRIOR_YEAR": cur_year - 2,
