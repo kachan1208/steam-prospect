@@ -53,7 +53,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "game_search", "aspect_drilldown_open", "game_comparable_open",
         "estimator_run", "chat_send", "view_save", "view_load",
         "benchmark_metric_change", "timing_genre_change", "marketing_platform_change",
-        "press_article_open",
+        "press_article_open", "detail_view_toggle",
     }
 )
 

@@ -16,6 +16,8 @@ import { Badge } from "../components/ui/Badge";
 import { Card } from "../components/ui/Card";
 import { Meter, BulletMeter } from "../components/ui/Meter";
 import { StatTile } from "../components/ui/StatTile";
+import { ViewToggle } from "../components/ui/ViewToggle";
+import { trackEvent } from "../lib/analytics";
 import {
   useGameChannelMix,
   useGameComparables,
@@ -30,6 +32,7 @@ import { splitEntities } from "../lib/entities";
 import { fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName } from "../lib/format";
 import { genreTintStyle, heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { CSS_VAR } from "../lib/palette";
+import { useDetailView } from "../lib/viewMode";
 
 const TABS = [
   { key: "overview", label: "Overview" },
@@ -103,6 +106,7 @@ export default function GameProfile() {
   const validAppid = Number.isFinite(appid);
   const [tab, setTab] = useState<TabKey>("overview");
   const [selectedMetric, setSelectedMetric] = useState<DrilldownMetric | null>(null);
+  const [view, setView] = useDetailView();
 
   const profileQ = useGameProfile(validAppid ? appid : null);
   const comparablesQ = useGameComparables(validAppid ? appid : null);
@@ -352,23 +356,36 @@ export default function GameProfile() {
       {/* Plain toggled buttons, not ARIA tabs — the full tabs contract (tabpanel ids,
           arrow-key nav) isn't implemented, and half a tab widget is worse for screen
           readers than honest pressed-state buttons. */}
-      <div className="flex flex-wrap gap-1.5" aria-label="Game profile sections">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            aria-pressed={tab === t.key}
-            onClick={() => setTab(t.key)}
-            className={clsx(
-              "rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
-              tab === t.key
-                ? "border-brand bg-page text-ink-primary"
-                : "border-chartborder text-ink-muted hover:text-ink-secondary",
-            )}
-          >
-            {t.label}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap gap-1.5" aria-label="Game profile sections">
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              aria-pressed={tab === t.key}
+              onClick={() => setTab(t.key)}
+              className={clsx(
+                "rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+                tab === t.key
+                  ? "border-brand bg-page text-ink-primary"
+                  : "border-chartborder text-ink-muted hover:text-ink-secondary",
+              )}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        {/* Simple/Detailed governs the Overview content only — hidden on the teardown tab
+            so there's never a dead control on screen. */}
+        {tab === "overview" && (
+          <ViewToggle
+            value={view}
+            onChange={(v) => {
+              setView(v);
+              trackEvent("detail_view_toggle");
+            }}
+          />
+        )}
       </div>
 
       {tab === "overview" && (
@@ -413,6 +430,10 @@ export default function GameProfile() {
         )}
       </Card>
 
+      {/* The chart-heavy expert cards live under the Detailed toggle; Simple keeps the
+          plain-language reads (header, stat tiles, genre standing, comparables) only. */}
+      {view === "detailed" && (
+      <>
       <Card
         title="Review timeline"
         subtitle="From the sampled reviews table (not Steam's full review count) — a recency-biased sample for older/popular titles"
@@ -532,6 +553,8 @@ export default function GameProfile() {
           </div>
         </div>
       </Card>
+      </>
+      )}
 
       <Card
         title="Comparables"
