@@ -96,10 +96,40 @@ _HAS_PLAYERS_DIST = bool(
     )
 )
 
+# Whether the mart carries the game-lifetime columns/table (mart_players.sql
+# _game_lifetime/_niche_lifetime + mart_market_lifetime): how long a game keeps an
+# audience once it has one — t0 = first calendar month averaging >= 100 concurrent
+# players, death = first FULL month after t0 averaging < 10 (steamcharts monthly,
+# top-8k-by-reviews coverage). Three probes because the columns land on different marts.
+_HAS_LIFETIME = bool(
+    query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_niche' AND column_name = 'lifetime_survival_12m'"
+    )
+)
+
+_HAS_LIFETIME_GAME = bool(
+    query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_game' AND column_name = 'lifetime_months'"
+    )
+)
+
+_HAS_LIFETIME_CURVE = bool(
+    query(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'mart_market_lifetime'"
+    )
+)
+
 _PLAYERS_MISSING = (
     "this analytics DB predates the live-player (CCU) marts (mart_game_players_daily / "
     "mart_niche_players and the players_* columns on mart_game/mart_niche) — it was built "
     "by an older ETL. Re-run the ETL (`task etl` in the main prospect checkout) and retry."
+)
+
+_LIFETIME_MISSING = (
+    "This mart predates the game-lifetime columns (an older ETL build). Re-run the ETL "
+    "(`task etl` in the main prospect checkout) and retry."
 )
 
 # Shared caveats for every players/CCU read — the two ways these series lie if unstated.
@@ -342,6 +372,21 @@ keyless GetNumberOfCurrentPlayers, captured by a nightly ~21-22:00 UTC sweep sin
 - **Interpretation trap**: a niche's total is its HITS — top-heavy by construction. A
   huge total_players_now says people play the niche's biggest games, not that a new
   entrant will get players; read it with winner_concentration and the median columns.
+- **Game lifetime (mart_game columns)** — how long a game keeps an audience once it has
+  one, from steamcharts MONTHLY averages (top-8k-by-reviews coverage only, not our
+  nightly point samples): lifetime_first_100_month (t0 = the first calendar month
+  averaging >= 100 concurrent players, 'YYYY-MM-DD'), lifetime_died_month (the first
+  FULL month after t0 averaging < 10; NULL while alive), lifetime_months (death − t0,
+  or months-so-far while alive), lifetime_alive. NULL on all = UNKNOWN (no coverage or
+  never reached 100+) — never zero.
+- **Niche lifetime (mart_niche columns)** (one value per key, identical on all 4 cut
+  rows, like entrant_ratio): lifetime_n_games (covered 100+-reaching games),
+  lifetime_survival_12m (fixed-horizon share still averaging 10+ twelve months after
+  t0, among games observable >= 12 months — censoring-safe), lifetime_median_dead_months
+  (median lifetime of the ALREADY-DEAD games — biased LOW, it ignores every still-alive
+  game; read it with lifetime_survival_12m, never alone). NULL = fewer than 5 covered
+  games. The catalog-wide survival curve lives in mart_market_lifetime ->
+  `lifetime_curve`.
 
 ## Revenue & owners estimates
 
@@ -405,6 +450,9 @@ games clearing the review floor).
   A different MEASURE from our point samples — the tools return it as a separate
   `monthly` block and it must never be averaged with the daily series. -> the `monthly`
   blocks of `game_player_history` / `niche_player_history`.
+- **mart_market_lifetime** — the catalog-wide fixed-horizon survival curve over the
+  100+-reaching cohort (see "Game lifetime" above): per month-since-t0 `t` (0-72),
+  n_observable (games observable >= t months) and share_alive. -> lifetime_curve()
 - **mart_entity / mart_entity_games** — one row per (role, developer/publisher name),
   normalized out of mart_game's comma-joined developers/publishers strings (corporate
   suffixes like ", Inc." / ", Ltd." are re-merged into the name instead of becoming fake
@@ -465,11 +513,13 @@ _NICHE_SORTABLE = {
     "entrant_ratio", "solo_viability",
     "total_players_now", "players_trend_7d_pct", "players_coverage",
     "median_players_now", "players_top5_share",
+    "lifetime_survival_12m", "lifetime_median_dead_months",
 }
 # The subset of _NICHE_SORTABLE that only exists on marts with the players columns
 # (sorting/filtering on them needs _HAS_PLAYERS; everything else works on older marts).
 _NICHE_PLAYERS_COLS = {"total_players_now", "players_trend_7d_pct", "players_coverage"}
 _NICHE_PLAYERS_DIST_COLS = {"median_players_now", "players_top5_share"}
+_NICHE_LIFETIME_COLS = {"lifetime_survival_12m", "lifetime_median_dead_months"}
 _NICHE_TIERS = {"micro", "umbrella", "theme", "meta"}
 # Default tier filter (tags only): buildable micro-genres + themes. Umbrella containers
 # (Open World, Sandbox, RPG...) and meta/reception tags (Great Soundtrack, Nostalgia...)
@@ -576,6 +626,17 @@ def find_niches(
       is dominated by its biggest games (the top-12k games hold ~99% of all Steam CCU) —
       a huge total_players_now says people play the niche's HITS, not that a new entrant
       gets players.
+      - lifetime_survival_12m: of the niche's games that ever reached 100+ concurrent
+        players, the share still holding 10+ a year later (steamcharts top-8k coverage;
+        NULL = too few covered games — fewer than 5). lifetime_n_games = the covered
+        population behind it.
+      - lifetime_median_dead_months: median lifetime of the ALREADY-DEAD 100+ games —
+        biased LOW (ignores every still-alive game); read it with lifetime_survival_12m,
+        never alone.
+      FALSIFICATION RULE for the lifetime columns: lifetime_survival_12m below ~0.5
+      marks a hit-churn niche — games get an audience and lose it within a year; a
+      strong opportunity score there still means a SHORT revenue window (front-load the
+      launch, don't plan year-two updates). Catalog-wide baseline: lifetime_curve().
 
     EXACT MATERIALISATION: only the precomputed cuts exist — window in {"all","24m"} x
     min_reviews in {50,100} (must stay in sync with MIN_REVIEWS_LEVELS in
@@ -596,6 +657,8 @@ def find_niches(
         return {"error": _PLAYERS_MISSING}
     if not _HAS_PLAYERS_DIST and sort in _NICHE_PLAYERS_DIST_COLS:
         return {"error": _PLAYERS_MISSING}
+    if not _HAS_LIFETIME and sort in _NICHE_LIFETIME_COLS:
+        return {"error": _LIFETIME_MISSING}
     if include_tiers is not None:
         bad = [t for t in include_tiers if t not in _NICHE_TIERS]
         if bad:
@@ -631,6 +694,11 @@ def find_niches(
     )
     if _HAS_PLAYERS_DIST:
         players_cols += ",\n                   median_players_now, players_top5_share"
+    lifetime_cols = (
+        ",\n                   lifetime_n_games, lifetime_survival_12m, lifetime_median_dead_months"
+        if _HAS_LIFETIME
+        else ""
+    )
     try:
         rows = query(
             f"""
@@ -639,7 +707,7 @@ def find_niches(
                    market_size, total_owners, total_rev, total_reviews,
                    median_rev, median_reviews, median_price, median_positive_ratio,
                    median_owners, recent_velocity, hit_rate_200k, hit_rate_500k,
-                   saturation_yoy, winner_concentration{players_cols}
+                   saturation_yoy, winner_concentration{players_cols}{lifetime_cols}
             FROM mart_niche
             WHERE {" AND ".join(where)}
             ORDER BY {sort} DESC NULLS LAST, n_games DESC
@@ -690,6 +758,15 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
         total_players_now / players_trend_7d_pct / players_coverage (same value on all 4
         cuts). None = never measured or the mart predates CCU collection; call
         niche_player_history(dimension, key) for the full daily series.
+      - lifetime columns on the variants rows (same value on all 4 cuts, like
+        entrant_ratio): lifetime_n_games (the niche's games that ever reached 100+
+        concurrent players, steamcharts top-8k coverage), lifetime_survival_12m (share
+        of those still holding 10+ a year after first reaching 100+ — fixed horizon,
+        only games observable >= 12 months count), lifetime_median_dead_months (median
+        lifetime of the ALREADY-DEAD games — biased LOW, it ignores every still-alive
+        game; never read it without lifetime_survival_12m). None = fewer than 5 covered
+        games or a mart built before the lifetime ETL. Catalog-wide baseline:
+        lifetime_curve().
     Returns {"error": ...} if dimension/key doesn't match any niche (call find_niches to
     get exact valid keys — spelling and case must match precisely), or asking you to
     re-run the ETL if the analytics DB predates the v2 columns.
@@ -705,6 +782,11 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
     )
     if _HAS_PLAYERS_DIST:
         players_cols += ",\n                   median_players_now, players_top5_share"
+    lifetime_cols = (
+        ",\n                   lifetime_n_games, lifetime_survival_12m, lifetime_median_dead_months"
+        if _HAS_LIFETIME
+        else ""
+    )
     try:
         variants = query(
             f"""
@@ -713,7 +795,7 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
                    competition, quality_gap, market_size, total_owners, total_rev,
                    total_reviews, median_rev, median_reviews, median_price,
                    median_positive_ratio, median_owners, recent_velocity, hit_rate_200k,
-                   hit_rate_500k, beatable_share, saturation_yoy, winner_concentration{players_cols}
+                   hit_rate_500k, beatable_share, saturation_yoy, winner_concentration{players_cols}{lifetime_cols}
             FROM mart_niche WHERE dimension = ? AND key = ? ORDER BY win, min_reviews
             """,
             [dimension, key],
@@ -1222,6 +1304,57 @@ def estimate_revenue(
     )
 
 
+@mcp.tool()
+def lifetime_curve() -> dict:
+    """How long does a Steam game keep an audience once it has one? The catalog-wide
+    survival curve from mart_market_lifetime: for every game whose steamcharts monthly
+    history ever averaged 100+ concurrent players (that first month = its t0), share_alive
+    at month t = the share still averaging 10+ t months later. Computed at FIXED horizons
+    — month t counts only games observable >= t months since t0 — so a young cohort can
+    never read as dead simply because we haven't watched it long enough (right-censoring
+    safe). n_observable per row is the population behind each point.
+
+    HOW TO READ IT: milestones gives the m3/m6/m12/m24/m36/m60 shares — quote those, not
+    the raw 73-point curve. median_months is the first month where half the cohort has
+    died (None = the curve never crosses 0.5 within 72 months). A steep early drop means
+    a Steam audience is typically a launch-window phenomenon: plan revenue for the window
+    the curve says exists, not for a long tail.
+
+    SURVIVORSHIP CAVEAT — the cohort is games that DID reach 100+ concurrent players
+    (steamcharts monthly averages, top-8k-by-reviews coverage only). The MAJORITY of
+    Steam releases never get there at all, so this curve answers "once a game has an
+    audience, how long does it keep it" — NEVER "will my game find an audience". For
+    per-niche versions use find_niches' lifetime_survival_12m /
+    lifetime_median_dead_months columns (both sortable) or niche_detail; per-game fields
+    live on game_profile / game_search. Returns {"error": ...} asking you to re-run the
+    ETL when the mart predates the lifetime build.
+    """
+    if not _HAS_LIFETIME_CURVE:
+        return {"error": _LIFETIME_MISSING}
+    rows = query("SELECT t, n_observable, share_alive FROM mart_market_lifetime ORDER BY t")
+    by_t = {int(r["t"]): r["share_alive"] for r in rows}
+    median_months = next(
+        (int(r["t"]) for r in rows
+         if r["share_alive"] is not None and r["share_alive"] <= 0.5),
+        None,
+    )
+    return {
+        "curve": clean_rows(rows),
+        "milestones": clean({f"m{m}": by_t.get(m) for m in (3, 6, 12, 24, 36, 60)}),
+        "median_months": median_months,
+        "methodology": (
+            "t0 = a game's first calendar month averaging >= 100 concurrent players; "
+            "death = the first FULL month after t0 averaging < 10 (the current partial "
+            "month never counts). share_alive at month t is a FIXED-horizon share — only "
+            "games observable >= t months since t0 count, so right-censoring never reads "
+            "as death. Source: steamcharts.com monthly averages, top-8k-by-reviews games "
+            "only — a monthly AVERAGE, not our nightly point samples, so a point-in-time "
+            "dip can't kill a game. Games never reaching 100+ (most of Steam) are simply "
+            "not in the cohort."
+        ),
+    }
+
+
 # ==========================================================================================
 # Launch timing tools
 # ==========================================================================================
@@ -1419,6 +1552,8 @@ def game_search(
     tag: str | None = None,
     genre: str | None = None,
     min_reviews: int = 0,
+    min_lifetime_months: int | None = None,
+    lifetime_alive: bool | None = None,
     sort: str = "total_reviews",
     order: Literal["asc", "desc"] = "desc",
     limit: int = 15,
@@ -1431,9 +1566,20 @@ def game_search(
     to find an appid for game_profile/game_teardown, or to spot-check who the top players
     in a niche/genre are. sort is any returned numeric field (default total_reviews);
     *_pct_in_genre fields are 0-100 percentile rank within the game's own primary genre.
+
+    min_lifetime_months / lifetime_alive filter on the game-lifetime columns (steamcharts
+    monthly, top-8k-by-reviews coverage): lifetime_months = MONTHS from a game's first
+    calendar month averaging 100+ concurrent players (its t0) to its first full month
+    under 10 — or months-so-far while still alive; lifetime_alive = still averaging 10+.
+    NULL-DROP SEMANTICS: either filter drops every game with UNKNOWN lifetime (no
+    steamcharts coverage, or never reached 100+ — NULL matches neither condition), so
+    they narrow results to the measured head of the catalog. Both columns ride along in
+    the rows when the mart carries them.
     """
     if sort not in _GAME_SORTABLE:
         return {"error": f"sort must be one of {sorted(_GAME_SORTABLE)}"}
+    if (min_lifetime_months is not None or lifetime_alive is not None) and not _HAS_LIFETIME_GAME:
+        return {"error": _LIFETIME_MISSING}
 
     where = ["total_reviews >= ?"]
     params: list = [min_reviews]
@@ -1450,12 +1596,23 @@ def game_search(
     if tag:
         where.append("list_contains(top_tags, ?)")
         params.append(tag)
+    # Lifetime filters compare against NULL-able columns, so unknown-lifetime games drop
+    # out naturally — a game we can't measure can't be shown to satisfy the constraint.
+    if min_lifetime_months is not None:
+        where.append("lifetime_months >= ?")
+        params.append(min_lifetime_months)
+    if lifetime_alive is not None:
+        where.append("lifetime_alive = ?")
+        params.append(lifetime_alive)
     limit = max(1, min(limit, 50))
 
+    lifetime_cols = (
+        ",\n               lifetime_months, lifetime_alive" if _HAS_LIFETIME_GAME else ""
+    )
     rows = query(
         f"""
         SELECT appid, name, primary_genre, release_year, price_initial, owners_mid,
-               total_reviews, positive_ratio, est_rev_reviews, top_tags
+               total_reviews, positive_ratio, est_rev_reviews, top_tags{lifetime_cols}
         FROM mart_game
         WHERE {" AND ".join(where)}
         ORDER BY {sort} {order.upper()} NULLS LAST, total_reviews DESC
@@ -1464,7 +1621,10 @@ def game_search(
         params + [limit],
     )
     return {
-        "filters": {"q": q, "tag": tag, "genre": genre, "min_reviews": min_reviews},
+        "filters": {
+            "q": q, "tag": tag, "genre": genre, "min_reviews": min_reviews,
+            "min_lifetime_months": min_lifetime_months, "lifetime_alive": lifetime_alive,
+        },
         "sort": sort,
         "order": order,
         "n_returned": len(rows),
@@ -1483,13 +1643,25 @@ def game_profile(appid: int) -> dict:
     carries them: live_players (latest nightly ~21-22:00 UTC point sample — NOT a daily
     peak), players_7d_avg (trailing-7d average of those samples) and players_trend_7d_pct
     (vs the prior 7d); NULL = not yet measured — call game_player_history(appid) for the
-    daily series. Use game_search to find an appid by name first. Returns {"error": ...}
+    daily series. And the game-lifetime columns when the mart carries them (steamcharts
+    monthly, top-8k-by-reviews coverage): lifetime_first_100_month (t0 — the first
+    calendar month averaging 100+ concurrent players, 'YYYY-MM-DD'),
+    lifetime_died_month (first FULL month after t0 averaging under 10; None while
+    alive), lifetime_months (death minus t0, or months-so-far while alive),
+    lifetime_alive. All None = UNKNOWN (no steamcharts coverage or never reached 100+),
+    never zero. Use game_search to find an appid by name first. Returns {"error": ...}
     if the appid isn't in the catalog or didn't clear the >=10-review analysis floor
     (mart_game only carries scored games).
     """
     players_cols = (
         ",\n               live_players, players_7d_avg, players_trend_7d_pct"
         if _HAS_PLAYERS
+        else ""
+    )
+    lifetime_cols = (
+        ",\n               lifetime_first_100_month, lifetime_died_month, lifetime_months,"
+        "\n               lifetime_alive"
+        if _HAS_LIFETIME_GAME
         else ""
     )
     row = query_one(
@@ -1501,7 +1673,7 @@ def game_profile(appid: int) -> dict:
                short_description, rev_pct_in_genre, reviews_pct_in_genre,
                owners_pct_in_genre, top_tags, n_reviews_first_30d, n_reviews_first_90d,
                n_reviews_first_365d, n_reviews_trailing_30d, playtime_p25, playtime_p50,
-               playtime_p75{players_cols}
+               playtime_p75{players_cols}{lifetime_cols}
         FROM mart_game WHERE appid = ?
         """,
         [appid],

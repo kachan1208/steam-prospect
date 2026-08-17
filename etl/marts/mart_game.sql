@@ -101,6 +101,13 @@ SELECT
     -- trend vs the prior 7d. NULL until a game has measured days (see mart_players.sql).
     gps.players_7d_avg,
     round(gps.players_trend_7d_pct, 2) AS players_trend_7d_pct,
+    -- Lifetime (steamcharts monthly, top-8k coverage; mart_players.sql _game_lifetime):
+    -- months from the first 100+-avg month to the first full month under 10 avg players.
+    -- NULL = never reached 100+ OR outside steamcharts coverage — "unknown", never zero.
+    CAST(gl.first_100_month AS VARCHAR) AS lifetime_first_100_month,
+    CAST(gl.died_month AS VARCHAR) AS lifetime_died_month,
+    gl.lifetime_months,
+    gl.lifetime_alive,
     COALESCE(tw.twitch_viewers, 0) AS twitch_viewers,
     COALESCE(tw.twitch_streams, 0) AS twitch_streams
 FROM stg_game g
@@ -110,5 +117,6 @@ LEFT JOIN top_tags_agg tt ON tt.appid = g.appid
 LEFT JOIN velocity v ON v.appid = g.appid
 LEFT JOIN ccu cc ON cc.appid = g.appid
 LEFT JOIN _game_players_summary gps ON gps.appid = g.appid
+LEFT JOIN _game_lifetime gl ON gl.appid = g.appid
 LEFT JOIN twitch tw ON tw.appid = g.appid
 LEFT JOIN src.games gh ON gh.appid = g.appid;

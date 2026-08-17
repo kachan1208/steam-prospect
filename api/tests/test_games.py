@@ -188,3 +188,22 @@ def test_game_comparables_ranks_by_jaccard_similarity(client):
 def test_game_comparables_unknown_appid_is_404(client):
     r = client.get("/api/games/404404404/comparables")
     assert r.status_code == 404
+
+
+def test_search_lifetime_gates_503_on_old_mart(client):
+    # The fixture mart_game deliberately lacks the lifetime columns (like name_lower) —
+    # the gated filter/sort must degrade to an explicit 503, never a BinderException 500.
+    for params in (
+        {"min_lifetime_months": 6},
+        {"lifetime_alive": "true"},
+        {"sort": "lifetime_months"},
+    ):
+        r = client.get("/api/games/search", params=params)
+        assert r.status_code == 503
+        assert "lifetime columns" in r.json()["detail"]
+
+
+def test_search_lifetime_filter_validation_precedes_gate(client):
+    # Query validation (ge=0) fires before the capability gate — out-of-range is 422.
+    r = client.get("/api/games/search", params={"min_lifetime_months": -1})
+    assert r.status_code == 422

@@ -40,6 +40,7 @@ SORTABLE = {
     "name", "release_year", "release_date", "price_initial", "owners_mid", "total_reviews",
     "positive_ratio", "est_rev_reviews", "rev_pct_in_genre", "reviews_pct_in_genre",
     "owners_pct_in_genre", "n_reviews_trailing_30d", "live_players", "first_seen",
+    "lifetime_months",
 }
 
 @lru_cache(maxsize=1)
@@ -90,10 +91,37 @@ def _has_players_summary() -> bool:
     return bool(rows)
 
 
+@lru_cache(maxsize=1)
+def _has_lifetime_game() -> bool:
+    """Whether the current mart carries the game-lifetime columns (mart_players.sql
+    _game_lifetime: months from the first 100+-avg-CCU month to the first full month
+    under 10). Gated + cached exactly like _has_players_summary() and for the same
+    reasons — the app must serve marts built before the lifetime ETL landed."""
+    rows = analytics_db.query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_game' AND column_name = 'lifetime_months'"
+    )
+    return bool(rows)
+
+
+_LIFETIME_PROFILE_COLS = (
+    ", lifetime_first_100_month, lifetime_died_month, lifetime_months, lifetime_alive"
+)
+
+
 def _profile_cols() -> str:
+    cols = _PROFILE_COLS
     if _has_players_summary():
-        return _PROFILE_COLS + ", players_7d_avg, players_trend_7d_pct"
-    return _PROFILE_COLS
+        cols += ", players_7d_avg, players_trend_7d_pct"
+    if _has_lifetime_game():
+        cols += _LIFETIME_PROFILE_COLS
+    return cols
+
+
+def _search_cols() -> str:
+    if _has_lifetime_game():
+        return _SEARCH_COLS + ", lifetime_months, lifetime_alive"
+    return _SEARCH_COLS
 
 
 @router.get("/search", response_model=GameSearchList)
@@ -123,6 +151,16 @@ def search_games(
         None, description="true = self-published only, false = publisher-backed only, omitted = both."
     ),
     indie: bool | None = Query(None, description="true = indie only, false = non-indie only, omitted = both."),
+    min_lifetime_months: int | None = Query(
+        None, ge=0,
+        description="Floor on lifetime_months (months from the first 100+-avg-CCU month to the "
+        "first full month under 10; steamcharts top-8k coverage). Drops games with unknown lifetime.",
+    ),
+    lifetime_alive: bool | None = Query(
+        None,
+        description="true = still averaging 10+ concurrent players, false = audience already died, "
+        "omitted = both. Either value drops games with unknown lifetime (no steamcharts coverage).",
+    ),
     sort: str = Query("total_reviews"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(25, ge=1, le=100),
@@ -130,6 +168,12 @@ def search_games(
 ) -> GameSearchList:
     if sort not in SORTABLE:
         raise HTTPException(status_code=400, detail=f"sort must be one of {sorted(SORTABLE)}")
+    if (sort == "lifetime_months" or min_lifetime_months is not None or lifetime_alive is not None) \
+            and not _has_lifetime_game():
+        raise HTTPException(
+            status_code=503,
+            detail="mart_game predates the lifetime columns — rebuild the marts (task etl).",
+        )
 
     where = ["total_reviews >= ?"]
     params: list = [min_reviews]
@@ -188,11 +232,19 @@ def search_games(
     if indie is not None:
         where.append("is_indie = ?")
         params.append(1 if indie else 0)
+    # Lifetime filters compare against NULL-able columns, so unknown-lifetime games drop
+    # out naturally — a game we can't measure can't be shown to satisfy the constraint.
+    if min_lifetime_months is not None:
+        where.append("lifetime_months >= ?")
+        params.append(min_lifetime_months)
+    if lifetime_alive is not None:
+        where.append("lifetime_alive = ?")
+        params.append(lifetime_alive)
     where_sql = "WHERE " + " AND ".join(where)
 
     total = analytics_db.scalar(f"SELECT COUNT(*) FROM mart_game {where_sql}", params)
     rows = analytics_db.query(
-        f"SELECT {_SEARCH_COLS} FROM mart_game {where_sql} "
+        f"SELECT {_search_cols()} FROM mart_game {where_sql} "
         f"ORDER BY {sort} {order.upper()} NULLS LAST, total_reviews DESC LIMIT ? OFFSET ?",
         params + [limit, offset],
     )

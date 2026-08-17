@@ -82,6 +82,13 @@ export function titleCase(s: string): string {
   return s.replace(/\w\S*/g, (t) => t[0].toUpperCase() + t.slice(1));
 }
 
+/** Lifetime in months -> "14 mo" under 2 years, "3.2 yr" (one decimal) at 24+. */
+export function fmtMonths(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  if (value < 24) return `${Math.round(value)} mo`;
+  return `${(value / 12).toFixed(1)} yr`;
+}
+
 /** Playtime in minutes -> compact "142.0h" / "35m" (Steam's own hour-first convention). */
 export function fmtMinutes(value: number | null | undefined): string {
   if (value === null || value === undefined || Number.isNaN(value)) return "—";

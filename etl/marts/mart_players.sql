@@ -299,3 +299,90 @@ SELECT n.dimension, n.key,
 FROM now_agg n
 LEFT JOIN tr t ON t.dimension = n.dimension AND t.key = n.key
 LEFT JOIN top5 t5 ON t5.dimension = n.dimension AND t5.key = n.key;
+
+-- ---------------------------------------------------------------------------------------
+-- Game LIFETIME (steamcharts monthly, top-8k coverage): how long a game keeps an audience.
+--   t0    = first calendar month averaging >= @LIFETIME_ALIVE_CCU@ concurrent players
+--   death = first FULL month AFTER t0 averaging < @LIFETIME_DEAD_CCU@
+--   lifetime_months = death - t0; still-alive games carry months-so-far + lifetime_alive
+-- The current (partial) month never counts: a mid-month dip is not a dead month. Games
+-- outside steamcharts' top-8k head (or never reaching 100+) simply aren't in this table —
+-- their mart_game lifetime columns stay NULL, which readers must treat as "unknown", not 0.
+-- ---------------------------------------------------------------------------------------
+CREATE TEMP TABLE _game_lifetime AS
+WITH m AS (
+    SELECT appid, date AS month, avg_players
+    FROM stg_player_history_external
+    WHERE source = 'steamcharts_monthly' AND date < date_trunc('month', CURRENT_DATE)
+),
+first100 AS (
+    SELECT appid, MIN(month) AS first_100_month
+    FROM m WHERE avg_players >= @LIFETIME_ALIVE_CCU@ GROUP BY 1
+),
+death AS (
+    SELECT m.appid, MIN(m.month) AS died_month
+    FROM m
+    JOIN first100 f ON f.appid = m.appid
+    WHERE m.month > f.first_100_month AND m.avg_players < @LIFETIME_DEAD_CCU@
+    GROUP BY 1
+),
+last_m AS (SELECT appid, MAX(month) AS last_month FROM m GROUP BY 1)
+SELECT f.appid, f.first_100_month, d.died_month,
+    datediff('month', f.first_100_month, COALESCE(d.died_month, l.last_month)) AS lifetime_months,
+    (d.died_month IS NULL) AS lifetime_alive
+FROM first100 f
+LEFT JOIN death d ON d.appid = f.appid
+JOIN last_m l ON l.appid = f.appid;
+
+-- Market survival curve: of the games that ever reached 100+, the share still alive t
+-- months later — at FIXED horizons (at month t only games observable >= t months count),
+-- so right-censoring never reads as death. Powers the "how long does a game live" answer.
+DROP TABLE IF EXISTS mart_market_lifetime;
+CREATE TABLE mart_market_lifetime AS
+WITH bounds AS (
+    SELECT MAX(date) AS last_month FROM stg_player_history_external
+    WHERE source = 'steamcharts_monthly' AND date < date_trunc('month', CURRENT_DATE)
+),
+obs AS (
+    SELECT gl.lifetime_months, gl.lifetime_alive,
+        datediff('month', gl.first_100_month, b.last_month) AS observable_months
+    FROM _game_lifetime gl CROSS JOIN bounds b
+)
+SELECT h.t,
+    COUNT(*) AS n_observable,
+    round(AVG(CASE WHEN o.lifetime_alive OR o.lifetime_months > h.t THEN 1.0 ELSE 0.0 END), 4) AS share_alive
+FROM generate_series(0, 72) AS h(t)
+JOIN obs o ON o.observable_months >= h.t
+GROUP BY h.t
+ORDER BY h.t;
+
+-- Per-niche lifetime summary (stamped one-value-per-key, same convention as
+-- _niche_players_now): a 12-month fixed-horizon survival share (only games whose t0 is at
+-- least 12 full months old count — censoring-safe) and the median lifetime among the
+-- already-dead (biased LOW by construction — it ignores every still-alive game; label it).
+CREATE TEMP TABLE _niche_lifetime AS
+WITH membership AS (
+    SELECT 'tag' AS dimension, tag AS key, appid FROM stg_tag_membership
+    UNION ALL
+    SELECT 'genre' AS dimension, genre AS key, appid FROM stg_genre_membership
+),
+bounds AS (
+    SELECT MAX(date) AS last_month FROM stg_player_history_external
+    WHERE source = 'steamcharts_monthly' AND date < date_trunc('month', CURRENT_DATE)
+),
+pop AS (
+    SELECT m.dimension, m.key, gl.lifetime_months, gl.lifetime_alive,
+        datediff('month', gl.first_100_month, b.last_month) AS observable_months
+    FROM membership m
+    JOIN _game_lifetime gl ON gl.appid = m.appid
+    JOIN stg_game g ON g.appid = m.appid AND g.total_reviews >= @MIN_REVIEWS_DEFAULT@
+    CROSS JOIN bounds b
+)
+SELECT dimension, key,
+    COUNT(*) AS lifetime_n_games,
+    round(AVG(CASE WHEN lifetime_alive OR lifetime_months > 12 THEN 1.0 ELSE 0.0 END)
+        FILTER (WHERE observable_months >= 12), 4) AS lifetime_survival_12m,
+    median(lifetime_months) FILTER (WHERE NOT lifetime_alive) AS lifetime_median_dead_months
+FROM pop
+GROUP BY 1, 2
+HAVING COUNT(*) >= @LIFETIME_MIN_NICHE_GAMES@;

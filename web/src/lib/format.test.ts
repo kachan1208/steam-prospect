@@ -4,6 +4,7 @@ import {
   fmtCompact,
   fmtInt,
   fmtMinutes,
+  fmtMonths,
   fmtPct,
   fmtPrice,
   fmtSigned,
@@ -156,5 +157,23 @@ describe("fmtMinutes", () => {
 
   it("clamps negative values to 0 rather than going negative", () => {
     expect(fmtMinutes(-10)).toBe("0m");
+  });
+});
+
+describe("fmtMonths", () => {
+  it("returns an em dash for null/undefined/NaN", () => {
+    expect(fmtMonths(null)).toBe("—");
+    expect(fmtMonths(undefined)).toBe("—");
+    expect(fmtMonths(NaN)).toBe("—");
+  });
+
+  it("renders lifetimes under 2 years as whole months", () => {
+    expect(fmtMonths(14)).toBe("14 mo");
+    expect(fmtMonths(23)).toBe("23 mo");
+  });
+
+  it("renders 24+ months as years with one decimal", () => {
+    expect(fmtMonths(24)).toBe("2.0 yr");
+    expect(fmtMonths(38)).toBe("3.2 yr");
   });
 });

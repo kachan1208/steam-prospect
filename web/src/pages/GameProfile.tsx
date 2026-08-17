@@ -27,7 +27,7 @@ import {
 } from "../lib/api";
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
-import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
+import { fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName } from "../lib/format";
 import { genreTintStyle, heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { CSS_VAR } from "../lib/palette";
 
@@ -210,6 +210,21 @@ export default function GameProfile() {
                         {new Date(profile.first_seen).toLocaleDateString(undefined, { year: "numeric", month: "short" })}
                       </span>
                     </>
+                  )}
+                  {profile.lifetime_alive === true && profile.lifetime_first_100_month && (
+                    <span title="Reached a monthly average of 100+ concurrent players then and still averages 10+ (steamcharts monthly history, top-8k coverage).">
+                      <Badge color={CSS_VAR.demand}>
+                        Audience alive since {monthName(Number(profile.lifetime_first_100_month.slice(5, 7)))}{" "}
+                        {profile.lifetime_first_100_month.slice(0, 4)}
+                      </Badge>
+                    </span>
+                  )}
+                  {profile.lifetime_alive === false && profile.lifetime_months != null && (
+                    <span title="Audience lifetime: months from the game's first month averaging 100+ concurrent players to its first full month averaging under 10 (steamcharts monthly history, top-8k coverage).">
+                      <Badge color="var(--status-critical)">
+                        Audience: {fmtMonths(profile.lifetime_months)} (100+ → &lt;10)
+                      </Badge>
+                    </span>
                   )}
                 </div>
                 <div className="mt-1 text-xs text-ink-secondary">

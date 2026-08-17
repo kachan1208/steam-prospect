@@ -99,7 +99,9 @@ export type SortKey =
   | "winner_concentration"
   | "total_players_now"
   | "players_trend_7d_pct"
-  | "players_coverage";
+  | "players_coverage"
+  | "lifetime_survival_12m"
+  | "lifetime_median_dead_months";
 
 export type NicheTier = "micro" | "theme" | "umbrella" | "meta";
 export const NICHE_TIERS: NicheTier[] = ["micro", "theme", "umbrella", "meta"];
@@ -172,6 +174,10 @@ export interface NicheRow {
   players_coverage?: number | null;
   median_players_now?: number | null;
   players_top5_share?: number | null;
+  // Lifetime (steamcharts top-8k) — absent on marts that predate the lifetime ETL.
+  lifetime_n_games?: number | null;
+  lifetime_survival_12m?: number | null;
+  lifetime_median_dead_months?: number | null;
 }
 
 export interface NicheList {
@@ -587,6 +593,9 @@ export interface GameSearchRow {
   live_players: number | null;
   header_image: string | null;
   top_tags: string[];
+  // Lifetime (steamcharts top-8k) — absent on marts that predate the lifetime ETL.
+  lifetime_months?: number | null;
+  lifetime_alive?: boolean | null;
 }
 
 export interface GameSearchList {
@@ -610,7 +619,8 @@ export type GameSortKey =
   | "reviews_pct_in_genre"
   | "owners_pct_in_genre"
   | "n_reviews_trailing_30d"
-  | "live_players";
+  | "live_players"
+  | "lifetime_months";
 
 export interface GameSearchParams {
   q?: string;
@@ -631,6 +641,10 @@ export interface GameSearchParams {
   /** true = only, false = only-the-opposite, undefined = both (don't pass false unless meant). */
   self_published?: boolean;
   indie?: boolean;
+  /** Floor on lifetime_months (steamcharts top-8k coverage; uncovered games drop out). */
+  min_lifetime_months?: number;
+  /** true = only still-alive audiences, false = only dead ones, undefined = both. */
+  lifetime_alive?: boolean;
   sort: GameSortKey;
   order: "asc" | "desc";
   limit: number;
@@ -708,6 +722,11 @@ export interface GameProfile {
   twitch_viewers: number | null;
   twitch_streams: number | null;
   first_seen: string | null;
+  // Lifetime (steamcharts top-8k) — absent on marts that predate the lifetime ETL.
+  lifetime_first_100_month?: string | null;
+  lifetime_died_month?: string | null;
+  lifetime_months?: number | null;
+  lifetime_alive?: boolean | null;
 }
 
 /** Shared query options so the compare page can fan out over N games via useQueries while
