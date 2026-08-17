@@ -11,6 +11,8 @@ import { Badge } from "./ui/Badge";
 import { Drawer } from "./ui/Drawer";
 import { BulletMeter } from "./ui/Meter";
 import { StatTile } from "./ui/StatTile";
+import { ViewToggle } from "./ui/ViewToggle";
+import { trackEvent } from "../lib/analytics";
 import {
   nicheExportCsvUrl,
   useMarketBenchmarks,
@@ -25,6 +27,7 @@ import {
 } from "../lib/api";
 import { fmtCompact, fmtInt, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtSigned, fmtUsd, titleCase } from "../lib/format";
 import { CSS_VAR } from "../lib/palette";
+import { useDetailView } from "../lib/viewMode";
 
 function variantLabel(v: NicheRow): string {
   return `${v.window === "24m" ? "Last 24m" : "All-time"} · ≥${v.min_reviews} reviews`;
@@ -197,6 +200,7 @@ export function NicheDetailDrawer({
   const { data: detail, isLoading, isError } = useNicheDetail(dimension, row.key);
   const { data: benchmarks } = useMarketBenchmarks();
   const [activeVariant, setActiveVariant] = useState<NicheRow>(row);
+  const [view, setView] = useDetailView();
 
   useEffect(() => {
     setActiveVariant(row);
@@ -221,6 +225,15 @@ export function NicheDetailDrawer({
       onClose={onClose}
       title={row.key}
       subtitle={`${titleCase(dimension)} niche${tier ? ` · ${tier} (${TIER_HINT[tier] ?? tier})` : ""} · ${variantLabel(activeVariant)}`}
+      action={
+        <ViewToggle
+          value={view}
+          onChange={(v) => {
+            setView(v);
+            trackEvent("detail_view_toggle");
+          }}
+        />
+      }
     >
       <div className="flex flex-col gap-6 pb-8">
         {detail && detail.variants.length > 1 && (
@@ -266,6 +279,76 @@ export function NicheDetailDrawer({
           </div>
         )}
 
+        {/* SIMPLE view: the decision-critical reads as one compact grid — the full sections
+            these condense live under the Detailed toggle, untouched. */}
+        {view === "simple" && (
+          <section>
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-muted">The essentials</h3>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+              <StatTile
+                help="The niche's overall entry score (0–100, higher = better) after the decline gate — the gate shrinks the score when the market is shrinking or newcomers underearn. Switch to Detailed for the full formula."
+                label="Opportunity"
+                value={fmtCompact(activeVariant.opportunity_v2)}
+                sub={
+                  activeVariant.decline_gate != null
+                    ? `after decline gate ×${activeVariant.decline_gate.toFixed(2)}`
+                    : undefined
+                }
+              />
+              <StatTile
+                help="Half the niche's games earn less than this (estimated lifetime gross). This is what a REALISTIC entry should expect — not what the hits earn."
+                label="Typical game earns"
+                value={fmtUsd(activeVariant.median_rev)}
+                sub="median, lifetime gross"
+              />
+              <StatTile
+                help="Only 1 game in 10 earns more than this — what the niche's successful titles make."
+                label="A hit earns"
+                value={activeVariant.p90_rev != null ? fmtUsd(activeVariant.p90_rev) : "—"}
+                sub="top 10% outcome"
+              />
+              <StatTile
+                help="Summed current concurrent players across the niche's scored games — dominated by the niche's biggest games. The sub-line is the last 7 days vs the 7 before, same games in both windows."
+                label="Playing right now"
+                value={
+                  (players?.total_players_now ?? activeVariant.total_players_now) != null
+                    ? fmtCompact(players?.total_players_now ?? activeVariant.total_players_now)
+                    : "—"
+                }
+                sub={
+                  (players?.players_trend_7d_pct ?? activeVariant.players_trend_7d_pct) != null
+                    ? `${(players?.players_trend_7d_pct ?? activeVariant.players_trend_7d_pct)! >= 0 ? "+" : ""}${(
+                        players?.players_trend_7d_pct ?? activeVariant.players_trend_7d_pct
+                      )!.toFixed(1)}% vs prior 7d`
+                    : undefined
+                }
+              />
+              <StatTile
+                help="Games released into this niche in the window. The sub-line is the release pipeline year-over-year — shrinking releases mean decline even when competition looks invitingly low."
+                label="Recent releases"
+                value={fmtInt(activeVariant.n_recent)}
+                sub={
+                  activeVariant.saturation_yoy != null
+                    ? `${fmtSigned(activeVariant.saturation_yoy, 0)} releases vs prior year`
+                    : undefined
+                }
+              />
+              <StatTile
+                help="Of the niche's games that reached 100+ concurrent players, the share still holding 10+ a year later. The sub-line is how long the ones that died lasted."
+                label="Still alive after a year"
+                value={activeVariant.lifetime_survival_12m != null ? fmtPct(activeVariant.lifetime_survival_12m) : "—"}
+                sub={
+                  activeVariant.lifetime_median_dead_months != null
+                    ? `dead ones lasted ~${fmtMonths(activeVariant.lifetime_median_dead_months)}`
+                    : undefined
+                }
+              />
+            </div>
+          </section>
+        )}
+
+        {view === "detailed" && (
+        <>
         <section>
           <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-muted">Opportunity</h3>
           <div className="flex items-center gap-6 rounded-card border border-chartborder p-3">
@@ -573,7 +656,7 @@ export function NicheDetailDrawer({
           {detail && <SaturationTrend points={detail.saturation_trend} />}
           {activeVariant.saturation_yoy != null && (
             <p className="mt-1.5 text-[11px] text-ink-muted">
-              Releases {fmtSigned(activeVariant.saturation_yoy * 100, 0)}% year-over-year — a shrinking pipeline is
+              Releases {fmtSigned(activeVariant.saturation_yoy, 0)} year-over-year — a shrinking pipeline is
               decline even when competition looks invitingly low.
             </p>
           )}
@@ -677,6 +760,8 @@ export function NicheDetailDrawer({
               </p>
             </div>
           </section>
+        )}
+        </>
         )}
 
         <section>

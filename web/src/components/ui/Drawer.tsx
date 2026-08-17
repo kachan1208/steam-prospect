@@ -6,12 +6,15 @@ export function Drawer({
   onClose,
   title,
   subtitle,
+  action,
   children,
 }: {
   open: boolean;
   onClose: () => void;
   title?: ReactNode;
   subtitle?: ReactNode;
+  /** Optional control rendered in the sticky header, between the title and the close button. */
+  action?: ReactNode;
   children: ReactNode;
 }) {
   useEffect(() => {
@@ -39,16 +42,19 @@ export function Drawer({
             {title && <h2 className="truncate text-base font-semibold text-ink-primary">{title}</h2>}
             {subtitle && <p className="mt-0.5 text-xs text-ink-muted">{subtitle}</p>}
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-ink-secondary hover:bg-page hover:text-ink-primary"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M6 6l12 12M18 6L6 18" />
-            </svg>
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            {action}
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-ink-secondary hover:bg-page hover:text-ink-primary"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </button>
+          </div>
         </div>
         <div className="flex-1 px-5 py-4">{children}</div>
       </div>
