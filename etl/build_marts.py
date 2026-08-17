@@ -1136,11 +1136,26 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         LEFT JOIN src.games cg ON cg.appid = g.appid
         LEFT JOIN stg_singleplayer_tag sp ON sp.appid = g.appid;
 
+        -- COMPLETE-SAMPLE games only: launch curves are HISTORIC shapes, and a partial
+        -- sample (recency-biased fetch order, 20k deepen cap) lies about shape. A game
+        -- feeds day-since-release curves only when its sampled review count covers its
+        -- reconciled true total (0.95 tolerance: totals keep moving between scrapes).
+        -- >20k-review megahits are therefore permanently excluded — acceptable, they're
+        -- unrepresentative for launch-shape medians anyway. Population grows nightly as
+        -- the deepen coverage keeper fills samples toward min(true, 20k).
+        CREATE TEMP TABLE _complete_sample AS
+        SELECT r.appid
+        FROM src.reviews r
+        JOIN stg_game g ON g.appid = r.appid
+        GROUP BY r.appid, g.total_reviews
+        HAVING COUNT(*) >= 0.95 * g.total_reviews;
+
         CREATE TEMP TABLE stg_review_dsr AS
         SELECT r.appid,
             datediff('day', g.release_date, CAST(to_timestamp(r.timestamp_created) AS DATE)) AS dsr
         FROM src.reviews r
         JOIN stg_game g ON g.appid = r.appid
+        JOIN _complete_sample cs ON cs.appid = r.appid
         WHERE g.release_valid
           AND g.release_date <= CURRENT_DATE - INTERVAL 365 DAY
           AND r.timestamp_created IS NOT NULL
@@ -1350,13 +1365,16 @@ def create_timing_staging(con: duckdb.DuckDBPyConnection) -> bool:
             CREATE TEMP TABLE stg_review_histogram AS
             SELECT rh.appid,
                 CAST(rh.period || '-01' AS DATE) AS period_month,
-                COALESCE(rh.recommendations_up, 0) + COALESCE(rh.recommendations_down, 0) AS n_reviews
+                COALESCE(rh.recommendations_up, 0) + COALESCE(rh.recommendations_down, 0) AS n_reviews,
+                COALESCE(rh.recommendations_up, 0) AS n_positive
             FROM src.review_histogram rh
             WHERE rh.period IS NOT NULL;
             """
         )
         return True
-    con.execute("CREATE TEMP TABLE stg_review_histogram (appid INTEGER, period_month DATE, n_reviews BIGINT)")
+    con.execute(
+        "CREATE TEMP TABLE stg_review_histogram (appid INTEGER, period_month DATE, n_reviews BIGINT, n_positive BIGINT)"
+    )
     return False
 
 
