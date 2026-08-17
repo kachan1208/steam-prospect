@@ -164,6 +164,10 @@ cd /root/steam-scraper || exit 1
 run_step_bg "news"   2400 "./run_news.sh"
 run_step_bg "twitch" 3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=6 RATE_PER_WORKER=1.5 MIN_REVIEWS=50 python3 twitch_bulk.py"
 run_step_bg "ccu"    3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=8 RATE_PER_WORKER=3.0 MIN_REVIEWS=50 python3 steam_players_bulk.py"
+# Rotating tag refresh (SteamSpy + store-page fallback — its own endpoints, so Lane B):
+# community tags evolve after release, and a one-time fetch drifts ~2%/month from the
+# storefront. 4000/night ≈ the whole 50+-review head every ~10 nights.
+run_step_bg "tags_refresh" 3600 "python3 -m steam_scraper.scraper --db steam_games.db refresh-stale-tags --workers 12 --rate 3.0 --limit 4000"
 
 # ── Lane A (Steam review endpoint + shared proxy pool) — SEQUENTIAL by necessity: these all hit
 # store.steampowered.com/appreviews through the ONE shared proxy pool, so parallelising them
@@ -196,6 +200,13 @@ echo "[lane-b] background service steps complete."
 # each night instead of re-fetching the same games; commits per game so the 4h timeout keeps every
 # finished title. The shallow ~2k stream pass (review_refresh) still seeds brand-new games separately.
 run_step "review_deepen"   14400 "python3 -m steam_scraper.scraper --db steam_games.db deepen-reviews --target 20000 --min-reviews 50 --activity-months 12 --refresh-days 30 --limit 4000 --workers 16 --rate 8.0"
+
+# [7c] Tag SYNC — rebuild game_tags (the ETL's niche-membership table) from the
+# games.steamspy_tags JSON the enrichment loops maintain. It was a one-off
+# materialisation that silently froze on ~2026-07-07: every game discovered after that
+# was invisible to every niche (~25% of some tags' members). Runs right before the ETL
+# so membership includes everything tonight's scrape + tags_refresh just wrote. ~2s.
+run_step "tag_sync" 600 "python3 -m steam_scraper.scraper --db steam_games.db sync-game-tags"
 
 # [8] ETL — timeout-bounded (was UNbounded; a hung ETL once ran 406min). On success: atomic swap +
 # app restart + prune. On failure/timeout: keep the previous mart so the app never serves a partial.
