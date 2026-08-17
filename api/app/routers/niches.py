@@ -119,6 +119,16 @@ def _has_lifetime() -> bool:
 
 
 @lru_cache(maxsize=1)
+def _has_no_floor_cut() -> bool:
+    """Whether the mart materialises the min_reviews=0 cut (the whole tag, no review floor
+    — MIN_REVIEWS_LEVELS gained 0 after the lifetime columns landed). A ROW probe, not a
+    column probe: the cut adds rows, not schema. Cached for the usual swap-then-restart
+    reason."""
+    rows = analytics_db.query("SELECT 1 FROM mart_niche WHERE min_reviews = 0 LIMIT 1")
+    return bool(rows)
+
+
+@lru_cache(maxsize=1)
 def _has_p90() -> bool:
     """p90_rev landed 2026-08-14; gate it like the players columns so the app still
     serves a mart built before that ETL."""
@@ -253,6 +263,11 @@ def list_niches(
         raise HTTPException(
             status_code=503,
             detail="mart_niche predates the p90_rev column — rebuild the marts (task etl).",
+        )
+    if min_reviews == 0 and not _has_no_floor_cut():
+        raise HTTPException(
+            status_code=503,
+            detail="mart_niche predates the no-floor (min_reviews=0) cut — rebuild the marts (task etl).",
         )
     tiers_arg = tiers if tiers else None  # "" (explicit empty) = no tier filter
     where, params = _build_filters(
@@ -440,6 +455,11 @@ def export_csv(
 ):
     if sort not in SORTABLE:
         raise HTTPException(status_code=400, detail=f"sort must be one of {sorted(SORTABLE)}")
+    if min_reviews == 0 and not _has_no_floor_cut():
+        raise HTTPException(
+            status_code=503,
+            detail="mart_niche predates the no-floor (min_reviews=0) cut — rebuild the marts (task etl).",
+        )
     tiers_arg = tiers if tiers else None
     where, params = _build_filters(dimension, window, min_reviews, q, tiers_arg, None, None)
     rows = _niche_query(where, params, sort, order, limit, None)

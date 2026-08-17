@@ -123,7 +123,7 @@ export default function NicheFinder() {
   // 24m is the market a new entrant actually faces — the all-time cut is context, not an
   // entry decision, so it is NOT the default (same default as the MCP tool).
   const [windowParam, setWindowParam] = useState<Window>("24m");
-  const [minReviews, setMinReviews] = useState(50); // mart materializes exactly 50 & 100
+  const [minReviews, setMinReviews] = useState(50); // mart materializes exactly 0 (no floor), 50 & 100
   const [tiers, setTiers] = useState<NicheTier[]>(DEFAULT_TIERS);
   const [q, setQ] = useState("");
   const debouncedQ = useDebounced(q, 300);
@@ -484,6 +484,13 @@ export default function NicheFinder() {
             </SegButton>
           </Segmented>
           <Segmented>
+            <SegButton
+              active={minReviews === 0}
+              onClick={() => setMinReviews(0)}
+              title="No review floor — the whole tag, unreviewed releases included. Game counts are the honest tag size; revenue stats still skip games too small to estimate."
+            >
+              All games
+            </SegButton>
             <SegButton active={minReviews === 50} onClick={() => setMinReviews(50)} title="Broader population, noisier stats">
               ≥50 reviews
             </SegButton>

@@ -29,7 +29,10 @@ import duckdb
 # --------------------------------------------------------------------------------------
 MIN_REVIEWS_DEFAULT = 50          # a game needs >= this many reviews to enter niche/analysis STATS
                                   # (NOT the games list — that now shows the full live catalog, below)
-MIN_REVIEWS_LEVELS = [50, 100]    # min_reviews floors materialised in mart_niche
+MIN_REVIEWS_LEVELS = [0, 50, 100]  # min_reviews floors materialised in mart_niche. 0 = NO floor:
+                                  # the whole tag membership, unreviewed releases included —
+                                  # n_games there is the honest full tag size; revenue medians
+                                  # still skip games with no estimable revenue (NULLs)
 MIN_NICHE_GAMES = 30              # a niche needs >= this many qualifying games to be ranked
 TAG_VOTE_FLOOR = 3                # a (game,tag) association needs >= this many community votes
 TAG_RANK_FLOOR = 20              # ...and be within the game's top-N tags

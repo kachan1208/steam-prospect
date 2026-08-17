@@ -132,6 +132,15 @@ _LIFETIME_MISSING = (
     "(`task etl` in the main prospect checkout) and retry."
 )
 
+# Row probe, not a schema probe: the min_reviews=0 (no-floor) cut adds ROWS to mart_niche,
+# not columns, so its presence is detected by looking for one.
+_HAS_NO_FLOOR_CUT = bool(query("SELECT 1 FROM mart_niche WHERE min_reviews = 0 LIMIT 1"))
+
+_NO_FLOOR_MISSING = (
+    "This mart predates the no-floor (min_reviews=0) cut of mart_niche (an older ETL "
+    "build). Use min_reviews=50 or 100, or re-run the ETL (`task etl`) and retry."
+)
+
 # Shared caveats for every players/CCU read — the two ways these series lie if unstated.
 _PLAYERS_POINT_SAMPLE_CAVEAT = (
     "players values are nightly point samples (one capture per game per day, ~21-22:00 UTC "
@@ -269,9 +278,12 @@ caveats at the bottom before treating any number as ground truth.
 
 ## The opportunity score (mart_niche)
 
-For each niche (a Steam community `tag` or a Steam `genre`), computed at 4 cuts —
-`window` in {`all`, `24m`} x `min_reviews` in {`50`, `100`} — as percentile ranks (0-100)
-against every other niche in the SAME cut:
+For each niche (a Steam community `tag` or a Steam `genre`), computed at 6 cuts —
+`window` in {`all`, `24m`} x `min_reviews` in {`0`, `50`, `100`} — as percentile ranks
+(0-100) against every other niche in the SAME cut. min_reviews=0 is the NO-FLOOR cut:
+n_games there is the honest full tag size (unreviewed releases included), while revenue
+medians still skip games with no estimable revenue — use it for "how big is this tag
+really", not for revenue conclusions:
 
 - **demand** = 0.4 x percentile(median revenue) + 0.3 x percentile(median owners) +
   0.3 x percentile(recent 24m review velocity). Higher = bigger, hotter market.
@@ -540,7 +552,7 @@ _NICHE_V2_MISSING = (
 def find_niches(
     dimension: Literal["tag", "genre"] = "tag",
     window: Literal["all", "24m"] = "24m",
-    min_reviews: Literal[50, 100] = 50,
+    min_reviews: Literal[0, 50, 100] = 50,
     min_median_rev: float | None = None,
     max_competition: float | None = None,
     min_total_owners: float | None = None,
@@ -553,7 +565,10 @@ def find_niches(
     THE headline tool — start here for "what should I build" questions. Defaults are
     tuned for exactly that question: window="24m" (the market a new entrant actually
     faces), sort="opportunity_v2" (decline-gated), include_tiers=["micro","theme"]
-    (buildable concepts only). This docstring is an INTERPRETATION PLAYBOOK — the numbers
+    (buildable concepts only). min_reviews=0 is the NO-FLOOR cut: n_games = the honest
+    full tag size (unreviewed releases included) — use for "how big is this tag really",
+    not for revenue conclusions; requires a mart built after 2026-08-17.
+    This docstring is an INTERPRETATION PLAYBOOK — the numbers
     lie in specific, known ways; the falsification rules below are how you catch them.
 
     THE SCORES
@@ -659,6 +674,8 @@ def find_niches(
         return {"error": _PLAYERS_MISSING}
     if not _HAS_LIFETIME and sort in _NICHE_LIFETIME_COLS:
         return {"error": _LIFETIME_MISSING}
+    if min_reviews == 0 and not _HAS_NO_FLOOR_CUT:
+        return {"error": _NO_FLOOR_MISSING}
     if include_tiers is not None:
         bad = [t for t in include_tiers if t not in _NICHE_TIERS]
         if bad:
@@ -735,7 +752,8 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
       - tier: 'micro' | 'theme' | 'umbrella' | 'meta' (tags) or 'genre' — an 'umbrella'
         or 'meta' key is a container/reception tag, not a buildable niche.
       - variants: this niche's opportunity_v2/opportunity/demand/competition/etc at all
-        4 precomputed cuts — (all|24m) x (min_reviews 50|100) — including entrant_ratio
+        precomputed cuts — (all|24m) x (min_reviews 0|50|100; the 0 rows exist only on
+        marts built after the no-floor cut landed) — including entrant_ratio
         (24m-vs-all-time median revenue; catalog-median tag is ~1.08, so <1 means recent
         entrants genuinely underearn), solo_viability (share of scored games playable
         single-player; ~0.9 is the catalog norm, below ~0.8 leans multiplayer — a red
@@ -755,7 +773,7 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
         n_games_panel) + history bounds (first_date, last_date, n_days). total_players
         is summed current CCU (nightly ~21-22:00 UTC point samples, <= 7d carry-forward
         for rotation gaps — not daily peaks). The variants rows also carry
-        total_players_now / players_trend_7d_pct / players_coverage (same value on all 4
+        total_players_now / players_trend_7d_pct / players_coverage (same value on all
         cuts). None = never measured or the mart predates CCU collection; call
         niche_player_history(dimension, key) for the full daily series.
       - lifetime columns on the variants rows (same value on all 4 cuts, like
