@@ -1,4 +1,4 @@
-# Droplet root crontab (142.93.49.69) — reference copy, updated 2026-08-17. This file is
+# Droplet root crontab (142.93.49.69) — reference copy, updated 2026-08-18. This file is
 # documentation, not deployment: edit the crontab on the box, then refresh this copy.
 0 21 * * * /usr/bin/flock -n /root/.prospect-refresh.lock /root/prospect-refresh.sh  # daily 21:00 UTC
 # Daytime review-coverage keeper: deepen sampled review TEXT toward min(true_total, 20k)
@@ -7,3 +7,8 @@
 # against a still-running nightly. Self-draining: exits in seconds once coverage is full,
 # then keeps new reviews topped up (games re-enter via the 7d staleness recheck).
 0 6 * * * cd /root/steam-scraper && /usr/bin/flock -n /root/.prospect-refresh.lock timeout 46800 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 20000 --min-reviews 50 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0 >> /root/deepen_backfill.log 2>&1
+# Daytime socials keeper: harvest official social links for ALL games, reviews-desc
+# (min-reviews 0 -> literally the whole catalog, most-reviewed first), then hold a 90d
+# rotation. Own lock (not the refresh lock — must run ALONGSIDE the 06:00 review keeper;
+# different endpoints: store pages vs appreviews). 13h timeout ends before the 21:00 nightly.
+15 6 * * * cd /root/steam-scraper && /usr/bin/flock -n /root/.prospect-socials.lock timeout 46800 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db dev-socials --min-reviews 0 --refresh-days 90 --limit 60000 --workers 8 --rate 2.0 >> /root/dev_socials_keeper.log 2>&1
