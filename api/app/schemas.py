@@ -126,6 +126,9 @@ class GameSearchRow(BaseModel):
     # personal account; we can't disambiguate without X API access. None = none found /
     # socials never fetched / mart predates the socials ETL (games.py::_has_dev_socials).
     dev_x_handle: Optional[str] = None
+    # Playable Steam demo (from the game's own appdetails). Tri-state: None = appdetails
+    # never re-checked for a demo yet — "unknown", not "no demo" (games.py::_has_demo_flag).
+    has_demo: Optional[bool] = None
 
 
 class GameSearchList(BaseModel):
@@ -203,6 +206,10 @@ class GameProfile(BaseModel):
     # personal account; we can't disambiguate without X API access. None = none found /
     # socials never fetched / mart predates the socials ETL (games.py::_has_dev_socials).
     dev_x_handle: Optional[str] = None
+    # Playable Steam demo (from the game's own appdetails `demos` field). Tri-state:
+    # None = appdetails never re-checked for a demo yet — "unknown", not "no demo".
+    demo_appid: Optional[int] = None
+    has_demo: Optional[bool] = None
 
 
 class PriceBand(BaseModel):

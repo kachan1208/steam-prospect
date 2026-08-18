@@ -600,6 +600,8 @@ export interface GameSearchRow {
    * game's, the studio's, or the dev's personal account. Absent on older marts; null =
    * none found / socials never fetched. */
   dev_x_handle?: string | null;
+  /** Playable Steam demo. Absent on older marts; null = never re-checked — unknown, not "no". */
+  has_demo?: boolean | null;
 }
 
 export interface GameSearchList {
@@ -649,6 +651,9 @@ export interface GameSearchParams {
   min_lifetime_months?: number;
   /** true = only still-alive audiences, false = only dead ones, undefined = both. */
   lifetime_alive?: boolean;
+  /** true = only games with a playable Steam demo, false = checked-and-none, undefined = both
+   * (games never re-checked for a demo drop out on either value). */
+  has_demo?: boolean;
   sort: GameSortKey;
   order: "asc" | "desc";
   limit: number;
@@ -735,6 +740,10 @@ export interface GameProfile {
    * game's, the studio's, or the dev's personal account. Absent on older marts; null =
    * none found / socials never fetched. */
   dev_x_handle?: string | null;
+  /** Playable Steam demo (appid links to its store page). Absent on older marts;
+   * null = never re-checked — unknown, not "no". */
+  demo_appid?: number | null;
+  has_demo?: boolean | null;
 }
 
 /** Shared query options so the compare page can fan out over N games via useQueries while

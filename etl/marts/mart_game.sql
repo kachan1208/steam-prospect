@@ -125,6 +125,13 @@ SELECT
     -- NULL = no X link found OR socials never fetched for this game — "unknown",
     -- never zero.
     dx.dev_x_handle,
+    -- Playable demo, from the game's own Steam appdetails `demos` field (SteamSpy discovery
+    -- never indexes demo apps, so the parent's appdetails is the only reliable source;
+    -- captured by enrichment + dev-socials + check-demos). Tri-state: TRUE/FALSE only when
+    -- appdetails was seen since demo capture landed; NULL = never checked — "unknown",
+    -- never "no demo".
+    gh.demo_appid,
+    CASE WHEN gh.demos_checked_at IS NOT NULL THEN gh.demo_appid IS NOT NULL END AS has_demo,
     COALESCE(tw.twitch_viewers, 0) AS twitch_viewers,
     COALESCE(tw.twitch_streams, 0) AS twitch_streams
 FROM stg_game g
