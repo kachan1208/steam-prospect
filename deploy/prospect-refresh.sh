@@ -202,10 +202,14 @@ echo "[lane-b] background service steps complete."
 
 # [7b] Review DEEPEN — nightly TOP-UP only (2026-08-18): the 06:00 UTC daytime coverage keeper
 # (see crontab) owns the backlog with a 13h window and 15k/day budget, so the nightly pass just
-# catches same-day-hot titles (velocity-first ordering does that in the first few hundred games).
+# catches the cheapest gaps (smallest-total-first ordering = small games in the first thousands).
 # Shrunk from limit 4000 / 4h to 1200 / 1.5h — the ETL and the morning mart now land ~3h earlier.
 # Still behind the Lane B barrier: the memory ceiling reasoning is unchanged.
-run_step "review_deepen"   5400 "python3 -m steam_scraper.scraper --db steam_games.db deepen-reviews --target 20000 --min-reviews 50 --activity-months 12 --refresh-days 30 --limit 1200 --workers 16 --rate 8.0"
+# --min-reviews 1 (2026-08-18): the old floor of 50 structurally excluded 75.9K small games —
+# 31.3K of them had missing/zero texts and NOTHING would ever fetch them (one shallow fetch at
+# discovery, then reviews accumulated forever un-refetched). Their whole gap is ~415K texts
+# (~1 request/game), so with cost-ordered selection they clear in days and cost almost nothing.
+run_step "review_deepen"   5400 "python3 -m steam_scraper.scraper --db steam_games.db deepen-reviews --target 20000 --min-reviews 1 --activity-months 12 --refresh-days 30 --limit 1200 --workers 16 --rate 8.0"
 
 # [7c] Tag SYNC — rebuild game_tags (the ETL's niche-membership table) from the
 # games.steamspy_tags JSON the enrichment loops maintain. It was a one-off

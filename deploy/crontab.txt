@@ -2,11 +2,14 @@
 # documentation, not deployment: edit the crontab on the box, then refresh this copy.
 0 21 * * * /usr/bin/flock -n /root/.prospect-refresh.lock /root/prospect-refresh.sh  # daily 21:00 UTC
 # Daytime review-coverage keeper: deepen sampled review TEXT toward min(true_total, 20k)
-# for every 50+-review game (2026-08-17: 22.5k games / 30.8M texts behind). Runs in the
-# 06:00-19:00 UTC window (nightly refresh owns 21:00-04:40), 13h timeout, flock-guarded
+# for EVERY reviewed game (--min-reviews 1 since 2026-08-18: the old floor of 50 permanently
+# excluded 31.3K small games with missing/zero texts — their whole gap is only ~415K texts).
+# Selection is smallest-total-first = cost order (a deepen re-paginates the whole list, so
+# cost ∝ total, not the gap) — small games clear first, 20k-cap megahits land last. Runs in
+# the 06:00-19:00 UTC window (nightly refresh owns 21:00-04:40), 13h timeout, flock-guarded
 # against a still-running nightly. Self-draining: exits in seconds once coverage is full,
 # then keeps new reviews topped up (games re-enter via the 7d staleness recheck).
-0 6 * * * cd /root/steam-scraper && /usr/bin/flock -n /root/.prospect-refresh.lock timeout 46800 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 20000 --min-reviews 50 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0 >> /root/deepen_backfill.log 2>&1
+0 6 * * * cd /root/steam-scraper && /usr/bin/flock -n /root/.prospect-refresh.lock timeout 46800 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 20000 --min-reviews 1 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0 >> /root/deepen_backfill.log 2>&1
 # Daytime socials keeper: harvest official social links for ALL games, reviews-desc
 # (min-reviews 0 -> literally the whole catalog, most-reviewed first), then hold a 90d
 # rotation. Own lock (not the refresh lock — must run ALONGSIDE the 06:00 review keeper;
