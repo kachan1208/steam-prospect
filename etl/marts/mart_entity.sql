@@ -119,6 +119,8 @@ JOIN mart_game g ON g.appid = m.appid;
 --   n_partners           publishers: COUNT(DISTINCT developer name) across their games
 --                        (includes themselves when they self-publish — read alongside
 --                        self_published_share); developers: NULL.
+--   x_handle             majority-vote X handle over the entity's games' dev_x_handle
+--                        (see _entity_x_handle below); NULL = unknown, never zero.
 -- ------------------------------------------------------------------------------------
 CREATE TEMP TABLE _entity_game_facts AS
 SELECT
@@ -157,6 +159,39 @@ LEFT JOIN _entity_map d ON d.appid = p.appid AND d.role = 'developer'
 WHERE p.role = 'publisher'
 GROUP BY p.name;
 
+-- ------------------------------------------------------------------------------------
+-- _entity_x_handle — the entity's X handle by MAJORITY VOTE over its games'
+-- mart_game.dev_x_handle: the most frequent non-NULL handle among the entity's games,
+-- ties broken by the handle held by the game with the most reviews (then alphabetically
+-- for determinism). Majority vote rather than "any game's handle" because a studio's
+-- games usually all link the STUDIO account, while a one-off collab/port can link
+-- someone else's — the mode is the entity's own account far more often than any single
+-- game's row is. Same attribution caveat as mart_game.dev_x_handle: an official link
+-- harvested from the games' developer-controlled pages (store page + website), which
+-- may be a game's, the studio's, or the dev's personal account. NULL = no game has a
+-- handle (none found or socials never fetched) — "unknown", never zero.
+-- ------------------------------------------------------------------------------------
+CREATE TEMP TABLE _entity_x_handle AS
+WITH votes AS (
+    SELECT m.role, m.name, g.dev_x_handle,
+        COUNT(*) AS n_games_with_handle,
+        MAX(g.total_reviews) AS max_reviews
+    FROM _entity_map m
+    JOIN mart_game g ON g.appid = m.appid
+    WHERE g.dev_x_handle IS NOT NULL
+    GROUP BY m.role, m.name, g.dev_x_handle
+)
+SELECT role, name, dev_x_handle AS x_handle
+FROM (
+    SELECT role, name, dev_x_handle,
+        row_number() OVER (
+            PARTITION BY role, name
+            ORDER BY n_games_with_handle DESC, max_reviews DESC NULLS LAST, dev_x_handle
+        ) AS rn
+    FROM votes
+)
+WHERE rn = 1;
+
 CREATE TABLE mart_entity AS
 SELECT
     f.role,
@@ -176,8 +211,12 @@ SELECT
     COALESCE(ANY_VALUE(tg.top_genres), []::VARCHAR[]) AS top_genres,
     CASE WHEN f.role = 'publisher'
          THEN CAST(ANY_VALUE(pp.n_partners) AS INTEGER)
-         ELSE NULL END AS n_partners
+         ELSE NULL END AS n_partners,
+    -- Majority-vote X handle over the entity's games (see _entity_x_handle above).
+    -- NULL = unknown, never zero.
+    ANY_VALUE(xh.x_handle) AS x_handle
 FROM _entity_game_facts f
 LEFT JOIN _entity_top_genres tg ON tg.role = f.role AND tg.name = f.name
 LEFT JOIN _publisher_partners pp ON f.role = 'publisher' AND pp.name = f.name
+LEFT JOIN _entity_x_handle xh ON xh.role = f.role AND xh.name = f.name
 GROUP BY f.role, f.name;

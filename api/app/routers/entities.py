@@ -82,8 +82,29 @@ def _has_p90() -> bool:
     )
 
 
+@lru_cache(maxsize=1)
+def _has_x_handle() -> bool:
+    """Whether the mart carries x_handle — the entity's majority-vote X handle across its
+    games' mart_game.dev_x_handle (official links harvested from the games' own store
+    pages / dev websites, so it may be a game's, the studio's, or the dev's personal
+    account). Gated so the app still boots against an older mart — same capability idiom
+    as _has_p90."""
+    if not analytics_db.is_ready():
+        return False
+    return bool(
+        analytics_db.query(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'mart_entity' AND column_name = 'x_handle'"
+        )
+    )
+
+
 def _entity_cols() -> str:
-    return _ENTITY_COLS + (", p90_rev" if _has_p90() else "")
+    return (
+        _ENTITY_COLS
+        + (", p90_rev" if _has_p90() else "")
+        + (", x_handle" if _has_x_handle() else "")
+    )
 
 
 def _search_cols() -> str:
@@ -127,6 +148,11 @@ class EntitySummary(BaseModel):
     top_genres: list[str]
     # Distinct co-credited entities of the OTHER role. NULL for developers by contract.
     n_partners: int | None
+    # Majority-vote X handle across the entity's games' dev_x_handle — an official link
+    # from the games' own store pages / dev websites, which may be a game's, the studio's,
+    # or the dev's personal account (no X-side verification). None = none found / socials
+    # never fetched / mart predates the socials ETL.
+    x_handle: str | None = None
 
 
 class EntityGameRow(BaseModel):

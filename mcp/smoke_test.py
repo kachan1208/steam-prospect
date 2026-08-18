@@ -112,6 +112,15 @@ def main() -> None:
     show('game_search(q="Hollow Knight")', search)
     assert any(g["appid"] == 367520 for g in search["games"])
 
+    # dev_x_handle rides along exactly when the mart carries the socials columns (value
+    # may be None — official links are harvested from store pages / dev websites, and
+    # not every game has one or has been fetched yet).
+    if srv._HAS_DEV_SOCIALS:
+        assert "dev_x_handle" in profile, "missing dev_x_handle in game_profile"
+        assert all("dev_x_handle" in g for g in search["games"]), \
+            "missing dev_x_handle in game_search rows"
+        print("\n[OK] dev_x_handle rides along in game_profile + game_search")
+
     # 6b. player-history tools — tolerant: the CCU marts only exist once the ETL that
     # added them has rebuilt current.duckdb, and their absence must yield the tools'
     # clear "re-run ETL" error dict, never a crash. Values are shape-checked only (a
@@ -205,6 +214,10 @@ def main() -> None:
         assert ep["entity"]["n_games"] >= 50, "EA should have a large publisher catalog"
         assert ep["games"] and ep["games"][0]["seq"] == 1, "games must be seq-ordered from 1"
         assert ep["trajectory"]["debut"]["seq"] == 1
+        # x_handle rides along exactly when the mart carries the socials columns (value
+        # may be None — majority vote over the entity's games' dev_x_handle).
+        if srv._HAS_DEV_SOCIALS:
+            assert "x_handle" in ep["entity"], "missing x_handle in entity_profile"
         print(f"\n[OK] entity_profile: EA published {ep['entity']['n_games']} games, "
               f"{ep['entity']['n_recent_24m']} in the last 24m, {ep['entity']['n_partners']} partners")
 

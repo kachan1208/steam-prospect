@@ -104,6 +104,21 @@ def _has_lifetime_game() -> bool:
     return bool(rows)
 
 
+@lru_cache(maxsize=1)
+def _has_dev_socials() -> bool:
+    """Whether the current mart carries dev_x_handle (mart_game.sql dev_x: the game's most
+    prominent official X handle, harvested from its developer-controlled pages — store
+    page + dev website — NOT from X itself). Gated + cached exactly like
+    _has_players_summary() and for the same reasons — the app must serve marts built
+    before the socials ETL landed. The column isn't filterable/sortable, so absence just
+    omits it (schema default None); there's no 503 path."""
+    rows = analytics_db.query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_game' AND column_name = 'dev_x_handle'"
+    )
+    return bool(rows)
+
+
 _LIFETIME_PROFILE_COLS = (
     ", lifetime_first_100_month, lifetime_died_month, lifetime_months, lifetime_alive"
 )
@@ -115,13 +130,18 @@ def _profile_cols() -> str:
         cols += ", players_7d_avg, players_trend_7d_pct"
     if _has_lifetime_game():
         cols += _LIFETIME_PROFILE_COLS
+    if _has_dev_socials():
+        cols += ", dev_x_handle"
     return cols
 
 
 def _search_cols() -> str:
+    cols = _SEARCH_COLS
     if _has_lifetime_game():
-        return _SEARCH_COLS + ", lifetime_months, lifetime_alive"
-    return _SEARCH_COLS
+        cols += ", lifetime_months, lifetime_alive"
+    if _has_dev_socials():
+        cols += ", dev_x_handle"
+    return cols
 
 
 @router.get("/search", response_model=GameSearchList)

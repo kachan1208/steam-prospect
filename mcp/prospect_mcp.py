@@ -121,6 +121,24 @@ _HAS_LIFETIME_CURVE = bool(
     )
 )
 
+# Whether the mart carries the dev-socials columns: mart_game.dev_x_handle (the game's
+# most prominent official X handle, harvested from its developer-CONTROLLED pages —
+# store page + dev website — never from X itself) and the majority-vote
+# mart_entity.x_handle built from it. Both land in the same ETL build; checked together
+# so a half-present state (impossible via the atomic mart swap) still degrades safely —
+# same idiom as _HAS_PLAYERS.
+_HAS_DEV_SOCIALS = bool(
+    query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_game' AND column_name = 'dev_x_handle'"
+    )
+) and bool(
+    query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_entity' AND column_name = 'x_handle'"
+    )
+)
+
 _PLAYERS_MISSING = (
     "this analytics DB predates the live-player (CCU) marts (mart_game_players_daily / "
     "mart_niche_players and the players_* columns on mart_game/mart_niche) — it was built "
@@ -447,10 +465,15 @@ games clearing the review floor).
   trio above (launch-month medians are composition-confounded — they reflect what kind
   of game launches then, not the calendar).
 - **mart_game** — one row per game: metadata, revenue/owners, percentile-vs-genre, top
-  tags, review velocity, live players (latest + 7d avg/trend). -> `game_search`,
-  `game_profile`, `find_comparables` (closest competitors, ranked on demand by
-  tag-Jaccard over `top_tags` within the same primary genre + a price band — no
-  precomputed pairwise mart).
+  tags, review velocity, live players (latest + 7d avg/trend), and dev_x_handle — the
+  game's most prominent official X handle from the scraper's `game_socials` table
+  (links harvested from the game's developer-controlled pages: store page + dev
+  website, store-page links preferred; NOT looked up on X, so the handle may be the
+  game's, the studio's, or the dev's personal account). NULL dev_x_handle = none found
+  or socials not yet fetched — unknown, never zero. -> `game_search`, `game_profile`,
+  `find_comparables` (closest competitors, ranked on demand by tag-Jaccard over
+  `top_tags` within the same primary genre + a price band — no precomputed pairwise
+  mart).
 - **mart_game_players_daily / mart_niche_players** — daily live-player (CCU) history:
   per-game measured days (point samples, gaps = unmeasured), and the per-niche daily
   rollup (LOCF <= 7d, with measured_players/n_games_measured coverage columns). See the
@@ -470,10 +493,13 @@ games clearing the review floor).
   suffixes like ", Inc." / ", Ltd." are re-merged into the name instead of becoming fake
   entities), plus a thin (role, name, appid, seq) map where seq 1 = the entity's earliest
   release. Carries game counts, first/last release year, n_recent_24m (the active/dormant
-  signal), revenue medians/hit rate, self_published_share, top genres, and (publishers)
-  n_partners = distinct developer names published. Names are self-reported strings — the
-  same studio under variant spellings ("Ubisoft" vs "UBISOFT") counts as separate
-  entities. -> `entity_profile`, `publisher_pitch_list`.
+  signal), revenue medians/hit rate, self_published_share, top genres, (publishers)
+  n_partners = distinct developer names published, and x_handle — the entity's X handle
+  by majority vote over its games' dev_x_handle (same attribution caveat as mart_game's
+  column: an official link from the games' own pages, possibly a personal account).
+  Names are self-reported strings — the same studio under variant spellings ("Ubisoft"
+  vs "UBISOFT") counts as separate entities. -> `entity_profile`,
+  `publisher_pitch_list`.
 - **mart_game_review_aspects / mart_genre_aspect_baseline / mart_game_press_summary /
   mart_game_press_by_source / mart_game_press_timeline / mart_game_press_notable** —
   per-game praise/complaint aspect mining (10 fixed aspects) + press footprint.
@@ -1593,6 +1619,10 @@ def game_search(
     steamcharts coverage, or never reached 100+ — NULL matches neither condition), so
     they narrow results to the measured head of the catalog. Both columns ride along in
     the rows when the mart carries them.
+
+    - dev_x_handle: official X handle linked from the game's store page/website (may be
+      the game's, studio's or dev's personal account — we cannot disambiguate without X
+      API access); NULL = none found or socials not yet fetched.
     """
     if sort not in _GAME_SORTABLE:
         return {"error": f"sort must be one of {sorted(_GAME_SORTABLE)}"}
@@ -1627,10 +1657,11 @@ def game_search(
     lifetime_cols = (
         ",\n               lifetime_months, lifetime_alive" if _HAS_LIFETIME_GAME else ""
     )
+    socials_cols = ",\n               dev_x_handle" if _HAS_DEV_SOCIALS else ""
     rows = query(
         f"""
         SELECT appid, name, primary_genre, release_year, price_initial, owners_mid,
-               total_reviews, positive_ratio, est_rev_reviews, top_tags{lifetime_cols}
+               total_reviews, positive_ratio, est_rev_reviews, top_tags{lifetime_cols}{socials_cols}
         FROM mart_game
         WHERE {" AND ".join(where)}
         ORDER BY {sort} {order.upper()} NULLS LAST, total_reviews DESC
@@ -1670,6 +1701,10 @@ def game_profile(appid: int) -> dict:
     never zero. Use game_search to find an appid by name first. Returns {"error": ...}
     if the appid isn't in the catalog or didn't clear the >=10-review analysis floor
     (mart_game only carries scored games).
+
+    - dev_x_handle: official X handle linked from the game's store page/website (may be
+      the game's, studio's or dev's personal account — we cannot disambiguate without X
+      API access); NULL = none found or socials not yet fetched.
     """
     players_cols = (
         ",\n               live_players, players_7d_avg, players_trend_7d_pct"
@@ -1682,6 +1717,7 @@ def game_profile(appid: int) -> dict:
         if _HAS_LIFETIME_GAME
         else ""
     )
+    socials_cols = ",\n               dev_x_handle" if _HAS_DEV_SOCIALS else ""
     row = query_one(
         f"""
         SELECT appid, name, release_year, release_date, price_initial, is_free,
@@ -1691,7 +1727,7 @@ def game_profile(appid: int) -> dict:
                short_description, rev_pct_in_genre, reviews_pct_in_genre,
                owners_pct_in_genre, top_tags, n_reviews_first_30d, n_reviews_first_90d,
                n_reviews_first_365d, n_reviews_trailing_30d, playtime_p25, playtime_p50,
-               playtime_p75{players_cols}{lifetime_cols}
+               playtime_p75{players_cols}{lifetime_cols}{socials_cols}
         FROM mart_game WHERE appid = ?
         """,
         [appid],
@@ -1986,13 +2022,19 @@ def entity_profile(name: str, role: Literal["developer", "publisher"] = "develop
     name must match EXACTLY (trimmed, case-sensitive). On a miss, returns {"error": ...}
     with up to 5 close-match suggestions (substring, case-insensitive) — and says so if
     the exact name exists under the OTHER role (e.g. a publisher-only entity queried as
-    a developer)."""
+    a developer).
+
+    - x_handle: the entity's X handle by majority vote over its games' dev_x_handle —
+      official X links from the games' store pages/websites (may be a game's, the
+      studio's or the dev's personal account — we cannot disambiguate without X API
+      access); NULL = none found or socials not yet fetched."""
+    socials_cols = ",\n                   x_handle" if _HAS_DEV_SOCIALS else ""
     try:
         ent = query_one(
-            """
+            f"""
             SELECT role, name, n_games, first_release_year, last_release_year, n_recent_24m,
                    total_rev, median_rev, hit_rate_200k, median_reviews, median_positive_ratio,
-                   self_published_share, top_genres, n_partners
+                   self_published_share, top_genres, n_partners{socials_cols}
             FROM mart_entity WHERE role = ? AND name = ?
             """,
             [role, name],

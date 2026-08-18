@@ -207,3 +207,17 @@ def test_search_lifetime_filter_validation_precedes_gate(client):
     # Query validation (ge=0) fires before the capability gate — out-of-range is 422.
     r = client.get("/api/games/search", params={"min_lifetime_months": -1})
     assert r.status_code == 422
+
+
+def test_dev_socials_gate_degrades_silently_on_old_mart(client):
+    # The fixture mart_game deliberately lacks dev_x_handle (like name_lower) — the
+    # _has_dev_socials() gate must simply omit the column and let the schema default
+    # (None) fill in. No 503 path exists for it: the column isn't filterable or
+    # sortable, so an old mart can't be asked for something it can't answer.
+    r = client.get("/api/games/search", params={"q": "rogue"})
+    assert r.status_code == 200
+    assert r.json()["items"][0]["dev_x_handle"] is None
+
+    r = client.get("/api/games/1001")
+    assert r.status_code == 200
+    assert r.json()["dev_x_handle"] is None

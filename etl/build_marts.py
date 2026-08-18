@@ -1378,6 +1378,35 @@ def create_timing_staging(con: duckdb.DuckDBPyConnection) -> bool:
     return False
 
 
+def create_socials_staging(con: duckdb.DuckDBPyConnection) -> bool:
+    """Official social links per game from the scraper's `game_socials` table. These are
+    harvested from developer-CONTROLLED pages (the Steam store page + the dev's own
+    website, `source` says which), NOT from the platforms themselves — so a handle may be
+    the game's account, the studio's, or the dev's personal one, and we cannot tell which
+    without platform API access. Downstream surfaces must label it "official social
+    linked from the game's pages", never "the game's account".
+
+    Guarded exactly like create_ccu_staging()/create_timing_staging(): builds
+    stg_game_socials when the table exists, else an empty typed temp table so downstream
+    marts never crash on an older source DB. rk = sqlite ROWID (insertion order — the
+    scraper inserts store_page rows before website rows per game), so MIN(rk) per
+    (appid, platform) = the game's most PROMINENT link for that platform."""
+    if _sqlite_table_exists(con, "game_socials"):
+        con.execute(
+            """
+            CREATE TEMP TABLE stg_game_socials AS
+            SELECT appid, platform, handle, url, source, rowid AS rk
+            FROM src.game_socials;
+            """
+        )
+        return True
+    con.execute(
+        "CREATE TEMP TABLE stg_game_socials "
+        "(appid INTEGER, platform VARCHAR, handle VARCHAR, url VARCHAR, source VARCHAR, rk BIGINT)"
+    )
+    return False
+
+
 _ANALYZER = None
 
 
@@ -1933,6 +1962,10 @@ def main() -> int:
         have_timing = create_timing_staging(con)
         print("[etl] review_histogram (true monthly review counts): "
               + ("found" if have_timing else "ABSENT — mart_timing_* will be empty"))
+
+        have_socials = create_socials_staging(con)
+        print("[etl] game_socials (official social links): "
+              + ("found" if have_socials else "ABSENT — dev_x_handle/x_handle will be NULL"))
 
         if _sentiment_cache_enabled():
             print(f"[etl] sentiment cache  : {data_dir / SENTIMENT_CACHE_DB_NAME}")

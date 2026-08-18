@@ -121,6 +121,11 @@ class GameSearchRow(BaseModel):
     # mart predates the lifetime ETL — see games.py::_has_lifetime_game).
     lifetime_months: Optional[int] = None
     lifetime_alive: Optional[bool] = None
+    # Official X handle linked from the game's own store page / dev website (developer-
+    # controlled pages, NOT X itself) — may be the game's, the studio's, or the dev's
+    # personal account; we can't disambiguate without X API access. None = none found /
+    # socials never fetched / mart predates the socials ETL (games.py::_has_dev_socials).
+    dev_x_handle: Optional[str] = None
 
 
 class GameSearchList(BaseModel):
@@ -193,6 +198,11 @@ class GameProfile(BaseModel):
     lifetime_died_month: Optional[str] = None       # None while still alive
     lifetime_months: Optional[int] = None           # alive games: months so far
     lifetime_alive: Optional[bool] = None
+    # Official X handle linked from the game's own store page / dev website (developer-
+    # controlled pages, NOT X itself) — may be the game's, the studio's, or the dev's
+    # personal account; we can't disambiguate without X API access. None = none found /
+    # socials never fetched / mart predates the socials ETL (games.py::_has_dev_socials).
+    dev_x_handle: Optional[str] = None
 
 
 class PriceBand(BaseModel):
