@@ -596,6 +596,10 @@ export interface GameSearchRow {
   // Lifetime (steamcharts top-8k) — absent on marts that predate the lifetime ETL.
   lifetime_months?: number | null;
   lifetime_alive?: boolean | null;
+  /** Official X handle linked from the game's own store page / dev website — may be the
+   * game's, the studio's, or the dev's personal account. Absent on older marts; null =
+   * none found / socials never fetched. */
+  dev_x_handle?: string | null;
 }
 
 export interface GameSearchList {
@@ -727,6 +731,10 @@ export interface GameProfile {
   lifetime_died_month?: string | null;
   lifetime_months?: number | null;
   lifetime_alive?: boolean | null;
+  /** Official X handle linked from the game's own store page / dev website — may be the
+   * game's, the studio's, or the dev's personal account. Absent on older marts; null =
+   * none found / socials never fetched. */
+  dev_x_handle?: string | null;
 }
 
 /** Shared query options so the compare page can fan out over N games via useQueries while

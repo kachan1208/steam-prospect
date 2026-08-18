@@ -68,6 +68,18 @@ twitch AS (
     FROM stg_game_creator_mention
     WHERE platform = 'twitch'
     GROUP BY appid
+),
+dev_x AS (
+    -- The game's most PROMINENT official X handle, from stg_game_socials (guarded
+    -- staging over the scraper's game_socials table — links harvested from the game's
+    -- developer-controlled pages: store page + dev website, NOT from X itself; the
+    -- handle may be the game's, the studio's, or the dev's personal account). rk =
+    -- source insertion order with store_page rows first, so MIN(rk) prefers the store
+    -- page's own link when one exists.
+    SELECT appid, min_by(handle, rk) AS dev_x_handle
+    FROM stg_game_socials
+    WHERE platform = 'x' AND handle IS NOT NULL
+    GROUP BY appid
 )
 SELECT
     g.appid, g.name,
@@ -108,6 +120,11 @@ SELECT
     CAST(gl.died_month AS VARCHAR) AS lifetime_died_month,
     gl.lifetime_months,
     gl.lifetime_alive,
+    -- Official social linked from the game's own pages (store page + dev website — see
+    -- the dev_x CTE): may be the game's, the studio's, or the dev's personal account.
+    -- NULL = no X link found OR socials never fetched for this game — "unknown",
+    -- never zero.
+    dx.dev_x_handle,
     COALESCE(tw.twitch_viewers, 0) AS twitch_viewers,
     COALESCE(tw.twitch_streams, 0) AS twitch_streams
 FROM stg_game g
@@ -118,5 +135,6 @@ LEFT JOIN velocity v ON v.appid = g.appid
 LEFT JOIN ccu cc ON cc.appid = g.appid
 LEFT JOIN _game_players_summary gps ON gps.appid = g.appid
 LEFT JOIN _game_lifetime gl ON gl.appid = g.appid
+LEFT JOIN dev_x dx ON dx.appid = g.appid
 LEFT JOIN twitch tw ON tw.appid = g.appid
 LEFT JOIN src.games gh ON gh.appid = g.appid;

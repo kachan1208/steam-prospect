@@ -168,6 +168,10 @@ run_step_bg "ccu"    3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=8
 # community tags evolve after release, and a one-time fetch drifts ~2%/month from the
 # storefront. 4000/night ≈ the whole 50+-review head every ~10 nights.
 run_step_bg "tags_refresh" 3600 "python3 -m steam_scraper.scraper --db steam_games.db refresh-stale-tags --workers 12 --rate 3.0 --limit 4000"
+# Dev socials — official X/Discord/YouTube/Bluesky links harvested from store pages +
+# dev websites (X itself is unscrapeable; the devs publish their handles HERE). Feeds
+# mart_game.dev_x_handle / mart_entity.x_handle. 90d rotation, 3000/night steady state.
+run_step_bg "dev_socials" 5400 "python3 -m steam_scraper.scraper --db steam_games.db dev-socials --workers 8 --rate 2.0 --limit 3000"
 
 # ── Lane A (Steam review endpoint + shared proxy pool) — SEQUENTIAL by necessity: these all hit
 # store.steampowered.com/appreviews through the ONE shared proxy pool, so parallelising them

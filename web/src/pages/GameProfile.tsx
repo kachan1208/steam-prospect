@@ -230,6 +230,17 @@ export default function GameProfile() {
                       </Badge>
                     </span>
                   )}
+                  {profile.dev_x_handle && (
+                    <a
+                      href={`https://x.com/${profile.dev_x_handle}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      title="Official X account linked from the game's page — may be the game's, studio's, or developer's personal account"
+                      className="hover:underline"
+                    >
+                      <Badge>@{profile.dev_x_handle}</Badge>
+                    </a>
+                  )}
                 </div>
                 <div className="mt-1 text-xs text-ink-secondary">
                   {profile.developers ? (
