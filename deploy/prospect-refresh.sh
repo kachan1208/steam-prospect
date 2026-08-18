@@ -173,20 +173,22 @@ run_step_bg "tags_refresh" 3600 "python3 -m steam_scraper.scraper --db steam_gam
 # mart_game.dev_x_handle / mart_entity.x_handle. 90d rotation, 3000/night steady state.
 run_step_bg "dev_socials" 5400 "python3 -m steam_scraper.scraper --db steam_games.db dev-socials --workers 8 --rate 2.0 --limit 3000"
 
-# ── Lane A (Steam review endpoint + shared proxy pool) — SEQUENTIAL by necessity: these all hit
-# store.steampowered.com/appreviews through the ONE shared proxy pool, so parallelising them
-# would multiply proxy/rate contention, not throughput. This lane is the critical path.
-
-# [1] Discovery — WEEKLY (Sundays). backfill-missing walks Steam's whole storefront; SteamSpy's
-# 'all' pagination dead-ends ~page 87 so this is the real new-game path, but it's heavy and the
-# games it finds are mostly sub-threshold — nightly re-discovery just made nightlies 5h+.
+# [1] Discovery — WEEKLY (Sundays), moved to LANE B (2026-08-18): backfill-missing walks the
+# STOREFRONT SEARCH + SteamSpy appdetails — neither is the appreviews endpoint, so it no longer
+# needs to block Lane A's start (it used to cost Sunday nights up to 2h of serial wall clock).
+# wait_bg below still guarantees it finishes before review_deepen/ETL. Its payloads are small
+# JSON, so it doesn't stack meaningfully against the 4GB ceiling the barrier protects.
 if [ "$(date -u +%u)" = "7" ]; then
-    run_step "discovery" 7200 "python3 -m steam_scraper.scraper --db steam_games.db backfill-missing --workers 16 --rate 8.0"
+    run_step_bg "discovery" 7200 "python3 -m steam_scraper.scraper --db steam_games.db backfill-missing --workers 16 --rate 8.0"
 else
     echo "[discovery] skipped (weekly — Sundays only)"
     push "prospect_pipeline_step_success{step=\"discovery\"} 1
 prospect_pipeline_step_duration_seconds{step=\"discovery\"} 0"
 fi
+
+# ── Lane A (Steam review endpoint + shared proxy pool) — SEQUENTIAL by necessity: these all hit
+# store.steampowered.com/appreviews through the ONE shared proxy pool, so parallelising them
+# would multiply proxy/rate contention, not throughput. This lane is the critical path.
 
 run_step "steam_scrape"     3600 "./run_full.sh"
 run_step "review_refresh"   2700 "python3 -m steam_scraper.scraper --db steam_games.db review-summary --workers 16 --rate 12.0 --refresh-older-than-days 7 --limit 25000"
@@ -198,12 +200,12 @@ echo "[lane-b] waiting for background service steps to finish before review_deep
 wait_bg
 echo "[lane-b] background service steps complete."
 
-# [7b] Review DEEPEN — top up review TEXT toward 20k for under-target games Steam still has more of,
-# MOST-RECENTLY-REVIEWED first (review_histogram velocity — still-updated/selling titles, not dead
-# back-catalogue megahits). Tracked by reviews_deepened_at + 30d staleness so it advances a big slice
-# each night instead of re-fetching the same games; commits per game so the 4h timeout keeps every
-# finished title. The shallow ~2k stream pass (review_refresh) still seeds brand-new games separately.
-run_step "review_deepen"   14400 "python3 -m steam_scraper.scraper --db steam_games.db deepen-reviews --target 20000 --min-reviews 50 --activity-months 12 --refresh-days 30 --limit 4000 --workers 16 --rate 8.0"
+# [7b] Review DEEPEN — nightly TOP-UP only (2026-08-18): the 06:00 UTC daytime coverage keeper
+# (see crontab) owns the backlog with a 13h window and 15k/day budget, so the nightly pass just
+# catches same-day-hot titles (velocity-first ordering does that in the first few hundred games).
+# Shrunk from limit 4000 / 4h to 1200 / 1.5h — the ETL and the morning mart now land ~3h earlier.
+# Still behind the Lane B barrier: the memory ceiling reasoning is unchanged.
+run_step "review_deepen"   5400 "python3 -m steam_scraper.scraper --db steam_games.db deepen-reviews --target 20000 --min-reviews 50 --activity-months 12 --refresh-days 30 --limit 1200 --workers 16 --rate 8.0"
 
 # [7c] Tag SYNC — rebuild game_tags (the ETL's niche-membership table) from the
 # games.steamspy_tags JSON the enrichment loops maintain. It was a one-off
