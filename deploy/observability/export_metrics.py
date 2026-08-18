@@ -63,6 +63,18 @@ add("review_texts_missing_total", max(0, target - covered))
 add("games_full_review_coverage", sum(1 for t, c in rows if c >= min(t, REVIEW_TEXT_CAP)))
 
 add("tag_rows_total", q("SELECT count(*) FROM game_tags"))
+# Demo coverage burn-down: checked climbs toward games_released as appdetails passes
+# sweep the catalog; with_demo/checked is the market's true demo-adoption rate.
+# Additive sqlite columns — absent before the demo migration, skip rather than crash.
+try:
+    add("games_demo_checked", q(
+        "SELECT count(*) FROM games WHERE demos_checked_at IS NOT NULL AND (type='game' OR type IS NULL)"
+    ))
+    add("games_with_demo", q(
+        "SELECT count(*) FROM games WHERE demo_appid IS NOT NULL AND (type='game' OR type IS NULL)"
+    ))
+except sqlite3.OperationalError:
+    pass
 add("games_with_socials", q("SELECT count(DISTINCT appid) FROM game_socials"))
 add("games_with_x_handle", q("SELECT count(DISTINCT appid) FROM game_socials WHERE platform = 'x'"))
 for plat, n in s.execute("SELECT platform, count(*) FROM game_creator_mention GROUP BY platform"):

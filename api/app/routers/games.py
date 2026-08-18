@@ -119,6 +119,20 @@ def _has_dev_socials() -> bool:
     return bool(rows)
 
 
+@lru_cache(maxsize=1)
+def _has_demo_flag() -> bool:
+    """Whether the current mart carries has_demo/demo_appid (mart_game.sql: the game's
+    playable demo from its own Steam appdetails `demos` field). Gated + cached exactly
+    like _has_players_summary() and for the same reasons. has_demo is tri-state — NULL
+    means the game's appdetails was never re-checked since demo capture landed, so the
+    filter drops unknowns naturally rather than reading them as 'no demo'."""
+    rows = analytics_db.query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_game' AND column_name = 'has_demo'"
+    )
+    return bool(rows)
+
+
 _LIFETIME_PROFILE_COLS = (
     ", lifetime_first_100_month, lifetime_died_month, lifetime_months, lifetime_alive"
 )
@@ -132,6 +146,8 @@ def _profile_cols() -> str:
         cols += _LIFETIME_PROFILE_COLS
     if _has_dev_socials():
         cols += ", dev_x_handle"
+    if _has_demo_flag():
+        cols += ", demo_appid, has_demo"
     return cols
 
 
@@ -141,6 +157,8 @@ def _search_cols() -> str:
         cols += ", lifetime_months, lifetime_alive"
     if _has_dev_socials():
         cols += ", dev_x_handle"
+    if _has_demo_flag():
+        cols += ", has_demo"
     return cols
 
 
@@ -181,6 +199,11 @@ def search_games(
         description="true = still averaging 10+ concurrent players, false = audience already died, "
         "omitted = both. Either value drops games with unknown lifetime (no steamcharts coverage).",
     ),
+    has_demo: bool | None = Query(
+        None,
+        description="true = has a playable Steam demo, false = checked and has none, omitted = both. "
+        "Either value drops games whose appdetails we haven't re-checked for a demo yet.",
+    ),
     sort: str = Query("total_reviews"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(25, ge=1, le=100),
@@ -193,6 +216,11 @@ def search_games(
         raise HTTPException(
             status_code=503,
             detail="mart_game predates the lifetime columns — rebuild the marts (task etl).",
+        )
+    if has_demo is not None and not _has_demo_flag():
+        raise HTTPException(
+            status_code=503,
+            detail="mart_game predates the demo columns — rebuild the marts (task etl).",
         )
 
     where = ["total_reviews >= ?"]
@@ -260,6 +288,11 @@ def search_games(
     if lifetime_alive is not None:
         where.append("lifetime_alive = ?")
         params.append(lifetime_alive)
+    if has_demo is not None:
+        # Tri-state column: NULL (never checked) fails both = comparisons, so unknowns
+        # drop out naturally — same stance as the lifetime filters above.
+        where.append("has_demo = ?")
+        params.append(has_demo)
     where_sql = "WHERE " + " AND ".join(where)
 
     total = analytics_db.scalar(f"SELECT COUNT(*) FROM mart_game {where_sql}", params)

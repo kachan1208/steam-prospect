@@ -230,6 +230,17 @@ export default function GameProfile() {
                       </Badge>
                     </span>
                   )}
+                  {profile.has_demo === true && (
+                    <a
+                      href={`https://store.steampowered.com/app/${profile.demo_appid ?? profile.appid}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      title="Has a playable demo on Steam (from the game's own store metadata)"
+                      className="hover:underline"
+                    >
+                      <Badge color={CSS_VAR.demand}>Demo</Badge>
+                    </a>
+                  )}
                   {profile.dev_x_handle && (
                     <a
                       href={`https://x.com/${profile.dev_x_handle}`}
