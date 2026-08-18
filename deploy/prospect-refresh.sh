@@ -226,6 +226,9 @@ if [ "$ETL_RC" -eq 0 ]; then
     docker restart prospect
     ls -t /root/prospect/data/prospect_*.duckdb 2>/dev/null | tail -n +4 | xargs -r rm -f
     rm -rf /root/prospect/data/*.duckdb.tmp /root/prospect/data/*.duckdb.wal 2>/dev/null || true
+    # Corpus metrics (Grafana "Prospect — Corpus" dashboard): sizes/coverage of what the
+    # fresh mart serves — pushed only on success so the series never describes a stale mart.
+    run_step "metrics_export" 900 "/root/prospect/etl/.venv/bin/python /root/prospect/deploy/observability/export_metrics.py"
     RESULT="OK"; STEP="done"
     echo "[etl] OK ${ETL_DUR}s — app restarted"
 else
