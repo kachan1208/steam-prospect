@@ -183,6 +183,18 @@ _HAS_ASPECT_REVIEWS = bool(
     )
 )
 
+# Revenue percentiles per niche (p25/p75/p90_rev). They land in mart_niche from the same ETL,
+# and the REST API has exposed them since 2026-08-14 — the MCP simply never selected them, so
+# agents could only ever see the MEDIAN of a niche. The median is the wrong target for someone
+# deciding what to build: it is dragged down by asset flips and abandoned projects, while p90 is
+# what a niche pays when the game actually lands.
+_HAS_NICHE_P90 = bool(
+    query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_niche' AND column_name = 'p90_rev'"
+    )
+)
+
 _PLAYERS_MISSING = (
     "this analytics DB predates the live-player (CCU) marts (mart_game_players_daily / "
     "mart_niche_players and the players_* columns on mart_game/mart_niche) — it was built "
@@ -376,6 +388,10 @@ really", not for revenue conclusions:
 
 ### Niche-score v2 fields (mart_niche, additive)
 
+- **p25_rev / p75_rev / p90_rev** = revenue percentiles of the niche's own games. Prefer
+  **p90_rev** over median_rev when the question is "what can this niche pay": the median is
+  dragged down by asset flips and abandoned projects, and a competent solo dev is not the
+  median entrant. Sortable — `sort="p90_rev"` ranks niches by upside instead of by typical.
 - **entrant_ratio** = (24m median_rev) / (all-time median_rev) for the same (dimension,
   key, min_reviews) — same value on both window rows. INTERPRET AGAINST THE NORM: the
   catalog-median tag sits at ~1.08 (price inflation + the review floor filters recent
@@ -597,7 +613,7 @@ _NICHE_SORTABLE = {
     "opportunity", "opportunity_v2", "demand", "competition", "quality_gap",
     "market_size", "total_owners", "total_rev", "total_reviews",
     "median_rev", "median_reviews", "median_price", "median_owners",
-    "median_positive_ratio", "recent_velocity",
+    "median_positive_ratio", "recent_velocity", "p25_rev", "p75_rev", "p90_rev",
     "n_games", "n_recent", "hit_rate_200k", "hit_rate_500k",
     "beatable_share", "saturation_yoy", "self_pub_share", "winner_concentration",
     "entrant_ratio", "solo_viability",
@@ -782,6 +798,9 @@ def find_niches(
         params.extend(tiers_applied)
     limit = max(1, min(limit, 50))
 
+    pct_cols = (
+        ",\n                   p25_rev, p75_rev, p90_rev" if _HAS_NICHE_P90 else ""
+    )
     players_cols = (
         ",\n                   total_players_now, players_trend_7d_pct, players_coverage"
         if _HAS_PLAYERS
@@ -802,7 +821,7 @@ def find_niches(
                    market_size, total_owners, total_rev, total_reviews,
                    median_rev, median_reviews, median_price, median_positive_ratio,
                    median_owners, recent_velocity, hit_rate_200k, hit_rate_500k,
-                   saturation_yoy, winner_concentration{players_cols}{lifetime_cols}
+                   saturation_yoy, winner_concentration{pct_cols}{players_cols}{lifetime_cols}
             FROM mart_niche
             WHERE {" AND ".join(where)}
             ORDER BY {sort} DESC NULLS LAST, n_games DESC
@@ -871,6 +890,9 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
     # word in DuckDB SQL (window functions) and can't be used unquoted in ORDER BY — same
     # reason api/app/routers/niches.py renames win -> window in Python, after the fetch,
     # rather than in SQL.
+    pct_cols = (
+        ",\n                   p25_rev, p75_rev, p90_rev" if _HAS_NICHE_P90 else ""
+    )
     players_cols = (
         ",\n                   total_players_now, players_trend_7d_pct, players_coverage"
         if _HAS_PLAYERS
@@ -891,7 +913,7 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
                    competition, quality_gap, market_size, total_owners, total_rev,
                    total_reviews, median_rev, median_reviews, median_price,
                    median_positive_ratio, median_owners, recent_velocity, hit_rate_200k,
-                   hit_rate_500k, beatable_share, saturation_yoy, winner_concentration{players_cols}{lifetime_cols}
+                   hit_rate_500k, beatable_share, saturation_yoy, winner_concentration{pct_cols}{players_cols}{lifetime_cols}
             FROM mart_niche WHERE dimension = ? AND key = ? ORDER BY win, min_reviews
             """,
             [dimension, key],
