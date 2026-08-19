@@ -26,7 +26,7 @@ const RELEASE_WINDOWS: { label: string; days: number | undefined }[] = [
 const SORT_KEYS: readonly GameSortKey[] = [
   "name", "release_year", "release_date", "price_initial", "owners_mid", "total_reviews",
   "positive_ratio", "est_rev_reviews", "rev_pct_in_genre", "reviews_pct_in_genre",
-  "owners_pct_in_genre", "n_reviews_trailing_30d", "live_players",
+  "owners_pct_in_genre", "n_reviews_trailing_30d", "live_players", "metacritic_score",
 ] as const;
 
 // ---- URL-backed filter state ---------------------------------------------------------------
@@ -45,6 +45,7 @@ interface Filters {
   priceMin: number | undefined;
   priceMax: number | undefined;
   minPositive: number | undefined; // 0-1
+  minMetacritic: number | undefined; // critic score floor (only ~2.6% of games have one)
   minRevenue: number | undefined;
   after: number | undefined; // release_year >=
   before: number | undefined; // release_year <=
@@ -80,6 +81,7 @@ function readFilters(sp: URLSearchParams): Filters {
     priceMin: num(sp, "price_min"),
     priceMax: num(sp, "price_max"),
     minPositive: num(sp, "min_positive"),
+    minMetacritic: num(sp, "min_metacritic"),
     minRevenue: num(sp, "min_revenue"),
     after: num(sp, "after"),
     before: num(sp, "before"),
@@ -98,6 +100,7 @@ interface Drafts {
   priceMin: string;
   priceMax: string;
   minRating: string; // PERCENT in the UI (80), stored as min_positive=0.8 in the URL
+  minMetacritic: string;
   minRevenue: string;
   after: string;
   before: string;
@@ -110,6 +113,7 @@ function draftsFromFilters(f: Filters): Drafts {
     priceMin: f.priceMin !== undefined ? String(f.priceMin) : "",
     priceMax: f.priceMax !== undefined ? String(f.priceMax) : "",
     minRating: f.minPositive !== undefined ? String(Math.round(f.minPositive * 100)) : "",
+    minMetacritic: f.minMetacritic !== undefined ? String(f.minMetacritic) : "",
     minRevenue: f.minRevenue !== undefined ? String(f.minRevenue) : "",
     after: f.after !== undefined ? String(f.after) : "",
     before: f.before !== undefined ? String(f.before) : "",
@@ -133,6 +137,11 @@ function canonicalizeDrafts(d: Drafts): Drafts {
       if (d.minRating.trim() === "" || !Number.isFinite(v) || v <= 0) return "";
       return String(Math.min(100, Math.round(v)));
     })(),
+    minMetacritic: (() => {
+      const v = Number(d.minMetacritic);
+      if (d.minMetacritic.trim() === "" || !Number.isFinite(v) || v <= 0) return "";
+      return String(Math.min(100, Math.round(v)));
+    })(),
     minRevenue: n(d.minRevenue, true),
     after: n(d.after, true),
     before: n(d.before, true),
@@ -146,6 +155,7 @@ function urlPatchFromDrafts(d: Drafts): Record<string, string | null> {
     price_min: d.priceMin || null,
     price_max: d.priceMax || null,
     min_positive: d.minRating ? String(Number(d.minRating) / 100) : null,
+    min_metacritic: d.minMetacritic || null,
     min_revenue: d.minRevenue || null,
     after: d.after || null,
     before: d.before || null,
@@ -155,7 +165,7 @@ function urlPatchFromDrafts(d: Drafts): Record<string, string | null> {
 function hasAdvanced(f: Filters): boolean {
   return (
     f.priceMin !== undefined || f.priceMax !== undefined || f.minPositive !== undefined ||
-    f.minRevenue !== undefined || f.after !== undefined || f.before !== undefined ||
+    f.minMetacritic !== undefined || f.minRevenue !== undefined || f.after !== undefined || f.before !== undefined ||
     f.selfPub !== undefined || f.indie !== undefined
   );
 }
@@ -377,6 +387,7 @@ export default function GameSearch() {
     price_min: filters.priceMin,
     price_max: filters.priceMax,
     min_positive: filters.minPositive,
+    min_metacritic: filters.minMetacritic,
     min_revenue: filters.minRevenue,
     released_after: filters.after,
     released_before: filters.before,
@@ -426,6 +437,8 @@ export default function GameSearch() {
     }
     if (f.minPositive !== undefined)
       out.push({ key: "min_positive", label: `≥ ${Math.round(f.minPositive * 100)}% positive`, clear: { min_positive: null } });
+    if (f.minMetacritic !== undefined)
+      out.push({ key: "min_metacritic", label: `≥ ${f.minMetacritic} Metacritic`, clear: { min_metacritic: null } });
     if (f.minRevenue !== undefined)
       out.push({ key: "min_revenue", label: `≥ ${fmtUsd(f.minRevenue)} est. rev`, clear: { min_revenue: null } });
     if (f.after !== undefined || f.before !== undefined) {
@@ -445,7 +458,7 @@ export default function GameSearch() {
   }, [filters]);
 
   const advancedCount = chips.filter((c) =>
-    ["price", "min_positive", "min_revenue", "years", "self_pub", "indie"].includes(c.key),
+    ["price", "min_positive", "min_metacritic", "min_revenue", "years", "self_pub", "indie"].includes(c.key),
   ).length;
 
   // Per-column log-scale domains over the loaded page — the heat tints are relative to
@@ -604,6 +617,27 @@ export default function GameSearch() {
           </span>
         ),
       }),
+      columnHelper.accessor("metacritic_score", {
+        header: () => (
+          <SortLabel
+            label="MC"
+            col="metacritic_score"
+            active={filters.sort === "metacritic_score"}
+            order={filters.order}
+            onSort={toggleSort}
+          />
+        ),
+        // "—" is the honest render: only ~2.6% of games have a linked Metacritic page, so a
+        // blank means "no critic score published", never "scored badly".
+        cell: (info) => {
+          const v = info.getValue();
+          return v == null ? (
+            <span className="text-ink-muted">—</span>
+          ) : (
+            <span className="tabular font-medium text-ink-primary">{v}</span>
+          );
+        },
+      }),
       columnHelper.display({
         id: "tags",
         header: "Top tags",
@@ -727,6 +761,13 @@ export default function GameSearch() {
               <input type="number" min={0} max={100} step={5} value={drafts.minRating} onChange={setDraft("minRating")} placeholder="%" className={clsx(inputCls, "w-14 !px-2 !py-1")} />
               %
             </label>
+            <label
+              className="flex items-center gap-1.5 text-xs text-ink-secondary"
+              title="Floor on the Metacritic critic score. Only ~2.6% of games have one (Steam links a Metacritic page for few titles), so this narrows results to critically-covered games — it is a benchmarking lens, not a way to size a niche."
+            >
+              Metacritic ≥
+              <input type="number" min={0} max={100} step={5} value={drafts.minMetacritic} onChange={setDraft("minMetacritic")} placeholder="e.g. 75" className={clsx(inputCls, "w-16 !px-2 !py-1")} />
+            </label>
             <label className="flex items-center gap-1.5 text-xs text-ink-secondary" title="Floor on estimated revenue (review-based)">
               Min revenue $
               <input type="number" min={0} step={10000} value={drafts.minRevenue} onChange={setDraft("minRevenue")} placeholder="e.g. 100000" className={clsx(inputCls, "w-24 !px-2 !py-1")} />
@@ -766,6 +807,7 @@ export default function GameSearch() {
                 patchParams({
                   q: null, genre: null, tag: null, min_reviews: null, window: null,
                   price_min: null, price_max: null, min_positive: null, min_revenue: null,
+                  min_metacritic: null,
                   after: null, before: null, self_pub: null, indie: null,
                 })
               }
