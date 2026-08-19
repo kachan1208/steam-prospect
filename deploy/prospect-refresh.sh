@@ -230,6 +230,16 @@ echo "[etl] start $(date -u)"
 # losing tonight's mart is not. The refresh's OWN scraper steps are long done by this point.
 pkill -f 'steam_scraper.scraper' 2>/dev/null && echo "[etl] swept stray scraper jobs" || true
 sleep 5
+# Stale-scratch sweep (2026-08-19). build_marts spills to <version>.duckdb.building.tmp/ and on
+# this corpus that reached 18GB. A run that dies (last night's OOM) leaves the whole spill behind
+# forever: the success-path cleanup below never matched it — its glob is *.duckdb.tmp, while the
+# real names end in .duckdb.building.tmp — and the failure path cleaned nothing at all. One dead
+# run had the disk at 90% (8GB free) while the next run was still spilling into it. Sweep BEFORE
+# starting, and only artifacts not belonging to today's build, so headroom is guaranteed no matter
+# how the previous attempt ended.
+find /root/prospect/data -maxdepth 1 -name 'prospect_*.duckdb.building*' \
+     ! -name "prospect_$(date -u +%Y%m%d).duckdb.building*" -exec rm -rf {} + 2>/dev/null || true
+df -h /root/prospect/data | tail -1 | awk '{print "[etl] disk before build: " $4 " free (" $5 " used)"}'
 cd /root/prospect/etl || exit 1
 ETL_RC=0
 timeout 14400 /root/prospect/etl/.venv/bin/python build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data || ETL_RC=$?
@@ -237,7 +247,12 @@ ETL_DUR=$(( $(date -u +%s) - ETL_T0 ))
 if [ "$ETL_RC" -eq 0 ]; then
     docker restart prospect
     ls -t /root/prospect/data/prospect_*.duckdb 2>/dev/null | tail -n +4 | xargs -r rm -f
-    rm -rf /root/prospect/data/*.duckdb.tmp /root/prospect/data/*.duckdb.wal 2>/dev/null || true
+    # Corrected globs: the scratch artifacts are named <version>.duckdb.building{,.wal,.tmp/},
+    # so the old *.duckdb.tmp / *.duckdb.wal patterns matched NOTHING and every run's spill
+    # (up to 18GB) leaked. The pre-build sweep above is the belt; this is the braces.
+    rm -rf /root/prospect/data/prospect_*.duckdb.building.tmp \
+           /root/prospect/data/prospect_*.duckdb.building.wal \
+           /root/prospect/data/prospect_*.duckdb.building 2>/dev/null || true
     # Corpus metrics (Grafana "Prospect — Corpus" dashboard): sizes/coverage of what the
     # fresh mart serves — pushed only on success so the series never describes a stale mart.
     run_step "metrics_export" 900 "/root/prospect/etl/.venv/bin/python /root/prospect/deploy/observability/export_metrics.py"
