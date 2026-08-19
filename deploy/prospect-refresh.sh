@@ -222,6 +222,14 @@ run_step "tag_sync" 600 "python3 -m steam_scraper.scraper --db steam_games.db sy
 # app restart + prune. On failure/timeout: keep the previous mart so the app never serves a partial.
 STEP="etl"; ETL_T0=$(date -u +%s)
 echo "[etl] start $(date -u)"
+# Stray-job sweep (2026-08-19): the ETL peaks past 2GB and shares a 3.9GB box — any scraper
+# job still running here (an overrunning daytime keeper, a manually chained catch-up run)
+# starves it into an OOM kill (rc=137, exactly what happened on 2026-08-18: an overnight
+# socials+demos chain ate the headroom). Every scraper job is resumable by design (staleness
+# markers + daily crons re-select where they left off), so killing strays is always safe;
+# losing tonight's mart is not. The refresh's OWN scraper steps are long done by this point.
+pkill -f 'steam_scraper.scraper' 2>/dev/null && echo "[etl] swept stray scraper jobs" || true
+sleep 5
 cd /root/prospect/etl || exit 1
 ETL_RC=0
 timeout 14400 /root/prospect/etl/.venv/bin/python build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data || ETL_RC=$?
