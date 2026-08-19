@@ -159,6 +159,30 @@ _HAS_ALL_SOCIALS = bool(
     )
 )
 
+# Whether the mart carries metacritic_url (the Metacritic page Steam links in appdetails).
+# The SCORE needs no gate — every mart has it; only the outbound link is conditional.
+_HAS_METACRITIC_URL = bool(
+    query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_game' AND column_name = 'metacritic_url'"
+    )
+)
+
+# Per-game review marts behind game_reviews_summary / aspect_reviews. Probed like the other
+# additive marts so an older analytics DB degrades with a message instead of a SQL error.
+_HAS_GAME_REVIEWS = bool(
+    query(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_name = 'mart_game_reviews_timeline'"
+    )
+)
+_HAS_ASPECT_REVIEWS = bool(
+    query(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_name = 'mart_game_aspect_reviews'"
+    )
+)
+
 _PLAYERS_MISSING = (
     "this analytics DB predates the live-player (CCU) marts (mart_game_players_daily / "
     "mart_niche_players and the players_* columns on mart_game/mart_niche) — it was built "
@@ -1615,6 +1639,7 @@ _GAME_SORTABLE = {
     "name", "release_year", "price_initial", "owners_mid", "total_reviews",
     "positive_ratio", "est_rev_reviews", "rev_pct_in_genre", "reviews_pct_in_genre",
     "owners_pct_in_genre", "n_reviews_trailing_30d", "metacritic_score",
+    "release_date", "live_players", "first_seen", "lifetime_months",
 }
 
 
@@ -1628,6 +1653,15 @@ def game_search(
     lifetime_alive: bool | None = None,
     min_metacritic: int | None = None,
     has_demo: bool | None = None,
+    released_within_days: int | None = None,
+    released_after: int | None = None,
+    released_before: int | None = None,
+    price_min: float | None = None,
+    price_max: float | None = None,
+    min_positive: float | None = None,
+    min_revenue: float | None = None,
+    self_published: bool | None = None,
+    indie: bool | None = None,
     sort: str = "total_reviews",
     order: Literal["asc", "desc"] = "desc",
     limit: int = 15,
@@ -1694,6 +1728,43 @@ def game_search(
     if min_metacritic is not None:
         where.append("metacritic_score >= ?")
         params.append(min_metacritic)
+    if released_within_days is not None:
+        # "New releases": released in the recent PAST. Upper-bounded to today so upcoming
+        # titles — and the far-future placeholder dates in the source (e.g. 9998-12-31) —
+        # are excluded; NULL/unparseable release dates drop out via TRY_CAST.
+        where.append(
+            "TRY_CAST(release_date AS DATE) >= CURRENT_DATE - CAST(? AS INTEGER) "
+            "AND TRY_CAST(release_date AS DATE) <= CURRENT_DATE"
+        )
+        params.append(released_within_days)
+    if released_after is not None:
+        where.append("release_year >= ?")
+        params.append(released_after)
+    if released_before is not None:
+        where.append("release_year <= ?")
+        params.append(released_before)
+    # Price band in USD. Comparisons drop NULL-priced rows naturally — a game with an unknown
+    # price cannot be shown to satisfy a price constraint. Free games (price_initial = 0) stay
+    # in whenever the floor allows 0. Filters on the LIST PRICE, not is_free, because some
+    # F2P-flagged titles sell paid editions with a real price.
+    if price_min is not None:
+        where.append("price_initial >= ?")
+        params.append(price_min)
+    if price_max is not None:
+        where.append("price_initial <= ?")
+        params.append(price_max)
+    if min_positive is not None:
+        where.append("positive_ratio >= ?")
+        params.append(min_positive)
+    if min_revenue is not None:
+        where.append("est_rev_reviews >= ?")
+        params.append(min_revenue)
+    if self_published is not None:
+        where.append("self_published = ?")
+        params.append(1 if self_published else 0)
+    if indie is not None:
+        where.append("is_indie = ?")
+        params.append(1 if indie else 0)
     if has_demo is not None:
         if not _HAS_DEMO:
             return {"error": _DEMO_MISSING}
@@ -1710,8 +1781,9 @@ def game_search(
     demo_cols = ",\n               has_demo" if _HAS_DEMO else ""
     rows = query(
         f"""
-        SELECT appid, name, primary_genre, release_year, price_initial, owners_mid,
-               total_reviews, positive_ratio, est_rev_reviews, metacritic_score,
+        SELECT appid, name, primary_genre, release_year, release_date, price_initial,
+               is_free, is_indie, self_published, owners_mid, total_reviews, positive_ratio,
+               est_rev_reviews, metacritic_score, live_players, first_seen, header_image,
                top_tags{lifetime_cols}{socials_cols}{demo_cols}
         FROM mart_game
         WHERE {" AND ".join(where)}
@@ -1725,6 +1797,10 @@ def game_search(
             "q": q, "tag": tag, "genre": genre, "min_reviews": min_reviews,
             "min_lifetime_months": min_lifetime_months, "lifetime_alive": lifetime_alive,
             "min_metacritic": min_metacritic, "has_demo": has_demo,
+            "released_within_days": released_within_days, "released_after": released_after,
+            "released_before": released_before, "price_min": price_min, "price_max": price_max,
+            "min_positive": min_positive, "min_revenue": min_revenue,
+            "self_published": self_published, "indie": indie,
         },
         "sort": sort,
         "order": order,
@@ -1774,16 +1850,19 @@ def game_profile(appid: int) -> dict:
         socials_cols += (",\n               dev_x_url, dev_discord_url, dev_youtube_url,"
                          "\n               dev_bluesky_handle, dev_bluesky_url")
     demo_cols = ",\n               has_demo, demo_appid" if _HAS_DEMO else ""
+    if _HAS_METACRITIC_URL:
+        demo_cols += ",\n               metacritic_url"
     row = query_one(
         f"""
         SELECT appid, name, release_year, release_date, price_initial, is_free,
                primary_genre, developers, publishers, self_published, is_indie,
                owners_mid, total_reviews, positive_ratio, est_rev_reviews, est_rev_owners,
                metacritic_score, achievements_count, avg_playtime_forever,
-               short_description, rev_pct_in_genre, reviews_pct_in_genre,
-               owners_pct_in_genre, top_tags, n_reviews_first_30d, n_reviews_first_90d,
+               short_description, header_image, first_seen, rev_pct_in_genre,
+               reviews_pct_in_genre, owners_pct_in_genre, top_tags, n_reviews_sampled,
+               n_reviews_first_30d, n_reviews_first_90d,
                n_reviews_first_365d, n_reviews_trailing_30d, playtime_p25, playtime_p50,
-               playtime_p75{players_cols}{lifetime_cols}{socials_cols}{demo_cols}
+               playtime_p75, twitch_viewers, twitch_streams{players_cols}{lifetime_cols}{socials_cols}{demo_cols}
         FROM mart_game WHERE appid = ?
         """,
         [appid],
@@ -1930,7 +2009,17 @@ def game_teardown(appid: int) -> dict:
         SELECT a.aspect, a.n_pos_mentions, a.n_neg_mentions, a.total_mentions, a.pos_share,
             a.n_reviews_sampled,
             COALESCE(gb.pos_share, ab.pos_share) AS genre_pos_share,
-            a.pos_share - COALESCE(gb.pos_share, ab.pos_share) AS delta_vs_genre
+            a.pos_share - COALESCE(gb.pos_share, ab.pos_share) AS delta_vs_genre,
+            -- Which baseline the differential was measured against: the game's own primary
+            -- genre where it cleared the minimum game count, else the '__all__' catalog-wide
+            -- one. Without this an agent cannot tell a genre-relative claim from a global one.
+            COALESCE(gb.genre, ab.genre) AS baseline_genre,
+            COALESCE(gb.n_games, ab.n_games) AS n_games_in_baseline,
+            -- Aspect TEXT sentiment (VADER) + its own genre-baseline differential. pos_share
+            -- is thumbs-based; these are what reviewers actually WROTE about the aspect.
+            a.n_text_pos, a.n_text_neg, a.n_text_neutral, a.text_pos_share, a.mean_compound,
+            COALESCE(gb.text_pos_share, ab.text_pos_share) AS genre_text_pos_share,
+            a.text_pos_share - COALESCE(gb.text_pos_share, ab.text_pos_share) AS text_delta_vs_genre
         FROM mart_game_review_aspects a
         LEFT JOIN mart_genre_aspect_baseline gb ON gb.genre = ? AND gb.aspect = a.aspect
         LEFT JOIN mart_genre_aspect_baseline ab ON ab.genre = '__all__' AND ab.aspect = a.aspect
@@ -1942,7 +2031,10 @@ def game_teardown(appid: int) -> dict:
     n_reviews_sampled = int(aspect_rows[0]["n_reviews_sampled"]) if aspect_rows else 0
 
     press_summary = query_one(
-        "SELECT total_mentions, n_sources, first_seen, last_seen FROM mart_game_press_summary WHERE appid = ?",
+        "SELECT total_mentions, n_sources, first_seen, last_seen, "
+        "n_pos_articles, n_neg_articles, n_neutral_articles, n_scored_articles, "
+        "press_pos_share, mean_compound "
+        "FROM mart_game_press_summary WHERE appid = ?",
         [appid],
     )
     by_source = query(
@@ -1950,8 +2042,14 @@ def game_teardown(appid: int) -> dict:
         [appid],
     )
     notable = query(
-        "SELECT source, title, author, published_at, is_earliest FROM mart_game_press_notable "
+        "SELECT source, title, author, published_at, match_confidence, is_earliest, "
+        "url, sentiment_compound, sentiment FROM mart_game_press_notable "
         "WHERE appid = ? ORDER BY published_at LIMIT 5",
+        [appid],
+    )
+
+    timeline = query(
+        "SELECT period, n_mentions FROM mart_game_press_timeline WHERE appid = ? ORDER BY period",
         [appid],
     )
 
@@ -1968,6 +2066,12 @@ def game_teardown(appid: int) -> dict:
         caveats.append("Fewer than the review floor of sampled English reviews — review-aspect mining unavailable.")
     if press_summary is None:
         caveats.append("No press coverage found above the match-confidence floor.")
+    elif press_summary.get("n_scored_articles"):
+        caveats.append(
+            "Press tone is VADER sentiment of each matched article's headline + short summary "
+            "(not the body), so it captures an outlet's framing rather than a considered "
+            "verdict — and an article's overall tone only proxies its stance on this game."
+        )
 
     return clean(
         {
@@ -1983,11 +2087,168 @@ def game_teardown(appid: int) -> dict:
                 "first_seen": press_summary["first_seen"] if press_summary else None,
                 "last_seen": press_summary["last_seen"] if press_summary else None,
                 "by_source": by_source,
+                "timeline": timeline,
                 "notable_articles": notable,
+                # Article-tone counts + share, matching the REST teardown. n_scored_articles
+                # is the denominator that makes press_pos_share readable — a share over three
+                # scored articles is not the same claim as one over thirty.
+                "n_pos_articles": int(press_summary["n_pos_articles"]) if press_summary else 0,
+                "n_neg_articles": int(press_summary["n_neg_articles"]) if press_summary else 0,
+                "n_neutral_articles": int(press_summary["n_neutral_articles"]) if press_summary else 0,
+                "n_scored_articles": int(press_summary["n_scored_articles"]) if press_summary else 0,
+                "press_pos_share": press_summary["press_pos_share"] if press_summary else None,
+                "mean_compound": press_summary["mean_compound"] if press_summary else None,
             },
             "caveats": caveats,
         }
     )
+
+
+_VALID_ASPECTS = {
+    "Combat & Bosses",
+    "World & Exploration",
+    "Art & Visuals",
+    "Music & Audio",
+    "Story & Writing",
+    "Difficulty",
+    "Controls & Performance",
+    "Map & Navigation / Backtracking",
+    "Content & Length",
+    "Price & Value",
+}
+
+
+@mcp.tool()
+def game_reviews_summary(appid: int) -> dict:
+    """How ONE game's reception moved over time, who its audience is, and how front-loaded
+    its reviews were — the per-game counterpart to the genre-level launch_shape.
+
+    Four series, all for this appid alone:
+    - timeline: MONTHLY review volume and sentiment (n_reviews, n_positive, cumulative
+      totals, cum_positive_share, plus trailing_reviews / trailing_positive_share — a
+      bounded recent window that can rise AND fall, unlike the cumulative share which
+      is anchored by launch). Built from Steam's own uncapped review histogram, falling
+      back to our sample only where the sample provably covers the true total.
+    - language_split: share of reviews by language — who actually plays it.
+    - playtime_at_review: percentiles of hours played AT THE MOMENT OF REVIEWING. NOT the
+      same as game_profile's playtime_p25/p50/p75, which are lifetime playtime_forever.
+    - launch_curve: this game's own cumulative first-year review fraction by day.
+
+    Empty lists (eligible=false) mean this game has too few sampled reviews for the marts,
+    not that it was badly received."""
+    if not _HAS_GAME_REVIEWS:
+        return {
+            "error": "mart_game_reviews_* are not present in this analytics DB — it was "
+            "built by an older ETL. Re-run the ETL (`task etl`) and retry."
+        }
+    if not query_one("SELECT appid FROM mart_game WHERE appid = ?", [appid]):
+        return {
+            "error": f"appid {appid} not found in mart_game — either not in the catalog, or "
+            "below the analysis floor."
+        }
+    timeline = query(
+        "SELECT period, n_reviews, n_positive, cum_reviews, cum_positive, cum_positive_share, "
+        "trailing_reviews, trailing_positive_share "
+        "FROM mart_game_reviews_timeline WHERE appid = ? ORDER BY period",
+        [appid],
+    )
+    lang = query(
+        "SELECT language, n, share FROM mart_game_reviews_lang WHERE appid = ? ORDER BY n DESC",
+        [appid],
+    )
+    playtime = query(
+        "SELECT pctile, value FROM mart_game_reviews_playtime WHERE appid = ? ORDER BY pctile",
+        [appid],
+    )
+    curve = query(
+        "SELECT day, cum_fraction, sample_first_year_reviews FROM mart_game_launch_curve "
+        "WHERE appid = ? ORDER BY day",
+        [appid],
+    )
+    return clean(
+        {
+            "appid": appid,
+            "eligible": bool(timeline or lang or playtime),
+            "timeline": timeline,
+            "language_split": lang,
+            "playtime_at_review": playtime,
+            "launch_curve": curve,
+            "caveats": [
+                "timeline uses Steam's uncapped monthly review histogram; language_split and "
+                "playtime_at_review are composed from our SAMPLE of reviews, so they describe "
+                "the sample's mix rather than every review ever written.",
+                "playtime_at_review is hours played WHEN THE REVIEW WAS WRITTEN — distinct "
+                "from game_profile's playtime_p25/p50/p75 (lifetime playtime_forever).",
+            ],
+        }
+    )
+
+
+@mcp.tool()
+def aspect_reviews(
+    appid: int,
+    aspect: str,
+    sentiment: Literal["praise", "complaint"],
+    limit: int = 4,
+) -> dict:
+    """The verbatim review excerpts behind ONE game_teardown aspect's praise or complaint
+    share — the evidence layer under the numbers. Run game_teardown first to see which
+    aspects are unusually strong or weak, then quote the reviewers here.
+
+    aspect must be one of the exact labels game_teardown returns (e.g. 'Combat & Bosses',
+    'Price & Value'). Excerpts are keyword-window snippets from the same sampled English
+    reviews and the same floor as game_teardown, highest-voted first. An eligible game with
+    nothing said about that aspect returns an empty list — that is an absence of evidence,
+    not a negative finding."""
+    if not _HAS_ASPECT_REVIEWS:
+        return {
+            "error": "mart_game_aspect_reviews is not present in this analytics DB — it was "
+            "built by an older ETL. Re-run the ETL (`task etl`) and retry."
+        }
+    if aspect not in _VALID_ASPECTS:
+        return {"error": f"aspect must be one of {sorted(_VALID_ASPECTS)}"}
+    limit = max(1, min(limit, 10))
+    rows = query(
+        """
+        SELECT excerpt, matched_keywords, votes_up, playtime_minutes, date, language
+        FROM mart_game_aspect_reviews
+        WHERE appid = ? AND aspect = ? AND sentiment = ?
+        ORDER BY votes_up DESC NULLS LAST
+        LIMIT ?
+        """,
+        [appid, aspect, sentiment, limit],
+    )
+    return clean(
+        {
+            "appid": appid,
+            "aspect": aspect,
+            "sentiment": sentiment,
+            "n_returned": len(rows),
+            "items": rows,
+        }
+    )
+
+
+@mcp.tool()
+def tag_suggest(q: str = "", limit: int = 10) -> dict:
+    """Resolve a partial tag to the EXACT tag strings the catalog uses, with how many games
+    carry each. Steam tags are exact-match everywhere else in this server ('Rogue-like' and
+    'Roguelike' are different tags), so call this before passing `tag` to game_search or
+    find_niches rather than guessing the spelling. Empty q returns the most common tags."""
+    needle = (q or "").strip().lower()
+    limit = max(1, min(limit, 50))
+    rows = query(
+        """
+        SELECT tag, COUNT(*) AS n_games
+        FROM (SELECT UNNEST(top_tags) AS tag FROM mart_game)
+        WHERE ? = '' OR contains(lower(tag), ?)
+        GROUP BY tag
+        ORDER BY n_games DESC
+        LIMIT ?
+        """,
+        [needle, needle, limit],
+    )
+    return {"q": q, "n_returned": len(rows), "tags": clean_rows(rows)}
 
 
 # ==========================================================================================
