@@ -77,22 +77,36 @@ FROM _aspectrev_base;
 
 -- Rank the ALREADY-COMPUTED mentions (stg_aspect_mention_sentiment: one row per (review, aspect)
 -- match, same lexicon/pool as a fresh 10-arm scan — see the PERFORMANCE note above) by helpfulness
--- then recency, and keep the top @ASPECT_REVIEWS_TOP_K@ per (appid, aspect, sentiment). Sentiment
--- is the SIGN of the precomputed VADER compound (>= 0 -> praise), so a mention splits by what the
--- TEXT says about the aspect, not the reviewer's overall vote — identical to the classification
--- the previous version applied. Joined to _aspectrev_meta (text-free, see above), so the sort
--- moves only small columns. A LEFT/COALESCE vote fallback isn't needed (unlike when we started
--- from raw matches): every row here comes FROM the sentiment table, so compound is always present.
+-- then recency, and keep the top @ASPECT_REVIEWS_TOP_K@ per (appid, aspect, sentiment). A mention
+-- splits by what the TEXT says about the aspect, not the reviewer's overall vote.
+--
+-- NEUTRAL BAND (fixed 2026-08-19): this used to split on the bare SIGN of the compound
+-- (>= 0 -> praise), which had no neutral band at all — so every mention VADER scored at exactly
+-- 0.0 was filed as PRAISE. That is not a rounding detail: 16.1% of all cached mentions (236,512
+-- of 1,464,649) score exactly 0.0, because the domain lexicon deliberately neutralizes the very
+-- words that carry the aspect ("combat", "fight", "brutal", "horror" -> 0), so a mention whose
+-- window contains nothing else scores dead zero. Sampled output was visibly wrong: neutral
+-- descriptions and outright complaints ("you can walk for under half a minute ... and hit the edge
+-- of the entire game map") were being shown to users as praise.
+-- Now the SAME +/-0.05 band the count columns already use (SENTIMENT_POS/NEG_THRESHOLD, VADER's
+-- own standard cutoffs) applies here, and mentions inside the band are DROPPED rather than
+-- relabelled: the excerpt contract is two-valued (praise|complaint) in the REST Literal, the MCP
+-- tool and the web's two-column layout, and text_pos_share already excludes neutrals — so
+-- excluding them is what makes the excerpts agree with the bars above them.
 CREATE TEMP TABLE _aspectrev_ranked AS
 SELECT m.appid, m.recommendationid, s.aspect,
-    CASE WHEN s.compound >= 0 THEN 'praise' ELSE 'complaint' END AS sentiment,
+    CASE WHEN s.compound >= @SENTIMENT_POS_THRESHOLD@ THEN 'praise' ELSE 'complaint' END AS sentiment,
     m.votes_up, m.playtime_minutes, m.timestamp_created, m.language,
     row_number() OVER (
-        PARTITION BY m.appid, s.aspect, CASE WHEN s.compound >= 0 THEN 'praise' ELSE 'complaint' END
+        PARTITION BY m.appid, s.aspect,
+            CASE WHEN s.compound >= @SENTIMENT_POS_THRESHOLD@ THEN 'praise' ELSE 'complaint' END
         ORDER BY m.votes_up DESC NULLS LAST, m.timestamp_created DESC NULLS LAST
     ) AS rn
 FROM stg_aspect_mention_sentiment s
 JOIN _aspectrev_meta m ON m.appid = s.appid AND m.recommendationid = s.recommendationid
+-- Drop the neutral band BEFORE ranking, so a neutral mention can never occupy one of the
+-- @ASPECT_REVIEWS_TOP_K@ slots that should hold a genuinely positive or negative excerpt.
+WHERE s.compound >= @SENTIMENT_POS_THRESHOLD@ OR s.compound <= @SENTIMENT_NEG_THRESHOLD@
 QUALIFY rn <= @ASPECT_REVIEWS_TOP_K@;
 
 DROP TABLE _aspectrev_meta;
