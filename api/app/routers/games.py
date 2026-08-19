@@ -135,6 +135,19 @@ def _has_demo_flag() -> bool:
 
 
 @lru_cache(maxsize=1)
+def _has_all_socials() -> bool:
+    """Whether the mart carries the per-platform social columns (Discord/YouTube/Bluesky and
+    the X profile URL) rather than only dev_x_handle. Gated + cached like the others: the
+    harvest has always collected all four platforms, but until the widened dev_x CTE landed
+    the mart kept only the X handle."""
+    rows = analytics_db.query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_game' AND column_name = 'dev_discord_url'"
+    )
+    return bool(rows)
+
+
+@lru_cache(maxsize=1)
 def _has_metacritic_url() -> bool:
     """Whether the current mart carries metacritic_url (the Metacritic page Steam links in
     appdetails). Gated + cached like the other additive columns. The SCORE needs no gate —
@@ -164,6 +177,10 @@ def _profile_cols() -> str:
         cols += ", demo_appid, has_demo"
     if _has_metacritic_url():
         cols += ", metacritic_url"
+    if _has_all_socials():
+        cols += (
+            ", dev_x_url, dev_discord_url, dev_youtube_url, dev_bluesky_handle, dev_bluesky_url"
+        )
     return cols
 
 

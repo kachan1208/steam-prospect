@@ -139,6 +139,26 @@ _HAS_DEV_SOCIALS = bool(
     )
 )
 
+# Whether the mart carries the DEMO flag (mart_game.has_demo/demo_appid — the game's playable
+# Steam demo, from its own appdetails). has_demo is TRI-STATE: NULL means the game's appdetails
+# has not been re-read since demo capture landed, i.e. "not checked", never "no demo".
+_HAS_DEMO = bool(
+    query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_game' AND column_name = 'has_demo'"
+    )
+)
+
+# Whether the mart carries every harvested social platform (Discord/YouTube/Bluesky + the X
+# profile URL) rather than only dev_x_handle. The harvest always collected all four; older
+# marts simply dropped everything but X.
+_HAS_ALL_SOCIALS = bool(
+    query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_game' AND column_name = 'dev_discord_url'"
+    )
+)
+
 _PLAYERS_MISSING = (
     "this analytics DB predates the live-player (CCU) marts (mart_game_players_daily / "
     "mart_niche_players and the players_* columns on mart_game/mart_niche) — it was built "
@@ -148,6 +168,11 @@ _PLAYERS_MISSING = (
 _LIFETIME_MISSING = (
     "This mart predates the game-lifetime columns (an older ETL build). Re-run the ETL "
     "(`task etl` in the main prospect checkout) and retry."
+)
+
+_DEMO_MISSING = (
+    "This mart predates the demo columns (has_demo/demo_appid, an older ETL build). Re-run "
+    "the ETL (`task etl` in the main prospect checkout) and retry."
 )
 
 # Row probe, not a schema probe: the min_reviews=0 (no-floor) cut adds ROWS to mart_niche,
@@ -465,7 +490,10 @@ games clearing the review floor).
   trio above (launch-month medians are composition-confounded — they reflect what kind
   of game launches then, not the calendar).
 - **mart_game** — one row per game: metadata, revenue/owners, percentile-vs-genre, top
-  tags, review velocity, live players (latest + 7d avg/trend), and dev_x_handle — the
+  tags, review velocity, live players (latest + 7d avg/trend), the official socials
+  (dev_x_handle/dev_x_url, dev_discord_url, dev_youtube_url, dev_bluesky_handle — all
+  harvested from developer-CONTROLLED pages, never the platforms themselves), whether the
+  game has a playable demo (has_demo/demo_appid), and dev_x_handle — the
   game's most prominent official X handle from the scraper's `game_socials` table
   (links harvested from the game's developer-controlled pages: store page + dev
   website, store-page links preferred; NOT looked up on X, so the handle may be the
@@ -1599,6 +1627,7 @@ def game_search(
     min_lifetime_months: int | None = None,
     lifetime_alive: bool | None = None,
     min_metacritic: int | None = None,
+    has_demo: bool | None = None,
     sort: str = "total_reviews",
     order: Literal["asc", "desc"] = "desc",
     limit: int = 15,
@@ -1629,6 +1658,10 @@ def game_search(
       NULL means NO LINKED PAGE, never "reviewed badly", so min_metacritic drops ~97% of
       games: use it to benchmark against critically-covered titles, never to size a niche.
       For a broad quality signal use positive_ratio, which exists for the whole catalog.
+    - has_demo: does the game ship a playable Steam demo (from its own appdetails).
+      TRI-STATE — NULL means "we have not re-read this game\'s appdetails since demo
+      capture landed", NOT "no demo", so the has_demo filter drops unchecked games on
+      either value. Coverage grows nightly as the socials/demo sweep works the catalog.
     """
     if sort not in _GAME_SORTABLE:
         return {"error": f"sort must be one of {sorted(_GAME_SORTABLE)}"}
@@ -1661,17 +1694,25 @@ def game_search(
     if min_metacritic is not None:
         where.append("metacritic_score >= ?")
         params.append(min_metacritic)
+    if has_demo is not None:
+        if not _HAS_DEMO:
+            return {"error": _DEMO_MISSING}
+        # Tri-state: NULL (not yet checked) satisfies neither = comparison, so unknowns drop
+        # out rather than being counted as "no demo".
+        where.append("has_demo = ?")
+        params.append(has_demo)
     limit = max(1, min(limit, 50))
 
     lifetime_cols = (
         ",\n               lifetime_months, lifetime_alive" if _HAS_LIFETIME_GAME else ""
     )
     socials_cols = ",\n               dev_x_handle" if _HAS_DEV_SOCIALS else ""
+    demo_cols = ",\n               has_demo" if _HAS_DEMO else ""
     rows = query(
         f"""
         SELECT appid, name, primary_genre, release_year, price_initial, owners_mid,
                total_reviews, positive_ratio, est_rev_reviews, metacritic_score,
-               top_tags{lifetime_cols}{socials_cols}
+               top_tags{lifetime_cols}{socials_cols}{demo_cols}
         FROM mart_game
         WHERE {" AND ".join(where)}
         ORDER BY {sort} {order.upper()} NULLS LAST, total_reviews DESC
@@ -1683,7 +1724,7 @@ def game_search(
         "filters": {
             "q": q, "tag": tag, "genre": genre, "min_reviews": min_reviews,
             "min_lifetime_months": min_lifetime_months, "lifetime_alive": lifetime_alive,
-            "min_metacritic": min_metacritic,
+            "min_metacritic": min_metacritic, "has_demo": has_demo,
         },
         "sort": sort,
         "order": order,
@@ -1729,6 +1770,10 @@ def game_profile(appid: int) -> dict:
         else ""
     )
     socials_cols = ",\n               dev_x_handle" if _HAS_DEV_SOCIALS else ""
+    if _HAS_ALL_SOCIALS:
+        socials_cols += (",\n               dev_x_url, dev_discord_url, dev_youtube_url,"
+                         "\n               dev_bluesky_handle, dev_bluesky_url")
+    demo_cols = ",\n               has_demo, demo_appid" if _HAS_DEMO else ""
     row = query_one(
         f"""
         SELECT appid, name, release_year, release_date, price_initial, is_free,
@@ -1738,7 +1783,7 @@ def game_profile(appid: int) -> dict:
                short_description, rev_pct_in_genre, reviews_pct_in_genre,
                owners_pct_in_genre, top_tags, n_reviews_first_30d, n_reviews_first_90d,
                n_reviews_first_365d, n_reviews_trailing_30d, playtime_p25, playtime_p50,
-               playtime_p75{players_cols}{lifetime_cols}{socials_cols}
+               playtime_p75{players_cols}{lifetime_cols}{socials_cols}{demo_cols}
         FROM mart_game WHERE appid = ?
         """,
         [appid],

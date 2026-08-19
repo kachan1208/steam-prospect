@@ -216,6 +216,14 @@ class GameProfile(BaseModel):
     # Metacritic page Steam links for this game. None = Steam links none (most of the catalog)
     # or the mart predates the column (games.py::_has_metacritic_url).
     metacritic_url: Optional[str] = None
+    # The rest of the official socials harvested from the same developer-controlled pages as
+    # dev_x_handle. None = no link found for that platform, socials not yet fetched, or the
+    # mart predates the widened columns (games.py::_has_all_socials).
+    dev_x_url: Optional[str] = None
+    dev_discord_url: Optional[str] = None
+    dev_youtube_url: Optional[str] = None
+    dev_bluesky_handle: Optional[str] = None
+    dev_bluesky_url: Optional[str] = None
 
 
 class PriceBand(BaseModel):

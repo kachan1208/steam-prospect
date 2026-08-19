@@ -13,6 +13,7 @@ import { ReviewsTimelineChart } from "../components/charts/ReviewsTimelineChart"
 import { GameTrendsChart } from "../components/charts/GameTrendsChart";
 import { NotableCoverageCard } from "../components/NotableCoverageCard";
 import { Badge } from "../components/ui/Badge";
+import { SocialLinks } from "../components/ui/SocialLinks";
 import { Card } from "../components/ui/Card";
 import { Meter, BulletMeter } from "../components/ui/Meter";
 import { StatTile } from "../components/ui/StatTile";
@@ -241,17 +242,14 @@ export default function GameProfile() {
                       <Badge color={CSS_VAR.demand}>Demo</Badge>
                     </a>
                   )}
-                  {profile.dev_x_handle && (
-                    <a
-                      href={`https://x.com/${profile.dev_x_handle}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      title="Official X account linked from the game's page — may be the game's, studio's, or developer's personal account"
-                      className="hover:underline"
-                    >
-                      <Badge>@{profile.dev_x_handle}</Badge>
-                    </a>
-                  )}
+                  <SocialLinks
+                    x={profile.dev_x_handle}
+                    xUrl={profile.dev_x_url}
+                    discordUrl={profile.dev_discord_url}
+                    youtubeUrl={profile.dev_youtube_url}
+                    bluesky={profile.dev_bluesky_handle}
+                    blueskyUrl={profile.dev_bluesky_url}
+                  />
                 </div>
                 <div className="mt-1 text-xs text-ink-secondary">
                   {profile.developers ? (
