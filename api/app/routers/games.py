@@ -40,7 +40,7 @@ SORTABLE = {
     "name", "release_year", "release_date", "price_initial", "owners_mid", "total_reviews",
     "positive_ratio", "est_rev_reviews", "rev_pct_in_genre", "reviews_pct_in_genre",
     "owners_pct_in_genre", "n_reviews_trailing_30d", "live_players", "first_seen",
-    "lifetime_months",
+    "lifetime_months", "metacritic_score",
 }
 
 @lru_cache(maxsize=1)
@@ -62,7 +62,8 @@ def _has_name_lower() -> bool:
 
 _SEARCH_COLS = (
     "appid, name, primary_genre, release_year, release_date, price_initial, is_free, owners_mid, "
-    "total_reviews, positive_ratio, est_rev_reviews, live_players, first_seen, header_image, top_tags"
+    "total_reviews, positive_ratio, est_rev_reviews, live_players, first_seen, header_image, "
+    "top_tags, metacritic_score"
 )
 
 _PROFILE_COLS = (
@@ -133,6 +134,19 @@ def _has_demo_flag() -> bool:
     return bool(rows)
 
 
+@lru_cache(maxsize=1)
+def _has_metacritic_url() -> bool:
+    """Whether the current mart carries metacritic_url (the Metacritic page Steam links in
+    appdetails). Gated + cached like the other additive columns. The SCORE needs no gate —
+    it has been in every mart — so filtering and sorting by it work regardless; only the
+    outbound link is conditional."""
+    rows = analytics_db.query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_game' AND column_name = 'metacritic_url'"
+    )
+    return bool(rows)
+
+
 _LIFETIME_PROFILE_COLS = (
     ", lifetime_first_100_month, lifetime_died_month, lifetime_months, lifetime_alive"
 )
@@ -148,6 +162,8 @@ def _profile_cols() -> str:
         cols += ", dev_x_handle"
     if _has_demo_flag():
         cols += ", demo_appid, has_demo"
+    if _has_metacritic_url():
+        cols += ", metacritic_url"
     return cols
 
 
@@ -203,6 +219,12 @@ def search_games(
         None,
         description="true = has a playable Steam demo, false = checked and has none, omitted = both. "
         "Either value drops games whose appdetails we haven't re-checked for a demo yet.",
+    ),
+    min_metacritic: int | None = Query(
+        None, ge=0, le=100,
+        description="Floor on the Metacritic critic score. Only ~2.6% of the catalog has one "
+        "(Steam links a Metacritic page for few games), so this drops the vast majority — "
+        "use it to benchmark against critically-reviewed titles, not to filter a whole niche.",
     ),
     sort: str = Query("total_reviews"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
@@ -293,6 +315,9 @@ def search_games(
         # drop out naturally — same stance as the lifetime filters above.
         where.append("has_demo = ?")
         params.append(has_demo)
+    if min_metacritic is not None:
+        where.append("metacritic_score >= ?")
+        params.append(min_metacritic)
     where_sql = "WHERE " + " AND ".join(where)
 
     total = analytics_db.scalar(f"SELECT COUNT(*) FROM mart_game {where_sql}", params)

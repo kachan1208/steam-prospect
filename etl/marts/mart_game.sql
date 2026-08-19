@@ -130,6 +130,9 @@ SELECT
     -- captured by enrichment + dev-socials + check-demos). Tri-state: TRUE/FALSE only when
     -- appdetails was seen since demo capture landed; NULL = never checked — "unknown",
     -- never "no demo".
+    -- Metacritic page Steam links for this game (appdetails metacritic.url). NULL = Steam links
+    -- none — which is most of the catalog (~2.6% coverage); never read it as "badly reviewed".
+    gh.metacritic_url,
     gh.demo_appid,
     CASE WHEN gh.demos_checked_at IS NOT NULL THEN gh.demo_appid IS NOT NULL END AS has_demo,
     COALESCE(tw.twitch_viewers, 0) AS twitch_viewers,

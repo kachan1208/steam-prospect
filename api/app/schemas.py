@@ -129,6 +129,9 @@ class GameSearchRow(BaseModel):
     # Playable Steam demo (from the game's own appdetails). Tri-state: None = appdetails
     # never re-checked for a demo yet — "unknown", not "no demo" (games.py::_has_demo_flag).
     has_demo: Optional[bool] = None
+    # Metacritic critic score, where Steam links a Metacritic page (~2.6% of the catalog).
+    # None = no linked page, NOT a poor score.
+    metacritic_score: Optional[int] = None
 
 
 class GameSearchList(BaseModel):
@@ -210,6 +213,9 @@ class GameProfile(BaseModel):
     # None = appdetails never re-checked for a demo yet — "unknown", not "no demo".
     demo_appid: Optional[int] = None
     has_demo: Optional[bool] = None
+    # Metacritic page Steam links for this game. None = Steam links none (most of the catalog)
+    # or the mart predates the column (games.py::_has_metacritic_url).
+    metacritic_url: Optional[str] = None
 
 
 class PriceBand(BaseModel):

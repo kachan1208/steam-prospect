@@ -1586,7 +1586,7 @@ def best_launch_timing(genre: str = "__all__") -> dict:
 _GAME_SORTABLE = {
     "name", "release_year", "price_initial", "owners_mid", "total_reviews",
     "positive_ratio", "est_rev_reviews", "rev_pct_in_genre", "reviews_pct_in_genre",
-    "owners_pct_in_genre", "n_reviews_trailing_30d",
+    "owners_pct_in_genre", "n_reviews_trailing_30d", "metacritic_score",
 }
 
 
@@ -1598,6 +1598,7 @@ def game_search(
     min_reviews: int = 0,
     min_lifetime_months: int | None = None,
     lifetime_alive: bool | None = None,
+    min_metacritic: int | None = None,
     sort: str = "total_reviews",
     order: Literal["asc", "desc"] = "desc",
     limit: int = 15,
@@ -1623,6 +1624,11 @@ def game_search(
     - dev_x_handle: official X handle linked from the game's store page/website (may be
       the game's, studio's or dev's personal account — we cannot disambiguate without X
       API access); NULL = none found or socials not yet fetched.
+    - metacritic_score / min_metacritic: CRITIC score, only where Steam links a Metacritic
+      page — about 2.6% of the catalog (4.5k games), skewed to publisher-backed titles.
+      NULL means NO LINKED PAGE, never "reviewed badly", so min_metacritic drops ~97% of
+      games: use it to benchmark against critically-covered titles, never to size a niche.
+      For a broad quality signal use positive_ratio, which exists for the whole catalog.
     """
     if sort not in _GAME_SORTABLE:
         return {"error": f"sort must be one of {sorted(_GAME_SORTABLE)}"}
@@ -1652,6 +1658,9 @@ def game_search(
     if lifetime_alive is not None:
         where.append("lifetime_alive = ?")
         params.append(lifetime_alive)
+    if min_metacritic is not None:
+        where.append("metacritic_score >= ?")
+        params.append(min_metacritic)
     limit = max(1, min(limit, 50))
 
     lifetime_cols = (
@@ -1661,7 +1670,8 @@ def game_search(
     rows = query(
         f"""
         SELECT appid, name, primary_genre, release_year, price_initial, owners_mid,
-               total_reviews, positive_ratio, est_rev_reviews, top_tags{lifetime_cols}{socials_cols}
+               total_reviews, positive_ratio, est_rev_reviews, metacritic_score,
+               top_tags{lifetime_cols}{socials_cols}
         FROM mart_game
         WHERE {" AND ".join(where)}
         ORDER BY {sort} {order.upper()} NULLS LAST, total_reviews DESC
@@ -1673,6 +1683,7 @@ def game_search(
         "filters": {
             "q": q, "tag": tag, "genre": genre, "min_reviews": min_reviews,
             "min_lifetime_months": min_lifetime_months, "lifetime_alive": lifetime_alive,
+            "min_metacritic": min_metacritic,
         },
         "sort": sort,
         "order": order,
