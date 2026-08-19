@@ -751,6 +751,14 @@ export interface GameProfile {
   has_demo?: boolean | null;
   /** Metacritic page Steam links for this game; null = none linked (most of the catalog). */
   metacritic_url?: string | null;
+  /** Official socials harvested from the developer's own pages (store page + dev website),
+   * never from the platforms themselves. Absent on older marts; null = none found for that
+   * platform, or socials not yet fetched for this game. */
+  dev_x_url?: string | null;
+  dev_discord_url?: string | null;
+  dev_youtube_url?: string | null;
+  dev_bluesky_handle?: string | null;
+  dev_bluesky_url?: string | null;
 }
 
 /** Shared query options so the compare page can fan out over N games via useQueries while

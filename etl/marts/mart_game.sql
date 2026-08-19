@@ -70,15 +70,24 @@ twitch AS (
     GROUP BY appid
 ),
 dev_x AS (
-    -- The game's most PROMINENT official X handle, from stg_game_socials (guarded
+    -- The game's most PROMINENT official link PER PLATFORM, from stg_game_socials (guarded
     -- staging over the scraper's game_socials table — links harvested from the game's
-    -- developer-controlled pages: store page + dev website, NOT from X itself; the
-    -- handle may be the game's, the studio's, or the dev's personal account). rk =
-    -- source insertion order with store_page rows first, so MIN(rk) prefers the store
-    -- page's own link when one exists.
-    SELECT appid, min_by(handle, rk) AS dev_x_handle
+    -- developer-controlled pages: store page + dev website, NOT from the platforms
+    -- themselves; an account may be the game's, the studio's, or the dev's personal one).
+    -- rk = source insertion order with store_page rows first, so min_by(.., rk) prefers the
+    -- store page's own link when one exists.
+    -- All four platforms are surfaced (not just X, as originally): the harvest already
+    -- collects Discord/YouTube/Bluesky for tens of thousands of games, and they were simply
+    -- being dropped at this step, leaving the API and UI with nothing but a bare handle.
+    SELECT appid,
+        min_by(handle, rk) FILTER (WHERE platform = 'x') AS dev_x_handle,
+        min_by(url, rk)    FILTER (WHERE platform = 'x') AS dev_x_url,
+        min_by(url, rk)    FILTER (WHERE platform = 'discord') AS dev_discord_url,
+        min_by(url, rk)    FILTER (WHERE platform = 'youtube') AS dev_youtube_url,
+        min_by(handle, rk) FILTER (WHERE platform = 'bluesky') AS dev_bluesky_handle,
+        min_by(url, rk)    FILTER (WHERE platform = 'bluesky') AS dev_bluesky_url
     FROM stg_game_socials
-    WHERE platform = 'x' AND handle IS NOT NULL
+    WHERE handle IS NOT NULL OR url IS NOT NULL
     GROUP BY appid
 )
 SELECT
@@ -125,6 +134,11 @@ SELECT
     -- NULL = no X link found OR socials never fetched for this game — "unknown",
     -- never zero.
     dx.dev_x_handle,
+    dx.dev_x_url,
+    dx.dev_discord_url,
+    dx.dev_youtube_url,
+    dx.dev_bluesky_handle,
+    dx.dev_bluesky_url,
     -- Playable demo, from the game's own Steam appdetails `demos` field (SteamSpy discovery
     -- never indexes demo apps, so the parent's appdetails is the only reliable source;
     -- captured by enrichment + dev-socials + check-demos). Tri-state: TRUE/FALSE only when
