@@ -602,6 +602,8 @@ export interface GameSearchRow {
   dev_x_handle?: string | null;
   /** Playable Steam demo. Absent on older marts; null = never re-checked — unknown, not "no". */
   has_demo?: boolean | null;
+  /** Metacritic critic score where Steam links a page (~2.6% of games); null = no linked page. */
+  metacritic_score?: number | null;
 }
 
 export interface GameSearchList {
@@ -626,7 +628,8 @@ export type GameSortKey =
   | "owners_pct_in_genre"
   | "n_reviews_trailing_30d"
   | "live_players"
-  | "lifetime_months";
+  | "lifetime_months"
+  | "metacritic_score";
 
 export interface GameSearchParams {
   q?: string;
@@ -654,6 +657,8 @@ export interface GameSearchParams {
   /** true = only games with a playable Steam demo, false = checked-and-none, undefined = both
    * (games never re-checked for a demo drop out on either value). */
   has_demo?: boolean;
+  /** Floor on the Metacritic critic score. Only ~2.6% of games have one, so this drops the rest. */
+  min_metacritic?: number;
   sort: GameSortKey;
   order: "asc" | "desc";
   limit: number;
@@ -744,6 +749,8 @@ export interface GameProfile {
    * null = never re-checked — unknown, not "no". */
   demo_appid?: number | null;
   has_demo?: boolean | null;
+  /** Metacritic page Steam links for this game; null = none linked (most of the catalog). */
+  metacritic_url?: string | null;
 }
 
 /** Shared query options so the compare page can fan out over N games via useQueries while

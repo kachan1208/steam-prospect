@@ -322,7 +322,22 @@ export default function GameProfile() {
           label="Positive rating"
           valueClassName={positiveRatioClass(profile.positive_ratio)}
           value={fmtPct(profile.positive_ratio)}
-          sub={profile.metacritic_score ? `Metacritic ${profile.metacritic_score}` : undefined}
+          sub={
+            profile.metacritic_score
+              ? profile.metacritic_url
+                ? (
+                    <a
+                      href={profile.metacritic_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="hover:underline"
+                    >
+                      Metacritic {profile.metacritic_score}
+                    </a>
+                  )
+                : `Metacritic ${profile.metacritic_score}`
+              : undefined
+          }
         />
         <StatTile
           help="Concurrent players at our last nightly capture (~21-22:00 UTC) — a point sample, NOT the daily peak (peak charts run higher). Click for the daily history."
