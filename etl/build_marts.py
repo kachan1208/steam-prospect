@@ -1637,6 +1637,15 @@ def _attach_sentiment_cache(con: duckdb.DuckDBPyConnection, data_dir: Path) -> P
         "CREATE TABLE IF NOT EXISTS cache.press_article(article_id BIGINT, compound DOUBLE)"
     )
     con.execute("CREATE TABLE IF NOT EXISTS cache.meta(key VARCHAR, value VARCHAR)")
+    # CREATE TABLE IF NOT EXISTS is a no-op on a table that already exists — it does NOT add
+    # columns. A cache file created before the classifier landed therefore keeps the old
+    # three-column shape, and the six-value INSERT below fails at runtime, hours into a build.
+    # (That is not hypothetical: it cost a 4.5-hour run on 2026-08-20.) Add anything missing
+    # explicitly; ALTER ... ADD COLUMN is cheap and idempotent here because we check first.
+    have = {r[0] for r in con.execute("DESCRIBE cache.aspect_mention").fetchall()}
+    for col, typ in (("clf_aspect", "VARCHAR"), ("clf_sentiment", "VARCHAR"), ("clf_margin", "DOUBLE")):
+        if col not in have:
+            con.execute(f"ALTER TABLE cache.aspect_mention ADD COLUMN {col} {typ}")
     return cache_path
 
 
