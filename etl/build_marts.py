@@ -1760,14 +1760,21 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
         con.execute(
             """
             CREATE TEMP TABLE stg_aspect_mention_sentiment AS
-            SELECT appid, recommendationid, aspect, compound FROM (
-                SELECT appid, recommendationid,
-                       COALESCE(clf_aspect, aspect) AS aspect, compound,
+            SELECT appid, recommendationid, aspect, kw_aspect, compound FROM (
+                SELECT r.appid, r.recommendationid,
+                       COALESCE(r.clf_aspect, r.aspect) AS aspect,
+                       -- See the cached branch: the excerpt regex needs the arm that cut the
+                       -- window, not the aspect the classifier moved it to. Qualified with the
+                       -- table alias on purpose — bare `aspect` here would be ambiguous with the
+                       -- COALESCE alias above it, and resolving to that would silently defeat
+                       -- the whole point of carrying this column.
+                       r.aspect AS kw_aspect,
+                       r.compound,
                        row_number() OVER (
-                           PARTITION BY appid, recommendationid, COALESCE(clf_aspect, aspect)
-                           ORDER BY clf_margin DESC NULLS LAST
+                           PARTITION BY r.appid, r.recommendationid, COALESCE(r.clf_aspect, r.aspect)
+                           ORDER BY r.clf_margin DESC NULLS LAST
                        ) AS rn
-                FROM _sent_raw
+                FROM _sent_raw r
                 WHERE clf_aspect IS NULL OR clf_aspect <> 'NONE'
             ) WHERE rn = 1
             """
@@ -1837,10 +1844,17 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
                 -- QUALIFY keeps one row per (review, aspect): several keyword arms of the same
                 -- review routinely resolve to the same true aspect, and without this the winner
                 -- would be counted two or three times.
-                SELECT appid, recommendationid, aspect, compound FROM (
+                SELECT appid, recommendationid, aspect, kw_aspect, compound FROM (
                     SELECT p.appid,
                            m.recommendationid,
                            COALESCE(m.clf_aspect, m.aspect) AS aspect,
+                           -- The arm whose regex CUT this window, kept alongside the verdict.
+                           -- mart_game_aspect_reviews re-extracts the excerpt text with one
+                           -- aspect's keyword regex, and after reassignment the displayed aspect
+                           -- is no longer the one that matched — extracting by it yields '' and
+                           -- the user sees an empty excerpt. Extracting by kw_aspect returns the
+                           -- exact window the classifier actually judged.
+                           m.aspect AS kw_aspect,
                            m.compound,
                            row_number() OVER (
                                PARTITION BY p.appid, m.recommendationid, COALESCE(m.clf_aspect, m.aspect)

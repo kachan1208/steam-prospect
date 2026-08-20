@@ -106,6 +106,19 @@ def features(text: str, use_bigrams: bool = True) -> list[str]:
     return out
 
 
+# The trainer's label set shortened one aspect's name; ASPECT_LEXICON in build_marts.py — the
+# source of truth every downstream mart joins on — spells it out. Renamed here, once, at load:
+# the model file stays exactly as trained, and what classify() emits is always a label the rest of
+# the pipeline recognises. Left unmapped it fails silently rather than loudly — the rows land under
+# an aspect no mart joins to, so the category just looks nearly empty (it did: 11k mentions against
+# 900k+ for its neighbours) instead of raising anything.
+_CANONICAL_ASPECT = {"Map & Navigation": "Map & Navigation / Backtracking"}
+
+
+def _canonical(classes: list) -> list:
+    return [_CANONICAL_ASPECT.get(c, c) for c in classes]
+
+
 class AspectClassifier:
     """Loaded once per ETL run and reused; scoring is pure dict lookups, no shared mutable state."""
 
@@ -114,7 +127,7 @@ class AspectClassifier:
         if self.kind == "linear":
             self._init_linear(model)
             return
-        self._aspect = model["aspect"]["classes"]
+        self._aspect = {_CANONICAL_ASPECT.get(k, k): v for k, v in model["aspect"]["classes"].items()}
         self._sentiment = model["sentiment"]["classes"]
         cfg = model.get("config", {})
         # Default True only so an older model file without a config block keeps working.
@@ -130,7 +143,8 @@ class AspectClassifier:
         self._lin = {}
         for head in ("aspect", "sentiment"):
             h = model[head]
-            self._lin[head] = (h["classes"], h["bias"], h["weights"])
+            classes = _canonical(h["classes"]) if head == "aspect" else h["classes"]
+            self._lin[head] = (classes, h["bias"], h["weights"])
         self.n_train = model.get("n_train")
 
     @staticmethod

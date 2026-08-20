@@ -94,7 +94,7 @@ FROM _aspectrev_base;
 -- tool and the web's two-column layout, and text_pos_share already excludes neutrals — so
 -- excluding them is what makes the excerpts agree with the bars above them.
 CREATE TEMP TABLE _aspectrev_ranked AS
-SELECT m.appid, m.recommendationid, s.aspect,
+SELECT m.appid, m.recommendationid, s.aspect, s.kw_aspect,
     CASE WHEN s.compound >= @SENTIMENT_POS_THRESHOLD@ THEN 'praise' ELSE 'complaint' END AS sentiment,
     m.votes_up, m.playtime_minutes, m.timestamp_created, m.language,
     row_number() OVER (
@@ -115,7 +115,7 @@ DROP TABLE _aspectrev_meta;
 -- hash-join with the survivors on the build side, streaming _aspectrev_base past it — no text
 -- sort. Then drop the big pool so it doesn't sit in memory through the windowing below.
 CREATE TEMP TABLE _aspectrev_surv AS
-SELECT r.appid, r.recommendationid, r.aspect, r.sentiment,
+SELECT r.appid, r.recommendationid, r.aspect, r.kw_aspect, r.sentiment,
     r.votes_up, r.playtime_minutes, r.timestamp_created, r.language,
     b.review_text
 FROM _aspectrev_ranked r
@@ -145,7 +145,7 @@ SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, 
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_COMBAT@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
     ) AS window_text
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_COMBAT@)', 1, 'i')) + 1 AS kw_pos
-      FROM _aspectrev_surv WHERE aspect = 'Combat & Bosses')
+      FROM _aspectrev_surv WHERE kw_aspect = 'Combat & Bosses')
 
 UNION ALL
 SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text,
@@ -158,7 +158,7 @@ SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, 
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_WORLD@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
     )
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_WORLD@)', 1, 'i')) + 1 AS kw_pos
-      FROM _aspectrev_surv WHERE aspect = 'World & Exploration')
+      FROM _aspectrev_surv WHERE kw_aspect = 'World & Exploration')
 
 UNION ALL
 SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text,
@@ -171,7 +171,7 @@ SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, 
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_ART@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
     )
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_ART@)', 1, 'i')) + 1 AS kw_pos
-      FROM _aspectrev_surv WHERE aspect = 'Art & Visuals')
+      FROM _aspectrev_surv WHERE kw_aspect = 'Art & Visuals')
 
 UNION ALL
 SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text,
@@ -184,7 +184,7 @@ SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, 
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_MUSIC@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
     )
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_MUSIC@)', 1, 'i')) + 1 AS kw_pos
-      FROM _aspectrev_surv WHERE aspect = 'Music & Audio')
+      FROM _aspectrev_surv WHERE kw_aspect = 'Music & Audio')
 
 UNION ALL
 SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text,
@@ -197,7 +197,7 @@ SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, 
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_STORY@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
     )
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_STORY@)', 1, 'i')) + 1 AS kw_pos
-      FROM _aspectrev_surv WHERE aspect = 'Story & Writing')
+      FROM _aspectrev_surv WHERE kw_aspect = 'Story & Writing')
 
 UNION ALL
 SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text,
@@ -210,7 +210,7 @@ SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, 
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_DIFFICULTY@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
     )
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_DIFFICULTY@)', 1, 'i')) + 1 AS kw_pos
-      FROM _aspectrev_surv WHERE aspect = 'Difficulty')
+      FROM _aspectrev_surv WHERE kw_aspect = 'Difficulty')
 
 UNION ALL
 SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text,
@@ -223,7 +223,7 @@ SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, 
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_CONTROLS@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
     )
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_CONTROLS@)', 1, 'i')) + 1 AS kw_pos
-      FROM _aspectrev_surv WHERE aspect = 'Controls & Performance')
+      FROM _aspectrev_surv WHERE kw_aspect = 'Controls & Performance')
 
 UNION ALL
 SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text,
@@ -236,7 +236,7 @@ SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, 
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_MAPNAV@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
     )
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_MAPNAV@)', 1, 'i')) + 1 AS kw_pos
-      FROM _aspectrev_surv WHERE aspect = 'Map & Navigation / Backtracking')
+      FROM _aspectrev_surv WHERE kw_aspect = 'Map & Navigation / Backtracking')
 
 UNION ALL
 SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text,
@@ -249,7 +249,7 @@ SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, 
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_CONTENT@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
     )
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_CONTENT@)', 1, 'i')) + 1 AS kw_pos
-      FROM _aspectrev_surv WHERE aspect = 'Content & Length')
+      FROM _aspectrev_surv WHERE kw_aspect = 'Content & Length')
 
 UNION ALL
 SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text,
@@ -262,7 +262,7 @@ SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, 
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_PRICEVALUE@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
     )
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_PRICEVALUE@)', 1, 'i')) + 1 AS kw_pos
-      FROM _aspectrev_surv WHERE aspect = 'Price & Value');
+      FROM _aspectrev_surv WHERE kw_aspect = 'Price & Value');
 
 DROP TABLE _aspectrev_surv;
 
