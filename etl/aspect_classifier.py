@@ -15,23 +15,35 @@ The failure is inherent to keyword matching: "cheap deaths" is Difficulty, "look
 "cheap at 5 bucks" is Price, and "road map" is not Map at all. Per-bucket precision bottomed out
 at 11.1% for Map & Navigation, whose keyword `map` is the most polysemous of the lot.
 
-WHAT THIS DOES INSTEAD
-Multinomial Naive Bayes trained on 6,722 LLM-labelled review fragments, two heads with separately
-cross-validated feature sets: ASPECT uses unigrams with a min-document-frequency of 2, SENTIMENT
-uses unigrams + bigrams. Bigrams are what let the sentiment head see `not_worth` and `too_short`
-as single signals; the aspect head generalised better without them once there was enough data,
-which is why the two disagree and why the model file records the choice per head.
+WHAT THIS DOES INSTEAD — TEACHER/STUDENT
+A DistilBERT with two heads (aspect 11-way, sentiment 3-way) was fine-tuned on 6,722 hand-labelled
+fragments. That TEACHER reaches 70.7% / 79.9% — but it needs torch, and the droplet has 2 cores,
+~2GB usable during the nightly run, Python 3.14 and no scientific wheels, so it can never run
+there. It therefore runs on a laptop only, where it labelled 400,000 fragments.
 
-Measured on the same 184-fragment ground truth as the numbers above:
+What ships here is the STUDENT distilled from those labels: a linear softmax over bag-of-ngrams.
+Training used torch (offline, on a laptop); INFERENCE is a dict lookup and an addition, which is
+why this file has no dependencies at all. The whole model is bias + a {feature: [weight per class]}
+table, gzipped to ~6MB.
 
-    aspect correct     42.9% -> 55.4%
-    sentiment correct  60.3% -> 67.4%
-    both correct       25.5% -> 37.0%
+Linear-softmax rather than the Naive Bayes it replaces because NB assumes features are independent
+given the class — exactly false for text, where "cheap" + "deaths" is not the product of its parts.
 
-Still far from solved — roughly two fragments in five get the wrong aspect — but it is right more
-often than wrong, which the keyword regex never was. The learning curve was still climbing when
-the labelling budget ran out (CV 0.271 at 150 examples, 0.439 at 842, 0.579 at 6,722), so more
-labels remain the cheapest available improvement.
+Measured on the same 184-fragment ground truth throughout:
+
+                       regex      NB      student    (teacher)
+    aspect correct     42.9%   55.4%      62.5%       70.7%
+    sentiment correct  60.3%   67.4%      72.3%       79.9%
+    both correct       25.5%   37.0%      44.6%       54.9%
+
+The student keeps ~88% of the teacher's aspect accuracy with none of its cost, and is FASTER than
+the Naive Bayes it replaces: ~70,000 fragments/sec, i.e. minutes for the full 15.8M-mention corpus
+on one core.
+
+Honest ceiling: the two human raters who produced the ground truth agreed with each other on only
+92% of aspects, so this is an 11-way problem with genuinely noisy labels. Roughly one fragment in
+three still gets the wrong aspect. The cheapest remaining improvement is more teacher labels — the
+distillation set was capped at 400k for time, not because it stopped helping.
 
 WHY NAIVE BAYES AND NOT SOMETHING STRONGER
 No numpy, scipy or scikit-learn is installed on the droplet, the box has 2 cores and ~2GB of
@@ -45,6 +57,7 @@ This module decides what each candidate is actually about — including rejectin
 """
 from __future__ import annotations
 
+import gzip
 import json
 import math
 import os
@@ -61,7 +74,21 @@ _STOP = {
 }
 
 NONE_LABEL = "NONE"
-MODEL_FILENAME = "aspect_model.json"
+MODEL_FILENAME = "aspect_model.json.gz"   # gzipped: the linear model is ~17MB raw, ~4MB packed
+
+
+def featurize(text: str) -> set[str]:
+    """THE feature function — imported by the offline trainer as well, so training and serving can
+    never drift. (They did once: the aspect head was trained on unigrams while inference fed it
+    bigrams, and unseen features shifted the argmax because each class contributes its own default.
+    One shared function is the fix that makes that class of bug impossible.)
+
+    A SET, not a list: the linear model scores presence, not frequency, so a word repeated five
+    times in a rant must not outvote five distinct pieces of evidence."""
+    words = [t for t in _TOKEN.findall(text.lower()) if len(t) > 1]
+    out = {t for t in words if t not in _STOP}
+    out.update(f"{a}_{b}" for a, b in zip(words, words[1:]))
+    return out
 
 
 def features(text: str, use_bigrams: bool = True) -> list[str]:
@@ -83,6 +110,10 @@ class AspectClassifier:
     """Loaded once per ETL run and reused; scoring is pure dict lookups, no shared mutable state."""
 
     def __init__(self, model: dict):
+        self.kind = model.get("kind", "nb")
+        if self.kind == "linear":
+            self._init_linear(model)
+            return
         self._aspect = model["aspect"]["classes"]
         self._sentiment = model["sentiment"]["classes"]
         cfg = model.get("config", {})
@@ -91,9 +122,34 @@ class AspectClassifier:
         self._sentiment_bigrams = bool(cfg.get("sentiment", {}).get("bigrams", True))
         self.n_train = model.get("n_train")
 
+    def _init_linear(self, model: dict):
+        """Linear softmax head distilled from the transformer teacher: score = bias + the sum of
+        the weight rows of whichever features are present. Pruned features are simply absent, which
+        is the same as a zero row — no default term, so unlike the Naive Bayes head an unseen
+        feature contributes nothing rather than tilting the argmax."""
+        self._lin = {}
+        for head in ("aspect", "sentiment"):
+            h = model[head]
+            self._lin[head] = (h["classes"], h["bias"], h["weights"])
+        self.n_train = model.get("n_train")
+
+    @staticmethod
+    def _linear_argmax(classes, bias, weights, feats):
+        scores = list(bias)
+        for f in feats:
+            row = weights.get(f)
+            if row is not None:
+                for i, w in enumerate(row):
+                    scores[i] += w
+        best = max(range(len(scores)), key=scores.__getitem__)
+        top = scores[best]
+        second = max((v for i, v in enumerate(scores) if i != best), default=top)
+        return classes[best], top - second
+
     @classmethod
     def load(cls, path: str) -> "AspectClassifier":
-        with open(path, "r", encoding="utf-8") as fh:
+        opener = gzip.open if path.endswith(".gz") else open
+        with opener(path, "rt", encoding="utf-8") as fh:
             return cls(json.load(fh))
 
     @staticmethod
@@ -115,6 +171,13 @@ class AspectClassifier:
     def classify(self, text: str) -> tuple[str, str, float]:
         """-> (aspect, sentiment, margin). aspect may be NONE, which means "this fragment does not
         discuss any tracked aspect" — a verdict the keyword regex was structurally unable to give."""
+        if self.kind == "linear":
+            feats = featurize(text)
+            if not feats:
+                return NONE_LABEL, "neutral", 0.0
+            aspect, margin = self._linear_argmax(*self._lin["aspect"], feats)
+            sentiment, _ = self._linear_argmax(*self._lin["sentiment"], feats)
+            return aspect, sentiment, margin
         uni = features(text, use_bigrams=False)
         if not uni:
             return NONE_LABEL, "neutral", 0.0
@@ -131,8 +194,12 @@ def load_default(data_dir: str) -> "AspectClassifier | None":
     """Model lives next to the ETL code, not in the data dir: it is versioned with the code that
     produced it. Returns None when absent so the caller can fall back to keyword behaviour rather
     than fail the whole nightly build."""
-    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), MODEL_FILENAME)
-    for candidate in (here, os.path.join(data_dir, MODEL_FILENAME)):
-        if os.path.exists(candidate):
-            return AspectClassifier.load(candidate)
+    root = os.path.dirname(os.path.abspath(__file__))
+    # .gz first, then the uncompressed name, so a hand-dropped plain JSON still works.
+    names = (MODEL_FILENAME, MODEL_FILENAME.removesuffix(".gz"))
+    for base in (root, data_dir):
+        for name in names:
+            candidate = os.path.join(base, name)
+            if base and os.path.exists(candidate):
+                return AspectClassifier.load(candidate)
     return None
