@@ -23,6 +23,8 @@ from pathlib import Path
 
 import duckdb
 
+import aspect_classifier
+
 # --------------------------------------------------------------------------------------
 # Tunable constants (single source of truth for the ETL). Mirrored where relevant in
 # api/app/benchmarks.py — keep the two in sync if you change scoring.
@@ -1433,6 +1435,33 @@ def _get_analyzer():
     return _ANALYZER
 
 
+def _stream_vader_and_classify(con: duckdb.DuckDBPyConnection, select_sql: str, insert_sql: str,
+                               clf) -> int:
+    """Same streaming contract as _stream_vader_scores, but each window is ALSO passed through the
+    aspect classifier, so one pass over the corpus produces both the VADER compound (which still
+    feeds the numeric text_* columns) and the classifier's verdict on what the fragment is really
+    about. Scoring both here rather than in a second pass matters: the window text is the
+    expensive thing to produce, and it is already in hand."""
+    analyzer = _get_analyzer()
+    read = con.cursor()
+    read.execute(select_sql)
+    n = 0
+    while True:
+        batch = read.fetchmany(SENTIMENT_SCORE_BATCH)
+        if not batch:
+            break
+        rows = []
+        for row in batch:
+            text = row[-1] or ""
+            compound = float(analyzer.polarity_scores(text)["compound"])
+            clf_aspect, clf_sent, margin = clf.classify(text)
+            rows.append((*row[:-1], compound, clf_aspect, clf_sent, float(margin)))
+        con.executemany(insert_sql, rows)
+        n += len(rows)
+    read.close()
+    return n
+
+
 def _stream_vader_scores(con: duckdb.DuckDBPyConnection, select_sql: str, insert_sql: str) -> int:
     """Score a text column with VADER in bounded, streamed batches — the shared engine behind
     both compute_aspect_sentiment (review text) and compute_press_sentiment (article text).
@@ -1550,6 +1579,18 @@ def _sentiment_cache_enabled() -> bool:
     return os.environ.get("PROSPECT_SENTIMENT_CACHE", "").strip().lower() not in ("off", "0")
 
 
+def _aspect_model_fingerprint() -> str:
+    """Size+mtime of the shipped classifier, folded into the sentiment config hash. Swapping the
+    model changes what a cached mention's clf_* verdict would be, so it must invalidate the cache
+    exactly like a lexicon edit does — otherwise a new model would silently serve old verdicts."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), aspect_classifier.MODEL_FILENAME)
+    try:
+        st = os.stat(path)
+        return f"{st.st_size}:{int(st.st_mtime)}"
+    except OSError:
+        return "absent"
+
+
 def _sentiment_config_hash() -> str:
     """Hash of every knob that can change what a cached score's VALUE would be: the aspect keyword
     lexicon, the gaming-domain VADER overrides applied in _get_analyzer(), the sentence/window
@@ -1564,6 +1605,7 @@ def _sentiment_config_hash() -> str:
     regardless of the cache, so a floor change is picked up automatically."""
     payload = "\n".join([
         f"version={SENTIMENT_CACHE_VERSION}",
+        f"aspect_model={_aspect_model_fingerprint()}",
         f"aspect_lexicon={ASPECT_LEXICON!r}",
         f"gaming_overrides={sorted(GAMING_LEXICON_OVERRIDES.items())!r}",
         f"sentence_chars={ASPECT_SENTENCE_CHARS!r}",
@@ -1585,7 +1627,11 @@ def _attach_sentiment_cache(con: duckdb.DuckDBPyConnection, data_dir: Path) -> P
     con.execute(f"ATTACH '{cache_path}' AS cache")
     con.execute(
         "CREATE TABLE IF NOT EXISTS cache.aspect_mention("
-        "recommendationid VARCHAR, aspect VARCHAR, compound DOUBLE)"
+        "recommendationid VARCHAR, aspect VARCHAR, compound DOUBLE, "
+        # clf_* are the classifier's verdict on the same window: which aspect the text is REALLY
+        # about (possibly NONE) and its praise/complaint/neutral read. `aspect` stays as the
+        # keyword arm that generated the candidate, so a model swap can be diffed against it.
+        "clf_aspect VARCHAR, clf_sentiment VARCHAR, clf_margin DOUBLE)"
     )
     con.execute(
         "CREATE TABLE IF NOT EXISTS cache.press_article(article_id BIGINT, compound DOUBLE)"
@@ -1612,6 +1658,23 @@ def _refresh_sentiment_cache(con: duckdb.DuckDBPyConnection) -> bool:
     con.execute("DELETE FROM cache.meta WHERE key = 'config_hash'")
     con.execute("INSERT INTO cache.meta VALUES ('config_hash', ?)", [current])
     return True
+
+
+_CLF = None
+
+
+def _get_classifier():
+    """One classifier per process, loaded lazily. A MISSING model is not fatal: the pipeline falls
+    back to the keyword aspect it always used, so a bad deploy degrades to the old behaviour
+    instead of failing the nightly build."""
+    global _CLF
+    if _CLF is None:
+        _CLF = aspect_classifier.load_default("")
+        if _CLF is None:
+            print("[etl] WARNING: aspect model not found — falling back to keyword aspects")
+        else:
+            print(f"[etl] aspect classifier loaded ({_CLF.n_train:,} training examples)")
+    return _CLF
 
 
 def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> int:
@@ -1663,15 +1726,45 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
         # Original, uncached path: score the WHOLE pool every run.
         con.execute("DROP TABLE IF EXISTS _sent_windows")
         con.execute(f"CREATE TABLE _sent_windows AS {_aspect_window_sql('_sent_pool')}")
+        clf = _get_classifier()
         con.execute(
-            "CREATE TEMP TABLE stg_aspect_mention_sentiment("
-            "appid INTEGER, recommendationid VARCHAR, aspect VARCHAR, compound DOUBLE)"
+            "CREATE TEMP TABLE _sent_raw("
+            "appid INTEGER, recommendationid VARCHAR, aspect VARCHAR, compound DOUBLE, "
+            "clf_aspect VARCHAR, clf_sentiment VARCHAR, clf_margin DOUBLE)"
         )
-        n_scored = _stream_vader_scores(
-            con,
-            "SELECT appid, recommendationid, aspect, window_text FROM _sent_windows",
-            "INSERT INTO stg_aspect_mention_sentiment VALUES (?, ?, ?, ?)",
+        if clf is not None:
+            n_scored = _stream_vader_and_classify(
+                con,
+                "SELECT appid, recommendationid, aspect, window_text FROM _sent_windows",
+                "INSERT INTO _sent_raw VALUES (?, ?, ?, ?, ?, ?, ?)",
+                clf,
+            )
+        else:
+            n_scored = _stream_vader_scores(
+                con,
+                "SELECT appid, recommendationid, aspect, window_text FROM _sent_windows",
+                "INSERT INTO _sent_raw (appid, recommendationid, aspect, compound) VALUES (?, ?, ?, ?)",
+            )
+        # Same NONE-drop + one-row-per-(review, aspect) rule as the cached branch — the two paths
+        # must produce identical tables or PROSPECT_SENTIMENT_CACHE=off would quietly mean
+        # "different numbers", which is worse than being slow.
+        con.execute(
+            """
+            CREATE TEMP TABLE stg_aspect_mention_sentiment AS
+            SELECT appid, recommendationid, aspect, compound FROM (
+                SELECT appid, recommendationid,
+                       COALESCE(clf_aspect, aspect) AS aspect, compound,
+                       row_number() OVER (
+                           PARTITION BY appid, recommendationid, COALESCE(clf_aspect, aspect)
+                           ORDER BY clf_margin DESC NULLS LAST
+                       ) AS rn
+                FROM _sent_raw
+                WHERE clf_aspect IS NULL OR clf_aspect <> 'NONE'
+            ) WHERE rn = 1
+            """
         )
+        n_scored = con.execute("SELECT COUNT(*) FROM stg_aspect_mention_sentiment").fetchone()[0]
+        con.execute("DROP TABLE IF EXISTS _sent_raw")
         con.execute("DROP TABLE IF EXISTS _sent_windows")
     else:
         _attach_sentiment_cache(con, data_dir)
@@ -1706,11 +1799,20 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             con.execute("DROP TABLE IF EXISTS _sent_windows")
             con.execute(f"CREATE TABLE _sent_windows AS {_aspect_window_sql('_sent_new')}")
 
-            n_new_mentions = _stream_vader_scores(
-                con,
-                "SELECT recommendationid, aspect, window_text FROM _sent_windows",
-                "INSERT INTO cache.aspect_mention VALUES (?, ?, ?)",
-            )
+            clf = _get_classifier()
+            if clf is not None:
+                n_new_mentions = _stream_vader_and_classify(
+                    con,
+                    "SELECT recommendationid, aspect, window_text FROM _sent_windows",
+                    "INSERT INTO cache.aspect_mention VALUES (?, ?, ?, ?, ?, ?)",
+                    clf,
+                )
+            else:
+                n_new_mentions = _stream_vader_scores(
+                    con,
+                    "SELECT recommendationid, aspect, window_text FROM _sent_windows",
+                    "INSERT INTO cache.aspect_mention (recommendationid, aspect, compound) VALUES (?, ?, ?)",
+                )
             con.execute("DROP TABLE IF EXISTS _sent_windows")
             con.execute("DROP TABLE IF EXISTS _sent_new")
 
@@ -1719,9 +1821,26 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             con.execute(
                 """
                 CREATE TEMP TABLE stg_aspect_mention_sentiment AS
-                SELECT p.appid, m.recommendationid, m.aspect, m.compound
-                FROM cache.aspect_mention m
-                JOIN _sent_pool p ON p.recommendationid = m.recommendationid
+                -- The keyword arm only nominated this window; the classifier decides what it is
+                -- ABOUT. Rows it reads as NONE are dropped outright — that class alone is 22% of
+                -- keyword matches, and the regex had no way to express it. Fall back to the
+                -- keyword aspect only when no verdict exists (model absent at scoring time).
+                -- QUALIFY keeps one row per (review, aspect): several keyword arms of the same
+                -- review routinely resolve to the same true aspect, and without this the winner
+                -- would be counted two or three times.
+                SELECT appid, recommendationid, aspect, compound FROM (
+                    SELECT p.appid,
+                           m.recommendationid,
+                           COALESCE(m.clf_aspect, m.aspect) AS aspect,
+                           m.compound,
+                           row_number() OVER (
+                               PARTITION BY p.appid, m.recommendationid, COALESCE(m.clf_aspect, m.aspect)
+                               ORDER BY m.clf_margin DESC NULLS LAST
+                           ) AS rn
+                    FROM cache.aspect_mention m
+                    JOIN _sent_pool p ON p.recommendationid = m.recommendationid
+                    WHERE m.clf_aspect IS NULL OR m.clf_aspect <> 'NONE'
+                ) WHERE rn = 1
                 """
             )
             n_scored = con.execute("SELECT COUNT(*) FROM stg_aspect_mention_sentiment").fetchone()[0]
