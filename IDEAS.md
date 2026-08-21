@@ -82,9 +82,13 @@ a five-line colour correction.
 
 ## What SteamDB has that Prospect could use
 
-SteamDB blocks automated fetching (403), so this is assembled from search results and prior
-knowledge rather than a page-by-page crawl — treat the feature list as accurate in outline, not
-audited.
+**Sourcing, stated plainly.** SteamDB serves a Cloudflare challenge to automated clients — a plain
+fetch AND a real headless browser both got 403 "Just a moment...". They are deliberately refusing
+automated access, so the SteamDB feature list below comes from search results and prior knowledge,
+NOT from reading their pages. Treat it as accurate in outline, not audited.
+
+What WAS verified in a browser is Steam's own public charts, which is where half of SteamDB's
+value originates anyway — and that turned up something better than a SteamDB clone (item 6).
 
 The filter applied throughout: **Prospect is not a SteamDB clone.** SteamDB answers "what is
 happening to game X right now". Prospect answers "what should I build, and when should I launch".
@@ -113,6 +117,24 @@ passes would surface something genuinely useful and, as far as I know, unserved:
 changed their tags or repositioned themselves, and what happened to their reviews afterwards*.
 That is a direct answer to "is this niche worth entering" — you can watch what repositioning did
 for someone else. Needs a small history table, not a new scrape.
+
+**6. Weekly top-seller rank, change, and weeks-on-chart.** VERIFIED IN BROWSER:
+`store.steampowered.com/charts/topselling/US` returns HTTP 200 and its table carries exactly four
+columns — **Rank · Price · Change · Weeks**. That is Valve's own published sales ranking, with
+week-over-week movement and, crucially, *how many weeks a title has held the chart*.
+
+This is the closest public proxy to sales that exists, and nothing in Prospect uses it. Two things
+it answers that our current data cannot:
+
+- *Staying power.* "Weeks on chart" separates a launch spike from a game that kept selling. Our
+  revenue estimate is lifetime and static; this is the shape of it over time.
+- *A sales signal independent of reviews.* Every revenue number in Prospect is derived from review
+  counts through Boxleiter. A ranking Valve publishes from actual sales is a genuinely independent
+  check — where the two disagree, the Boxleiter multiplier for that genre is probably wrong, which
+  is worth knowing on its own.
+
+Regional charts exist per country, so it also gives a read on which markets a niche sells in —
+something no other source here carries.
 
 ### Needs a clock started (history accrues forward only)
 
