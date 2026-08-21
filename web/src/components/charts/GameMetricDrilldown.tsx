@@ -222,7 +222,7 @@ function GrowthPanels({
               }}
             />
             <Area
-              type="monotone"
+              type="linear"
               dataKey="cumulative"
               stroke={color}
               strokeWidth={1.5}
@@ -459,7 +459,7 @@ function LivePlayersDrilldown({
                 {/* Measured days only — unmeasured days simply aren't in the data, so the
                     line spans the real samples without fabricating zeros between them. */}
                 <Line
-                  type="monotone"
+                  type="linear"
                   dataKey="players"
                   stroke={CSS_VAR.demand}
                   strokeWidth={1.5}
@@ -500,7 +500,7 @@ function LivePlayersDrilldown({
                     monitoring, not zero players, so the line honestly breaks there instead of
                     interpolating across it. */}
                 <Line
-                  type="monotone"
+                  type="linear"
                   dataKey="ccu_avg"
                   stroke={CSS_VAR.demand}
                   strokeWidth={1.5}
@@ -624,7 +624,7 @@ function LivePlayersDrilldown({
                   secondary (peak) paper-alpha dashed "4 3" — CSS_VAR.competition already
                   carries the recession, so no extra strokeOpacity is needed on top of it. */}
               <Line
-                type="monotone"
+                type="linear"
                 dataKey="peak_players"
                 stroke={CSS_VAR.competition}
                 strokeWidth={1.5}
@@ -632,7 +632,7 @@ function LivePlayersDrilldown({
                 dot={false}
                 connectNulls
               />
-              <Line type="monotone" dataKey="avg_players" stroke={CSS_VAR.demand} strokeWidth={1.5} dot={false} />
+              <Line type="linear" dataKey="avg_players" stroke={CSS_VAR.demand} strokeWidth={1.5} dot={false} />
             </LineChart>
           </ResponsiveContainer>
           <p className="mt-1 text-[11px] italic text-ink-muted">

@@ -93,7 +93,7 @@ export function SaturationTrend({ points }: { points: TrendPoint[] }) {
               }}
             />
             <Line
-              type="monotone"
+              type="linear"
               dataKey={hasP90 ? "p90_rev" : "median_rev"}
               stroke={CSS_VAR.demand}
               strokeWidth={1.5}

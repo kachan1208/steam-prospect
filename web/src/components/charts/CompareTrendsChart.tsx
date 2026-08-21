@@ -133,7 +133,7 @@ export function CompareTrendsChart({ ids, names }: { ids: number[]; names: Map<n
           {chartIds.map((id, i) => (
             <Line
               key={id}
-              type="monotone"
+              type="linear"
               dataKey={`g${id}`}
               stroke={compareSeriesColor(i)}
               strokeWidth={1.5}
