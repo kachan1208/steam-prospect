@@ -87,13 +87,13 @@ export function TagAutocomplete({ onSelect }: { onSelect: (tag: string) => void 
         onFocus={() => setOpen(true)}
         onKeyDown={onKeyDown}
         placeholder="Add tag filter…"
-        className="w-44 rounded-md border border-chartborder bg-page px-2.5 py-1.5 text-xs text-ink-primary outline-none placeholder:text-ink-muted focus:border-brand"
+        className="w-44 border border-chartborder bg-page px-2.5 py-1.5 text-xs text-ink-primary outline-none placeholder:text-ink-muted focus:border-brand"
       />
       {open && items.length > 0 && (
         <ul
           id="tag-suggest-listbox"
           role="listbox"
-          className="absolute left-0 top-full z-40 mt-1 max-h-64 w-64 overflow-y-auto rounded-md border border-chartborder bg-surface py-1 shadow-md"
+          className="absolute left-0 top-full z-40 mt-1 max-h-64 w-64 overflow-y-auto border border-chartborder bg-surface py-1 shadow-md"
         >
           {items.map((s, i) => (
             <li
