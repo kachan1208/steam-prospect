@@ -50,22 +50,27 @@ export function StatTile({
       onKeyDown={onKeyDown}
       title={help}
       className={clsx(
-        "rounded-card border bg-surface p-4 transition-colors",
+        "rounded-none border bg-surface p-4 transition-colors",
         active ? "border-brand bg-brand-tint" : "border-chartborder",
         interactive && !active && "cursor-pointer hover:border-brand-hover hover:bg-page",
         className,
       )}
     >
-      <div className="text-xs text-ink-muted">
+      <div className="kicker text-[10px] text-ink-muted">
         {label}
         {help && (
-          <span aria-hidden className="ml-1 cursor-help text-[10px] text-ink-muted/70">
+          <span aria-hidden className="ml-1 cursor-help text-[10px] normal-case tracking-normal text-ink-muted/70">
             ⓘ
           </span>
         )}
       </div>
-      <div className={clsx("mt-1 text-2xl font-semibold text-ink-primary", valueClassName)}>{value}</div>
-      {sub && <div className="mt-1 text-xs text-ink-secondary">{sub}</div>}
+      <div
+        className={clsx("mt-1 text-[28px] font-semibold leading-none text-ink-primary", valueClassName)}
+        style={{ fontFamily: '"Barlow Condensed", "Barlow", system-ui, sans-serif' }}
+      >
+        {value}
+      </div>
+      {sub && <div className="mt-1.5 text-xs text-ink-secondary">{sub}</div>}
     </div>
   );
 }

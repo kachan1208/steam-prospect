@@ -225,7 +225,7 @@ function GrowthPanels({
               type="monotone"
               dataKey="cumulative"
               stroke={color}
-              strokeWidth={2}
+              strokeWidth={1.5}
               fill={color}
               fillOpacity={0.14}
               dot={{ r: 3, fill: color, strokeWidth: 0 }}
@@ -462,7 +462,7 @@ function LivePlayersDrilldown({
                   type="monotone"
                   dataKey="players"
                   stroke={CSS_VAR.demand}
-                  strokeWidth={2}
+                  strokeWidth={1.5}
                   dot={dailyPoints.length <= 45 ? { r: 2.5, fill: CSS_VAR.demand, strokeWidth: 0 } : false}
                 />
               </LineChart>
@@ -503,7 +503,7 @@ function LivePlayersDrilldown({
                   type="monotone"
                   dataKey="ccu_avg"
                   stroke={CSS_VAR.demand}
-                  strokeWidth={2}
+                  strokeWidth={1.5}
                   dot={{ r: 3, fill: CSS_VAR.demand, strokeWidth: 0 }}
                 />
               </LineChart>
@@ -565,9 +565,11 @@ function LivePlayersDrilldown({
           <p className="mt-2 text-xs text-ink-secondary">
             7-day average {fmtCompact(summary.players_7d_avg)} players
             {trendPct != null && (
-              <span className={trendPct >= 0 ? "text-verdict-good" : "text-verdict-serious"}>
+              // Trend verdict language (design handoff): ▲/▼ + signed %, mono steel —
+              // up reads accent-300, down/flat recedes to muted paper. Never red/green.
+              <span style={{ color: trendPct >= 0 ? "var(--verdict-up)" : "var(--verdict-flat)" }}>
                 {" "}
-                ({trendPct >= 0 ? "+" : ""}
+                ({trendPct >= 0 ? "▲ +" : "▼ "}
                 {trendPct.toFixed(1)}% vs prior 7d)
               </span>
             )}
@@ -618,8 +620,19 @@ function LivePlayersDrilldown({
                   );
                 }}
               />
-              <Line type="monotone" dataKey="peak_players" stroke={CSS_VAR.competition} strokeWidth={1} dot={false} strokeOpacity={0.6} connectNulls />
-              <Line type="monotone" dataKey="avg_players" stroke={CSS_VAR.demand} strokeWidth={2} dot={false} />
+              {/* Two-series trend language (design handoff): primary (avg) accent-300 solid,
+                  secondary (peak) paper-alpha dashed "4 3" — CSS_VAR.competition already
+                  carries the recession, so no extra strokeOpacity is needed on top of it. */}
+              <Line
+                type="monotone"
+                dataKey="peak_players"
+                stroke={CSS_VAR.competition}
+                strokeWidth={1.5}
+                strokeDasharray="4 3"
+                dot={false}
+                connectNulls
+              />
+              <Line type="monotone" dataKey="avg_players" stroke={CSS_VAR.demand} strokeWidth={1.5} dot={false} />
             </LineChart>
           </ResponsiveContainer>
           <p className="mt-1 text-[11px] italic text-ink-muted">

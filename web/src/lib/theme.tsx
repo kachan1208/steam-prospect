@@ -1,8 +1,8 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 export type Theme = "light" | "dark";
-export type AccentId = "indigo" | "blue" | "slate" | "violet" | "teal" | "emerald";
-export type PresetId = "soft" | "flat" | "rounded";
+export type AccentId = "industry" | "indigo" | "blue" | "slate" | "violet" | "teal" | "emerald";
+export type PresetId = "industry" | "soft" | "flat" | "rounded";
 
 interface AccentVars {
   brand: string;
@@ -20,6 +20,16 @@ interface AccentDef {
 
 /** Accent = the color axis (drives --brand*). Each carries an explicit light + dark set. */
 export const ACCENTS: AccentDef[] = [
+  {
+    // The designed accent. On dark it is accent-300 — a LIGHT steel blue — so its
+    // foreground is the ground colour, not white. Same runtime-override trap as the
+    // preset radii: an accent writes --brand on load, so index.css alone cannot hold this.
+    id: "industry",
+    name: "Industry",
+    swatch: "#5980a6",
+    light: { brand: "#5980a6", hover: "#416180", tint: "color-mix(in srgb, #5980a6 12%, transparent)", fg: "#f2f2f3" },
+    dark: { brand: "#b5d9fd", hover: "#94bce3", tint: "color-mix(in srgb, #b5d9fd 14%, transparent)", fg: "#1d2d3d" },
+  },
   {
     id: "blue",
     name: "Blue",
@@ -108,6 +118,28 @@ const NONE = { xs: "none", sm: "none", md: "none", lg: "none" };
  * with any accent. `soft` reproduces the current look, so it's a safe default. */
 export const PRESETS: PresetDef[] = [
   {
+    // The designed identity (design_handoff_prospect_dark_ui): square corners, no
+    // elevation, steel-blue ground, hairline frames. FIRST in the list because it is the
+    // default — and because a preset applies its radii at runtime, index.css alone cannot
+    // hold radius 0: any other preset silently puts the rounded corners back.
+    id: "industry",
+    name: "Industry",
+    light: {
+      page: "#f2f2f3", surface2: "#f5f5f8",
+      border: "color-mix(in srgb, #1d1f20 16%, transparent)",
+      borderStrong: "color-mix(in srgb, #1d1f20 32%, transparent)",
+      radiusCard: "0px", radiusControl: "0px",
+      shadowXs: NONE.xs, shadowSm: NONE.sm, shadowMd: NONE.md, shadowLg: NONE.lg,
+    },
+    dark: {
+      page: "#1d2d3d", surface2: "color-mix(in srgb, #f2f2f3 6%, #1d2d3d)",
+      border: "color-mix(in srgb, #f2f2f3 22%, transparent)",
+      borderStrong: "color-mix(in srgb, #f2f2f3 35%, transparent)",
+      radiusCard: "0px", radiusControl: "0px",
+      shadowXs: NONE.xs, shadowSm: NONE.sm, shadowMd: NONE.md, shadowLg: NONE.lg,
+    },
+  },
+  {
     id: "soft",
     name: "Soft",
     light: {
@@ -154,14 +186,16 @@ export const PRESETS: PresetDef[] = [
 const THEME_KEY = "prospect-theme-2";
 const ACCENT_KEY = "prospect-accent";
 const PRESET_KEY = "prospect-preset";
-const DEFAULT_ACCENT: AccentId = "blue";
-const DEFAULT_PRESET: PresetId = "soft";
+const DEFAULT_ACCENT: AccentId = "industry";
+// The designed identity is the product's look now, not an option users must find.
+const DEFAULT_PRESET: PresetId = "industry";
 
 function initialTheme(): Theme {
   if (typeof window === "undefined") return "light";
   const stored = window.localStorage.getItem(THEME_KEY);
   if (stored === "light" || stored === "dark") return stored;
-  return "light";
+  // Dark is the designed mode — the handoff draws every screen on the steel ground.
+  return "dark";
 }
 function initialAccent(): AccentId {
   if (typeof window === "undefined") return DEFAULT_ACCENT;

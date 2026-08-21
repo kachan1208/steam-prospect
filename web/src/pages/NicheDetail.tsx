@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import clsx from "clsx";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
@@ -9,10 +9,8 @@ import {
   type BucketSelection,
   type DistributionBucket,
 } from "../components/charts/NicheDistribution";
-import { OpportunityBars } from "../components/charts/OpportunityBars";
 import { SaturationTrend } from "../components/charts/SaturationTrend";
 import { TooltipPanel } from "../components/charts/TooltipPanel";
-import { Badge } from "../components/ui/Badge";
 import { Card } from "../components/ui/Card";
 import { BulletMeter } from "../components/ui/Meter";
 import { StatTile } from "../components/ui/StatTile";
@@ -33,12 +31,19 @@ import {
   type NichePlayersPoint,
   type NichePressPoint,
   type NicheRow,
+  type TrendPoint,
   type Window,
 } from "../lib/api";
 import { fmtCompact, fmtInt, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtSigned, fmtUsd, titleCase } from "../lib/format";
 import { heatDomain, heatStyle } from "../lib/heat";
 import { CSS_VAR } from "../lib/palette";
 import { useDetailView } from "../lib/viewMode";
+import { nicheCombinedPath } from "./NicheCombined";
+
+/** The condensed stack the foundation applies to h1–h6 and .kicker (index.css) — used inline
+ * for KPI/panel numerals that aren't semantically headings, so they still read as the
+ * blueprint identity's display type. */
+const CONDENSED = '"Barlow Condensed", "Barlow", system-ui, sans-serif';
 
 /**
  * The niche deep-dive PAGE — the twin of /games/:appid, replacing the old right-hand
@@ -335,6 +340,38 @@ const TABS = [
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
 
+/** One cell of the KPI strip: condensed uppercase label -> 38px condensed value -> footnote,
+ * matching §4b exactly. Not StatTile — that component's rounded tile doesn't carry this
+ * grid's "gap colour IS the rule" layout or the 38px numeral, so this stays page-local.
+ * Exported so NicheCombined's KPI row can reuse the same blueprint grid language. */
+export function KpiCell({
+  label,
+  value,
+  footnote,
+  valueClassName,
+}: {
+  label: string;
+  value: ReactNode;
+  footnote?: ReactNode;
+  valueClassName?: string;
+}) {
+  return (
+    <div className="bg-page px-5 py-4">
+      <div className="kicker text-[11px] text-ink-primary/55">{label}</div>
+      {/* Only one text-color utility ever applies: two same-specificity color classes race on
+          Tailwind's generated-CSS order, not className string order, so the default has to be
+          the FALLBACK (via ??), not a base class the override tries to beat. */}
+      <div
+        className={clsx("mt-1 truncate leading-none", valueClassName ?? "text-ink-primary")}
+        style={{ fontFamily: CONDENSED, fontWeight: 600, fontSize: 38 }}
+      >
+        {value}
+      </div>
+      {footnote && <div className="mt-1.5 truncate text-[11px] text-ink-primary/55">{footnote}</div>}
+    </div>
+  );
+}
+
 /** Sortable header for the games table — same click-to-sort/arrow affordance as the Niche
  * Finder's SortLabel, scaled down to this table's type ramp. */
 function GameSortLabel({
@@ -379,6 +416,9 @@ export default function NicheDetail() {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const [view, setView] = useDetailView();
+  // Local-only: Watchlist alerts (mockup 4f) have no backend yet, so this just gives the
+  // button honest click feedback for the visit rather than pretending to persist anything.
+  const [watchlisted, setWatchlisted] = useState(false);
 
   const dimension = DIMENSIONS.includes(dimensionParam as Dimension) ? (dimensionParam as Dimension) : null;
   // React Router has already decoded the segment (and restored an escaped "/"), so this is
@@ -523,6 +563,12 @@ export default function NicheDetail() {
 
   const totalPlayersNow = players?.total_players_now ?? activeVariant.total_players_now;
   const playersTrend = players?.players_trend_7d_pct ?? activeVariant.players_trend_7d_pct;
+  // Neither /niches/.../games nor representative_games carries a live-CCU column — the only
+  // per-game "now" figure this page has is the players endpoint's own top-5-by-share list.
+  // Join it in by appid so the top-games table can show it where it overlaps, "—" elsewhere,
+  // rather than inventing a number the API never served.
+  const liveNow = new Map((players?.distribution?.top_games ?? []).map((g) => [g.appid, g.players]));
+  const hasP90Trend = detail.saturation_trend.some((p) => p.p90_rev != null);
 
   const gamesUnavailable =
     gamesQ.isError ||
@@ -546,119 +592,123 @@ export default function NicheDetail() {
 
   return (
     <div className="flex flex-col gap-4">
-      <Link to="/niches" className="text-xs text-ink-muted hover:text-ink-primary">
-        ← Back to the Niche Finder
-      </Link>
-
-      <Card>
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <h1 className="text-lg font-semibold text-ink-primary">{nicheKey}</h1>
-                <Badge color={CSS_VAR.demand}>{titleCase(dimension)}</Badge>
-                {tier && (
-                  <span title={TIER_HINT[tier] ?? tier}>
-                    <Badge>{tier}</Badge>
-                  </span>
-                )}
-              </div>
-              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-ink-muted">
-                <span>{variantLabel(activeVariant)}</span>
-                <span aria-hidden="true">·</span>
-                <span>{fmtInt(activeVariant.n_games)} scored games</span>
-                <span aria-hidden="true">·</span>
-                {/* n_recent is always the trailing-24m release count, on BOTH cuts — label it
-                    as such rather than "in the window", which would be wrong on all-time. */}
-                <span>{fmtInt(activeVariant.n_recent)} released in the last 24m</span>
-                {tier && (
-                  <>
-                    <span aria-hidden="true">·</span>
-                    <span>{TIER_HINT[tier] ?? tier}</span>
-                  </>
-                )}
-              </div>
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="min-w-0">
+            <div className="text-[11px] text-ink-primary/55">
+              <Link to="/niches" className="hover:text-ink-primary">
+                Niches
+              </Link>
+              {" / "}
+              {titleCase(dimension)} /
             </div>
+            <h1 className="mt-0.5 truncate text-[28px] text-ink-primary sm:text-[32px]">{nicheKey}</h1>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {tier && (
+                <span
+                  title={TIER_HINT[tier] ?? tier}
+                  className="border border-brand px-2 py-0.5 text-[11px] font-medium text-brand"
+                >
+                  {tier} tier
+                </span>
+              )}
+              <span className="border border-ink-primary/30 px-2 py-0.5 text-[11px] font-medium text-ink-primary/65">
+                window {cut.win === "all" ? "all-time" : "24m"}
+              </span>
+              <span className="border border-ink-primary/30 px-2 py-0.5 text-[11px] font-medium text-ink-primary/65">
+                {cut.min_reviews > 0 ? `≥${cut.min_reviews} reviews` : "all games"}
+              </span>
+            </div>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-3">
             <a
               href={csvUrl}
               onClick={() => trackEvent("niche_export_csv")}
-              className="shrink-0 rounded-md border border-chartborder px-2.5 py-1 text-[11px] font-medium text-ink-secondary transition-colors hover:border-brand hover:text-brand"
+              className="text-[11px] font-medium text-ink-muted transition-colors hover:text-ink-primary"
             >
               Export CSV
             </a>
+            <button
+              type="button"
+              onClick={() => setWatchlisted((w) => !w)}
+              title="Watchlist alerts aren't wired up to a backend yet — this only remembers the click for this visit."
+              className="border border-ink-primary/35 px-3 py-1.5 text-xs font-medium text-ink-primary transition-colors hover:bg-ink-primary/[0.08]"
+            >
+              {watchlisted ? "✓ Watchlisted" : "+ Watchlist"}
+            </button>
+            <Link
+              to={nicheCombinedPath([{ dimension, key: nicheKey }], "intersect", cut)}
+              className="bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg transition-colors hover:bg-brand-hover"
+            >
+              Combine with…
+            </Link>
           </div>
-
-          {/* The materialized cuts, as links: the cut is URL state, so a shared link opens on
-              the same population the sender was reading. */}
-          {detail.variants.length > 1 && (
-            <div className="flex flex-wrap gap-1.5">
-              {detail.variants.map((v) => {
-                const active = v.window === cut.win && v.min_reviews === cut.min_reviews;
-                return (
-                  <button
-                    key={`${v.window}-${v.min_reviews}`}
-                    type="button"
-                    aria-pressed={active}
-                    onClick={() => setParam({ win: v.window, min_reviews: v.min_reviews, offset: null })}
-                    className={clsx(
-                      "rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors",
-                      active
-                        ? "border-brand bg-page text-ink-primary"
-                        : "border-chartborder text-ink-muted hover:text-ink-secondary",
-                    )}
-                  >
-                    {variantLabel(v)}
-                  </button>
-                );
-              })}
-            </div>
-          )}
         </div>
-      </Card>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-        <StatTile
-          help="The niche's overall entry score (0–100, higher = better) after the decline gate — the gate shrinks the score when the market is shrinking or newcomers underearn."
+        {/* The materialized cuts, as links: the cut is URL state, so a shared link opens on
+            the same population the sender was reading. */}
+        {detail.variants.length > 1 && (
+          <div className="flex flex-wrap gap-1.5">
+            {detail.variants.map((v) => {
+              const active = v.window === cut.win && v.min_reviews === cut.min_reviews;
+              return (
+                <button
+                  key={`${v.window}-${v.min_reviews}`}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => setParam({ win: v.window, min_reviews: v.min_reviews, offset: null })}
+                  className={clsx(
+                    "border px-2.5 py-1 text-[11px] font-medium transition-colors",
+                    active ? "border-brand text-brand" : "border-ink-primary/20 text-ink-muted hover:text-ink-secondary",
+                  )}
+                >
+                  {variantLabel(v)}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* 4 equal cells, 1px gaps that read as the rules (gap = paper-20% background showing
+          through, cells = the ground colour) — the exact §4b KPI-strip construction. */}
+      <div className="grid grid-cols-1 gap-px border border-ink-primary/20 bg-ink-primary/20 sm:grid-cols-2 lg:grid-cols-4">
+        <KpiCell
           label="Opportunity v2"
           valueClassName="text-brand"
           value={fmtCompact(activeVariant.opportunity_v2)}
-          sub={
+          footnote={
             activeVariant.decline_gate != null
               ? `after decline gate ×${activeVariant.decline_gate.toFixed(2)}`
               : undefined
           }
         />
-        <StatTile
-          help="Half the niche's games earn less than this (estimated lifetime gross). This is what a REALISTIC entry should expect — not what the hits earn."
-          label="Typical game earns"
-          value={fmtUsd(activeVariant.median_rev)}
-          sub="median, lifetime gross"
-        />
-        <StatTile
-          help="Only 1 game in 10 earns more than this — what the niche's successful titles make. Boxleiter-style estimates (reviews × owners-per-review × price), not reported sales."
-          label="A hit earns"
-          value={activeVariant.p90_rev != null ? fmtUsd(activeVariant.p90_rev) : "—"}
-          sub="top 10% outcome"
-        />
-        <StatTile
-          help="Summed current concurrent players across the niche's scored games — dominated by its biggest games. Nightly ~21–22:00 UTC point samples, not daily peaks."
-          label="Playing right now"
-          value={totalPlayersNow != null ? fmtCompact(totalPlayersNow) : "—"}
-          sub={
+        {/* §4b specs "Demand / 90d" as a review-velocity trend, which no endpoint here serves
+            (the mart only carries a 7-day, same-panel PLAYERS trend) — used the real trend
+            instead of inventing a 90-day review-velocity number. */}
+        <KpiCell
+          label="Players / 7d"
+          valueClassName={playersTrend != null && playersTrend >= 0 ? "text-brand" : undefined}
+          value={
             playersTrend != null
-              ? `${playersTrend >= 0 ? "+" : ""}${playersTrend.toFixed(1)}% vs prior 7d`
-              : undefined
+              ? `${playersTrend >= 0 ? "▲" : "▼"} ${playersTrend >= 0 ? "+" : ""}${playersTrend.toFixed(1)}%`
+              : "—"
           }
+          footnote={totalPlayersNow != null ? `${fmtCompact(totalPlayersNow)} playing now` : "same-panel vs prior 7d"}
         />
-        <StatTile
-          help="Games released into this niche in the last 24 months (the same count on either cut). The sub-line is the release pipeline year-over-year — shrinking releases mean decline even when competition looks invitingly low."
-          label="Recent releases"
-          value={fmtInt(activeVariant.n_recent)}
-          sub={
+        <KpiCell
+          label="P90 revenue"
+          value={activeVariant.p90_rev != null ? fmtUsd(activeVariant.p90_rev) : "—"}
+          footnote={`median ${fmtUsd(activeVariant.median_rev)} · ${fmtInt(activeVariant.n_games)} scored games`}
+        />
+        <KpiCell
+          label="Saturation YoY"
+          value={
             activeVariant.saturation_yoy != null
-              ? `${fmtSigned(activeVariant.saturation_yoy, 0)} releases vs prior year`
-              : undefined
+              ? `${activeVariant.saturation_yoy >= 0 ? "▲" : "▼"} ${fmtSigned(activeVariant.saturation_yoy, 0)}`
+              : "—"
           }
+          footnote={`${fmtInt(activeVariant.n_recent)} released in the last 24m`}
         />
       </div>
 
@@ -673,9 +723,9 @@ export default function NicheDetail() {
               aria-pressed={tab === t.key}
               onClick={() => setParam({ tab: t.key === "overview" ? null : t.key })}
               className={clsx(
-                "rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+                "border px-3 py-1.5 text-xs font-medium transition-colors",
                 tab === t.key
-                  ? "border-brand bg-page text-ink-primary"
+                  ? "border-brand bg-brand-tint text-ink-primary"
                   : "border-chartborder text-ink-muted hover:text-ink-secondary",
               )}
             >
@@ -721,85 +771,213 @@ export default function NicheDetail() {
             )}
           </Card>
 
-          <Card
-            title="Opportunity — demand vs. competition vs. quality gap"
-            subtitle="Each input is a 0–100 percentile against every other niche in this cut; the headline score weighs them and then applies the decline gate."
-          >
-            <div className="flex flex-wrap items-center gap-6 rounded-card border border-chartborder p-3">
-              <OpportunityBars
-                demand={activeVariant.demand}
-                competition={activeVariant.competition}
-                quality_gap={activeVariant.quality_gap}
-              />
-              <div className="grid flex-1 grid-cols-3 gap-2 text-center">
-                <div>
-                  <div
-                    className="text-[10px] text-ink-muted"
-                    title="0.4×pctile(median revenue) + 0.3×pctile(median owners) + 0.3×pctile(recent review velocity), ranked 0–100 vs other niches. Higher = hotter market."
-                  >
-                    Demand
-                  </div>
-                  <div className="tabular text-sm font-semibold text-ink-primary">{fmtCompact(activeVariant.demand)}</div>
-                </div>
-                <div>
-                  <div
-                    className="text-[10px] text-ink-muted"
-                    title="0.6×pctile(recent releases) + 0.4×pctile(winner concentration), ranked 0–100. HIGHER IS WORSE for a new entrant."
-                  >
-                    Competition
-                  </div>
-                  <div className="tabular text-sm font-semibold text-ink-primary">
-                    {fmtCompact(activeVariant.competition)}
-                  </div>
-                </div>
-                <div>
-                  <div
-                    className="text-[10px] text-ink-muted"
-                    title="pctile(share of incumbents that are weak — under 80% positive OR under 50 reviews), ranked 0–100. Higher = easier to out-execute."
-                  >
-                    Quality gap
-                  </div>
-                  <div className="tabular text-sm font-semibold text-ink-primary">
-                    {fmtCompact(activeVariant.quality_gap)}
-                  </div>
+          <div className="flex flex-col gap-[22px] lg:flex-row lg:items-stretch">
+            {/* Demand vs pipeline. §4b specs a 24-month MONTHLY two-series chart (review
+                velocity vs releases); no endpoint here carries that granularity — the only
+                real releases-vs-demand series in the mart is yearly (saturation_trend, already
+                the "Saturation trend" card below). Reused that same real data/hook in the new
+                two-line visual language rather than a monthly figure the API doesn't serve. */}
+            <div className="blueprint relative flex-[1.6] border-ink-primary/25 px-6 py-5">
+              <i className="bp-corner" />
+              <div className="mb-3.5 flex items-baseline gap-4">
+                <h3 className="text-ink-primary">Demand vs. pipeline, by year</h3>
+                <div className="ml-auto flex gap-4 text-[11px] text-ink-primary/60">
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="inline-block h-[2px] w-3.5 bg-brand" aria-hidden />
+                    {hasP90Trend ? "P90 revenue" : "Median revenue"}
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="inline-block h-[2px] w-3.5 bg-ink-primary/45" aria-hidden />
+                    Releases
+                  </span>
                 </div>
               </div>
-              <div className="shrink-0 border-l border-chartborder pl-6 text-center">
-                <div className="text-[10px] text-ink-muted">Opportunity v2</div>
-                <div className="tabular text-xl font-bold text-ink-primary">
-                  {fmtCompact(activeVariant.opportunity_v2)}
+              {detail.saturation_trend.length === 0 ? (
+                <div className="flex h-[180px] items-center justify-center text-xs text-ink-muted">
+                  No yearly trend for this niche.
                 </div>
-                <div
-                  className="text-[10px] text-ink-muted"
-                  title="opportunity × decline gate — the gate shrinks with pipeline decline or underearning entrants"
-                >
-                  raw {fmtCompact(activeVariant.opportunity)} × gate{" "}
-                  {activeVariant.decline_gate != null ? activeVariant.decline_gate.toFixed(2) : "—"}
-                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height={180}>
+                  <LineChart data={detail.saturation_trend} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                    <CartesianGrid stroke="var(--gridline)" vertical={false} />
+                    <XAxis
+                      dataKey="year"
+                      tick={{ fontSize: 10 }}
+                      tickLine={false}
+                      axisLine={{ stroke: "var(--baseline)" }}
+                    />
+                    <YAxis yAxisId="revenue" hide domain={["auto", "auto"]} />
+                    <YAxis yAxisId="releases" orientation="right" hide domain={[0, "auto"]} />
+                    <Tooltip
+                      cursor={{ stroke: "var(--baseline)" }}
+                      content={({ active, payload, label }) => {
+                        if (!active || !payload || payload.length === 0) return null;
+                        const p = payload[0].payload as TrendPoint;
+                        return (
+                          <TooltipPanel
+                            title={String(label)}
+                            rows={[
+                              {
+                                label: hasP90Trend ? "P90 revenue" : "Median revenue",
+                                value: fmtUsd(hasP90Trend ? (p.p90_rev ?? null) : p.median_rev),
+                                color: "var(--brand)",
+                              },
+                              { label: "Releases", value: fmtCompact(p.n_releases) },
+                            ]}
+                          />
+                        );
+                      }}
+                    />
+                    <Line
+                      yAxisId="revenue"
+                      type="monotone"
+                      dataKey={hasP90Trend ? "p90_rev" : "median_rev"}
+                      stroke="var(--brand)"
+                      strokeWidth={1.5}
+                      dot={false}
+                      connectNulls
+                    />
+                    <Line
+                      yAxisId="releases"
+                      type="monotone"
+                      dataKey="n_releases"
+                      stroke="color-mix(in srgb, var(--text-primary) 45%, transparent)"
+                      strokeWidth={1.5}
+                      strokeDasharray="4 3"
+                      dot={false}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+
+            {/* Why the headline score — three weighted 4px bars, same formula the old card
+                computed, restyled to §4b's exact bar+footnote layout. */}
+            <div className="blueprint relative flex flex-[1] flex-col gap-3.5 border-ink-primary/25 px-6 py-5">
+              <i className="bp-corner" />
+              <h3 className="text-ink-primary">Why {fmtCompact(activeVariant.opportunity_v2)}</h3>
+              <div className="flex flex-col gap-2.5 text-[13px]">
+                {(
+                  [
+                    { label: "Demand", value: activeVariant.demand, weight: 0.5, positive: true },
+                    { label: "Competition", value: activeVariant.competition, weight: -0.35, positive: false },
+                    { label: "Quality gap", value: activeVariant.quality_gap, weight: 0.3, positive: true },
+                  ] as const
+                ).map((b) => {
+                  const pct = b.value == null ? 0 : Math.max(0, Math.min(100, b.value));
+                  return (
+                    <div key={b.label}>
+                      <div className="mb-1 flex text-ink-primary">
+                        <span>{b.label}</span>
+                        <span className={clsx("tabular ml-auto", b.positive ? "text-brand" : "text-ink-primary/70")}>
+                          {b.value != null ? b.value.toFixed(0) : "—"} × {b.weight >= 0 ? b.weight.toFixed(2) : `−${Math.abs(b.weight).toFixed(2)}`}
+                        </span>
+                      </div>
+                      <div className="h-1 bg-ink-primary/15">
+                        <div
+                          className={clsx("h-full", b.positive ? "bg-brand" : "bg-ink-primary/50")}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="tabular mt-auto border-t border-ink-primary/20 pt-3 text-[12px] text-ink-primary/65">
+                {activeVariant.demand != null && activeVariant.competition != null && activeVariant.quality_gap != null ? (
+                  <>
+                    0.5×{activeVariant.demand.toFixed(1)} − 0.35×{activeVariant.competition.toFixed(1)} + 0.3×
+                    {activeVariant.quality_gap.toFixed(1)} ={" "}
+                    {(
+                      0.5 * activeVariant.demand -
+                      0.35 * activeVariant.competition +
+                      0.3 * activeVariant.quality_gap
+                    ).toFixed(1)}
+                    {0.5 * activeVariant.demand - 0.35 * activeVariant.competition + 0.3 * activeVariant.quality_gap < 0
+                      ? " → floored to 0"
+                      : ""}
+                    {activeVariant.decline_gate != null ? ` → × decline gate ${activeVariant.decline_gate.toFixed(2)}` : ""}
+                    {" → percentile "}
+                    <strong className="text-brand">{fmtCompact(activeVariant.opportunity_v2)}</strong>
+                    {activeVariant.beatable_share != null && (
+                      <>. {fmtPct(activeVariant.beatable_share)} of incumbents are thin or weak — beatable.</>
+                    )}
+                  </>
+                ) : (
+                  "Not enough scored inputs to break down the formula for this cut."
+                )}
               </div>
             </div>
-            {activeVariant.demand != null && activeVariant.competition != null && activeVariant.quality_gap != null && (
-              <p className="mt-1.5 tabular text-[11px] text-ink-muted">
-                = 0.5×{activeVariant.demand.toFixed(1)} − 0.35×{activeVariant.competition.toFixed(1)} + 0.3×
-                {activeVariant.quality_gap.toFixed(1)} ={" "}
-                {(
-                  0.5 * activeVariant.demand -
-                  0.35 * activeVariant.competition +
-                  0.3 * activeVariant.quality_gap
-                ).toFixed(1)}
-                {0.5 * activeVariant.demand - 0.35 * activeVariant.competition + 0.3 * activeVariant.quality_gap < 0
-                  ? " → floored to 0"
-                  : ""}
-                {activeVariant.decline_gate != null ? ` → × gate ${activeVariant.decline_gate.toFixed(2)}` : ""}
-              </p>
+          </div>
+
+          {/* Top games in the niche — the same representative_games the degraded games-tab
+              fallback already uses (so no new fetch), previewed here and linked through to the
+              full, sortable/filterable list on the Games & distribution tab. */}
+          <div className="blueprint relative border-ink-primary/25">
+            <i className="bp-corner" />
+            <div className="flex items-baseline gap-2 px-5 pb-2.5 pt-3.5">
+              <h3 className="text-ink-primary">Top games in the niche</h3>
+              <button
+                type="button"
+                onClick={() => setParam({ tab: "games" })}
+                className="ml-auto text-xs font-medium text-brand hover:underline"
+              >
+                All {fmtInt(activeVariant.n_games)} →
+              </button>
+            </div>
+            {detail.representative_games.length === 0 ? (
+              <div className="border-t border-ink-primary/20 px-5 py-6 text-center text-xs text-ink-muted">
+                No representative games for this cut yet.
+              </div>
+            ) : (
+              // Six fixed columns don't reflow at phone widths — scroll horizontally instead
+              // of squeezing them (same convention as the Games & distribution tab's table).
+              <div className="overflow-x-auto">
+                <div className="min-w-[640px]">
+                  <div className="grid grid-cols-[60px_2fr_1fr_1fr_1fr_1fr] items-center gap-3.5 border-t border-ink-primary/20 px-5 py-2.5">
+                    <span />
+                    <span className="kicker text-[11px] text-ink-primary/55">Game</span>
+                    <span className="kicker text-[11px] text-ink-primary/55">Released</span>
+                    <span className="kicker text-[11px] text-ink-primary/55">Est. revenue</span>
+                    <span className="kicker text-[11px] text-ink-primary/55">Reviews</span>
+                    <span className="kicker text-[11px] text-ink-primary/55">Players now</span>
+                  </div>
+                  {detail.representative_games.slice(0, 5).map((g) => {
+                    const live = liveNow.get(g.appid);
+                    return (
+                      <Link
+                        key={g.appid}
+                        to={`/games/${g.appid}`}
+                        className="grid grid-cols-[60px_2fr_1fr_1fr_1fr_1fr] items-center gap-3.5 border-t border-ink-primary/10 px-5 py-2.5 text-sm transition-colors hover:bg-ink-primary/[0.04]"
+                      >
+                        {g.header_image ? (
+                          <img src={g.header_image} alt="" className="h-[26px] w-full object-cover" loading="lazy" />
+                        ) : (
+                          <span
+                            aria-hidden
+                            className="h-[26px] w-full"
+                            style={{
+                              backgroundImage:
+                                "repeating-linear-gradient(45deg, color-mix(in srgb, var(--text-primary) 12%, transparent), color-mix(in srgb, var(--text-primary) 12%, transparent) 4px, transparent 4px, transparent 8px)",
+                            }}
+                          />
+                        )}
+                        <span className="truncate font-medium text-ink-primary">{g.name ?? `App ${g.appid}`}</span>
+                        <span className="tabular text-ink-primary/70">{g.release_year ?? "—"}</span>
+                        <span className="tabular text-ink-primary/70">
+                          {fmtRevenue(g.est_rev_reviews, g.price_initial === 0)}
+                        </span>
+                        <span className="tabular text-ink-primary/70">
+                          {fmtPct(g.positive_ratio)} · {fmtInt(g.total_reviews)}
+                        </span>
+                        <span className="tabular text-brand">{live != null ? fmtCompact(live) : "—"}</span>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </div>
             )}
-            {activeVariant.opportunity === 0 && (
-              <p className="mt-1.5 text-[11px] text-ink-muted">
-                Floored at 0: the score formula (0.5×demand − 0.35×competition + 0.3×quality gap) went negative — the
-                crowding penalty outweighs what the typical game here earns. A big audience doesn't make it a good entry.
-              </p>
-            )}
-          </Card>
+          </div>
 
           {/* The chart-heavy expert cards live under the Detailed toggle; Simple keeps the
               plain-language reads (header, stat tiles, flags, opportunity) only — same split

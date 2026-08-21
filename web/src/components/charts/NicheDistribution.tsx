@@ -195,13 +195,13 @@ const PLOT_INSET: CSSProperties = {
   bottom: MARGIN.bottom + X_AXIS_HEIGHT,
 };
 
-// One series (a count of games) on both charts, so both wear categorical slot 1 — the same
-// blue the niche revenue histogram already uses. Selection is deliberately NOT a hue change:
-// picked bands keep the full-strength fill while the rest drop to 0.35 opacity, sit under a
-// brand-tint column wash, and are underlined by an ink rail on the baseline (which is also
-// the only marker that can show an EMPTY bucket is selected — it has no bar to restyle).
-// aria-pressed + the header chip carry the same state to assistive tech. No new hex values
-// are introduced, so the palette validator's existing sign-off in lib/palette.ts still holds.
+// One series (a count of games) on both charts, so both wear CSS_VAR.demand — mono
+// accent-300 per the design handoff (lib/palette.ts), the same "good" tone every other
+// single-series demand-family chart in the app uses. Selection is deliberately NOT a hue
+// change: picked bands keep the full-strength fill while the rest drop to 0.35 opacity, sit
+// under a brand-tint column wash, and are underlined by an ink rail on the baseline (which
+// is also the only marker that can show an EMPTY bucket is selected — it has no bar to
+// restyle). aria-pressed + the header chip carry the same state to assistive tech.
 const BAR_COLOR = CSS_VAR.demand;
 const DIM_OPACITY = 0.35;
 

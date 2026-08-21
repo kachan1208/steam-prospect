@@ -1,4 +1,6 @@
 import { Link, NavLink, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
+import Radar from "./pages/Radar";
+import Watchlist from "./pages/Watchlist";
 import clsx from "clsx";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
@@ -21,23 +23,33 @@ import Docs from "./pages/Docs";
 import Terms from "./pages/Terms";
 import Privacy from "./pages/Privacy";
 
-// Six destinations plus one CTA, deliberately. The old 14-page dashboard was trimmed to
-// the surfaces that earn their pixels: Niches (the finder came BACK in 2026-08 — the v2
-// growth-gated scores, live-player columns and the deep-dive drawer made it chart-heavy
-// again), Games (teardown charts), Studios (developer/publisher track records — added by
-// user request: publisher scouting needs a discoverable entry point, not a link buried in
-// game credits), Timing (the seasonality heatmap), Data (the freshness receipt), and Docs
-// in the footer. "MCP" is the primary CTA, not a peer nav item. Everything else the old
-// nav carried — benchmarks, the estimator, marketing pitch lists — is still fully
-// answerable, but through the MCP against current.duckdb rather than a page of its own.
-// 24x24 stroke icons, same family as the Logo mark. grid/calendar/history are the
-// originals from the sidebar era; "building" is new for Studios.
+// Six destinations plus one CTA, deliberately: Radar (the opportunity feed, new home —
+// mockup 3a), Niches (the finder came BACK in 2026-08 — the v2 growth-gated scores,
+// live-player columns and the deep-dive drawer made it chart-heavy again), Games
+// (teardown charts), Studios (developer/publisher track records — added by user request:
+// publisher scouting needs a discoverable entry point, not a link buried in game credits),
+// Timing (the seasonality heatmap), and Watchlist (saved niches/games + alert rules —
+// mockup 4f). Data log and Docs moved to the footer — a freshness receipt and reference
+// material aren't destinations you navigate to, and the footer already carries the
+// data-health readout next to them. "MCP" is the primary CTA, not a peer nav item.
+// Everything else the old nav carried — benchmarks, the estimator, marketing pitch lists —
+// is still fully answerable, but through the MCP against current.duckdb rather than a page
+// of its own.
+// 24x24 stroke icons, same family as the Logo mark. grid/calendar are the originals from
+// the sidebar era; building/pulse/eye are new for Studios/Radar/Watchlist.
 const ICONS: Record<string, ReactNode> = {
   target: (
     <>
       <circle cx="12" cy="12" r="8.5" />
       <circle cx="12" cy="12" r="4.75" />
       <circle cx="12" cy="12" r="1.25" fill="currentColor" stroke="none" />
+    </>
+  ),
+  pulse: <path d="M3 12.5h4.2l1.8-5.5 3.4 11 2.4-8.5 1.6 3h4.6" />,
+  eye: (
+    <>
+      <path d="M2.5 12S6 5.75 12 5.75 21.5 12 21.5 12 18 18.25 12 18.25 2.5 12 2.5 12Z" />
+      <circle cx="12" cy="12" r="2.6" />
     </>
   ),
   grid: (
@@ -64,13 +76,6 @@ const ICONS: Record<string, ReactNode> = {
       <line x1="16" y1="3" x2="16" y2="6.5" />
     </>
   ),
-  history: (
-    <>
-      <path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />
-      <path d="M3 4.5V9h4.5" />
-      <path d="M12 7.8v4.4l2.9 1.7" />
-    </>
-  ),
 };
 
 function NavIcon({ name }: { name: string }) {
@@ -90,20 +95,23 @@ function NavIcon({ name }: { name: string }) {
 }
 
 const NAV_ITEMS: { to: string; label: string; icon: string }[] = [
+  { to: "/radar", label: "Radar", icon: "pulse" },
   { to: "/niches", label: "Niches", icon: "target" },
   { to: "/games", label: "Games", icon: "grid" },
   { to: "/studios", label: "Studios", icon: "building" },
-  { to: "/timing", label: "Launch & Timing", icon: "calendar" },
-  { to: "/datalog", label: "Data log", icon: "history" },
+  { to: "/timing", label: "Timing", icon: "calendar" },
+  { to: "/watchlist", label: "Watchlist", icon: "eye" },
 ];
 
+/** Concentric-circles target mark (ICONS.target) in accent-300 + the PROSPECT wordmark in
+ * Barlow Condensed, uppercase — the mockups' brand lockup. No filled swatch behind the
+ * mark; blueprint identity draws the logo the same way it draws everything else: hairline
+ * strokes on the ground, not a filled chip. */
 function Logo() {
   return (
-    <div className="flex h-8 w-8 items-center justify-center rounded-[9px] bg-brand shadow-sm">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.4" strokeLinecap="round">
-        <path d="M5 19v-6M12 19V6M19 19v-9" />
-      </svg>
-    </div>
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="shrink-0 text-brand">
+      {ICONS.target}
+    </svg>
   );
 }
 
@@ -113,7 +121,7 @@ function ThemeToggle() {
     <button
       type="button"
       onClick={toggle}
-      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-surface2 hover:text-ink-primary"
+      className="flex h-7 w-7 shrink-0 items-center justify-center text-ink-muted transition-colors hover:bg-surface2 hover:text-ink-primary"
       aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
       title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
     >
@@ -135,16 +143,17 @@ function ThemePresetPicker() {
   const { preset, setPreset } = useTheme();
   return (
     <div className="flex items-center justify-between gap-3">
-      <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">Theme</span>
-      <div className="flex items-center gap-0.5 rounded-lg bg-surface2 p-0.5">
-        {PRESETS.map((pz) => (
+      <span className="kicker text-[10px] text-ink-muted">Theme</span>
+      <div className="inline-flex border border-chartborder">
+        {PRESETS.map((pz, i) => (
           <button
             key={pz.id}
             type="button"
             onClick={() => setPreset(pz.id)}
             className={clsx(
-              "rounded-md px-2 py-1 text-[11px] font-medium transition-all",
-              preset === pz.id ? "bg-surface text-ink-primary shadow-xs" : "text-ink-muted hover:text-ink-secondary",
+              "px-2 py-1 text-[11px] font-medium transition-colors",
+              i > 0 && "border-l border-chartborder",
+              preset === pz.id ? "bg-brand text-brand-fg" : "text-ink-muted hover:text-ink-secondary",
             )}
           >
             {pz.name}
@@ -216,7 +225,7 @@ function AppearancePopover() {
         aria-expanded={open}
         title="Appearance — theme preset and accent color"
         className={clsx(
-          "flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium transition-colors",
+          "flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors",
           open ? "bg-surface2 text-ink-primary" : "text-ink-muted hover:bg-surface2 hover:text-ink-primary",
         )}
       >
@@ -229,7 +238,7 @@ function AppearancePopover() {
         <span className="hidden sm:inline">Appearance</span>
       </button>
       {open && (
-        <div className="absolute right-0 top-full z-40 mt-2 flex w-60 flex-col gap-2.5 rounded-card border border-chartborder bg-surface p-3 shadow-md">
+        <div className="absolute right-0 top-full z-40 mt-2 flex w-60 flex-col gap-2.5 border border-chartborder bg-surface p-3 shadow-md">
           <ThemePresetPicker />
           <AccentPicker />
         </div>
@@ -240,27 +249,28 @@ function AppearancePopover() {
 
 function Header() {
   return (
-    <header className="sticky top-0 z-30 border-b border-chartborder bg-surface">
-      <div className="mx-auto flex w-full max-w-[1320px] flex-wrap items-center gap-x-5 px-6 lg:px-10">
-        <Link to="/games" className="flex h-14 items-center gap-2.5">
+    <header className="sticky top-0 z-30 border-b border-chartborder bg-page">
+      <div className="mx-auto flex w-full max-w-[1320px] flex-wrap items-center gap-x-6 px-6 lg:px-10">
+        <Link to="/radar" className="flex h-14 items-center gap-2.5">
           <Logo />
-          <span className="text-sm font-semibold tracking-tight text-ink-primary">Prospect</span>
-          <span className="hidden text-[11px] text-ink-muted lg:inline">Steam market intel</span>
+          <span className="kicker text-[15px] text-ink-primary">Prospect</span>
         </Link>
 
-        {/* Below sm the nav wraps to its own row under the logo (order-last + w-full);
-            no hamburger/drawer — four links fit fine as a second row. */}
-        <nav className="order-last flex w-full items-center gap-1 pb-2.5 sm:order-none sm:w-auto sm:pb-0">
+        {/* Below sm the nav wraps to its own block under the logo (order-last + w-full);
+            no hamburger/drawer — six links wrap onto a second line at narrow widths rather
+            than overflowing (flex-wrap; four links fit one row, six need two on a phone).
+            Plain text links, no pill background — active carries the accent, inactive
+            recedes to muted paper, matching the mockups' `.nav a` rule exactly (color
+            only, never a fill). */}
+        <nav className="order-last flex w-full flex-wrap items-center gap-x-4 gap-y-1 pb-2.5 sm:order-none sm:w-auto sm:flex-nowrap sm:gap-x-5 sm:pb-0">
           {NAV_ITEMS.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
               className={({ isActive }) =>
                 clsx(
-                  "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors",
-                  isActive
-                    ? "bg-brand-tint text-brand"
-                    : "text-ink-secondary hover:bg-surface2 hover:text-ink-primary",
+                  "flex items-center gap-1.5 py-1.5 text-[13px] font-medium transition-colors",
+                  isActive ? "text-brand" : "text-ink-secondary hover:text-ink-primary",
                 )
               }
             >
@@ -277,7 +287,7 @@ function Header() {
             to="/chat"
             className={({ isActive }) =>
               clsx(
-                "rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg shadow-xs transition-colors hover:bg-brand-hover",
+                "bg-brand px-3.5 py-1.5 text-xs font-semibold text-brand-fg transition-colors hover:bg-brand-hover",
                 isActive && "ring-2 ring-brand/30",
               )
             }
@@ -313,10 +323,14 @@ function HealthRow() {
 
 function Footer() {
   return (
-    <footer className="border-t border-chartborder bg-surface">
+    <footer className="border-t border-chartborder bg-page">
       <div className="mx-auto flex w-full max-w-[1320px] flex-wrap items-center justify-between gap-x-6 gap-y-1.5 px-6 py-3 lg:px-10">
         <HealthRow />
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-ink-muted">
+          <Link to="/datalog" className="hover:text-ink-secondary">
+            Data log
+          </Link>
+          <span aria-hidden="true">·</span>
           <Link to="/docs" className="hover:text-ink-secondary">
             Docs
           </Link>
@@ -368,13 +382,16 @@ export default function App() {
     <>
       <RouteTracker />
       <Routes>
-        <Route path="/" element={<Navigate to="/games" replace />} />
+        {/* Radar is the new index (mockup 3a); /games keeps its own route. */}
+        <Route path="/" element={<Navigate to="/radar" replace />} />
         <Route path="/terms" element={<Terms />} />
         <Route path="/privacy" element={<Privacy />} />
         <Route element={<AppShell />}>
           {/* Niche Finder — resurrected 2026-08 (removed in the four-surfaces trim) now
               that it earns pixels again: v2-gated scores, live-player columns and the
               per-niche deep-dive drawer are chart-heavy, not a table a chat can beat. */}
+          <Route path="/radar" element={<Radar />} />
+          <Route path="/watchlist" element={<Watchlist />} />
           <Route path="/niches" element={<NicheFinder />} />
           {/* Multi-niche overlap — a game carries many tags, so it lives in many niches;
               the selected niches ride the URL (?niches=tag:Roguelike&niches=…&mode=) so a

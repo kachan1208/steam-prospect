@@ -7,10 +7,11 @@ import { TooltipPanel } from "./TooltipPanel";
 
 /**
  * Two single-axis small multiples (same dual-axis-avoidance move as SaturationTrend)
- * rather than one combo chart: a trailing 3-month positive-rating trajectory (blue line
- * — "how is it landing, and is that changing") and reviews per month (aqua bars — "how
- * much signal / velocity"). Different scales (a narrow %-band vs. a count), so each
- * gets its own axis instead of a second y-scale on one plot.
+ * rather than one combo chart: a trailing 3-month positive-rating trajectory
+ * (CSS_VAR.demand, mono accent-300 line — "how is it landing, and is that changing")
+ * and reviews per month (CSS_VAR.competition, mono paper bars — "how much signal /
+ * velocity"). Different scales (a narrow %-band vs. a count), so each gets its own axis
+ * instead of a second y-scale on one plot.
  *
  * DATA SOURCE (2026-08-18): Steam's own full-history monthly review counts (the store
  * review graph — uncapped), never the text sample; a capped/recency-biased sample lies
@@ -84,7 +85,7 @@ export function ReviewsTimelineChart({ points }: { points: ReviewTimelinePoint[]
               type="monotone"
               dataKey="trailing_positive_share"
               stroke={CSS_VAR.demand}
-              strokeWidth={2}
+              strokeWidth={1.5}
               dot={false}
               connectNulls
             />

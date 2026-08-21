@@ -2,40 +2,64 @@
 @tailwind components;
 @tailwind utilities;
 
+@import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;700&family=Barlow+Condensed:wght@400;600&display=swap');
+
 /* ---------------------------------------------------------------------------------
- * Prospect palette. The categorical --series-* and --status-* hues are validated with
- * the dataviz skill's palette validator (both modes) and are UNCHANGED. The surface /
- * ink / border / shadow / brand tokens define a clean, light-first SaaS aesthetic
- * (Stripe/Notion): white cards on a soft cool-gray page, hairline borders, soft
- * elevation, one confident blue accent. Default theme is light; `.dark` on <html> is
- * toggled by lib/theme.tsx.
+ * Prospect palette — the "Industry" blueprint identity (design_handoff_prospect_dark_ui).
+ * Steel-blue ground, paper-white type, hairline frames with "+" registration marks,
+ * condensed headings, square corners. DARK IS THE DESIGNED MODE; `:root` carries the
+ * design system's own light ramp so the light theme stays coherent rather than orphaned.
+ *
+ * --series-* and --status-* keep their values: they were validated by the dataviz
+ * palette validator, and the handoff specifies mono steel only where it speaks (trend
+ * verdicts, aspect bars) — eight categorical series cannot be told apart in one hue.
+ * They were validated against the OLD surfaces, though, so contrast has to be re-checked
+ * against this ground before they are trusted as marks here.
  * ------------------------------------------------------------------------------- */
 :root {
-  /* surfaces */
-  --surface-1: #ffffff;   /* cards, header/footer chrome, popovers */
-  --surface-2: #f4f6f8;   /* subtle raised / hover / inset fills */
-  --page-plane: #f6f7f9;  /* app background */
+  /* surfaces — Industry light ramp */
+  --surface-1: #e9e9ea;   /* cards, header/footer chrome, popovers */
+  --surface-2: #f5f5f8;   /* subtle raised / hover / inset fills */
+  --page-plane: #f2f2f3;  /* app background */
 
   /* ink */
-  --text-primary: #1a1f36;
-  --text-secondary: #4b5566;
-  --text-muted: #8a94a6;
+  --text-primary: #1d1f20;
+  --text-secondary: color-mix(in srgb, #1d1f20 78%, transparent);
+  --text-muted: color-mix(in srgb, #1d1f20 55%, transparent);
 
-  /* lines & borders */
-  --gridline: #edeff2;
-  --baseline: #d5d9e0;
-  --border: #e6e8ec;
-  --border-strong: #d7dbe2;
+  /* lines & borders — hairlines, not fills */
+  --gridline: color-mix(in srgb, #1d1f20 12%, transparent);
+  --baseline: color-mix(in srgb, #1d1f20 30%, transparent);
+  --border: color-mix(in srgb, #1d1f20 16%, transparent);
+  --border-strong: color-mix(in srgb, #1d1f20 32%, transparent);
 
-  /* radius (switched at runtime by the Theme preset) */
-  --radius-card: 12px;
-  --radius-control: 10px;
+  /* radius — blueprint grammar is square. Kept as tokens because lib/theme.tsx
+     switches them at runtime per preset; the Industry preset pins both to 0. */
+  --radius-card: 0px;
+  --radius-control: 0px;
 
   /* brand accent — UI actions: primary buttons, active nav, links, focus */
-  --brand: #2563eb;
-  --brand-hover: #1d4ed8;
-  --brand-tint: #eef3ff;
-  --brand-fg: #ffffff;
+  --brand: #5980a6;
+  --brand-hover: #416180;
+  --brand-tint: color-mix(in srgb, #5980a6 12%, transparent);
+  --brand-fg: #f2f2f3;
+
+  /* Industry accent ramp — shared by both modes, referenced by charts and chrome. */
+  --accent-100: #eef6ff;
+  --accent-200: #d6ebff;
+  --accent-300: #b5d9fd;
+  --accent-400: #94bce3;
+  --accent-500: #749dc4;
+  --accent-600: #597ea3;
+  --accent-700: #416180;
+  --accent-800: #2c455d;
+  --accent-900: #1d2d3d;
+
+  /* Trend verdicts are mono BY DESIGN — "▲/▼ + signed %, never red/green". Up carries
+     the accent, down/flat recedes to muted paper. Direction is read from the glyph and
+     the sign, not from hue. */
+  --verdict-up: #5980a6;
+  --verdict-flat: color-mix(in srgb, #1d1f20 55%, transparent);
 
   /* elevation */
   --shadow-xs: 0 1px 2px rgba(16, 24, 40, 0.05);
@@ -85,21 +109,32 @@
 }
 
 .dark {
-  --surface-1: #17181c;
-  --surface-2: #202228;
-  --page-plane: #0e0f11;
-  --text-primary: #f2f3f5;
-  --text-secondary: #b3b8c2;
-  --text-muted: #7c8493;
-  --gridline: #26282e;
-  --baseline: #363941;
-  --border: #26282e;
-  --border-strong: #33363e;
+  /* Steel-blue ground. Cards are frames, not fills: surface-1 lifts by ~2% so nested
+     panels stay separable, and the hairline border does the real work. */
+  --page-plane: #1d2d3d;
+  --surface-1: color-mix(in srgb, #f2f2f3 2%, #1d2d3d);
+  --surface-2: color-mix(in srgb, #f2f2f3 6%, #1d2d3d);
 
-  --brand: #4f83f0;
-  --brand-hover: #6b98f3;
-  --brand-tint: rgba(79, 131, 240, 0.14);
-  --brand-fg: #ffffff;
+  /* Paper on steel, at the alphas the handoff specifies. */
+  --text-primary: #f2f2f3;
+  --text-secondary: color-mix(in srgb, #f2f2f3 68%, transparent);
+  --text-muted: color-mix(in srgb, #f2f2f3 55%, transparent);
+
+  --gridline: color-mix(in srgb, #f2f2f3 13%, transparent);
+  --baseline: color-mix(in srgb, #f2f2f3 30%, transparent);
+  --border: color-mix(in srgb, #f2f2f3 22%, transparent);
+  --border-strong: color-mix(in srgb, #f2f2f3 35%, transparent);
+
+  /* accent-300 is the primary on dark, and it is LIGHT — so text on top of it is the
+     ground colour, not white. Getting this backwards is the classic way to ship an
+     unreadable primary button. */
+  --brand: #b5d9fd;
+  --brand-hover: #94bce3;
+  --brand-tint: color-mix(in srgb, #b5d9fd 14%, transparent);
+  --brand-fg: #1d2d3d;
+
+  --verdict-up: #b5d9fd;
+  --verdict-flat: color-mix(in srgb, #f2f2f3 55%, transparent);
 
   --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
@@ -137,12 +172,59 @@ body,
 body {
   background-color: var(--page-plane);
   color: var(--text-primary);
-  font-family: "Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family: "Barlow", system-ui, -apple-system, "Segoe UI", sans-serif;
   font-variant-numeric: proportional-nums;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
 }
+
+/* Headings are condensed; body is not. Applied by element so every existing <h1>–<h6>
+   inherits it without touching 40 components. */
+h1, h2, h3, h4, h5, h6 {
+  font-family: "Barlow Condensed", "Barlow", system-ui, sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.12;
+}
+
+/* Kickers / column headers: condensed, uppercase, wide-tracked. */
+.kicker {
+  font-family: "Barlow Condensed", "Barlow", system-ui, sans-serif;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+/* ---------------------------------------------------------------------------------
+ * The blueprint frame — THE signature of this identity: a hairline box with four "+"
+ * registration marks overhanging the corners, like a drawing sheet.
+ *
+ * The marks are drawn OUTSIDE the box, so any wrapper that clips (overflow:hidden)
+ * eats them. Keep .blueprint on an element that does not clip, and give the clipping
+ * to a child.
+ * ------------------------------------------------------------------------------- */
+.blueprint {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 0;
+}
+.blueprint::before,
+.blueprint::after,
+.blueprint > .bp-corner::before,
+.blueprint > .bp-corner::after {
+  content: "";
+  position: absolute;
+  background: color-mix(in srgb, var(--text-primary) 55%, transparent);
+  pointer-events: none;
+}
+/* Top-left and bottom-right marks come free from the frame itself; the other two need
+   one empty <i class="bp-corner"> child. Each mark is a 11×11 "+": a 1px cross. */
+.blueprint::before { left: -1px; top: -6px; width: 1px; height: 11px; }
+.blueprint::after  { right: -1px; bottom: -6px; width: 1px; height: 11px; }
+.blueprint > .bp-corner { position: absolute; inset: 0; pointer-events: none; }
+.blueprint > .bp-corner::before { right: -6px; top: -1px; width: 11px; height: 1px; }
+.blueprint > .bp-corner::after  { left: -6px; bottom: -1px; width: 11px; height: 1px; }
 
 /* Tabular figures only where columns must align vertically. */
 .tabular {

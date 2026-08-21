@@ -1,9 +1,10 @@
-/** A single-value meter: filled track (0-100 scale) against a neutral, recessive rail. */
+/** A single-value meter: filled track (0-100 scale) against a neutral, recessive rail.
+ * 4px, square-cornered — the D/C/Q bars from the Niche Finder table and "Why 87.4" panel. */
 export function Meter({ value, max = 100, color }: { value: number | null; max?: number; color: string }) {
   const pct = value === null ? 0 : Math.max(0, Math.min(100, (value / max) * 100));
   return (
-    <span className="block h-1.5 w-full overflow-hidden rounded-full bg-line-grid">
-      <span className="block h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: color }} />
+    <span className="block h-1 w-full overflow-hidden bg-line-grid">
+      <span className="block h-full" style={{ width: `${pct}%`, backgroundColor: color }} />
     </span>
   );
 }
@@ -32,11 +33,11 @@ export function BulletMeter({
         <span className="text-ink-secondary">{label}</span>
         <span className="tabular font-medium text-ink-primary">{valueLabel}</span>
       </div>
-      <div className="relative h-2.5 rounded-full bg-line-grid">
-        <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: color }} />
+      <div className="relative h-1.5 bg-line-grid">
+        <div className="h-full" style={{ width: `${pct}%`, backgroundColor: color }} />
         {benchPct !== undefined && (
           <div
-            className="absolute -top-[3px] h-[16px] w-[2px] bg-ink-primary"
+            className="absolute -top-[3px] h-[12px] w-[2px] bg-ink-primary"
             style={{ left: `calc(${benchPct}% - 1px)` }}
             title={benchmarkLabel}
           />

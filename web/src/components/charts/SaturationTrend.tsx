@@ -7,8 +7,9 @@ import { TooltipPanel } from "./TooltipPanel";
 
 /**
  * Saturation trend, split into two single-axis small multiples rather than one
- * dual-axis combo chart: releases/year (supply, aqua) and median revenue/year
- * (reward, blue). Each measure keeps its own scale and its own chart.
+ * dual-axis combo chart: releases/year (supply — CSS_VAR.competition, mono paper) and
+ * median revenue/year (reward — CSS_VAR.demand, mono accent-300). Each measure keeps
+ * its own scale and its own chart.
  */
 export function SaturationTrend({ points }: { points: TrendPoint[] }) {
   // p90_rev only exists on marts built after 2026-08-14 — fall back to the median line
@@ -95,7 +96,7 @@ export function SaturationTrend({ points }: { points: TrendPoint[] }) {
               type="monotone"
               dataKey={hasP90 ? "p90_rev" : "median_rev"}
               stroke={CSS_VAR.demand}
-              strokeWidth={2}
+              strokeWidth={1.5}
               dot={{ r: 4, fill: CSS_VAR.demand, strokeWidth: 2, stroke: "var(--surface-1)" }}
               connectNulls
             />

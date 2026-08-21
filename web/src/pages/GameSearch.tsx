@@ -1,14 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import clsx from "clsx";
 
-import { Card } from "../components/ui/Card";
 import { TagAutocomplete } from "../components/TagAutocomplete";
 import { useGameSearch, useGenres, type GameSearchRow, type GameSortKey } from "../lib/api";
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
-import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
-import { genreTintStyle, heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
+import { fmtCompact, fmtInt, fmtPct, fmtRevenue, fmtUsd } from "../lib/format";
 import { useDebounced } from "../lib/useDebounced";
 
 const LIMIT = 25;
@@ -28,6 +25,25 @@ const SORT_KEYS: readonly GameSortKey[] = [
   "positive_ratio", "est_rev_reviews", "rev_pct_in_genre", "reviews_pct_in_genre",
   "owners_pct_in_genre", "n_reviews_trailing_30d", "live_players", "metacritic_score",
 ] as const;
+
+// Friendly labels for the "sorted by …" control (mockup 4e's caption, made interactive).
+const SORT_LABELS: Record<GameSortKey, string> = {
+  name: "name",
+  release_year: "release year",
+  release_date: "release date",
+  price_initial: "price",
+  owners_mid: "owners",
+  total_reviews: "review count",
+  positive_ratio: "rating",
+  est_rev_reviews: "est. revenue",
+  rev_pct_in_genre: "revenue percentile",
+  reviews_pct_in_genre: "review percentile",
+  owners_pct_in_genre: "owner percentile",
+  n_reviews_trailing_30d: "review velocity (30d)",
+  live_players: "live players",
+  lifetime_months: "lifetime",
+  metacritic_score: "metacritic",
+};
 
 // ---- URL-backed filter state ---------------------------------------------------------------
 // The URL is the single source of truth for every committed filter, so a research view is
@@ -172,55 +188,36 @@ function hasAdvanced(f: Filters): boolean {
 
 // ---- small UI pieces -----------------------------------------------------------------------
 
-function SortLabel({
-  label,
-  col,
-  active,
-  order,
-  onSort,
-}: {
-  label: string;
-  col: GameSortKey;
-  active: boolean;
-  order: "asc" | "desc";
-  onSort: (col: GameSortKey) => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={() => onSort(col)}
-      title={`Sort by ${label}`}
-      className={clsx(
-        "group inline-flex items-center gap-1 font-medium",
-        active ? "text-ink-primary" : "text-ink-muted hover:text-ink-secondary",
-      )}
-    >
-      {label}
-      <span
-        aria-hidden
-        className={clsx("text-[10px] leading-none", active ? "opacity-100" : "opacity-0 group-hover:opacity-40")}
-      >
-        {active ? (order === "desc" ? "↓" : "↑") : "↕"}
-      </span>
-    </button>
-  );
-}
+// Condensed heading stack, matching the global h1–h6 / .kicker rule in index.css — applied
+// inline here because these are <span>s inside a result row, not heading elements.
+const HEADING_FONT = '"Barlow Condensed", "Barlow", system-ui, sans-serif';
 
-/** Format an ISO YYYY-MM-DD (fall back to the year, then em dash) without a UTC→local off-by-one. */
-function fmtReleaseDate(iso: string | null, year: number | null): string {
+// Capsule placeholder: 45°-diagonal paper-12% stripes (mockup 4e), for games with no
+// header_image on this mart.
+const placeholderStripeStyle: React.CSSProperties = {
+  backgroundImage:
+    "repeating-linear-gradient(45deg, color-mix(in srgb, var(--text-primary) 12%, transparent) 0 4px, transparent 4px 8px)",
+};
+
+/** Format an ISO YYYY-MM-DD (fall back to the year, then em dash) without a UTC→local off-by-one.
+ * Month+year only — the row caption has room for a short date, not the full one. */
+function fmtReleaseMonthYear(iso: string | null, year: number | null): string {
   if (iso) {
     const d = new Date(`${iso}T00:00:00`);
     if (!Number.isNaN(d.getTime())) {
-      return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+      return d.toLocaleDateString(undefined, { year: "numeric", month: "short" });
     }
   }
   return year != null ? String(year) : "—";
 }
 
 const inputCls =
-  "rounded-md border border-chartborder bg-page px-2.5 py-1.5 text-xs text-ink-primary outline-none placeholder:text-ink-muted focus:border-brand";
+  "border border-chartborder bg-page px-2.5 py-1.5 text-xs text-ink-primary outline-none placeholder:text-ink-muted focus:border-brand";
+const selectCls =
+  "border border-chartborder bg-page px-2 py-1.5 text-xs text-ink-primary outline-none focus:border-brand";
 
-/** Any / yes / no segmented control for the boolean-ish mart flags. */
+/** Any / yes / no segmented control for the boolean-ish mart flags — square-cornered, selected
+ * cell = accent fill + accent-fg text (the same segmented-control grammar as the Niche Finder). */
 function TriToggle({
   label,
   value,
@@ -242,16 +239,17 @@ function TriToggle({
   return (
     <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
       {label}
-      <span className="flex items-center gap-0.5 rounded-md bg-surface2 p-0.5">
-        {opts.map((o) => (
+      <span className="inline-flex border border-chartborder">
+        {opts.map((o, i) => (
           <button
             key={o.label}
             type="button"
             onClick={() => onChange(o.v)}
             aria-pressed={value === o.v}
             className={clsx(
-              "rounded px-1.5 py-0.5 text-[11px] font-medium transition-all",
-              value === o.v ? "bg-surface text-ink-primary shadow-xs" : "text-ink-muted hover:text-ink-secondary",
+              "px-2 py-1 text-[11px] font-medium transition-colors",
+              i > 0 && "border-l border-chartborder",
+              value === o.v ? "bg-brand text-brand-fg" : "text-ink-muted hover:text-ink-secondary",
             )}
           >
             {o.label}
@@ -262,17 +260,41 @@ function TriToggle({
   );
 }
 
+/** Active-filter chip — outline accent, square corners (mockup 4e's filter row). Every chip
+ * rendered here represents a filter that IS applied, so it always wears the "active" outline. */
 function FilterChip({ label, onClear }: { label: string; onClear: () => void }) {
   return (
     <button
       type="button"
       onClick={onClear}
       title="Remove filter"
-      className="group inline-flex items-center gap-1 rounded-full border border-brand/50 bg-page px-2 py-0.5 text-[11px] font-medium text-ink-primary hover:border-brand"
+      className="group inline-flex items-center gap-1 border border-brand px-2 py-0.5 text-[11px] font-medium text-ink-primary transition-colors hover:bg-brand-tint"
     >
       {label}
       <span aria-hidden className="text-ink-muted group-hover:text-ink-primary">✕</span>
     </button>
+  );
+}
+
+/** Lucide "search" glyph (hand-inlined — the codebase doesn't depend on lucide-react), 1.5
+ * stroke per the design system's icon rule. */
+function SearchIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <circle cx="11" cy="11" r="8" />
+      <path d="m21 21-4.3-4.3" />
+    </svg>
   );
 }
 
@@ -299,7 +321,7 @@ function CompareCell({ g }: { g: GameSearchRow }) {
             : "Add to compare list"
       }
       className={clsx(
-        "flex h-6 w-6 items-center justify-center rounded-md border transition-colors",
+        "flex h-6 w-6 shrink-0 items-center justify-center border transition-colors",
         inList
           ? "border-brand bg-brand-tint text-brand"
           : "border-chartborder text-ink-muted hover:border-brand hover:text-brand",
@@ -370,6 +392,8 @@ export default function GameSearch() {
   const setDraft = (key: keyof Drafts) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setDrafts((d) => ({ ...d, [key]: e.target.value }));
 
+  // Column-header sorting became a compact "sorted by …" control (mockup 4e has no header
+  // row) — same URL-backed sort/order state and the same toggle-on-reselect behavior.
   const toggleSort = (col: GameSortKey) => {
     if (filters.sort === col) {
       patchParams({ order: filters.order === "desc" ? "asc" : "desc" });
@@ -461,343 +485,150 @@ export default function GameSearch() {
     ["price", "min_positive", "min_metacritic", "min_revenue", "years", "self_pub", "indie"].includes(c.key),
   ).length;
 
-  // Per-column log-scale domains over the loaded page — the heat tints are relative to
-  // what's on screen (this result set), which is the comparison the researcher is making.
-  const heat = useMemo(() => {
-    const rows = data?.items ?? [];
-    return {
-      rev: heatDomain(rows, (g) => g.est_rev_reviews),
-      reviews: heatDomain(rows, (g) => g.total_reviews),
-      owners: heatDomain(rows, (g) => g.owners_mid),
-    };
-  }, [data]);
-
-  const columnHelper = useMemo(() => createColumnHelper<GameSearchRow>(), []);
-  const columns = useMemo(
-    () => [
-      columnHelper.accessor("name", {
-        header: () => (
-          <SortLabel label="Game" col="name" active={filters.sort === "name"} order={filters.order} onSort={toggleSort} />
-        ),
-        cell: (info) => {
-          const g = info.row.original;
-          return (
-            // A real link (not a navigate() button) so middle-click / cmd-click "open in
-            // new tab" works — opening several candidates in tabs IS the research workflow.
-            <Link
-              to={`/games/${g.appid}`}
-              onClick={(e) => e.stopPropagation()}
-              className="flex items-center gap-2 text-left"
-            >
-              {g.header_image && (
-                <img
-                  src={g.header_image}
-                  alt=""
-                  loading="lazy"
-                  className="h-9 w-16 shrink-0 rounded-sm object-cover"
-                />
-              )}
-              <span className="min-w-0">
-                <span className="block truncate font-medium text-ink-primary hover:text-brand hover:underline">
-                  {g.name ?? `App ${g.appid}`}
-                </span>
-                <span className="block truncate text-[11px] text-ink-muted">
-                  {g.primary_genre ?? "—"} · {g.release_year ?? "—"}
-                </span>
-              </span>
-            </Link>
-          );
-        },
-      }),
-      columnHelper.accessor("release_date", {
-        header: () => (
-          <SortLabel
-            label="Released"
-            col="release_date"
-            active={filters.sort === "release_date"}
-            order={filters.order}
-            onSort={toggleSort}
-          />
-        ),
-        cell: (info) => (
-          <span className="tabular whitespace-nowrap text-ink-secondary">
-            {fmtReleaseDate(info.getValue(), info.row.original.release_year)}
-          </span>
-        ),
-      }),
-      columnHelper.accessor("price_initial", {
-        header: () => (
-          <SortLabel
-            label="Price"
-            col="price_initial"
-            active={filters.sort === "price_initial"}
-            order={filters.order}
-            onSort={toggleSort}
-          />
-        ),
-        cell: (info) => <span className="tabular">{fmtPrice(info.getValue())}</span>,
-      }),
-      columnHelper.accessor("owners_mid", {
-        header: () => (
-          <SortLabel
-            label="Owners"
-            col="owners_mid"
-            active={filters.sort === "owners_mid"}
-            order={filters.order}
-            onSort={toggleSort}
-          />
-        ),
-        cell: (info) => (
-          <span className="tabular rounded px-1.5 py-0.5" style={heatStyle(info.getValue(), ...heat.owners)}>
-            {fmtCompact(info.getValue())}
-          </span>
-        ),
-      }),
-      columnHelper.accessor("live_players", {
-        header: () => (
-          <SortLabel
-            label="Live"
-            col="live_players"
-            active={filters.sort === "live_players"}
-            order={filters.order}
-            onSort={toggleSort}
-          />
-        ),
-        cell: (info) => {
-          const v = info.getValue();
-          return <span className="tabular">{v != null ? fmtCompact(v) : "—"}</span>;
-        },
-      }),
-      columnHelper.accessor("total_reviews", {
-        header: () => (
-          <SortLabel
-            label="Reviews"
-            col="total_reviews"
-            active={filters.sort === "total_reviews"}
-            order={filters.order}
-            onSort={toggleSort}
-          />
-        ),
-        cell: (info) => (
-          <span className="tabular rounded px-1.5 py-0.5" style={heatStyle(info.getValue(), ...heat.reviews)}>
-            {fmtInt(info.getValue())}
-          </span>
-        ),
-      }),
-      columnHelper.accessor("positive_ratio", {
-        header: () => (
-          <SortLabel
-            label="Positive"
-            col="positive_ratio"
-            active={filters.sort === "positive_ratio"}
-            order={filters.order}
-            onSort={toggleSort}
-          />
-        ),
-        cell: (info) => (
-          <span className={clsx("tabular", positiveRatioClass(info.getValue()))}>{fmtPct(info.getValue())}</span>
-        ),
-      }),
-      columnHelper.accessor("est_rev_reviews", {
-        header: () => (
-          <SortLabel
-            label="Est. revenue"
-            col="est_rev_reviews"
-            active={filters.sort === "est_rev_reviews"}
-            order={filters.order}
-            onSort={toggleSort}
-          />
-        ),
-        cell: (info) => (
-          <span
-            className="tabular rounded px-1.5 py-0.5 font-medium text-ink-primary"
-            style={heatStyle(info.getValue(), ...heat.rev)}
-          >
-            {fmtRevenue(info.getValue(), info.row.original.price_initial === 0)}
-          </span>
-        ),
-      }),
-      columnHelper.accessor("metacritic_score", {
-        header: () => (
-          <SortLabel
-            label="MC"
-            col="metacritic_score"
-            active={filters.sort === "metacritic_score"}
-            order={filters.order}
-            onSort={toggleSort}
-          />
-        ),
-        // "—" is the honest render: only ~2.6% of games have a linked Metacritic page, so a
-        // blank means "no critic score published", never "scored badly".
-        cell: (info) => {
-          const v = info.getValue();
-          return v == null ? (
-            <span className="text-ink-muted">—</span>
-          ) : (
-            <span className="tabular font-medium text-ink-primary">{v}</span>
-          );
-        },
-      }),
-      columnHelper.display({
-        id: "tags",
-        header: "Top tags",
-        cell: (info) => (
-          <div className="flex max-w-[260px] flex-wrap gap-1">
-            {info.row.original.top_tags.slice(0, 3).map((t) => (
-              <span
-                key={t}
-                className="rounded-full border px-1.5 py-0.5 text-[10px] text-ink-secondary"
-                style={genreTintStyle(t)}
-              >
-                {t}
-              </span>
-            ))}
-          </div>
-        ),
-      }),
-      columnHelper.display({
-        id: "compare",
-        header: () => <span title="Add games to the compare list">vs</span>,
-        cell: (info) => <CompareCell g={info.row.original} />,
-      }),
-    ],
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [columnHelper, filters.sort, filters.order, navigate, heat],
-  );
-
-  const table = useReactTable({ data: data?.items ?? [], columns, getCoreRowModel: getCoreRowModel() });
-
   const total = data?.total ?? 0;
   const rangeStart = total === 0 ? 0 : filters.offset + 1;
   const rangeEnd = Math.min(filters.offset + LIMIT, total);
 
   return (
     <div className="flex flex-col gap-4">
-      <div>
-        <h1 className="text-lg font-semibold text-ink-primary">Games</h1>
-        <p className="mt-0.5 text-sm text-ink-muted">
-          Search the catalog to profile a specific title or competitor — owners, revenue, rating, and review velocity.
-        </p>
+      {/* Visually hidden — the nav's "Games" link already orients the page; the mockup goes
+          straight from nav to the search field with no title block. */}
+      <h1 className="sr-only">Games</h1>
+
+      {/* Large blueprint search field (4e): Lucide search glyph, accent caret, result count
+          right in paper 55%. */}
+      <div className="blueprint flex items-center gap-3 px-4 py-3" style={{ borderColor: "var(--border-strong)" }}>
+        <i className="bp-corner" />
+        <SearchIcon className="shrink-0 text-brand" />
+        <input
+          type="search"
+          value={drafts.q}
+          onChange={setDraft("q")}
+          placeholder="Search by name…"
+          aria-label="Search games by name"
+          className="min-w-0 flex-1 bg-transparent text-[15px] text-ink-primary outline-none caret-brand placeholder:text-ink-muted"
+        />
+        <span className="shrink-0 whitespace-nowrap text-xs text-ink-muted">
+          {isLoading ? "…" : `${total.toLocaleString()} match${total === 1 ? "" : "es"}`}
+        </span>
       </div>
 
-      <Card className="!p-3">
-        <div className="flex flex-wrap items-center gap-2">
+      {/* Secondary controls — same filters as before, restyled square/hairline. Not pictured
+          in the 4e mock (which shows only the search field + filter-chip row), but the page
+          keeps every prior filter, so they get a compact home here. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={filters.genre}
+          onChange={(e) => patchParams({ genre: e.target.value === "__all__" ? null : e.target.value })}
+          className={selectCls}
+        >
+          {genres.map((g) => (
+            <option key={g.value} value={g.value}>
+              {g.label}
+            </option>
+          ))}
+        </select>
+        <TagAutocomplete onSelect={(tag) => patchParams({ tag })} />
+        <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
+          Min reviews
           <input
-            type="search"
-            value={drafts.q}
-            onChange={setDraft("q")}
-            placeholder="Search by name…"
-            className={clsx(inputCls, "w-56")}
+            type="number"
+            min={0}
+            step={10}
+            value={drafts.minReviews}
+            onChange={setDraft("minReviews")}
+            placeholder="0"
+            className={clsx(inputCls, "w-16 !px-2 !py-1")}
           />
-          <select
-            value={filters.genre}
-            onChange={(e) => patchParams({ genre: e.target.value === "__all__" ? null : e.target.value })}
-            className="rounded-md border border-chartborder bg-page px-2 py-1.5 text-xs text-ink-primary outline-none focus:border-brand"
-          >
-            {genres.map((g) => (
-              <option key={g.value} value={g.value}>
-                {g.label}
-              </option>
-            ))}
-          </select>
-          <TagAutocomplete onSelect={(tag) => patchParams({ tag })} />
+        </label>
+        <select
+          value={filters.window ?? ""}
+          onChange={(e) => {
+            const v = e.target.value === "" ? null : e.target.value;
+            // Narrowing to new releases → default to newest-first so the filter's intent is visible.
+            patchParams(v !== null ? { window: v, sort: "release_date", order: "desc" } : { window: null });
+          }}
+          title="Show only recently released games (by Steam release date)"
+          className={selectCls}
+        >
+          {RELEASE_WINDOWS.map((w) => (
+            <option key={w.label} value={w.days ?? ""}>
+              {w.label}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={() => setMoreOpen((o) => !o)}
+          aria-expanded={moreOpen}
+          className={clsx(
+            "ml-auto inline-flex items-center gap-1.5 border px-2.5 py-1.5 text-xs font-medium transition-colors",
+            moreOpen || advancedCount > 0
+              ? "border-brand text-ink-primary"
+              : "border-chartborder text-ink-muted hover:text-ink-secondary",
+          )}
+        >
+          More filters
+          {advancedCount > 0 && (
+            <span className="bg-brand-tint px-1.5 text-[10px] font-semibold text-brand">{advancedCount}</span>
+          )}
+          <span aria-hidden className="text-[10px]">{moreOpen ? "▲" : "▼"}</span>
+        </button>
+      </div>
+
+      {moreOpen && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-chartborder pt-2">
           <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
-            Min reviews
-            <input
-              type="number"
-              min={0}
-              step={10}
-              value={drafts.minReviews}
-              onChange={setDraft("minReviews")}
-              placeholder="0"
-              className={clsx(inputCls, "w-16 !px-2 !py-1")}
-            />
+            Price $
+            <input type="number" min={0} value={drafts.priceMin} onChange={setDraft("priceMin")} placeholder="min" className={clsx(inputCls, "w-16 !px-2 !py-1")} />
+            –
+            <input type="number" min={0} value={drafts.priceMax} onChange={setDraft("priceMax")} placeholder="max" className={clsx(inputCls, "w-16 !px-2 !py-1")} />
           </label>
-          <select
-            value={filters.window ?? ""}
-            onChange={(e) => {
-              const v = e.target.value === "" ? null : e.target.value;
-              // Narrowing to new releases → default to newest-first so the filter's intent is visible.
-              patchParams(v !== null ? { window: v, sort: "release_date", order: "desc" } : { window: null });
-            }}
-            title="Show only recently released games (by Steam release date)"
-            className="rounded-md border border-chartborder bg-page px-2 py-1.5 text-xs text-ink-primary outline-none focus:border-brand"
+          <label className="flex items-center gap-1.5 text-xs text-ink-secondary" title="Floor on positive review share">
+            Min rating
+            <input type="number" min={0} max={100} step={5} value={drafts.minRating} onChange={setDraft("minRating")} placeholder="%" className={clsx(inputCls, "w-14 !px-2 !py-1")} />
+            %
+          </label>
+          <label
+            className="flex items-center gap-1.5 text-xs text-ink-secondary"
+            title="Floor on the Metacritic critic score. Only ~2.6% of games have one (Steam links a Metacritic page for few titles), so this narrows results to critically-covered games — it is a benchmarking lens, not a way to size a niche."
           >
-            {RELEASE_WINDOWS.map((w) => (
-              <option key={w.label} value={w.days ?? ""}>
-                {w.label}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            onClick={() => setMoreOpen((o) => !o)}
-            aria-expanded={moreOpen}
-            className={clsx(
-              "ml-auto inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors",
-              moreOpen || advancedCount > 0
-                ? "border-brand text-ink-primary"
-                : "border-chartborder text-ink-muted hover:text-ink-secondary",
-            )}
-          >
-            More filters
-            {advancedCount > 0 && (
-              <span className="rounded-full bg-brand-tint px-1.5 text-[10px] font-semibold text-brand">{advancedCount}</span>
-            )}
-            <span aria-hidden className="text-[10px]">{moreOpen ? "▲" : "▼"}</span>
-          </button>
+            Metacritic ≥
+            <input type="number" min={0} max={100} step={5} value={drafts.minMetacritic} onChange={setDraft("minMetacritic")} placeholder="e.g. 75" className={clsx(inputCls, "w-16 !px-2 !py-1")} />
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-ink-secondary" title="Floor on estimated revenue (review-based)">
+            Min revenue $
+            <input type="number" min={0} step={10000} value={drafts.minRevenue} onChange={setDraft("minRevenue")} placeholder="e.g. 100000" className={clsx(inputCls, "w-24 !px-2 !py-1")} />
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-ink-secondary" title="Release year range (inclusive)">
+            Year
+            <input type="number" min={1997} max={2100} value={drafts.after} onChange={setDraft("after")} placeholder="from" className={clsx(inputCls, "w-16 !px-2 !py-1")} />
+            –
+            <input type="number" min={1997} max={2100} value={drafts.before} onChange={setDraft("before")} placeholder="to" className={clsx(inputCls, "w-16 !px-2 !py-1")} />
+          </label>
+          <TriToggle
+            label="Publishing"
+            value={filters.selfPub}
+            yesLabel="Self-pub"
+            noLabel="Publisher"
+            onChange={(v) => patchParams({ self_pub: v === undefined ? null : v ? "1" : "0" })}
+          />
+          <TriToggle
+            label="Indie"
+            value={filters.indie}
+            yesLabel="Indie"
+            noLabel="Non-indie"
+            onChange={(v) => patchParams({ indie: v === undefined ? null : v ? "1" : "0" })}
+          />
         </div>
+      )}
 
-        {moreOpen && (
-          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-chartborder pt-2">
-            <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
-              Price $
-              <input type="number" min={0} value={drafts.priceMin} onChange={setDraft("priceMin")} placeholder="min" className={clsx(inputCls, "w-16 !px-2 !py-1")} />
-              –
-              <input type="number" min={0} value={drafts.priceMax} onChange={setDraft("priceMax")} placeholder="max" className={clsx(inputCls, "w-16 !px-2 !py-1")} />
-            </label>
-            <label className="flex items-center gap-1.5 text-xs text-ink-secondary" title="Floor on positive review share">
-              Min rating
-              <input type="number" min={0} max={100} step={5} value={drafts.minRating} onChange={setDraft("minRating")} placeholder="%" className={clsx(inputCls, "w-14 !px-2 !py-1")} />
-              %
-            </label>
-            <label
-              className="flex items-center gap-1.5 text-xs text-ink-secondary"
-              title="Floor on the Metacritic critic score. Only ~2.6% of games have one (Steam links a Metacritic page for few titles), so this narrows results to critically-covered games — it is a benchmarking lens, not a way to size a niche."
-            >
-              Metacritic ≥
-              <input type="number" min={0} max={100} step={5} value={drafts.minMetacritic} onChange={setDraft("minMetacritic")} placeholder="e.g. 75" className={clsx(inputCls, "w-16 !px-2 !py-1")} />
-            </label>
-            <label className="flex items-center gap-1.5 text-xs text-ink-secondary" title="Floor on estimated revenue (review-based)">
-              Min revenue $
-              <input type="number" min={0} step={10000} value={drafts.minRevenue} onChange={setDraft("minRevenue")} placeholder="e.g. 100000" className={clsx(inputCls, "w-24 !px-2 !py-1")} />
-            </label>
-            <label className="flex items-center gap-1.5 text-xs text-ink-secondary" title="Release year range (inclusive)">
-              Year
-              <input type="number" min={1997} max={2100} value={drafts.after} onChange={setDraft("after")} placeholder="from" className={clsx(inputCls, "w-16 !px-2 !py-1")} />
-              –
-              <input type="number" min={1997} max={2100} value={drafts.before} onChange={setDraft("before")} placeholder="to" className={clsx(inputCls, "w-16 !px-2 !py-1")} />
-            </label>
-            <TriToggle
-              label="Publishing"
-              value={filters.selfPub}
-              yesLabel="Self-pub"
-              noLabel="Publisher"
-              onChange={(v) => patchParams({ self_pub: v === undefined ? null : v ? "1" : "0" })}
-            />
-            <TriToggle
-              label="Indie"
-              value={filters.indie}
-              yesLabel="Indie"
-              noLabel="Non-indie"
-              onChange={(v) => patchParams({ indie: v === undefined ? null : v ? "1" : "0" })}
-            />
-          </div>
-        )}
-
+      {/* Filter chip row (4e): active = accent outline · "sorted by …" caption right, now a
+          real sort-key control + order-toggle so column-header sorting survives the redesign. */}
+      <div className="flex flex-wrap items-center gap-2 text-xs">
         {chips.length > 0 && (
-          <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-chartborder pt-2">
-            <span className="text-[11px] text-ink-muted">Active filters:</span>
+          <>
+            <span className="text-ink-muted">Filter:</span>
             {chips.map((c) => (
               <FilterChip key={c.key} label={c.label} onClear={() => patchParams(c.clear)} />
             ))}
@@ -811,108 +642,175 @@ export default function GameSearch() {
                   after: null, before: null, self_pub: null, indie: null,
                 })
               }
-              className="ml-1 text-[11px] text-ink-muted underline decoration-dotted hover:text-ink-primary"
+              className="text-ink-muted underline decoration-dotted hover:text-ink-primary"
             >
               Clear all
             </button>
-          </div>
+          </>
         )}
-
-        {tagChips.length > 0 && (
-          <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-chartborder pt-2">
-            <span className="text-[11px] text-ink-muted">Tags in these results:</span>
-            {tagChips.map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => patchParams({ tag: t })}
-                className={clsx(
-                  "rounded-full border px-2 py-0.5 text-[10px] font-medium transition-colors",
-                  filters.tag === t
-                    ? "border-brand bg-page text-ink-primary"
-                    : "border-chartborder text-ink-muted hover:text-ink-secondary",
-                )}
-              >
-                {t}
-              </button>
+        <span className="ml-auto flex items-center gap-1.5 text-ink-muted">
+          sorted by
+          <select
+            value={filters.sort}
+            onChange={(e) => toggleSort(e.target.value as GameSortKey)}
+            aria-label="Sort by"
+            className="cursor-pointer bg-transparent text-ink-secondary outline-none hover:text-ink-primary"
+          >
+            {SORT_KEYS.map((k) => (
+              <option key={k} value={k}>
+                {SORT_LABELS[k]}
+              </option>
             ))}
-          </div>
-        )}
-      </Card>
+          </select>
+          <button
+            type="button"
+            onClick={() => toggleSort(filters.sort)}
+            title={`Currently sorted ${filters.order === "desc" ? "highest first" : "lowest first"} — click to flip`}
+            className="text-ink-secondary hover:text-ink-primary"
+            aria-label="Toggle sort direction"
+          >
+            {filters.order === "desc" ? "▼" : "▲"}
+          </button>
+        </span>
+      </div>
 
-      <Card className={clsx("!p-0", isFetching && "opacity-90 transition-opacity")}>
-        {isLoading && <div className="p-6 text-sm text-ink-muted">Loading games…</div>}
+      {tagChips.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+          <span className="text-ink-muted">Tags in these results:</span>
+          {tagChips.map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => patchParams({ tag: t })}
+              className={clsx(
+                "border px-2 py-0.5 text-[10px] font-medium transition-colors",
+                filters.tag === t
+                  ? "border-brand text-brand"
+                  : "border-chartborder text-ink-muted hover:border-borderstrong hover:text-ink-secondary",
+              )}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Result rows — hairline top rules, not cards (4e). */}
+      <div className={clsx(isFetching && "opacity-90 transition-opacity")}>
+        {isLoading && <div className="py-6 text-sm text-ink-muted">Loading games…</div>}
         {isError && (
-          <div className="p-6 text-sm text-verdict-serious">
+          <div className="py-6 text-sm text-verdict-serious">
             Failed to load games{error instanceof Error ? `: ${error.message}` : "."}
           </div>
         )}
         {data && data.items.length === 0 && (
-          <div className="p-6 text-sm text-ink-muted">No games match these filters.</div>
+          <div className="py-6 text-sm text-ink-muted">No games match these filters.</div>
         )}
         {data && data.items.length > 0 && (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[900px] border-collapse text-sm">
-              <thead>
-                {table.getHeaderGroups().map((hg) => (
-                  <tr key={hg.id} className="border-b border-chartborder text-left text-xs text-ink-muted">
-                    {hg.headers.map((h) => (
-                      <th key={h.id} className="whitespace-nowrap px-3 py-2 font-medium">
-                        {flexRender(h.column.columnDef.header, h.getContext())}
-                      </th>
-                    ))}
-                  </tr>
-                ))}
-              </thead>
-              <tbody>
-                {table.getRowModel().rows.map((row) => (
-                  <tr
-                    key={row.id}
-                    className="cursor-pointer border-b border-chartborder/60 hover:bg-page"
-                    onClick={() => navigate(`/games/${row.original.appid}`)}
-                  >
-                    {row.getVisibleCells().map((cell) => (
-                      <td key={cell.id} className="px-3 py-2 align-middle">
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="border-b border-line-grid">
+            {data.items.map((g, i) => {
+              const isTop = i === 0 && filters.offset === 0;
+              const metaParts = [
+                ...(g.top_tags.length > 0 ? g.top_tags.slice(0, 2) : g.primary_genre ? [g.primary_genre] : []),
+                fmtReleaseMonthYear(g.release_date, g.release_year),
+              ].filter((p) => p && p !== "—");
+              return (
+                <div
+                  key={g.appid}
+                  onClick={() => navigate(`/games/${g.appid}`)}
+                  // Capsule+name and the metric group stack on narrow viewports (below `sm`)
+                  // instead of clipping — the 4e mock (an 880px desktop canvas) doesn't specify
+                  // mobile behavior, so this is an extrapolation, not a pictured requirement.
+                  className="flex cursor-pointer flex-col gap-2 border-t border-line-grid px-1 py-3.5 transition-colors hover:bg-surface2 sm:flex-row sm:items-center sm:gap-4"
+                >
+                  <div className="flex min-w-0 items-center gap-4 sm:flex-1">
+                    {g.header_image ? (
+                      <img
+                        src={g.header_image}
+                        alt=""
+                        loading="lazy"
+                        className="h-[45px] w-24 shrink-0 object-cover"
+                      />
+                    ) : (
+                      <span aria-hidden className="h-[45px] w-24 shrink-0" style={placeholderStripeStyle} />
+                    )}
+                    {/* A real link (not a navigate() button) so middle-click / cmd-click
+                        "open in new tab" works — opening several candidates in tabs IS the
+                        research workflow. */}
+                    <Link
+                      to={`/games/${g.appid}`}
+                      onClick={(e) => e.stopPropagation()}
+                      className="min-w-0 flex-1"
+                    >
+                      <span
+                        className="block truncate text-[17px] font-semibold text-ink-primary hover:text-brand hover:underline"
+                        style={{ fontFamily: HEADING_FONT }}
+                      >
+                        {g.name ?? `App ${g.appid}`}
+                      </span>
+                      <span className="block truncate text-xs text-ink-secondary">
+                        {metaParts.length > 0 ? metaParts.join(" · ") : "—"}
+                      </span>
+                    </Link>
+                  </div>
+                  <div className="flex items-center justify-between gap-4 sm:ml-auto sm:w-auto sm:shrink-0 sm:justify-end">
+                    <span className="w-[90px] shrink-0 text-[13px] text-ink-secondary">
+                      {fmtPct(g.positive_ratio, 0)} · {fmtCompact(g.total_reviews)}
+                    </span>
+                    <span
+                      className={clsx("w-20 shrink-0 truncate text-[16px] font-semibold", isTop ? "text-brand" : "text-ink-primary")}
+                      style={{ fontFamily: HEADING_FONT }}
+                    >
+                      {fmtRevenue(g.est_rev_reviews, g.price_initial === 0)}
+                    </span>
+                    {/* The 4e mock shows a "players 7d ▲/▼" verdict; the search API doesn't
+                        expose a 7-day trend (only a point-in-time live count), so this shows
+                        the real current count instead of fabricating a change figure. */}
+                    <span
+                      className="w-[70px] shrink-0 text-[13px] text-ink-muted"
+                      title="Live players right now — a 7-day trend isn't available from this endpoint."
+                    >
+                      {g.live_players != null ? `${fmtCompact(g.live_players)} live` : "—"}
+                    </span>
+                    <CompareCell g={g} />
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
-        {data && (
-          <div className="flex items-center justify-between border-t border-chartborder px-3 py-2 text-xs text-ink-muted">
-            <span>
-              {total > 0 ? `${rangeStart.toLocaleString()}–${rangeEnd.toLocaleString()} of ${total.toLocaleString()}` : "0 results"}
-            </span>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                disabled={filters.offset === 0}
-                onClick={() =>
-                  patchParams(
-                    { offset: filters.offset - LIMIT > 0 ? String(filters.offset - LIMIT) : null },
-                    { keepOffset: true },
-                  )
-                }
-                className="rounded-md border border-chartborder px-2.5 py-1 font-medium text-ink-secondary transition-colors hover:bg-page hover:text-ink-primary disabled:opacity-40 disabled:hover:bg-transparent"
-              >
-                Prev
-              </button>
-              <button
-                type="button"
-                disabled={filters.offset + LIMIT >= total}
-                onClick={() => patchParams({ offset: String(filters.offset + LIMIT) }, { keepOffset: true })}
-                className="rounded-md border border-chartborder px-2.5 py-1 font-medium text-ink-secondary transition-colors hover:bg-page hover:text-ink-primary disabled:opacity-40 disabled:hover:bg-transparent"
-              >
-                Next
-              </button>
-            </div>
+      </div>
+
+      {data && (
+        <div className="flex items-center justify-between border-t border-chartborder pt-3 text-xs text-ink-muted">
+          <span>
+            {total > 0 ? `${rangeStart.toLocaleString()}–${rangeEnd.toLocaleString()} of ${total.toLocaleString()}` : "0 results"}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={filters.offset === 0}
+              onClick={() =>
+                patchParams(
+                  { offset: filters.offset - LIMIT > 0 ? String(filters.offset - LIMIT) : null },
+                  { keepOffset: true },
+                )
+              }
+              className="border border-chartborder px-2.5 py-1 font-medium text-ink-secondary transition-colors hover:bg-surface2 hover:text-ink-primary disabled:opacity-45 disabled:hover:bg-transparent"
+            >
+              Prev
+            </button>
+            <button
+              type="button"
+              disabled={filters.offset + LIMIT >= total}
+              onClick={() => patchParams({ offset: String(filters.offset + LIMIT) }, { keepOffset: true })}
+              className="border border-chartborder px-2.5 py-1 font-medium text-ink-secondary transition-colors hover:bg-surface2 hover:text-ink-primary disabled:opacity-45 disabled:hover:bg-transparent"
+            >
+              Next
+            </button>
           </div>
-        )}
-      </Card>
+        </div>
+      )}
     </div>
   );
 }

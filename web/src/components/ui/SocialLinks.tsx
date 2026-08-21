@@ -80,7 +80,7 @@ export function SocialLinks({
           rel="noreferrer"
           title={`${LABELS[l.platform]} — ${l.label}. Linked from the game's own Steam page or developer site; may be the game's, the studio's, or the developer's personal account.`}
           aria-label={l.label}
-          className="inline-flex items-center gap-1 rounded border border-chartborder px-1.5 py-0.5 text-ink-secondary transition-colors hover:border-ink-muted hover:text-ink-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1"
+          className="inline-flex items-center gap-1 border border-chartborder px-1.5 py-0.5 text-ink-secondary transition-colors hover:border-ink-muted hover:text-ink-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1"
         >
           <SocialIcon platform={l.platform} />
           {l.platform === "x" && x ? (

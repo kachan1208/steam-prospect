@@ -1,10 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import clsx from "clsx";
 
-import { OpportunityBars, OPPORTUNITY_LEGEND } from "../components/charts/OpportunityBars";
-import { Card } from "../components/ui/Card";
 import { trackEvent } from "../lib/analytics";
 import {
   nicheExportCsvUrl,
@@ -17,9 +15,7 @@ import {
   type Window,
 } from "../lib/api";
 import { fmtCompact, fmtInt, fmtMonths, fmtPct, fmtSigned, fmtUsd } from "../lib/format";
-import { sequentialColorAt } from "../lib/palette";
 import { useDebounced } from "../lib/useDebounced";
-import { useTheme } from "../lib/theme";
 import {
   formatNicheRef,
   nicheCombinedPath,
@@ -31,11 +27,21 @@ import {
 
 const LIMIT = 50;
 
-const INPUT_CLS =
-  "rounded-lg border border-chartborder bg-surface text-xs text-ink-primary outline-none transition-colors placeholder:text-ink-muted focus:border-brand focus:shadow-[0_0_0_3px_var(--brand-tint)]";
-
-const legColor = (needle: string) =>
-  OPPORTUNITY_LEGEND.find((l) => l.label.toLowerCase().includes(needle))?.color;
+// ---------------------------------------------------------------------------------------
+// Industry blueprint grammar (design_handoff_prospect_dark_ui §4a). Most chrome maps onto
+// the shared semantic tokens (text-ink-muted, border-line-grid, bg-surface2…), but a
+// handful of alphas the mockup calls out precisely — segmented-control borders, bar
+// tracks, the decline-gate suffix — don't have an existing utility at that exact opacity.
+// These mix off --text-primary exactly the way index.css derives --text-muted/--text-secondary,
+// so they stay theme-correct in both light and dark rather than pinning a raw hex.
+// ---------------------------------------------------------------------------------------
+const PAPER_15 = "color-mix(in srgb, var(--text-primary) 15%, transparent)";
+const PAPER_30 = "color-mix(in srgb, var(--text-primary) 30%, transparent)";
+const PAPER_35 = "color-mix(in srgb, var(--text-primary) 35%, transparent)";
+const PAPER_45 = "color-mix(in srgb, var(--text-primary) 45%, transparent)";
+const PAPER_50 = "color-mix(in srgb, var(--text-primary) 50%, transparent)";
+const PAPER_80 = "color-mix(in srgb, var(--text-primary) 80%, transparent)";
+const CONDENSED = '"Barlow Condensed", "Barlow", system-ui, sans-serif';
 
 // Umbrella/meta tags are containers/reception labels, not buildable niches — excluded by
 // default, same reasoning (and default) as the MCP find_niches tool.
@@ -48,16 +54,31 @@ const TIER_TITLE: Record<NicheTier, string> = {
   meta: "Reception tags (Great Soundtrack…) — never buildable",
 };
 
+// The table's real column set is richer than the mockup's 8-column illustration (which
+// omits the multi-select checkbox and four sortable metrics — longevity, total owners,
+// hit rate, saturation — this page already had). Rather than drop working, sortable
+// columns to match the illustration literally, the mockup's grid grammar (fr-weighted
+// tracks, 14px gaps) is extended to the full real set below.
+const GRID_TEMPLATE = "28px 2fr .6fr .85fr .85fr .85fr .85fr .8fr .8fr .8fr .8fr .85fr .85fr .85fr";
+const TABLE_MIN_WIDTH = 1500;
+
+const ROW_GRID: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: GRID_TEMPLATE,
+  gap: 14,
+  alignItems: "center",
+};
+
 /** A clickable column header that drives the server-side sort, with a direction arrow.
  * `help` is the column's plain-language "how to read this" — it becomes the hover tooltip
- * (with the sort hint appended) so every metric column explains itself in place. */
+ * (with the sort hint appended) so every metric column explains itself in place, even
+ * though the visible affordance is now just the label + arrow (mockup 4a shows no icon). */
 function SortLabel({
   label,
   col,
   active,
   order,
   onSort,
-  color,
   help,
 }: {
   label: string;
@@ -65,7 +86,6 @@ function SortLabel({
   active: boolean;
   order: "asc" | "desc";
   onSort: (col: SortKey) => void;
-  color?: string;
   help?: string;
 }) {
   return (
@@ -73,21 +93,13 @@ function SortLabel({
       type="button"
       onClick={() => onSort(col)}
       title={help ? `${help}\n\nClick to sort by ${label}.` : `Sort by ${label}`}
-      className={clsx(
-        "group inline-flex items-center gap-1 font-semibold uppercase tracking-wide transition-colors",
-        active ? "text-ink-primary" : "text-ink-muted hover:text-ink-secondary",
-      )}
+      className="group inline-flex items-center gap-1 whitespace-nowrap uppercase text-ink-muted transition-colors hover:text-ink-secondary"
+      style={{ fontFamily: CONDENSED, fontSize: 12, letterSpacing: ".08em", fontWeight: 600 }}
     >
-      {color && <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: color }} />}
       {label}
-      {help && (
-        <span aria-hidden className="cursor-help text-[10px] normal-case text-ink-muted/70">
-          ⓘ
-        </span>
-      )}
       <span
         aria-hidden
-        className={clsx("text-[10px] leading-none", active ? "opacity-100" : "opacity-0 group-hover:opacity-40")}
+        className={clsx("text-[10px] leading-none", active ? "opacity-100" : "opacity-0 group-hover:opacity-50")}
       >
         {active ? (order === "desc" ? "↓" : "↑") : "↕"}
       </span>
@@ -95,8 +107,42 @@ function SortLabel({
   );
 }
 
-function Segmented({ children }: { children: React.ReactNode }) {
-  return <div className="flex items-center gap-0.5 rounded-lg bg-surface2 p-0.5">{children}</div>;
+function ColHead({
+  active,
+  order,
+  children,
+}: {
+  active: boolean;
+  order: "asc" | "desc";
+  children: ReactNode;
+}) {
+  return (
+    <div role="columnheader" aria-sort={active ? (order === "desc" ? "descending" : "ascending") : "none"}>
+      {children}
+    </div>
+  );
+}
+
+/** 4px opportunity meter: track paper 15%, fill accent-300 (demand/quality) or paper 50%
+ * (competition — higher is worse, so it never reads as "more of the good color"). */
+function MetricBar({ value, tone }: { value: number | null; tone: "accent" | "neutral" }) {
+  const pct = value == null ? 0 : Math.max(0, Math.min(100, value));
+  return (
+    <div className="h-1 w-full" style={{ backgroundColor: PAPER_15 }}>
+      <div
+        className="h-full"
+        style={{ width: `${pct}%`, backgroundColor: tone === "accent" ? "var(--brand)" : PAPER_50 }}
+      />
+    </div>
+  );
+}
+
+function Segmented({ children }: { children: ReactNode }) {
+  return (
+    <div className="inline-flex" style={{ border: `1px solid ${PAPER_30}` }}>
+      {children}
+    </div>
+  );
 }
 
 function SegButton({
@@ -104,21 +150,27 @@ function SegButton({
   onClick,
   children,
   title,
+  first,
 }: {
   active: boolean;
   onClick: () => void;
-  children: React.ReactNode;
+  children: ReactNode;
   title?: string;
+  first?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       title={title}
-      className={clsx(
-        "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
-        active ? "bg-surface text-ink-primary shadow-xs" : "text-ink-muted hover:text-ink-secondary",
-      )}
+      className={clsx("transition-colors", active ? "text-brand-fg" : "text-ink-primary hover:bg-surface2")}
+      style={{
+        padding: "6px 14px",
+        fontSize: 13,
+        fontWeight: active ? 600 : 400,
+        backgroundColor: active ? "var(--brand)" : undefined,
+        borderLeft: first ? "none" : `1px solid ${PAPER_30}`,
+      }}
     >
       {children}
     </button>
@@ -126,7 +178,6 @@ function SegButton({
 }
 
 export default function NicheFinder() {
-  const { theme } = useTheme();
   const [dimension, setDimension] = useState<Dimension>("tag");
   // 24m is the market a new entrant actually faces — the all-time cut is context, not an
   // entry decision, so it is NOT the default (same default as the MCP tool).
@@ -248,12 +299,15 @@ export default function NicheFinder() {
               to={nicheDetailPath(dimension, key)}
               onClick={() => trackEvent("niche_open")}
               title={`Open the ${key} deep dive`}
-              className="group/nk flex items-center gap-2 text-left"
+              className="group/nk inline-flex min-w-0 items-center gap-2"
             >
-              <span className="font-medium text-ink-primary transition-colors group-hover/nk:text-brand">{key}</span>
+              <span className="truncate font-medium text-ink-primary transition-colors group-hover/nk:text-brand">
+                {key}
+              </span>
               {tier && tier !== "micro" && tier !== "genre" && (
                 <span
-                  className="rounded-full border border-chartborder px-1.5 py-px text-[10px] text-ink-muted"
+                  className="shrink-0 px-[7px] py-px text-[10px] text-ink-muted"
+                  style={{ border: `1px solid ${PAPER_30}` }}
                   title={TIER_TITLE[tier as NicheTier] ?? tier}
                 >
                   {tier}
@@ -286,24 +340,44 @@ export default function NicheFinder() {
           );
         },
       }),
-      columnHelper.display({
-        id: "opportunity_bars",
+      columnHelper.accessor((row) => row.demand ?? null, {
+        id: "demand",
         header: () => (
-          <span className="flex items-center gap-1.5 whitespace-nowrap">
-            <SortLabel label="Demand" help="How hot the market is, 0–100 percentile vs other niches in this cut. Calculated: 0.4×pctile(median revenue) + 0.3×pctile(median owners) + 0.3×pctile(recent 24m review velocity)." col="demand" color={legColor("demand")} active={sort === "demand"} order={order} onSort={toggleSort} />
-            <span className="text-ink-muted/40">/</span>
-            <SortLabel label="Comp." help="How crowded it is, 0–100 percentile. Calculated: 0.6×pctile(recently released games) + 0.4×pctile(winner concentration — the top 5% of titles' revenue share). HIGHER IS WORSE for a new entrant." col="competition" color={legColor("competition")} active={sort === "competition"} order={order} onSort={toggleSort} />
-            <span className="text-ink-muted/40">/</span>
-            <SortLabel label="Quality gap" help="How beatable the field is, 0–100 percentile. Calculated: pctile(share of incumbents that are weak — rating under 80% positive OR fewer than 50 reviews). Higher = easier to out-execute." col="quality_gap" color={legColor("quality")} active={sort === "quality_gap"} order={order} onSort={toggleSort} />
-          </span>
+          <SortLabel label="Demand" help="How hot the market is, 0–100 percentile vs other niches in this cut. Calculated: 0.4×pctile(median revenue) + 0.3×pctile(median owners) + 0.3×pctile(recent 24m review velocity)." col="demand" active={sort === "demand"} order={order} onSort={toggleSort} />
         ),
         cell: (info) => {
-          const r = info.row.original;
+          const v = info.getValue();
           return (
-            <div
-              title={`Demand ${r.demand?.toFixed(1) ?? "—"} · Competition ${r.competition?.toFixed(1) ?? "—"} · Quality gap ${r.quality_gap?.toFixed(1) ?? "—"} (each a 0–100 percentile vs other niches in this cut)`}
-            >
-              <OpportunityBars demand={r.demand} competition={r.competition} quality_gap={r.quality_gap} />
+            <div title={`Demand: ${v != null ? v.toFixed(1) : "no data"} (0–100 percentile)`}>
+              <MetricBar value={v} tone="accent" />
+            </div>
+          );
+        },
+      }),
+      columnHelper.accessor((row) => row.competition ?? null, {
+        id: "competition",
+        header: () => (
+          <SortLabel label="Competition" help="How crowded it is, 0–100 percentile. Calculated: 0.6×pctile(recently released games) + 0.4×pctile(winner concentration — the top 5% of titles' revenue share). HIGHER IS WORSE for a new entrant." col="competition" active={sort === "competition"} order={order} onSort={toggleSort} />
+        ),
+        cell: (info) => {
+          const v = info.getValue();
+          return (
+            <div title={`Competition: ${v != null ? v.toFixed(1) : "no data"} (0–100 percentile, higher is worse)`}>
+              <MetricBar value={v} tone="neutral" />
+            </div>
+          );
+        },
+      }),
+      columnHelper.accessor((row) => row.quality_gap ?? null, {
+        id: "quality_gap",
+        header: () => (
+          <SortLabel label="Quality gap" help="How beatable the field is, 0–100 percentile. Calculated: pctile(share of incumbents that are weak — rating under 80% positive OR fewer than 50 reviews). Higher = easier to out-execute." col="quality_gap" active={sort === "quality_gap"} order={order} onSort={toggleSort} />
+        ),
+        cell: (info) => {
+          const v = info.getValue();
+          return (
+            <div title={`Quality gap: ${v != null ? v.toFixed(1) : "no data"} (0–100 percentile)`}>
+              <MetricBar value={v} tone="accent" />
             </div>
           );
         },
@@ -311,7 +385,7 @@ export default function NicheFinder() {
       columnHelper.accessor("opportunity_v2", {
         header: () => (
           <SortLabel
-            label="Opportunity v2" help="The headline score. Calculated: 0.5×demand − 0.35×competition + 0.3×quality gap, floored at 0, then × the decline gate (0.5–1.0; shrinks when the release pipeline contracts or newcomers earn under the back catalog). '0.0 floored' = the formula went negative: crowding outweighed demand + quality — a real verdict, not missing data."
+            label="Opp v2" help="The headline score. Calculated: 0.5×demand − 0.35×competition + 0.3×quality gap, floored at 0, then × the decline gate (0.5–1.0; shrinks when the release pipeline contracts or newcomers earn under the back catalog). '0.0 floored' = the formula went negative: crowding outweighed demand + quality — a real verdict, not missing data."
             col="opportunity_v2"
             active={sort === "opportunity_v2"}
             order={order}
@@ -322,11 +396,8 @@ export default function NicheFinder() {
           const v = info.getValue();
           const row = info.row.original;
           const gate = row.decline_gate;
-          const dotColor = v == null ? "var(--gridline)" : sequentialColorAt(v / 100, theme);
-          // A hard 0 means the formula went NEGATIVE and was floored — competition's
-          // penalty outweighed demand + quality gap. Without the note it reads as
-          // missing data instead of the real verdict it is.
           const floored = v === 0;
+          const strong = v != null && v >= 70;
           // The row's REAL numbers substituted into the formula, so the hover answers
           // "why is it this value" without leaving the table.
           const d = row.demand, c = row.competition, q = row.quality_gap;
@@ -341,13 +412,17 @@ export default function NicheFinder() {
             ? `${calc}\n\nThe competition penalty (C ${c?.toFixed(0)}) outweighs demand (D ${d?.toFixed(0)}) + quality gap (Q ${q?.toFixed(0)}): a crowded niche whose typical game earns little. Big audience ≠ good entry.`
             : calc ?? "0.5×demand − 0.35×competition + 0.3×quality gap, × the decline gate";
           return (
-            <div className="flex items-center gap-2" title={title}>
-              <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: dotColor }} />
-              <span className="tabular font-semibold text-ink-primary">{v != null ? v.toFixed(1) : "—"}</span>
-              {floored && <span className="text-[10px] text-ink-muted">floored</span>}
+            <div className="flex items-baseline gap-1.5" title={title}>
+              <span
+                className="tabular"
+                style={{ fontFamily: CONDENSED, fontWeight: 600, fontSize: 17, color: v == null ? undefined : strong ? "var(--brand)" : PAPER_80 }}
+              >
+                {v != null ? v.toFixed(1) : "—"}
+              </span>
               {gate != null && gate < 0.995 && (
                 <span
-                  className="tabular text-[10px] text-verdict-serious"
+                  className="tabular"
+                  style={{ fontSize: 10, color: PAPER_50 }}
                   title={(() => {
                     const satSev = Math.min(1, Math.max(0, -(row.saturation_yoy ?? 0) / 0.3));
                     const entSev = Math.min(1, Math.max(0, (1 - (row.entrant_ratio ?? 1)) / 0.5));
@@ -396,14 +471,18 @@ export default function NicheFinder() {
         ),
         cell: (info) => {
           const v = info.getValue();
-          if (v == null) return <span className="text-ink-muted">—</span>;
+          // Trend verdicts are mono steel — never red/green. Up carries the accent, down
+          // (or flat) recedes to muted paper; direction reads from the glyph + sign, not hue.
+          if (v == null) return <span style={{ color: "var(--verdict-flat)" }}>—</span>;
+          const up = v >= 0;
           return (
             <span
-              className={clsx("tabular font-medium", v >= 0 ? "text-verdict-good" : "text-verdict-serious")}
+              className="tabular font-medium"
+              style={{ color: up ? "var(--verdict-up)" : "var(--verdict-flat)" }}
               title="Last 7d vs prior 7d, same-panel (only games measured in both windows count)"
             >
-              {v >= 0 ? "+" : ""}
-              {v.toFixed(1)}%
+              {up ? "▲" : "▼"} {up ? "+" : "−"}
+              {Math.abs(v).toFixed(1)}%
             </span>
           );
         },
@@ -473,17 +552,14 @@ export default function NicheFinder() {
               ? `(${fmtInt(r.n_recent_year)} releases last year − ${fmtInt(r.n_prior_year)} the year before) ÷ ${fmtInt(r.n_prior_year)} = ${(v * 100).toFixed(1)}%${v < -0.05 ? " — the pipeline is shrinking" : ""}`
               : undefined;
           return (
-            <span
-              title={title}
-              className={clsx("tabular", v != null && v < -0.05 ? "text-verdict-serious" : "text-ink-secondary")}
-            >
+            <span title={title} className="tabular text-ink-secondary">
               {fmtSigned(v)}
             </span>
           );
         },
       }),
     ],
-    [columnHelper, theme, sort, order, toggleSort, dimension, selectedRefs, toggleSelected],
+    [columnHelper, sort, order, toggleSort, dimension, selectedRefs, toggleSelected],
   );
 
   const table = useReactTable({
@@ -507,116 +583,97 @@ export default function NicheFinder() {
   });
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight text-ink-primary">Niche Finder</h1>
-          <p className="mt-1 max-w-2xl text-sm text-ink-secondary">
-            Rank tags and genres by growth-gated opportunity — demand vs. competition vs. quality gap, absolute market
-            size, and who's actually playing right now.
-          </p>
-        </div>
-        {total > 0 && (
-          <span className="shrink-0 rounded-full border border-chartborder bg-surface px-3 py-1 text-xs font-medium text-ink-secondary shadow-xs">
-            {total.toLocaleString()} niches
-          </span>
-        )}
+    <div className="flex flex-col" style={{ gap: 18 }}>
+      <div className="flex flex-wrap items-baseline gap-3.5">
+        <h1 className="text-ink-primary" style={{ fontSize: 25 }}>
+          Niche Finder
+        </h1>
+        <span className="text-[13px] text-ink-secondary">
+          {total > 0 ? `${total.toLocaleString()} niches · ranked by growth-gated opportunity` : "ranked by growth-gated opportunity"}
+        </span>
+        <a
+          href={csvUrl}
+          onClick={() => trackEvent("niche_export_csv")}
+          className="ml-auto shrink-0 text-[13px] text-brand transition-colors hover:text-brand-hover"
+        >
+          Export CSV
+        </a>
       </div>
 
-      <Card className="!p-3.5">
-        <div className="flex flex-wrap items-center gap-2.5">
-          <Segmented>
-            <SegButton active={dimension === "tag"} onClick={() => setDimension("tag")}>
-              Tags
-            </SegButton>
-            <SegButton active={dimension === "genre"} onClick={() => setDimension("genre")}>
-              Genres
-            </SegButton>
-          </Segmented>
-          <Segmented>
-            <SegButton
-              active={windowParam === "24m"}
-              onClick={() => setWindowParam("24m")}
-              title="Games released in the last 24 months — the market a new entrant faces"
-            >
-              Last 24 months
-            </SegButton>
-            <SegButton
-              active={windowParam === "all"}
-              onClick={() => setWindowParam("all")}
-              title="Full history — context, not an entry decision"
-            >
-              All-time
-            </SegButton>
-          </Segmented>
-          <Segmented>
-            <SegButton
-              active={minReviews === 0}
-              onClick={() => setMinReviews(0)}
-              title="No review floor — the whole tag, unreviewed releases included. Game counts are the honest tag size; revenue stats still skip games too small to estimate."
-            >
-              All games
-            </SegButton>
-            <SegButton active={minReviews === 50} onClick={() => setMinReviews(50)} title="Broader population, noisier stats">
-              ≥50 reviews
-            </SegButton>
-            <SegButton active={minReviews === 100} onClick={() => setMinReviews(100)} title="Stricter population, cleaner stats">
-              ≥100 reviews
-            </SegButton>
-          </Segmented>
-          <input
-            type="search"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search niches…"
-            className={clsx(INPUT_CLS, "w-44 px-3 py-1.5")}
-          />
-          <div className="ml-auto flex items-center gap-2">
-            <a
-              href={csvUrl}
-              onClick={() => trackEvent("niche_export_csv")}
-              className="rounded-lg border border-chartborder bg-surface px-3 py-1.5 text-xs font-medium text-ink-secondary shadow-xs transition-colors hover:bg-surface2 hover:text-ink-primary"
-            >
-              Export CSV
-            </a>
-          </div>
-        </div>
-        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 border-t border-chartborder pt-2.5 text-[11px] text-ink-muted">
-          {dimension === "tag" && (
-            <span className="flex items-center gap-1.5">
-              <span className="font-medium">Tiers</span>
-              {NICHE_TIERS.map((t) => (
+      <div className="flex flex-wrap items-center gap-3">
+        <Segmented>
+          <SegButton first active={dimension === "tag"} onClick={() => setDimension("tag")}>
+            Tags
+          </SegButton>
+          <SegButton active={dimension === "genre"} onClick={() => setDimension("genre")}>
+            Genres
+          </SegButton>
+        </Segmented>
+        <Segmented>
+          <SegButton
+            first
+            active={windowParam === "24m"}
+            onClick={() => setWindowParam("24m")}
+            title="Games released in the last 24 months — the market a new entrant faces"
+          >
+            Last 24 months
+          </SegButton>
+          <SegButton
+            active={windowParam === "all"}
+            onClick={() => setWindowParam("all")}
+            title="Full history — context, not an entry decision"
+          >
+            All-time
+          </SegButton>
+        </Segmented>
+        <Segmented>
+          <SegButton
+            first
+            active={minReviews === 0}
+            onClick={() => setMinReviews(0)}
+            title="No review floor — the whole tag, unreviewed releases included. Game counts are the honest tag size; revenue stats still skip games too small to estimate."
+          >
+            All games
+          </SegButton>
+          <SegButton active={minReviews === 50} onClick={() => setMinReviews(50)} title="Broader population, noisier stats">
+            ≥50 reviews
+          </SegButton>
+          <SegButton active={minReviews === 100} onClick={() => setMinReviews(100)} title="Stricter population, cleaner stats">
+            ≥100
+          </SegButton>
+        </Segmented>
+        <input
+          type="search"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search niches…"
+          className="bg-transparent text-[13px] text-ink-primary outline-none placeholder:text-ink-muted"
+          style={{ width: 220, border: `1px solid ${PAPER_30}`, padding: "6px 12px" }}
+        />
+        {dimension === "tag" && (
+          <span className="flex items-center gap-1.5 text-[11px] text-ink-muted">
+            Tiers:
+            {NICHE_TIERS.map((t) => {
+              const active = tiers.includes(t);
+              return (
                 <button
                   key={t}
                   type="button"
                   onClick={() => toggleTier(t)}
                   title={TIER_TITLE[t]}
                   className={clsx(
-                    "rounded-full border px-2 py-0.5 font-medium transition-colors",
-                    tiers.includes(t)
-                      ? "border-brand bg-brand-tint text-brand"
-                      : "border-chartborder text-ink-muted hover:text-ink-secondary",
+                    "px-2.5 py-[3px] text-[11px] font-medium transition-colors",
+                    active ? "text-brand" : "text-ink-muted hover:bg-surface2",
                   )}
+                  style={{ border: `1px solid ${active ? "var(--brand)" : PAPER_30}` }}
                 >
                   {t}
                 </button>
-              ))}
-            </span>
-          )}
-          <span className="hidden items-center gap-3 sm:flex">
-            <span className="font-medium">Color key</span>
-            {OPPORTUNITY_LEGEND.map((l) => (
-              <span key={l.label} className="flex items-center gap-1.5">
-                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: l.color }} />
-                {l.label}
-              </span>
-            ))}
+              );
+            })}
           </span>
-          <span className="ml-auto hidden sm:inline">
-            Click a column header to sort · click a niche for the deep dive · tick 2+ to analyse them combined
-          </span>
-        </div>
-      </Card>
+        )}
+      </div>
 
       <NicheCombineBar
         selection={selection}
@@ -630,7 +687,8 @@ export default function NicheFinder() {
         }}
       />
 
-      <Card className={clsx("overflow-hidden !p-0", isFetching && "opacity-90 transition-opacity")}>
+      <div className={clsx("blueprint", isFetching && "opacity-90 transition-opacity")}>
+        <i className="bp-corner" />
         {isLoading && <div className="p-8 text-center text-sm text-ink-muted">Loading niches…</div>}
         {isError && (
           <div className="p-8 text-center text-sm text-status-serious">
@@ -642,63 +700,67 @@ export default function NicheFinder() {
         )}
         {data && data.items.length > 0 && (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1160px] border-collapse text-sm">
-              <thead>
-                {table.getHeaderGroups().map((hg) => (
-                  <tr key={hg.id} className="border-b border-chartborder bg-surface2/50 text-left text-[11px]">
-                    {hg.headers.map((h) => (
-                      <th key={h.id} className="whitespace-nowrap px-4 py-2.5">
-                        {flexRender(h.column.columnDef.header, h.getContext())}
-                      </th>
-                    ))}
-                  </tr>
-                ))}
-              </thead>
-              <tbody>
-                {table.getRowModel().rows.map((row) => (
-                  <tr
-                    key={row.id}
-                    className="border-b border-chartborder/70 transition-colors last:border-0 hover:bg-surface2/60"
-                  >
-                    {row.getVisibleCells().map((cell) => (
-                      <td key={cell.id} className="whitespace-nowrap px-4 py-2.5 align-middle">
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        {data && (
-          <div className="flex items-center justify-between border-t border-chartborder px-4 py-2.5 text-xs text-ink-muted">
-            <span>
-              {total > 0
-                ? `${rangeStart.toLocaleString()}–${rangeEnd.toLocaleString()} of ${total.toLocaleString()}`
-                : "0 results"}
-            </span>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                disabled={offset === 0}
-                onClick={() => setOffset((o) => Math.max(0, o - LIMIT))}
-                className="rounded-lg border border-chartborder bg-surface px-3 py-1 font-medium text-ink-secondary shadow-xs transition-colors hover:text-ink-primary disabled:pointer-events-none disabled:opacity-40"
-              >
-                Prev
-              </button>
-              <button
-                type="button"
-                disabled={offset + LIMIT >= total}
-                onClick={() => setOffset((o) => o + LIMIT)}
-                className="rounded-lg border border-chartborder bg-surface px-3 py-1 font-medium text-ink-secondary shadow-xs transition-colors hover:text-ink-primary disabled:pointer-events-none disabled:opacity-40"
-              >
-                Next
-              </button>
+            <div role="table" style={{ minWidth: TABLE_MIN_WIDTH }}>
+              {table.getHeaderGroups().map((hg) => (
+                <div key={hg.id} role="row" className="border-b border-chartborder" style={{ ...ROW_GRID, padding: "12px 20px" }}>
+                  {hg.headers.map((h) => (
+                    <ColHead key={h.id} active={sort === h.column.id} order={order}>
+                      {flexRender(h.column.columnDef.header, h.getContext())}
+                    </ColHead>
+                  ))}
+                </div>
+              ))}
+              {table.getRowModel().rows.map((row) => (
+                <div
+                  key={row.id}
+                  role="row"
+                  className="border-b border-line-grid transition-colors last:border-0 hover:bg-surface2/60"
+                  style={{ ...ROW_GRID, padding: "13px 20px", fontSize: 14 }}
+                >
+                  {row.getVisibleCells().map((cell) => (
+                    <div key={cell.id} role="cell" className="min-w-0">
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </div>
+                  ))}
+                </div>
+              ))}
             </div>
           </div>
         )}
-      </Card>
+      </div>
+
+      {data && (
+        <div className="flex items-center justify-between text-[12px] text-ink-muted">
+          <span>
+            {total > 0
+              ? `${rangeStart.toLocaleString()}–${rangeEnd.toLocaleString()} of ${total.toLocaleString()}`
+              : "0 results"}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={offset === 0}
+              onClick={() => setOffset((o) => Math.max(0, o - LIMIT))}
+              className={clsx("px-3 py-1 text-ink-primary transition-colors", offset === 0 ? "pointer-events-none" : "hover:bg-surface2")}
+              style={{ border: `1px solid ${PAPER_35}`, color: offset === 0 ? PAPER_45 : undefined }}
+            >
+              Prev
+            </button>
+            <button
+              type="button"
+              disabled={offset + LIMIT >= total}
+              onClick={() => setOffset((o) => o + LIMIT)}
+              className={clsx(
+                "px-3 py-1 text-ink-primary transition-colors",
+                offset + LIMIT >= total ? "pointer-events-none" : "hover:bg-surface2",
+              )}
+              style={{ border: `1px solid ${PAPER_35}`, color: offset + LIMIT >= total ? PAPER_45 : undefined }}
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -730,14 +792,14 @@ function NicheCombineBar({
   return (
     <div
       data-testid="niche-combine-bar"
-      className="sticky top-14 z-20 -mt-2 flex flex-wrap items-center gap-2 rounded-card border border-brand bg-surface px-3 py-2 shadow-md"
+      className="sticky top-14 z-20 -mt-2 flex flex-wrap items-center gap-2 border border-brand bg-surface px-3 py-2"
     >
       <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Combine</span>
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
         {selection.map((s) => (
           <span
             key={formatNicheRef(s)}
-            className="inline-flex max-w-[200px] items-center gap-1 rounded-full border border-chartborder bg-page px-2 py-0.5 text-[11px] text-ink-secondary"
+            className="inline-flex max-w-[200px] items-center gap-1 border border-chartborder bg-page px-2 py-0.5 text-[11px] text-ink-secondary"
           >
             <span className="truncate" title={`${s.dimension}: ${s.key}`}>
               {s.key}
@@ -746,7 +808,7 @@ function NicheCombineBar({
               type="button"
               onClick={() => onRemove(s)}
               aria-label={`Remove ${s.key} from the combination`}
-              className="-my-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-ink-muted hover:bg-surface2 hover:text-ink-primary"
+              className="-my-1 flex h-6 w-6 shrink-0 items-center justify-center text-ink-muted hover:bg-surface2 hover:text-ink-primary"
             >
               ✕
             </button>
@@ -765,14 +827,14 @@ function NicheCombineBar({
         onClick={onAnalyse}
         disabled={!ready}
         title={ready ? "See the games that carry all of these niches at once" : "Select at least two niches to combine them"}
-        className="rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg shadow-xs transition-colors hover:bg-brand-hover disabled:pointer-events-none disabled:opacity-40"
+        className="bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg transition-colors hover:bg-brand-hover disabled:pointer-events-none disabled:opacity-40"
       >
         Analyse combined ({selection.length})
       </button>
       <button
         type="button"
         onClick={onClear}
-        className="rounded-md border border-chartborder px-2.5 py-1.5 text-[11px] font-medium text-ink-muted hover:text-ink-primary"
+        className="border border-chartborder px-2.5 py-1.5 text-[11px] font-medium text-ink-muted hover:text-ink-primary"
       >
         Clear
       </button>
