@@ -1758,11 +1758,18 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
         # must produce identical tables or PROSPECT_SENTIMENT_CACHE=off would quietly mean
         # "different numbers", which is worse than being slow.
         con.execute(
-            """
+            f"""
             CREATE TEMP TABLE stg_aspect_mention_sentiment AS
-            SELECT appid, recommendationid, aspect, kw_aspect, compound FROM (
+            SELECT appid, recommendationid, aspect, kw_aspect, compound,
+                   -- Same praise/complaint source as the cached branch; the two paths must agree.
+                   COALESCE(clf_sentiment,
+                            CASE WHEN compound >= {SENTIMENT_POS_THRESHOLD} THEN 'praise'
+                                 WHEN compound <= {SENTIMENT_NEG_THRESHOLD} THEN 'complaint'
+                                 ELSE 'neutral' END) AS text_sentiment
+            FROM (
                 SELECT r.appid, r.recommendationid,
                        COALESCE(r.clf_aspect, r.aspect) AS aspect,
+                       r.clf_sentiment,
                        -- See the cached branch: the excerpt regex needs the arm that cut the
                        -- window, not the aspect the classifier moved it to. Qualified with the
                        -- table alias on purpose — bare `aspect` here would be ambiguous with the
@@ -1835,7 +1842,7 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             # Full in-scope set, read back from the cache (untouched old rows + just-inserted new
             # ones alike). Same shape/columns as the uncached branch above.
             con.execute(
-                """
+                f"""
                 CREATE TEMP TABLE stg_aspect_mention_sentiment AS
                 -- The keyword arm only nominated this window; the classifier decides what it is
                 -- ABOUT. Rows it reads as NONE are dropped outright — that class alone is 22% of
@@ -1844,10 +1851,23 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
                 -- QUALIFY keeps one row per (review, aspect): several keyword arms of the same
                 -- review routinely resolve to the same true aspect, and without this the winner
                 -- would be counted two or three times.
-                SELECT appid, recommendationid, aspect, kw_aspect, compound FROM (
+                SELECT appid, recommendationid, aspect, kw_aspect, compound,
+                       -- Praise/complaint now comes from the model's sentiment head, not VADER's
+                       -- compound. On a blind 120-window sample VADER agreed with a human read
+                       -- 65.8% of the time and the head 81.7%, winning 28 disagreements to 9 —
+                       -- VADER has no idea what "not worth full price" or "the boss is not so
+                       -- cool" mean, because it scores words, not the clause they sit in.
+                       -- Falls back to the VADER band when no verdict exists, so a missing model
+                       -- degrades to the old behaviour rather than blanking the column.
+                       COALESCE(clf_sentiment,
+                                CASE WHEN compound >= {SENTIMENT_POS_THRESHOLD} THEN 'praise'
+                                     WHEN compound <= {SENTIMENT_NEG_THRESHOLD} THEN 'complaint'
+                                     ELSE 'neutral' END) AS text_sentiment
+                FROM (
                     SELECT p.appid,
                            m.recommendationid,
                            COALESCE(m.clf_aspect, m.aspect) AS aspect,
+                           m.clf_sentiment,
                            -- The arm whose regex CUT this window, kept alongside the verdict.
                            -- mart_game_aspect_reviews re-extracts the excerpt text with one
                            -- aspect's keyword regex, and after reassignment the displayed aspect
@@ -1881,9 +1901,11 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
         CREATE TEMP TABLE stg_aspect_sentiment AS
         SELECT appid, aspect,
             COUNT(*) AS n_text_scored,
-            COALESCE(SUM(CASE WHEN compound >= {SENTIMENT_POS_THRESHOLD} THEN 1 ELSE 0 END), 0) AS n_text_pos,
-            COALESCE(SUM(CASE WHEN compound <= {SENTIMENT_NEG_THRESHOLD} THEN 1 ELSE 0 END), 0) AS n_text_neg,
-            COALESCE(SUM(CASE WHEN compound > {SENTIMENT_NEG_THRESHOLD} AND compound < {SENTIMENT_POS_THRESHOLD} THEN 1 ELSE 0 END), 0) AS n_text_neutral,
+            COALESCE(SUM(CASE WHEN text_sentiment = 'praise' THEN 1 ELSE 0 END), 0) AS n_text_pos,
+            COALESCE(SUM(CASE WHEN text_sentiment = 'complaint' THEN 1 ELSE 0 END), 0) AS n_text_neg,
+            COALESCE(SUM(CASE WHEN text_sentiment = 'neutral' THEN 1 ELSE 0 END), 0) AS n_text_neutral,
+            -- sum_compound stays VADER: mean_compound is exposed as its own numeric signal, and
+            -- the model's head is a 3-way label with no magnitude to average.
             SUM(compound) AS sum_compound
         FROM stg_aspect_mention_sentiment
         GROUP BY appid, aspect
