@@ -190,6 +190,32 @@ const DEFAULT_ACCENT: AccentId = "industry";
 // The designed identity is the product's look now, not an option users must find.
 const DEFAULT_PRESET: PresetId = "industry";
 
+/**
+ * One-time migration to the Industry identity.
+ *
+ * The redesign changed the product's look, but theme/preset/accent are PERSISTED choices, and a
+ * default only applies when nothing is stored. So every existing visitor kept light + soft +
+ * blue and saw none of it — the redesign was invisible to exactly the people who had used the
+ * app before. Verifying in a fresh browser context hid this completely.
+ *
+ * Runs once per browser: stamps a flag, overwrites the three stored keys. After that the pickers
+ * work normally again — this resets the look once, it does not lock anyone out of choosing.
+ */
+const MIGRATION_KEY = "prospect-design-industry";
+function migrateStoredPreferences(): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (window.localStorage.getItem(MIGRATION_KEY)) return;
+    window.localStorage.setItem(MIGRATION_KEY, "1");
+    window.localStorage.setItem(THEME_KEY, "dark");
+    window.localStorage.setItem(PRESET_KEY, DEFAULT_PRESET);
+    window.localStorage.setItem(ACCENT_KEY, DEFAULT_ACCENT);
+  } catch {
+    // Storage can throw (privacy mode, quota). Nothing to migrate then — the defaults apply.
+  }
+}
+migrateStoredPreferences();
+
 function initialTheme(): Theme {
   if (typeof window === "undefined") return "light";
   const stored = window.localStorage.getItem(THEME_KEY);
