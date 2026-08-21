@@ -209,22 +209,32 @@ h1, h2, h3, h4, h5, h6 {
   border: 1px solid var(--border);
   border-radius: 0;
 }
+/* Four "+" registration marks, one per corner, 11×11 and overhanging the frame by 6px.
+ *
+ * Each mark is a CROSS, drawn as two 1px gradients inside one 11×11 pseudo-element — the
+ * earlier version put a single stroke at each corner and called it a cross in its own comment,
+ * which is what a drawing sheet does NOT look like. Four pseudo-elements, four corners: the
+ * frame carries the top pair, the one empty <i class="bp-corner"> child carries the bottom pair.
+ */
 .blueprint::before,
 .blueprint::after,
 .blueprint > .bp-corner::before,
 .blueprint > .bp-corner::after {
   content: "";
   position: absolute;
-  background: color-mix(in srgb, var(--text-primary) 55%, transparent);
+  width: 11px;
+  height: 11px;
   pointer-events: none;
+  color: color-mix(in srgb, var(--text-primary) 55%, transparent);
+  background:
+    linear-gradient(to right, currentcolor 0 100%) center / 100% 1px no-repeat,
+    linear-gradient(to bottom, currentcolor 0 100%) center / 1px 100% no-repeat;
 }
-/* Top-left and bottom-right marks come free from the frame itself; the other two need
-   one empty <i class="bp-corner"> child. Each mark is a 11×11 "+": a 1px cross. */
-.blueprint::before { left: -1px; top: -6px; width: 1px; height: 11px; }
-.blueprint::after  { right: -1px; bottom: -6px; width: 1px; height: 11px; }
+.blueprint::before { left: -6px; top: -6px; }
+.blueprint::after  { right: -6px; top: -6px; }
 .blueprint > .bp-corner { position: absolute; inset: 0; pointer-events: none; }
-.blueprint > .bp-corner::before { right: -6px; top: -1px; width: 11px; height: 1px; }
-.blueprint > .bp-corner::after  { left: -6px; bottom: -1px; width: 11px; height: 1px; }
+.blueprint > .bp-corner::before { left: -6px; bottom: -6px; }
+.blueprint > .bp-corner::after  { right: -6px; bottom: -6px; }
 
 /* Tabular figures only where columns must align vertically. */
 .tabular {

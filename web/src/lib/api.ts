@@ -441,6 +441,77 @@ export function useNicheDistribution(
   });
 }
 
+// ---- Radar feed (the opportunity-feed home, mockup 3a) ---------------------------------
+// Ranks on demand_trend_90d_pct — a column that landed in mart_niche on 2026-08-21 (PR #69)
+// and is NOT in the mart until the next nightly rebuild materialises it. The endpoint 503s
+// until then (see api/app/routers/niches.py::_has_demand90); Radar.tsx must degrade to an
+// honest "not available yet" message on that response, never a spinner or an empty grid.
+
+export interface RadarSparklinePoint {
+  month: string; // 'YYYY-MM-DD' (month start)
+  players: number;
+}
+
+/** One niche in the feed — the hero pick and every "Moving niches" grid card share this
+ * shape (the hero repeats as the grid's first card, same as the mockup). reviews_90d /
+ * reviews_prev_90d are counts from a recency-biased review SAMPLE (not Steam's true totals);
+ * demand_trend_90d_pct is the ratio between them and IS directionally sound, but never label
+ * the raw counts as Steam's absolute numbers. Guaranteed non-null here — the API excludes
+ * rows with no 90-day baseline rather than rendering them as an unchanged (0%) mover. */
+export interface RadarNicheCard {
+  dimension: string;
+  key: string;
+  tier: string | null;
+  n_games: number;
+  p90_rev: number | null;
+  opportunity_v2: number | null;
+  saturation_yoy: number | null;
+  reviews_90d: number;
+  reviews_prev_90d: number;
+  demand_trend_90d_pct: number;
+  players_trend_7d_pct: number | null;
+  sparkline: RadarSparklinePoint[];
+}
+
+/** The hero pick (the cut's biggest 90-day riser) plus its yearly demand-vs-pipeline trend
+ * (mart_niche_trend) — the same real series NicheDetail's "Demand vs. pipeline, by year"
+ * panel charts (§4b), reused here for the hero's chart column: no mart carries niche review
+ * velocity or releases at the mockup's monthly granularity, so this is the honest
+ * real-data substitute rather than an invented curve. */
+export interface RadarHero extends RadarNicheCard {
+  trend: TrendPoint[];
+}
+
+export interface RadarFeed {
+  dimension: string;
+  window: string;
+  min_reviews: number;
+  hero: RadarHero;
+  /** Includes the hero as movers[0] (mirrors the mockup), then the cut's other biggest
+   * 90-day movers ranked by |demand_trend_90d_pct| — "Moving niches", not "Rising niches":
+   * both risers and decliners appear here. */
+  movers: RadarNicheCard[];
+}
+
+export interface RadarFeedParams {
+  dimension?: Dimension;
+  window?: Window;
+  min_reviews?: number;
+  limit?: number;
+}
+
+/** 503 = the mart predates demand_trend_90d_pct — the state production is genuinely in for
+ * hours after every deploy that adds a mart column, so it is not retried into a spinner. */
+export function useRadarFeed(params: RadarFeedParams = {}) {
+  return useQuery({
+    queryKey: ["radar-feed", params],
+    queryFn: () => request<RadarFeed>(`/niches/radar${qs(params)}`),
+    staleTime: 60_000,
+    retry: (failureCount, error) =>
+      !(error instanceof ApiError && (error.status === 503 || error.status === 404)) && failureCount < 2,
+  });
+}
+
 /** Build a download URL for the niches CSV export (GET, triggered via <a download>). */
 export function nicheExportCsvUrl(params: {
   dimension: Dimension;

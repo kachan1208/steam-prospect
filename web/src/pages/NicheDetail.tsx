@@ -744,33 +744,11 @@ export default function NicheDetail() {
         )}
       </div>
 
+      {/* §4b's composition ends at the "Top games" table below — everything the app carries
+          beyond that mockup (this bearish-flags read, the Detailed-view cards, and the whole
+          Games & distribution tab) sits AFTER it rather than interleaved above it. */}
       {tab === "overview" && (
         <>
-          {/* Bearish read FIRST: the traps this exact cut is showing, before the scores. */}
-          <Card title="Read this first">
-            {flags.length > 0 ? (
-              <div className="flex flex-col gap-1.5">
-                {flags.map((f) => (
-                  <div key={f.text} className="flex items-start gap-2 text-xs text-ink-secondary">
-                    <span
-                      aria-hidden
-                      className={clsx(
-                        "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
-                        f.serious ? "bg-[var(--text-primary)]" : "bg-[color-mix(in_srgb,var(--text-primary)_50%,transparent)]",
-                      )}
-                    />
-                    {f.text}
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="text-xs text-ink-secondary">
-                No decline flags at this cut — pipeline, entrant economics, concentration and solo-viability all read
-                normal.
-              </div>
-            )}
-          </Card>
-
           <div className="flex flex-col gap-[22px] lg:flex-row lg:items-stretch">
             {/* Demand vs pipeline. §4b specs a 24-month MONTHLY two-series chart (review
                 velocity vs releases); no endpoint here carries that granularity — the only
@@ -978,6 +956,32 @@ export default function NicheDetail() {
               </div>
             )}
           </div>
+
+          {/* Not part of §4b — the app's pre-existing bearish-read card, kept but moved below
+              the mockup's own composition (header/KPI/panels/table) rather than ahead of it. */}
+          <Card title="Read this first">
+            {flags.length > 0 ? (
+              <div className="flex flex-col gap-1.5">
+                {flags.map((f) => (
+                  <div key={f.text} className="flex items-start gap-2 text-xs text-ink-secondary">
+                    <span
+                      aria-hidden
+                      className={clsx(
+                        "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
+                        f.serious ? "bg-[var(--text-primary)]" : "bg-[color-mix(in_srgb,var(--text-primary)_50%,transparent)]",
+                      )}
+                    />
+                    {f.text}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-xs text-ink-secondary">
+                No decline flags at this cut — pipeline, entrant economics, concentration and solo-viability all read
+                normal.
+              </div>
+            )}
+          </Card>
 
           {/* The chart-heavy expert cards live under the Detailed toggle; Simple keeps the
               plain-language reads (header, stat tiles, flags, opportunity) only — same split

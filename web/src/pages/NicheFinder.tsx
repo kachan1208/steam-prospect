@@ -54,17 +54,34 @@ const TIER_TITLE: Record<NicheTier, string> = {
   meta: "Reception tags (Great Soundtrack…) — never buildable",
 };
 
-// The table's real column set is richer than the mockup's 8-column illustration (which
-// omits the multi-select checkbox and four sortable metrics — longevity, total owners,
-// hit rate, saturation — this page already had). Rather than drop working, sortable
-// columns to match the illustration literally, the mockup's grid grammar (fr-weighted
-// tracks, 14px gaps) is extended to the full real set below.
-const GRID_TEMPLATE = "28px 2fr .6fr .85fr .85fr .85fr .85fr .8fr .8fr .8fr .8fr .85fr .85fr .85fr";
-const TABLE_MIN_WIDTH = 1500;
+// Mockup 4a draws exactly 8 columns, at this exact fr-weighted grid — Niche | Games |
+// P90 rev | Demand | Competition | Quality gap | Opp v2 ↓ | Players 7d. The real table
+// carries more sortable metrics than that (longevity, total owners, hit rate, saturation)
+// plus a multi-select checkbox; a prior pass widened this grid to cram all 14 in, which is
+// why the page still read as "the old table, recoloured" instead of the mockup's composition.
+// Nothing is dropped: the checkbox rides inside the (2fr-wide) Niche cell instead of owning
+// its own track, and the four extra metrics move to a second, explicitly-toggled panel
+// below the mockup-faithful table (see MORE_METRICS_GRID / "More metrics" below).
+const GRID_TEMPLATE = "2fr .7fr 1fr 1fr 1fr 1fr .9fr 1fr";
+const TABLE_MIN_WIDTH = 860;
 
 const ROW_GRID: CSSProperties = {
   display: "grid",
   gridTemplateColumns: GRID_TEMPLATE,
+  gap: 14,
+  alignItems: "center",
+};
+
+// The second panel's grid — same grammar (14px gap, fr-weighted tracks), its own column
+// set: Niche (for correlation with the row above) + the four metrics the mockup doesn't
+// draw, plus the live player count (mockup 4a only draws the 7d *trend*, not the raw
+// "Playing now" total this page already had).
+const MORE_METRICS_GRID_TEMPLATE = "2fr .9fr 1fr .9fr 1fr .9fr";
+const MORE_METRICS_MIN_WIDTH = 640;
+
+const MORE_METRICS_ROW_GRID: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: MORE_METRICS_GRID_TEMPLATE,
   gap: 14,
   alignItems: "center",
 };
@@ -260,33 +277,10 @@ export default function NicheFinder() {
   const columnHelper = useMemo(() => createColumnHelper<NicheRow>(), []);
   const columns = useMemo(
     () => [
-      columnHelper.display({
-        id: "combine",
-        header: () => <span className="sr-only">Select for combined analysis</span>,
-        cell: (info) => {
-          const key = info.row.original.key;
-          const ref = `${dimension}:${key}`;
-          const on = selectedRefs.has(ref);
-          const full = !on && selectedRefs.size >= NICHE_COMBINE_CAP;
-          return (
-            <input
-              type="checkbox"
-              checked={on}
-              disabled={full}
-              onChange={() => toggleSelected({ dimension, key })}
-              aria-label={`${on ? "Remove" : "Add"} ${key} ${on ? "from" : "to"} the combined analysis`}
-              title={
-                full
-                  ? `You can combine up to ${NICHE_COMBINE_CAP} niches at once`
-                  : on
-                    ? "Selected — in the combination bar above the table"
-                    : "Select this niche to combine it with others"
-              }
-              className="h-3.5 w-3.5 cursor-pointer accent-[var(--brand)] disabled:cursor-not-allowed disabled:opacity-40"
-            />
-          );
-        },
-      }),
+      // Mockup 4a's Niche column is 2fr-wide and draws nothing else in the row for it —
+      // the multi-select checkbox rides inside that cell (rather than owning a dedicated
+      // grid track the mockup never draws) so the selection feature keeps working without
+      // widening the grid past the mockup's 8 columns.
       columnHelper.accessor("key", {
         header: () => (
           <SortLabel label="Niche" help="A Steam community tag or Steam genre. The small badge marks non-buildable tiers (theme = a setting you attach to a game; umbrella = a genre container; meta = a reception tag)." col="key" active={sort === "key"} order={order} onSort={toggleSort} />
@@ -294,26 +288,46 @@ export default function NicheFinder() {
         cell: (info) => {
           const tier = info.row.original.tier;
           const key = info.getValue();
+          const ref = `${dimension}:${key}`;
+          const on = selectedRefs.has(ref);
+          const full = !on && selectedRefs.size >= NICHE_COMBINE_CAP;
           return (
-            <Link
-              to={nicheDetailPath(dimension, key)}
-              onClick={() => trackEvent("niche_open")}
-              title={`Open the ${key} deep dive`}
-              className="group/nk inline-flex min-w-0 items-center gap-2"
-            >
-              <span className="truncate font-medium text-ink-primary transition-colors group-hover/nk:text-brand">
-                {key}
-              </span>
-              {tier && tier !== "micro" && tier !== "genre" && (
-                <span
-                  className="shrink-0 px-[7px] py-px text-[10px] text-ink-muted"
-                  style={{ border: `1px solid ${PAPER_30}` }}
-                  title={TIER_TITLE[tier as NicheTier] ?? tier}
-                >
-                  {tier}
+            <div className="flex min-w-0 items-center gap-2">
+              <input
+                type="checkbox"
+                checked={on}
+                disabled={full}
+                onChange={() => toggleSelected({ dimension, key })}
+                aria-label={`${on ? "Remove" : "Add"} ${key} ${on ? "from" : "to"} the combined analysis`}
+                title={
+                  full
+                    ? `You can combine up to ${NICHE_COMBINE_CAP} niches at once`
+                    : on
+                      ? "Selected — in the combination bar above the table"
+                      : "Select this niche to combine it with others"
+                }
+                className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-[var(--brand)] disabled:cursor-not-allowed disabled:opacity-40"
+              />
+              <Link
+                to={nicheDetailPath(dimension, key)}
+                onClick={() => trackEvent("niche_open")}
+                title={`Open the ${key} deep dive`}
+                className="group/nk inline-flex min-w-0 items-center gap-2"
+              >
+                <span className="truncate font-medium text-ink-primary transition-colors group-hover/nk:text-brand">
+                  {key}
                 </span>
-              )}
-            </Link>
+                {tier && tier !== "micro" && tier !== "genre" && (
+                  <span
+                    className="shrink-0 px-[7px] py-px text-[10px] text-ink-muted"
+                    style={{ border: `1px solid ${PAPER_30}` }}
+                    title={TIER_TITLE[tier as NicheTier] ?? tier}
+                  >
+                    {tier}
+                  </span>
+                )}
+              </Link>
+            </div>
           );
         },
       }),
@@ -440,25 +454,6 @@ export default function NicheFinder() {
           );
         },
       }),
-      columnHelper.accessor("total_players_now", {
-        header: () => (
-          <SortLabel
-            label="Playing now" help="Who's playing right now. Calculated: SUM of each scored game's latest nightly player capture (kept up to 7 days). Captures are ~21–22:00 UTC point samples, not daily peaks. Dominated by the niche's hits."
-            col="total_players_now"
-            active={sort === "total_players_now"}
-            order={order}
-            onSort={toggleSort}
-          />
-        ),
-        cell: (info) => {
-          const v = info.getValue();
-          return (
-            <span className="tabular text-ink-secondary" title="Summed current players (nightly point samples, ≤7d carry) — dominated by the niche's hits">
-              {v != null ? fmtCompact(v) : "—"}
-            </span>
-          );
-        },
-      }),
       columnHelper.accessor("players_trend_7d_pct", {
         header: () => (
           <SortLabel
@@ -487,77 +482,6 @@ export default function NicheFinder() {
           );
         },
       }),
-      columnHelper.accessor((row) => row.lifetime_survival_12m ?? null, {
-        id: "lifetime_survival_12m",
-        header: () => (
-          <SortLabel
-            label="Longevity" help="Of this niche's games that ever reached 100+ concurrent players, the share still holding 10+ a year later. Calculated: fixed-horizon survival — games whose 100+ month is at least 12 months old only; steamcharts top-8k coverage."
-            col="lifetime_survival_12m"
-            active={sort === "lifetime_survival_12m"}
-            order={order}
-            onSort={toggleSort}
-          />
-        ),
-        cell: (info) => {
-          const v = info.getValue();
-          if (v == null) return <span className="text-ink-muted">—</span>;
-          const m = info.row.original.lifetime_median_dead_months;
-          const title =
-            `${fmtPct(v)} of its 100+ games still alive after a year` +
-            (m != null ? ` · dead ones lasted ~${fmtMonths(m)}` : "");
-          return (
-            <span className="tabular text-ink-secondary" title={title}>
-              {fmtPct(v)}
-            </span>
-          );
-        },
-      }),
-      columnHelper.accessor("total_owners", {
-        header: () => (
-          <SortLabel
-            label="Total owners" help="The size of the pie. Calculated: SUM of each scored game's estimated owners (SteamSpy range midpoint; review-modeled where SteamSpy is coarse). A big pie with a low score means people play the HITS — it doesn't hand a new entrant a slice."
-            col="total_owners"
-            active={sort === "total_owners"}
-            order={order}
-            onSort={toggleSort}
-          />
-        ),
-        cell: (info) => <span className="tabular text-ink-secondary">{fmtCompact(info.getValue())}</span>,
-      }),
-      columnHelper.accessor("hit_rate_200k", {
-        header: () => (
-          <SortLabel label="Hit ≥$200K" help="The odds a serious title 'works' here. Calculated: share of the niche's scored games whose estimated lifetime revenue clears $200K." col="hit_rate_200k" active={sort === "hit_rate_200k"} order={order} onSort={toggleSort} />
-        ),
-        cell: (info) => {
-          const v = info.getValue();
-          const n = info.row.original.n_games;
-          const title =
-            v != null && n ? `${Math.round(v * n)} of ${fmtInt(n)} scored games clear $200K est. lifetime revenue` : undefined;
-          return (
-            <span className="tabular text-ink-secondary" title={title}>
-              {fmtPct(v)}
-            </span>
-          );
-        },
-      }),
-      columnHelper.accessor("saturation_yoy", {
-        header: () => (
-          <SortLabel label="Saturation YoY" help="Is the pipeline growing? Calculated: (releases last calendar year − releases the year before) ÷ the year before. Negative = SHRINKING — 'low competition' in a shrinking niche is decline, not opportunity." col="saturation_yoy" active={sort === "saturation_yoy"} order={order} onSort={toggleSort} />
-        ),
-        cell: (info) => {
-          const v = info.getValue();
-          const r = info.row.original;
-          const title =
-            r.n_recent_year != null && r.n_prior_year != null && v != null
-              ? `(${fmtInt(r.n_recent_year)} releases last year − ${fmtInt(r.n_prior_year)} the year before) ÷ ${fmtInt(r.n_prior_year)} = ${(v * 100).toFixed(1)}%${v < -0.05 ? " — the pipeline is shrinking" : ""}`
-              : undefined;
-          return (
-            <span title={title} className="tabular text-ink-secondary">
-              {fmtSigned(v)}
-            </span>
-          );
-        },
-      }),
     ],
     [columnHelper, sort, order, toggleSort, dimension, selectedRefs, toggleSelected],
   );
@@ -567,6 +491,88 @@ export default function NicheFinder() {
     columns,
     getCoreRowModel: getCoreRowModel(),
   });
+
+  // ---- "more metrics" panel --------------------------------------------------------
+  // Everything the app tracks that mockup 4a does NOT draw — longevity, total owners,
+  // hit rate, saturation, and the raw "playing now" count (the mockup only draws the 7d
+  // *trend*). Not deleted, just not crammed into the mockup-faithful grid above: reachable
+  // below the table, behind an explicit toggle, sharing the exact same sort/order state
+  // (and so the exact same row order) as the primary table above it.
+  const [showMoreMetrics, setShowMoreMetrics] = useState(false);
+  const moreMetricsColumns = useMemo(
+    () => [
+      {
+        col: "lifetime_survival_12m" as SortKey,
+        label: "Longevity",
+        help: "Of this niche's games that ever reached 100+ concurrent players, the share still holding 10+ a year later. Calculated: fixed-horizon survival — games whose 100+ month is at least 12 months old only; steamcharts top-8k coverage.",
+        render: (row: NicheRow) => {
+          const v = row.lifetime_survival_12m ?? null;
+          if (v == null) return <span className="text-ink-muted">—</span>;
+          const m = row.lifetime_median_dead_months;
+          const title =
+            `${fmtPct(v)} of its 100+ games still alive after a year` +
+            (m != null ? ` · dead ones lasted ~${fmtMonths(m)}` : "");
+          return (
+            <span className="tabular text-ink-secondary" title={title}>
+              {fmtPct(v)}
+            </span>
+          );
+        },
+      },
+      {
+        col: "total_owners" as SortKey,
+        label: "Total owners",
+        help: "The size of the pie. Calculated: SUM of each scored game's estimated owners (SteamSpy range midpoint; review-modeled where SteamSpy is coarse). A big pie with a low score means people play the HITS — it doesn't hand a new entrant a slice.",
+        render: (row: NicheRow) => (
+          <span className="tabular text-ink-secondary">{fmtCompact(row.total_owners)}</span>
+        ),
+      },
+      {
+        col: "hit_rate_200k" as SortKey,
+        label: "Hit ≥$200K",
+        help: "The odds a serious title 'works' here. Calculated: share of the niche's scored games whose estimated lifetime revenue clears $200K.",
+        render: (row: NicheRow) => {
+          const v = row.hit_rate_200k;
+          const n = row.n_games;
+          const title =
+            v != null && n ? `${Math.round(v * n)} of ${fmtInt(n)} scored games clear $200K est. lifetime revenue` : undefined;
+          return (
+            <span className="tabular text-ink-secondary" title={title}>
+              {fmtPct(v)}
+            </span>
+          );
+        },
+      },
+      {
+        col: "saturation_yoy" as SortKey,
+        label: "Saturation YoY",
+        help: "Is the pipeline growing? Calculated: (releases last calendar year − releases the year before) ÷ the year before. Negative = SHRINKING — 'low competition' in a shrinking niche is decline, not opportunity.",
+        render: (row: NicheRow) => {
+          const v = row.saturation_yoy;
+          const title =
+            row.n_recent_year != null && row.n_prior_year != null && v != null
+              ? `(${fmtInt(row.n_recent_year)} releases last year − ${fmtInt(row.n_prior_year)} the year before) ÷ ${fmtInt(row.n_prior_year)} = ${(v * 100).toFixed(1)}%${v < -0.05 ? " — the pipeline is shrinking" : ""}`
+              : undefined;
+          return (
+            <span title={title} className="tabular text-ink-secondary">
+              {fmtSigned(v)}
+            </span>
+          );
+        },
+      },
+      {
+        col: "total_players_now" as SortKey,
+        label: "Playing now",
+        help: "Who's playing right now. Calculated: SUM of each scored game's latest nightly player capture (kept up to 7 days). Captures are ~21–22:00 UTC point samples, not daily peaks. Dominated by the niche's hits.",
+        render: (row: NicheRow) => (
+          <span className="tabular text-ink-secondary" title="Summed current players (nightly point samples, ≤7d carry) — dominated by the niche's hits">
+            {row.total_players_now != null ? fmtCompact(row.total_players_now) : "—"}
+          </span>
+        ),
+      },
+    ],
+    [],
+  );
 
   const total = data?.total ?? 0;
   const rangeStart = total === 0 ? 0 : offset + 1;
@@ -759,6 +765,67 @@ export default function NicheFinder() {
               Next
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Mockup 4a draws exactly 8 columns. This page already tracked more sortable
+          metrics than that (longevity, total owners, hit rate, saturation, raw live-player
+          count) — kept, not deleted, but pushed below the mockup-faithful table and behind
+          an explicit toggle rather than crammed into its grid. Shares the same sort/order
+          state, so its row order always matches the table above it. */}
+      {data && data.items.length > 0 && (
+        <div className="flex flex-col" style={{ gap: 10 }}>
+          <button
+            type="button"
+            onClick={() => setShowMoreMetrics((v) => !v)}
+            aria-expanded={showMoreMetrics}
+            className="kicker inline-flex w-fit items-center gap-2 text-ink-muted transition-colors hover:text-ink-secondary"
+            style={{ fontSize: 11, border: `1px solid ${PAPER_30}`, padding: "6px 12px" }}
+          >
+            <span aria-hidden>{showMoreMetrics ? "−" : "+"}</span>
+            More metrics — longevity, owners, hit rate, saturation, live players
+          </button>
+          {showMoreMetrics && (
+            <div className="blueprint">
+              <i className="bp-corner" />
+              <div className="overflow-x-auto">
+                <div role="table" style={{ minWidth: MORE_METRICS_MIN_WIDTH }}>
+                  <div role="row" className="border-b border-chartborder" style={{ ...MORE_METRICS_ROW_GRID, padding: "12px 20px" }}>
+                    <ColHead active={false} order="desc">
+                      <span
+                        className="uppercase text-ink-muted"
+                        style={{ fontFamily: CONDENSED, fontSize: 12, letterSpacing: ".08em", fontWeight: 600 }}
+                      >
+                        Niche
+                      </span>
+                    </ColHead>
+                    {moreMetricsColumns.map((c) => (
+                      <ColHead key={c.col} active={sort === c.col} order={order}>
+                        <SortLabel label={c.label} help={c.help} col={c.col} active={sort === c.col} order={order} onSort={toggleSort} />
+                      </ColHead>
+                    ))}
+                  </div>
+                  {(data?.items ?? []).map((row) => (
+                    <div
+                      key={row.key}
+                      role="row"
+                      className="border-b border-line-grid transition-colors last:border-0 hover:bg-surface2/60"
+                      style={{ ...MORE_METRICS_ROW_GRID, padding: "13px 20px", fontSize: 14 }}
+                    >
+                      <div role="cell" className="min-w-0 truncate text-ink-secondary">
+                        {row.key}
+                      </div>
+                      {moreMetricsColumns.map((c) => (
+                        <div key={c.col} role="cell" className="min-w-0">
+                          {c.render(row)}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
