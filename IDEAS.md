@@ -77,3 +77,60 @@ The fix is a single exported `BlueprintPanel` (frame + corner marks + one title 
 six pages import. Deliberately NOT done in the same pass as the red/green fixes — it touches six
 live pages at once and needs per-page visual verification, which is a different kind of risk from
 a five-line colour correction.
+
+---
+
+## What SteamDB has that Prospect could use
+
+SteamDB blocks automated fetching (403), so this is assembled from search results and prior
+knowledge rather than a page-by-page crawl — treat the feature list as accurate in outline, not
+audited.
+
+The filter applied throughout: **Prospect is not a SteamDB clone.** SteamDB answers "what is
+happening to game X right now". Prospect answers "what should I build, and when should I launch".
+A SteamDB feature only earns a place here if it serves that second question. Depots, package
+diffs, the account-value calculator and per-user library tools are excluded on purpose — they are
+good features answering a question this product does not ask.
+
+### Buildable on data we already hold
+
+**1. All-time and rolling peak CCU per game.** SteamDB's headline trio is current / peak 24h /
+peak all-time. We hold `mart_game_players_daily` (nightly point samples, ~32 days deep) and
+`game_snapshots.ccu`. That supports "peak observed in the last N days" honestly today, and
+becomes a real all-time peak as the series lengthens. Note the sample is nightly, so it is a
+floor on the true peak, not the peak — label it as observed, never as "peak".
+
+**2. Charts by tag / category.** SteamDB's most-played-by-tag is one query away from
+`mart_niche_players` + `mart_niche_players_top`, which already exist. The Prospect twist is worth
+more than the clone: rank niches by *players per game* rather than total players, which is the
+number that tells a solo dev whether a niche's audience is reachable or locked up in three giants.
+`winner_concentration` is already computed for exactly this.
+
+**3. Store-page change history — repositioning detection.** SteamDB tracks every change to a
+game's store page. We hold the current values in `games` (tags, genres, price, description,
+categories) and rewrite them on each enrichment pass, keeping no history. Diffing enrichment
+passes would surface something genuinely useful and, as far as I know, unserved: *which games
+changed their tags or repositioned themselves, and what happened to their reviews afterwards*.
+That is a direct answer to "is this niche worth entering" — you can watch what repositioning did
+for someone else. Needs a small history table, not a new scrape.
+
+### Needs a clock started (history accrues forward only)
+
+**4. Price history and lowest-ever price.** Already argued above under event markers — the schema
+exists in `game_snapshots`, nothing writes it on a schedule. SteamDB's version answers "should I
+buy"; ours answers "what discount depth do games in my niche run, and what does it do to their
+review velocity". Same data, a different and more useful question.
+
+**5. Wishlist/popularity rank for unreleased games.** Steam publishes a ranked "Popular Upcoming"
+list — 51,958 titles, ~1,040 requests for a full sweep, verified fetchable. Absolute wishlist
+counts are private to the developer and cannot be obtained by anyone. But a *rank*, tracked over
+time, gives pre-launch momentum for competitors, which is the thing you cannot otherwise see. A
+game climbing from 4,000th to 900th in a month is a signal no other source in this product carries.
+
+### Deliberately not worth copying
+
+- **Depots, manifests, package diffs** — engineering plumbing; no bearing on what to build.
+- **Account value / cost-per-hour calculator** — a consumer toy.
+- **Sale-date prediction from backend changes** — genuinely clever, and squarely SteamDB's game.
+  Prospect's launch-timing answer should come from its own seasonality data, not from guessing
+  Valve's calendar.
