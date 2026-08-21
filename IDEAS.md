@@ -40,6 +40,19 @@ design question is not how to draw a marker, it is how to decide which events ar
 likely the ones that coincide with an actual inflection in the series, which is a different and
 better problem than "annotate everything".
 
+**Start with the clock, not the chart.** Price/sale markers are the most valuable of the five —
+"reviews tripled the week it went 20% off" is the lesson a solo dev can actually reuse — and they
+are the only ones that cannot be backfilled. `game_snapshots` already has the right schema
+(`price_initial`, `price_final`, `discount_percent`, `ccu`); it is written only when the scraper
+happens to pass a game, which works out to roughly one row each, so there is nothing to diff.
+Every day without a scheduled capture is a day of price history that can never be recovered —
+Steam serves the current price and nothing else.
+
+So the first move is a cheap nightly snapshot step, independent of any chart work. It is the same
+shape as the two gaps already fixed this week (`sync-game-genres`, `enrich --refresh-unreleased`):
+the mechanism exists and simply nobody runs it on a schedule. The visual work can follow whenever;
+the history only starts accruing once the job does.
+
 ---
 
 ## Open questions recorded elsewhere
