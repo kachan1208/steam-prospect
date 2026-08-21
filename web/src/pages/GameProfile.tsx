@@ -223,13 +223,20 @@ export default function GameProfile() {
                       <span>Indie</span>
                     </>
                   )}
+                  {/* When WE first saw the game — provenance about our own coverage, not a fact
+                      about the game, so it is the quietest thing here and it is dropped below
+                      `sm`. On a phone it otherwise wrapped to a line of its own led by an
+                      orphaned separator, spending a whole row on the least useful item. */}
                   {profile.first_seen && !Number.isNaN(Date.parse(profile.first_seen)) && (
                     <span
-                      className="text-ink-muted"
+                      className="hidden items-center gap-x-2 text-ink-muted sm:inline-flex"
                       title={`First seen in our catalog: ${profile.first_seen}`}
                     >
-                      · in catalog since{" "}
-                      {new Date(profile.first_seen).toLocaleDateString(undefined, { year: "numeric", month: "short" })}
+                      <span aria-hidden="true">·</span>
+                      <span>
+                        in catalog since{" "}
+                        {new Date(profile.first_seen).toLocaleDateString(undefined, { year: "numeric", month: "short" })}
+                      </span>
                     </span>
                   )}
                 </div>
@@ -248,8 +255,16 @@ export default function GameProfile() {
                       <CreditLinks role="publisher" joined={profile.publishers} />
                     </>
                   )}
-                  <span aria-hidden="true">·</span>
-                  <span>{profile.self_published ? "Self-published" : "Has a publisher"}</span>
+                  {/* Only when it SAYS something. "Self-published" is a real signal about who
+                      carries the risk; "Has a publisher" appended to a line that already names
+                      three of them is words for nothing — and on a phone it cost the line an
+                      extra wrap. */}
+                  {profile.self_published === 1 && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span>Self-published</span>
+                    </>
+                  )}
                   <SocialLinks
                     x={profile.dev_x_handle}
                     xUrl={profile.dev_x_url}
