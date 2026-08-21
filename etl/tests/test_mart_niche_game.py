@@ -121,6 +121,10 @@ def main() -> int:
 
     # ---- staging tables the two marts read (TEMP, exactly as create_staging() makes them)
     con.execute("CREATE TEMP TABLE stg_tag_membership(appid INTEGER, tag VARCHAR)")
+    # mart_niche.sql's 90-day demand window reads stg_review (created by create_staging()
+    # in the real build, so it exists before any mart file runs). Two reviews per game,
+    # one in each 90-day window, is enough to exercise the join and the NULL-baseline rule.
+    con.execute("CREATE TEMP TABLE stg_review(appid INTEGER, review_date DATE, dsr INTEGER, playtime_forever INTEGER)")
     con.executemany("INSERT INTO stg_tag_membership VALUES (?, ?)", tag_rows)
 
     con.execute("CREATE TEMP TABLE stg_genre_membership(appid INTEGER, genre VARCHAR)")
@@ -167,6 +171,11 @@ def main() -> int:
             lifetime_survival_12m DOUBLE, lifetime_median_dead_months DOUBLE)
         """
     )
+
+    con.execute("""INSERT INTO stg_review
+        SELECT appid, CURRENT_DATE - INTERVAL 30 DAY, 30, 100 FROM stg_game
+        UNION ALL
+        SELECT appid, CURRENT_DATE - INTERVAL 120 DAY, 120, 100 FROM stg_game""")
 
     # ---- render + execute through the REAL renderer -----------------------------------
     params = bm.build_params()

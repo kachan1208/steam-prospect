@@ -98,6 +98,33 @@ WHERE g.total_reviews >= mr.min_reviews
         OR (g.release_valid AND g.release_date >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH)
       );
 
+-- DEMAND OVER 90 DAYS — the metric the Radar feed ranks on ("top movers by 90d demand
+-- trend"). Nothing in the marts carried it: players_trend_7d_pct is a 7-day window, and
+-- saturation_yoy counts RELEASES (pipeline), not demand. So it is computed here, from the
+-- same _niche_pop the rest of this file aggregates.
+--
+-- CAVEAT, and it is not small: stg_review is a recency-biased SAMPLE (the keeper deepens
+-- toward min(true_total, 20k) per game), so this is sample velocity, not Steam's true
+-- review velocity. mart_game.n_reviews_trailing_30d already ships with exactly this
+-- caveat. It is directionally sound BECAUSE both windows are drawn from the same sample —
+-- the bias largely cancels in a ratio — but the absolute counts are not Steam's.
+DROP TABLE IF EXISTS _niche_demand90;
+CREATE TEMP TABLE _niche_demand90 AS
+WITH v AS (
+    SELECT appid,
+        COUNT(*) FILTER (WHERE review_date >= CURRENT_DATE - INTERVAL 90 DAY) AS r_now,
+        COUNT(*) FILTER (WHERE review_date >= CURRENT_DATE - INTERVAL 180 DAY
+                           AND review_date <  CURRENT_DATE - INTERVAL 90 DAY) AS r_prev
+    FROM stg_review
+    GROUP BY appid
+)
+SELECT p.dimension, p.key, p.win, p.min_reviews,
+       SUM(COALESCE(v.r_now, 0))  AS reviews_90d,
+       SUM(COALESCE(v.r_prev, 0)) AS reviews_prev_90d
+FROM _niche_pop p
+LEFT JOIN v ON v.appid = p.appid
+GROUP BY 1, 2, 3, 4;
+
 CREATE TABLE mart_niche AS
 WITH membership AS (
     SELECT 'tag' AS dimension, tag AS key, appid FROM stg_tag_membership
@@ -258,11 +285,22 @@ SELECT
     -- games only, steamcharts top-8k coverage; NULL = too few covered games, "unknown").
     nl.lifetime_n_games,
     nl.lifetime_survival_12m,
-    nl.lifetime_median_dead_months
+    nl.lifetime_median_dead_months,
+    d.reviews_90d,
+    d.reviews_prev_90d,
+    -- NULL, not 0, when the prior window is empty: "no baseline to compare against" and
+    -- "no change" are different answers, and a niche with its first reviews in the last
+    -- 90 days would otherwise read as flat instead of brand new.
+    CASE WHEN COALESCE(d.reviews_prev_90d, 0) = 0 THEN NULL
+         ELSE round(100.0 * (d.reviews_90d - d.reviews_prev_90d) / d.reviews_prev_90d, 1)
+    END AS demand_trend_90d_pct
 FROM gated g
 LEFT JOIN tag_tier tt ON g.dimension = 'tag' AND tt.tag = g.key
 LEFT JOIN _niche_players_now np ON np.dimension = g.dimension AND np.key = g.key
-LEFT JOIN _niche_lifetime nl ON nl.dimension = g.dimension AND nl.key = g.key;
+LEFT JOIN _niche_lifetime nl ON nl.dimension = g.dimension AND nl.key = g.key
+LEFT JOIN _niche_demand90 d
+       ON d.dimension = g.dimension AND d.key = g.key
+      AND d.win = g.win AND d.min_reviews = g.min_reviews;
 
 CREATE TABLE mart_niche_top AS
 WITH membership AS (
