@@ -7,6 +7,8 @@ import { initAnalytics, trackPageview } from "./lib/analytics";
 import { useTheme, ACCENTS, PRESETS } from "./lib/theme";
 import LaunchTiming from "./pages/LaunchTiming";
 import NicheFinder from "./pages/NicheFinder";
+import NicheDetail, { NICHE_ROUTE_PATH } from "./pages/NicheDetail";
+import NicheCombined from "./pages/NicheCombined";
 import GameSearch from "./pages/GameSearch";
 import GameProfile from "./pages/GameProfile";
 import Compare from "./pages/Compare";
@@ -374,6 +376,18 @@ export default function App() {
               that it earns pixels again: v2-gated scores, live-player columns and the
               per-niche deep-dive drawer are chart-heavy, not a table a chat can beat. */}
           <Route path="/niches" element={<NicheFinder />} />
+          {/* Multi-niche overlap — a game carries many tags, so it lives in many niches;
+              the selected niches ride the URL (?niches=tag:Roguelike&niches=…&mode=) so a
+              combination is shareable. Static segment, so it can't collide with the
+              per-niche deep-dive route. */}
+          <Route path="/niches/combined" element={<NicheCombined />} />
+          {/* Per-niche deep dive — a real page (was a right-hand drawer until 2026-08), so
+              the cut, the tab and the distribution bucket selection all ride the URL and a
+              filtered view is a link you can send. Niche keys carry spaces and slashes, so
+              the :key segment is percent-encoded by nicheDetailPath() and decoded back by
+              React Router; the API matches it with a {key:path} converter for the same
+              reason. Mirrors /games/:appid, deliberately. */}
+          <Route path={NICHE_ROUTE_PATH} element={<NicheDetail />} />
           <Route path="/games" element={<GameSearch />} />
           <Route path="/games/:appid" element={<GameProfile />} />
           {/* Side-by-side comparison — reached from the CompareTray or a shared ?ids= URL,

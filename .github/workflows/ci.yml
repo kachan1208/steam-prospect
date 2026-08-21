@@ -1,8 +1,8 @@
 name: CI
 
-# Track O2 (prospect-production-and-marketing-plan.md): stop shipping blind. Three
+# Track O2 (prospect-production-and-marketing-plan.md): stop shipping blind. Four
 # independent jobs (disjoint concerns, same split the codebase itself uses: web / api /
-# mcp) so a failure in one doesn't hide the others' signal. Nothing here needs the real
+# etl / mcp) so a failure in one doesn't hide the others' signal. Nothing here needs the real
 # ~176MB data/current.duckdb or the 4GB source catalog: api/tests/conftest.py builds its
 # own tiny synthetic mart at test time, and mcp/smoke_test.py runs against a small,
 # curated, REAL-data-derived fixture committed at .github/fixtures/mcp_smoke_mart.db (see
@@ -74,6 +74,30 @@ jobs:
         # -m pytest` puts the current directory on sys.path; see api/tests/conftest.py's
         # module docstring for the full ordering story (env vars + fixture mart must exist
         # before app.main is ever imported).
+        run: python -m pytest tests/ -v
+
+  etl:
+    name: ETL (mart invariants)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      # pytest is NOT in etl/requirements.txt on purpose: that file describes what the droplet's
+      # ETL venv installs, and it is kept deliberately thin (the aspect classifier is
+      # dependency-free for exactly this reason). Test-only tooling belongs here, not there.
+      - name: Install ETL dependencies
+        working-directory: etl
+        run: pip install -r requirements.txt pytest
+
+      - name: Run mart invariant tests
+        working-directory: etl
+        # cwd must be `etl/` so the tests can `import build_marts` — `python -m pytest` puts the
+        # current directory on sys.path. Needs no source database: the tests render the real .sql
+        # files against a synthetic staging layer in an in-memory DuckDB.
         run: python -m pytest tests/ -v
 
   mcp-smoke:

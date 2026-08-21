@@ -62,36 +62,53 @@ DROP TABLE IF EXISTS mart_niche_top;
 DROP TABLE IF EXISTS mart_niche_hist;
 DROP TABLE IF EXISTS mart_niche_trend;
 
-CREATE TABLE mart_niche AS
+-- THE NICHE POPULATION, materialised once and shared with mart_niche_game.sql (next in
+-- MART_FILES). This used to be an inline `pop` CTE here, and mart_niche_game.sql had to restate
+-- the same joins and predicates to reproduce it.
+--
+-- Sharing it is not tidiness. mart_niche publishes n_games, and the niche drill-down charts the
+-- games behind that number: if the two populations differ by so much as one predicate, the chart
+-- silently disagrees with the headline sitting above it — plausible, wrong, and invisible. As one
+-- table that cannot happen, instead of being a thing a test has to keep catching.
+--
+-- TEMP and deliberately NOT dropped here: mart_niche_game.sql reads it and drops it as its last
+-- consumer. Same cross-file TEMP pattern as _niche_players_now from mart_players.sql.
+DROP TABLE IF EXISTS _niche_pop;
+CREATE TEMP TABLE _niche_pop AS
 WITH membership AS (
     SELECT 'tag' AS dimension, tag AS key, appid FROM stg_tag_membership
     UNION ALL
     SELECT 'genre' AS dimension, genre AS key, appid FROM stg_genre_membership
 ),
 mr AS ( SELECT * FROM (VALUES @MR_VALUES@) AS t(min_reviews) ),
-wins AS ( SELECT * FROM (VALUES ('all'),('24m')) AS t(win) ),
-pop AS (
-    SELECT
-        m.dimension, m.key, w.win, mr.min_reviews,
-        g.appid, g.est_rev_reviews, g.total_reviews, g.price_initial,
-        g.positive_ratio, g.owners_mid, g.self_published, g.is_singleplayer,
-        (g.release_valid AND g.release_date >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH) AS is_recent
-    FROM membership m
-    JOIN stg_game g ON g.appid = m.appid
-    CROSS JOIN wins w
-    CROSS JOIN mr
-    WHERE g.total_reviews >= mr.min_reviews
-      AND g.est_rev_reviews IS NOT NULL
-      AND (
-            w.win = 'all'
-            OR (g.release_valid AND g.release_date >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH)
-          )
+wins AS ( SELECT * FROM (VALUES ('all'),('24m')) AS t(win) )
+SELECT
+    m.dimension, m.key, w.win, mr.min_reviews,
+    g.appid, g.est_rev_reviews, g.total_reviews, g.price_initial,
+    g.positive_ratio, g.owners_mid, g.self_published, g.is_singleplayer,
+    (g.release_valid AND g.release_date >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH) AS is_recent
+FROM membership m
+JOIN stg_game g ON g.appid = m.appid
+CROSS JOIN wins w
+CROSS JOIN mr
+WHERE g.total_reviews >= mr.min_reviews
+  AND g.est_rev_reviews IS NOT NULL
+  AND (
+        w.win = 'all'
+        OR (g.release_valid AND g.release_date >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH)
+      );
+
+CREATE TABLE mart_niche AS
+WITH membership AS (
+    SELECT 'tag' AS dimension, tag AS key, appid FROM stg_tag_membership
+    UNION ALL
+    SELECT 'genre' AS dimension, genre AS key, appid FROM stg_genre_membership
 ),
 ranked AS (
     SELECT *,
         percent_rank() OVER (PARTITION BY dimension, key, win, min_reviews
                              ORDER BY est_rev_reviews) AS rev_pr
-    FROM pop
+    FROM _niche_pop
 ),
 agg AS (
     SELECT
