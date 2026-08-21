@@ -218,6 +218,15 @@ run_step "review_deepen"   5400 "python3 -m steam_scraper.scraper --db steam_gam
 # so membership includes everything tonight's scrape + tags_refresh just wrote. ~2s.
 run_step "tag_sync" 600 "python3 -m steam_scraper.scraper --db steam_games.db sync-game-tags"
 
+# game_genres had the SAME disease as game_tags above, and nobody had looked: nothing in the
+# scraper ever wrote it. Frozen since its one-off materialisation, so coverage decayed with game
+# age — 98.4% of games under appid 1.0M had rows against 56.4% over 4.0M. A game without a
+# primary_genre falls back to the catalog-wide Boxleiter multiplier instead of its genre's (worse
+# revenue estimate) and vanishes from every genre percentile and genre niche: 19.3% of the
+# published mart. Same placement and same reasoning as tag_sync — right before the ETL, full
+# rebuild, no incremental state to get wrong.
+run_step "genre_sync" 600 "python3 -m steam_scraper.scraper --db steam_games.db sync-game-genres"
+
 # [8] ETL — timeout-bounded (was UNbounded; a hung ETL once ran 406min). On success: atomic swap +
 # app restart + prune. On failure/timeout: keep the previous mart so the app never serves a partial.
 STEP="etl"; ETL_T0=$(date -u +%s)
