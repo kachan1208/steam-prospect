@@ -77,29 +77,13 @@ const ICONS: Record<string, ReactNode> = {
   ),
 };
 
-function NavIcon({ name }: { name: string }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.75"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="h-4 w-4 shrink-0"
-    >
-      {ICONS[name]}
-    </svg>
-  );
-}
-
-const NAV_ITEMS: { to: string; label: string; icon: string }[] = [
-  { to: "/radar", label: "Radar", icon: "pulse" },
-  { to: "/niches", label: "Niches", icon: "target" },
-  { to: "/games", label: "Games", icon: "grid" },
-  { to: "/studios", label: "Studios", icon: "building" },
-  { to: "/timing", label: "Timing", icon: "calendar" },
-  { to: "/watchlist", label: "Watchlist", icon: "eye" },
+const NAV_ITEMS: { to: string; label: string }[] = [
+  { to: "/radar", label: "Radar" },
+  { to: "/niches", label: "Niches" },
+  { to: "/games", label: "Games" },
+  { to: "/studios", label: "Studios" },
+  { to: "/timing", label: "Timing" },
+  { to: "/watchlist", label: "Watchlist" },
 ];
 
 /** Concentric-circles target mark (ICONS.target) in accent-300 + the PROSPECT wordmark in
@@ -129,25 +113,27 @@ function Header() {
             Plain text links, no pill background — active carries the accent, inactive
             recedes to muted paper, matching the mockups' `.nav a` rule exactly (color
             only, never a fill). */}
-        <nav className="order-last flex w-full flex-wrap items-center gap-x-4 gap-y-1 pb-2.5 sm:order-none sm:w-auto sm:flex-nowrap sm:gap-x-5 sm:pb-0">
+        {/* Right-aligned, per the mockups: the wordmark holds the left edge and the links sit
+            beside the MCP button. ml-auto does the pushing so the wrap behaviour below sm is
+            unchanged — six items still wrap rather than running off a 390px screen. */}
+        <nav className="order-last flex w-full flex-wrap items-center gap-x-4 gap-y-1 pb-2.5 sm:order-none sm:ml-auto sm:w-auto sm:flex-nowrap sm:gap-x-5 sm:pb-0">
           {NAV_ITEMS.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
               className={({ isActive }) =>
                 clsx(
-                  "flex items-center gap-1.5 py-1.5 text-[13px] font-medium transition-colors",
+                  "flex items-center py-1.5 text-[13px] font-medium transition-colors",
                   isActive ? "text-brand" : "text-ink-secondary hover:text-ink-primary",
                 )
               }
             >
-              <NavIcon name={item.icon} />
               {item.label}
             </NavLink>
           ))}
         </nav>
 
-        <div className="ml-auto flex h-14 items-center gap-2">
+        <div className="flex h-14 items-center gap-2">
           <NavLink
             to="/chat"
             className={({ isActive }) =>
