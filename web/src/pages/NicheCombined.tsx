@@ -5,7 +5,6 @@ import clsx from "clsx";
 
 import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
-import { StatTile } from "../components/ui/StatTile";
 import { trackEvent } from "../lib/analytics";
 import {
   ApiError,
@@ -19,9 +18,10 @@ import {
   type Window,
 } from "../lib/api";
 import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
-// The deep-dive page owns the canonical /niches/:dimension/:key link builder; re-exported
-// below so the finder has one import site for every niche URL it writes.
-import { nicheDetailPath } from "./NicheDetail";
+// The deep-dive page owns the canonical /niches/:dimension/:key link builder AND the §4b
+// KPI-cell primitive (condensed-numeral, 1px-gap blueprint grid); re-exported/reused below so
+// the two pages share one link site and one visual language instead of drifting apart.
+import { KpiCell, nicheDetailPath } from "./NicheDetail";
 
 export { nicheDetailPath };
 
@@ -140,8 +140,11 @@ function modeSentence(mode: NicheCombineMode, names: string[]): string {
     : `Every game counted below carries AT LEAST ONE of these ${names.length} niches — ${joined}.`;
 }
 
+// Square-cornered segmented control, selected cell = accent-300 fill + accent-900 text — the
+// same construction as the Niche Finder's Tags/Genres and window/floor segments (README §4a),
+// reused here so mode/window/review-floor read as the identical control everywhere they occur.
 function Segmented({ children }: { children: React.ReactNode }) {
-  return <div className="flex items-center gap-0.5 rounded-lg bg-surface2 p-0.5">{children}</div>;
+  return <div className="flex items-stretch border border-ink-primary/25">{children}</div>;
 }
 
 function SegButton({
@@ -160,9 +163,10 @@ function SegButton({
       type="button"
       onClick={onClick}
       title={title}
+      aria-pressed={active}
       className={clsx(
-        "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
-        active ? "bg-surface text-ink-primary shadow-xs" : "text-ink-muted hover:text-ink-secondary",
+        "border-l border-ink-primary/25 px-3 py-1.5 text-xs font-medium transition-colors first:border-l-0",
+        active ? "bg-brand text-brand-fg" : "text-ink-muted hover:text-ink-secondary",
       )}
     >
       {children}
@@ -288,16 +292,19 @@ export default function NicheCombined() {
 
   return (
     <div className="flex flex-col gap-4">
-      <Link to={nicheFinderPath(selection)} className="text-xs text-ink-muted hover:text-ink-primary">
-        ← Back to Niche Finder
-      </Link>
+      <div className="text-[11px] text-ink-primary/55">
+        <Link to={nicheFinderPath(selection)} className="hover:text-ink-primary">
+          Niches
+        </Link>
+        {" / "}Combined
+      </div>
 
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight text-ink-primary">
+          <h1 className="text-[28px] text-ink-primary sm:text-[32px]">
             Combined niche
             {selection.length > 0 && (
-              <span className="text-ink-muted"> · {names.join(mode === "intersect" ? " ∩ " : " ∪ ")}</span>
+              <span className="text-ink-primary/55"> · {names.join(mode === "intersect" ? " ∩ " : " ∪ ")}</span>
             )}
           </h1>
           <p className="mt-1 max-w-2xl text-sm text-ink-secondary">
@@ -309,8 +316,8 @@ export default function NicheCombined() {
         {enough && (
           <span
             className={clsx(
-              "shrink-0 rounded-full border px-3 py-1 text-xs font-semibold shadow-xs",
-              mode === "intersect" ? "border-brand bg-brand-tint text-brand" : "border-chartborder bg-surface text-ink-secondary",
+              "shrink-0 border px-3 py-1 text-xs font-semibold",
+              mode === "intersect" ? "border-brand text-brand" : "border-ink-primary/30 text-ink-primary/65",
             )}
             title={
               mode === "intersect"
@@ -324,15 +331,16 @@ export default function NicheCombined() {
       </div>
 
       {/* The combination itself: which niches, which mode, which cut — all editable here. */}
-      <Card className="!p-3.5">
+      <div className="blueprint relative border-ink-primary/25 p-4">
+        <i className="bp-corner" />
         <div className="flex flex-wrap items-center gap-2.5">
-          <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Niches</span>
+          <span className="kicker text-[11px] text-ink-primary/55">Niches</span>
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
             {selection.length === 0 && <span className="text-xs text-ink-muted">None selected</span>}
             {selection.map((s) => (
               <span
                 key={formatNicheRef(s)}
-                className="inline-flex max-w-[220px] items-center gap-1 rounded-full border border-chartborder bg-page px-2 py-0.5 text-[11px] text-ink-secondary"
+                className="inline-flex max-w-[220px] items-center gap-1 border border-ink-primary/25 bg-page px-2 py-0.5 text-[11px] text-ink-secondary"
               >
                 <Link to={nicheDetailPath(s.dimension, s.key)} className="truncate hover:text-brand hover:underline">
                   {s.key}
@@ -341,7 +349,7 @@ export default function NicheCombined() {
                   type="button"
                   onClick={() => removeNiche(s)}
                   aria-label={`Remove ${s.key} from the combination`}
-                  className="-my-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-ink-muted hover:bg-surface2 hover:text-ink-primary"
+                  className="-my-1 flex h-6 w-6 shrink-0 items-center justify-center text-ink-muted hover:bg-ink-primary/10 hover:text-ink-primary"
                 >
                   ✕
                 </button>
@@ -349,13 +357,13 @@ export default function NicheCombined() {
             ))}
             <Link
               to={nicheFinderPath(selection)}
-              className="rounded-md border border-chartborder px-2 py-0.5 text-[11px] font-medium text-ink-muted hover:text-ink-primary"
+              className="border border-ink-primary/25 px-2 py-0.5 text-[11px] font-medium text-ink-muted hover:text-ink-primary"
             >
               + Add niches
             </Link>
           </div>
         </div>
-        <div className="mt-3 flex flex-wrap items-center gap-2.5 border-t border-chartborder pt-2.5">
+        <div className="mt-3 flex flex-wrap items-center gap-2.5 border-t border-ink-primary/20 pt-2.5">
           <Segmented>
             <SegButton
               active={mode === "intersect"}
@@ -406,7 +414,7 @@ export default function NicheCombined() {
             </span>
           )}
         </div>
-      </Card>
+      </div>
 
       {!enough && (
         <Card>
@@ -423,14 +431,14 @@ export default function NicheCombined() {
               <div className="flex items-center gap-2">
                 <Link
                   to={nicheFinderPath(selection)}
-                  className="rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg shadow-xs hover:bg-brand-hover"
+                  className="bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg hover:bg-brand-hover"
                 >
                   {selection.length === 1 ? "Add another niche" : "Open the Niche Finder"}
                 </Link>
                 {selection.length === 1 && (
                   <Link
                     to={nicheDetailPath(selection[0].dimension, selection[0].key)}
-                    className="rounded-lg border border-chartborder px-3 py-1.5 text-xs font-medium text-ink-secondary hover:text-ink-primary"
+                    className="border border-chartborder px-3 py-1.5 text-xs font-medium text-ink-secondary hover:text-ink-primary"
                   >
                     Open its deep dive
                   </Link>
@@ -472,7 +480,7 @@ export default function NicheCombined() {
               type="button"
               onClick={() => combinedQ.refetch()}
               disabled={combinedQ.isFetching}
-              className="self-start rounded-lg border border-chartborder bg-surface px-3 py-1.5 text-xs font-medium text-ink-secondary shadow-xs transition-colors hover:text-ink-primary disabled:opacity-40"
+              className="self-start border border-chartborder bg-surface px-3 py-1.5 text-xs font-medium text-ink-secondary transition-colors hover:text-ink-primary disabled:opacity-40"
             >
               {combinedQ.isFetching ? "Checking…" : "Check again"}
             </button>
@@ -500,7 +508,7 @@ export default function NicheCombined() {
                   sp.set("min_reviews", "50");
                 })
               }
-              className="self-start rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg shadow-xs hover:bg-brand-hover"
+              className="self-start bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg hover:bg-brand-hover"
             >
               Use the default cut (last 24 months, ≥50 reviews)
             </button>
@@ -537,7 +545,7 @@ export default function NicheCombined() {
                 <button
                   type="button"
                   onClick={() => update((sp) => sp.set("win", "all"))}
-                  className="rounded-md border border-chartborder px-2 py-1 font-medium hover:text-ink-primary"
+                  className="border border-chartborder px-2 py-1 font-medium hover:text-ink-primary"
                 >
                   Widen to all-time
                 </button>
@@ -546,7 +554,7 @@ export default function NicheCombined() {
                 <button
                   type="button"
                   onClick={() => update((sp) => sp.set("min_reviews", "0"))}
-                  className="rounded-md border border-chartborder px-2 py-1 font-medium hover:text-ink-primary"
+                  className="border border-chartborder px-2 py-1 font-medium hover:text-ink-primary"
                 >
                   Drop the review floor
                 </button>
@@ -555,7 +563,7 @@ export default function NicheCombined() {
                 <button
                   type="button"
                   onClick={() => setMode("union")}
-                  className="rounded-md border border-chartborder px-2 py-1 font-medium hover:text-ink-primary"
+                  className="border border-chartborder px-2 py-1 font-medium hover:text-ink-primary"
                 >
                   Show the union instead
                 </button>
@@ -568,43 +576,28 @@ export default function NicheCombined() {
 
       {enough && !degraded && data && data.n_games > 0 && (
         <>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-            <StatTile
+          <div className="grid grid-cols-1 gap-px border border-ink-primary/20 bg-ink-primary/20 sm:grid-cols-2 lg:grid-cols-4">
+            <KpiCell
               label={mode === "intersect" ? `Games in ALL ${selection.length} niches` : `Games in ANY of ${selection.length} niches`}
               value={fmtInt(data.n_games)}
               valueClassName="text-brand"
-              help={
-                mode === "intersect"
-                  ? "Scored games carrying every selected niche in this cut. This — not either input niche's size — is the segment you would be entering."
-                  : "Distinct scored games carrying at least one selected niche, counted once. This is combined reach, not a segment."
-              }
-              sub={
+              footnote={
                 mode === "intersect" && smallest != null && smallest > 0
                   ? `${fmtPct(data.n_games / smallest, 1)} of the smallest input niche (${fmtInt(smallest)} games)`
                   : undefined
               }
             />
-            <StatTile
+            <KpiCell
               label="Median est. revenue"
               value={fmtUsd(data.median_rev)}
-              help="Half the games in this combination earn less than this (estimated lifetime gross: reviews × a genre-fitted owners-per-review ratio × launch price). The typical outcome, not the hits."
-              sub={
+              footnote={
                 data.p25_rev != null || data.p75_rev != null
                   ? `P25 ${fmtUsd(data.p25_rev)} · P75 ${fmtUsd(data.p75_rev)}`
                   : undefined
               }
             />
-            <StatTile
-              label="P90 est. revenue"
-              value={fmtUsd(data.p90_rev)}
-              help="What this combination's successful titles earn — the 90th percentile of estimated lifetime revenue. 1 in 10 does better."
-              sub="1 in 10 does better"
-            />
-            <StatTile
-              label="Median price"
-              value={fmtPrice(data.median_price)}
-              help="Median launch price across the combination's games — the price point this overlap has trained its buyers to expect."
-            />
+            <KpiCell label="P90 est. revenue" value={fmtUsd(data.p90_rev)} footnote="1 in 10 does better" />
+            <KpiCell label="Median price" value={fmtPrice(data.median_price)} />
           </div>
 
           <Card
@@ -620,10 +613,11 @@ export default function NicheCombined() {
             />
           </Card>
 
-          <Card className="!p-0">
-            <div className="flex items-center justify-between gap-3 border-b border-chartborder px-4 py-3">
+          <div className="blueprint relative border-ink-primary/25">
+            <i className="bp-corner" />
+            <div className="flex items-center justify-between gap-3 border-b border-ink-primary/20 px-4 py-3">
               <div>
-                <h3 className="text-sm font-semibold text-ink-primary">
+                <h3 className="text-ink-primary">
                   {mode === "intersect" ? "Games in the overlap" : "Games in the union"}
                 </h3>
                 <p className="mt-1 text-xs leading-relaxed text-ink-muted">{modeSentence(mode, names)}</p>
@@ -637,7 +631,7 @@ export default function NicheCombined() {
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[720px] border-collapse text-sm">
                   <thead>
-                    <tr className="border-b border-chartborder bg-surface2/50 text-left text-[11px] uppercase tracking-wide text-ink-muted">
+                    <tr className="kicker border-b border-ink-primary/20 text-left text-[11px] text-ink-primary/55">
                       <th className="px-4 py-2.5 font-semibold">Game</th>
                       <th className="px-4 py-2.5 font-semibold">Year</th>
                       <th className="px-4 py-2.5 font-semibold">Price</th>
@@ -680,7 +674,7 @@ export default function NicheCombined() {
                   type="button"
                   disabled={offset === 0}
                   onClick={() => setOffset((o) => Math.max(0, o - PAGE))}
-                  className="rounded-lg border border-chartborder bg-surface px-3 py-1 font-medium text-ink-secondary shadow-xs transition-colors hover:text-ink-primary disabled:pointer-events-none disabled:opacity-40"
+                  className="border border-chartborder bg-surface px-3 py-1 font-medium text-ink-secondary transition-colors hover:text-ink-primary disabled:pointer-events-none disabled:opacity-40"
                 >
                   Prev
                 </button>
@@ -688,13 +682,13 @@ export default function NicheCombined() {
                   type="button"
                   disabled={offset + PAGE >= data.n_games}
                   onClick={() => setOffset((o) => o + PAGE)}
-                  className="rounded-lg border border-chartborder bg-surface px-3 py-1 font-medium text-ink-secondary shadow-xs transition-colors hover:text-ink-primary disabled:pointer-events-none disabled:opacity-40"
+                  className="border border-chartborder bg-surface px-3 py-1 font-medium text-ink-secondary transition-colors hover:text-ink-primary disabled:pointer-events-none disabled:opacity-40"
                 >
                   Next
                 </button>
               </div>
             </div>
-          </Card>
+          </div>
         </>
       )}
     </div>

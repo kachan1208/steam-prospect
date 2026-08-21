@@ -71,12 +71,22 @@ export function heatDomain<T>(rows: T[], pick: (row: T) => number | null | undef
 
 /**
  * Verdict color for Steam positive-review ratio (0..1) — the one magnitude with a
- * universally understood good/bad reading. Yellow is banned on text (contrast), so the
- * middle band stays neutral ink; color marks only the clear verdicts.
+ * universally understood good/bad reading. This IS a trend verdict in the design
+ * handoff's sense (README, Interactions: "Up = accent-300, down/flat = paper 55%. Never
+ * red/green — the palette is mono steel"), so it no longer reaches for the red/green
+ * text-verdict-good/text-verdict-serious classes (those stay reserved for actual error
+ * states — see e.g. GameTrendsChart's "failed to load" message). A standout ratio (>=80%)
+ * reads accent-300; a weak one (<70%) recedes to muted ink, exactly like a down/flat
+ * trend arrow; the middle band stays neutral ink, unstyled.
+ *
+ * `text-[color:var(--accent-300)]` is a Tailwind arbitrary-value utility (no config
+ * change needed) rather than `text-brand`, because --brand tracks the user's selected
+ * accent preset (theme.tsx) while the handoff's mono language is pinned to the literal
+ * steel accent-300 — the two only coincide when "Industry" (the default) is selected.
  */
 export function positiveRatioClass(ratio: number | null | undefined): string {
   if (ratio == null) return "";
-  if (ratio >= 0.8) return "text-verdict-good";
-  if (ratio < 0.7) return "text-verdict-serious";
+  if (ratio >= 0.8) return "text-[color:var(--accent-300)]";
+  if (ratio < 0.7) return "text-ink-muted";
   return "";
 }

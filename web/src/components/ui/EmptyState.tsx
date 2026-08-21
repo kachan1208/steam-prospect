@@ -22,7 +22,7 @@ export function EmptyState({
 }) {
   return (
     <div className={clsx("flex flex-col items-center gap-2 py-10 text-center", className)}>
-      <div className="flex h-10 w-10 items-center justify-center rounded-full border border-chartborder text-ink-muted">
+      <div className="flex h-10 w-10 items-center justify-center border border-chartborder text-ink-muted">
         {icon ?? (
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="9" />

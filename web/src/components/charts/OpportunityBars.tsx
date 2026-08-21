@@ -1,7 +1,9 @@
 import { CSS_VAR } from "../../lib/palette";
 
-// Fixed categorical order used everywhere in the app: demand (blue), competition
-// (aqua), quality_gap (yellow) — never reassigned or cycled per-row.
+// Fixed order used everywhere in the app — mono steel, not hue (design_handoff
+// README, 4a/4b: demand and quality_gap fill accent-300, competition fills paper 50%,
+// because both demand and quality_gap read as "good for the opportunity score" while
+// competition is the downside/crowding term). Never reassigned or cycled per-row.
 const METERS: { key: "demand" | "competition" | "quality_gap"; label: string; short: string; color: string }[] = [
   { key: "demand", label: "Demand", short: "D", color: CSS_VAR.demand },
   { key: "competition", label: "Competition", short: "C", color: CSS_VAR.competition },

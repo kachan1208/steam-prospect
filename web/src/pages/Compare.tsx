@@ -1,10 +1,9 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, type CSSProperties, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQueries } from "@tanstack/react-query";
 import clsx from "clsx";
 
 import { CompareTrendsChart, compareSeriesColor } from "../components/charts/CompareTrendsChart";
-import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
 import { gameProfileQueryOptions, type GameProfile } from "../lib/api";
 import { COMPARE_CAP, removeFromCompare, useCompareList } from "../lib/compareList";
@@ -12,12 +11,30 @@ import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtRevenue } from "..
 import { genreTintStyle } from "../lib/heat";
 
 /**
- * Side-by-side comparison for 2-6 games. The ids ride the URL (?ids=1,2,3) so a
+ * Side-by-side comparison for 2-6 games (mockup 4d). The ids ride the URL (?ids=1,2,3) so a
  * comparison is shareable/bookmarkable; with no ids param the page falls back to the
  * stored compare list and immediately normalizes the URL (replace) to match. Column
  * order = id order; the trends overlay uses game 1 as the primary with the rest as
  * ?comps= (one request).
+ *
+ * Blueprint grammar: hairline frames with "+" corner marks, square corners, condensed
+ * headings, mono-steel verdict language (accent-300 up / paper-muted down, never red-
+ * green). The overlay chart is CompareTrendsChart as-is — components/charts/* is owned by
+ * another agent, so only the panel it sits in is restyled here, not its strokes/fills.
  */
+
+// Hairline alphas the mockup calls that don't already have a named Tailwind token
+// (--border is 22%, --border-strong is 35%) — built the same way index.css builds every
+// other hairline: color-mix against the theme's own foreground, so it tracks light/dark
+// and any accent swap instead of a hardcoded paper rgba.
+const PANEL_BORDER = "color-mix(in srgb, var(--text-primary) 25%, transparent)";
+const ROW_RULE = "color-mix(in srgb, var(--text-primary) 12%, transparent)";
+const STRIPE_THUMB =
+  "repeating-linear-gradient(45deg, color-mix(in srgb, var(--text-primary) 12%, transparent), " +
+  "color-mix(in srgb, var(--text-primary) 12%, transparent) 4px, transparent 4px, transparent 8px)";
+// Condensed 600 is automatic on <h1>-<h6> (index.css applies it by element); anything else
+// that reads condensed in the mockup (buttons, column names, big values) needs it inline.
+const CONDENSED: CSSProperties = { fontFamily: '"Barlow Condensed", "Barlow", system-ui, sans-serif' };
 
 function parseIds(raw: string | null): number[] {
   if (!raw) return [];
@@ -37,20 +54,45 @@ interface StatRowDef {
   key: string;
   label: string;
   fmt: (p: GameProfile) => string;
-  /** Numeric accessor for best-in-row highlighting (max wins); omit = no highlight. */
+  /** Numeric accessor for best-in-row highlighting (max wins, bold accent-300); omit = no highlight. */
   best?: (p: GameProfile) => number | null;
+  /** Trend-verdict rows (▲/▼ + signed %, accent-300 up / paper-muted down) instead of a
+   * best-in-row bold — matches the "Players 7d" row in mockup 4d. */
+  verdict?: (p: GameProfile) => number | null;
 }
 
+// Order matches README §4d's metric grid exactly for the first five rows (revenue, units,
+// rating, "Peak CCU", players 7d). The mart has no tracked PEAK CCU — live_players is an
+// explicit point sample at the nightly capture, NOT a daily peak (see GameProfile's own
+// help text) — so that row is honestly relabeled "Live players (now)" rather than wearing
+// a name the data can't back up. The remaining rows are the page's pre-existing real
+// metrics (percentile, velocity, playtime, genre), kept below in the same grammar rather
+// than dropped — restyle, not rewrite.
 const STAT_ROWS: StatRowDef[] = [
-  { key: "owners", label: "Owners (est.)", fmt: (p) => fmtCompact(p.owners_mid), best: (p) => p.owners_mid },
-  { key: "reviews", label: "Total reviews", fmt: (p) => fmtInt(p.total_reviews), best: (p) => p.total_reviews },
-  { key: "positive", label: "Positive rating", fmt: (p) => fmtPct(p.positive_ratio), best: (p) => p.positive_ratio },
   {
     key: "revenue",
-    label: "Est. revenue",
+    label: "Est. gross revenue",
     fmt: (p) => fmtRevenue(p.est_rev_reviews, p.price_initial === 0),
     best: (p) => (p.price_initial === 0 ? null : p.est_rev_reviews),
   },
+  { key: "units", label: "Est. units", fmt: (p) => fmtCompact(p.owners_mid), best: (p) => p.owners_mid },
+  { key: "rating", label: "Rating", fmt: (p) => fmtPct(p.positive_ratio), best: (p) => p.positive_ratio },
+  {
+    key: "live_players",
+    label: "Live players (now)",
+    fmt: (p) => (p.live_players != null ? fmtCompact(p.live_players) : "—"),
+    best: (p) => p.live_players,
+  },
+  {
+    key: "players_7d",
+    label: "Players 7d",
+    fmt: (p) =>
+      p.players_trend_7d_pct != null
+        ? `${p.players_trend_7d_pct >= 0 ? "+" : ""}${p.players_trend_7d_pct.toFixed(1)}%`
+        : "—",
+    verdict: (p) => p.players_trend_7d_pct ?? null,
+  },
+  { key: "reviews", label: "Total reviews", fmt: (p) => fmtInt(p.total_reviews), best: (p) => p.total_reviews },
   {
     key: "rev_pct",
     label: "Revenue percentile in genre",
@@ -66,6 +108,17 @@ const STAT_ROWS: StatRowDef[] = [
   { key: "playtime", label: "Median playtime", fmt: (p) => fmtMinutes(p.playtime_p50) },
   { key: "genre", label: "Genre", fmt: (p) => p.primary_genre ?? "—" },
 ];
+
+/** The blueprint frame: hairline + "+" corner marks. The class draws two marks itself; the
+ * other two come from the one .bp-corner child (see index.css). */
+function Panel({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <div className={clsx("blueprint", className)} style={{ borderColor: PANEL_BORDER }}>
+      <i className="bp-corner" />
+      {children}
+    </div>
+  );
+}
 
 export default function Compare() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -114,9 +167,9 @@ export default function Compare() {
 
   if (ids.length === 0) {
     return (
-      <div className="flex flex-col gap-4">
-        <PageHeading n={0} />
-        <Card>
+      <div className="flex flex-col gap-6">
+        <PageHeading ids={ids} />
+        <Panel className="p-8">
           <EmptyState
             title="Nothing to compare yet"
             description={
@@ -129,23 +182,24 @@ export default function Compare() {
             action={
               <Link
                 to="/games"
-                className="rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg shadow-xs hover:bg-brand-hover"
+                style={CONDENSED}
+                className="bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg transition-colors hover:bg-brand-hover"
               >
                 Browse games
               </Link>
             }
           />
-        </Card>
+        </Panel>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      <PageHeading n={ids.length} />
+    <div className="flex flex-col gap-6">
+      <PageHeading ids={ids} />
 
       {ids.length === 1 && (
-        <Card>
+        <Panel className="p-8">
           <EmptyState
             title={`Only one game selected — ${names.get(ids[0])}`}
             description="A comparison needs at least two games. Add a competitor from search (the + button on any row) or from its profile page; its comparables table is a good place to find candidates."
@@ -153,176 +207,231 @@ export default function Compare() {
               <div className="flex items-center gap-2">
                 <Link
                   to="/games"
-                  className="rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg shadow-xs hover:bg-brand-hover"
+                  style={CONDENSED}
+                  className="bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg transition-colors hover:bg-brand-hover"
                 >
                   Find a competitor
                 </Link>
                 <Link
                   to={`/games/${ids[0]}`}
-                  className="rounded-lg border border-chartborder px-3 py-1.5 text-xs font-medium text-ink-secondary hover:text-ink-primary"
+                  style={CONDENSED}
+                  className="border border-borderstrong px-3 py-1.5 text-xs text-ink-primary transition-colors hover:bg-ink-primary/[0.08]"
                 >
                   Open its profile
                 </Link>
               </div>
             }
           />
-        </Card>
+        </Panel>
       )}
 
       {ids.length >= 2 && (
         <>
-          <Card className="!p-0">
+          <Panel className="p-5">
+            <div className="mb-3.5 flex flex-wrap items-baseline gap-4">
+              <h2 className="text-[16px] text-ink-primary">Review velocity</h2>
+              <div className="flex flex-wrap items-center gap-4 sm:ml-auto">
+                {ids.map((id, i) => (
+                  <span key={id} className="inline-flex items-center gap-1.5 text-[11px] text-ink-muted">
+                    <span aria-hidden className="h-[2px] w-3.5" style={{ backgroundColor: compareSeriesColor(i) }} />
+                    {names.get(id)}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <CompareTrendsChart ids={ids} names={names} />
+          </Panel>
+
+          <Panel>
             {anyLoading && <div className="p-6 text-sm text-ink-muted">Loading games…</div>}
             {!anyLoading && (
               <div className="overflow-x-auto">
-                <table className="w-full border-collapse text-sm" style={{ minWidth: `${180 + ids.length * 170}px` }}>
-                  <thead>
-                    <tr className="border-b border-chartborder align-top">
-                      <th className="w-44 px-3 py-3" />
-                      {ids.map((id, i) => {
-                        const p = profiles.get(id);
-                        return (
-                          <th key={id} className="min-w-[160px] px-3 py-3 text-left align-top font-normal">
-                            <div className="flex flex-col gap-1.5">
-                              <div className="flex items-start justify-between gap-1">
-                                {/* series dot ties the column to its line in the trends chart */}
-                                <span
-                                  aria-hidden
-                                  className="mt-1 h-2 w-2 shrink-0 rounded-full"
-                                  style={{ backgroundColor: compareSeriesColor(i) }}
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => remove(id)}
-                                  aria-label={`Remove ${names.get(id)} from comparison`}
-                                  title="Remove from comparison"
-                                  className="-m-1.5 flex h-6 w-6 items-center justify-center rounded-full text-xs text-ink-muted hover:bg-page hover:text-ink-primary"
-                                >
-                                  ✕
-                                </button>
-                              </div>
-                              {p?.header_image && (
-                                <img src={p.header_image} alt="" className="h-16 w-full rounded-sm object-cover" />
-                              )}
-                              <Link
-                                to={`/games/${id}`}
-                                className="text-[13px] font-semibold leading-tight text-ink-primary hover:text-brand hover:underline"
-                              >
-                                {names.get(id)}
-                              </Link>
-                              {p ? (
-                                <span className="text-[11px] text-ink-muted">
-                                  {p.release_year ?? "—"} · {fmtPrice(p.price_initial)}
-                                </span>
-                              ) : (
-                                <span className="text-[11px] text-verdict-serious">Not in catalog</span>
-                              )}
-                            </div>
-                          </th>
-                        );
-                      })}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {STAT_ROWS.map((row) => {
-                      // Best-in-row (max) among the loaded, non-null values — only marked
-                      // when at least two games actually have the metric.
-                      let bestIds: Set<number> = new Set();
-                      if (row.best) {
-                        const vals = ids
-                          .map((id) => ({ id, v: profiles.has(id) ? row.best!(profiles.get(id)!) : null }))
-                          .filter((x): x is { id: number; v: number } => x.v != null);
-                        if (vals.length >= 2) {
-                          const max = Math.max(...vals.map((x) => x.v));
-                          bestIds = new Set(vals.filter((x) => x.v === max).map((x) => x.id));
-                        }
-                      }
+                <div style={{ minWidth: `${220 + ids.length * 150}px` }}>
+                  <div
+                    className="grid items-end gap-3.5 border-b px-5 py-3.5"
+                    style={{ gridTemplateColumns: `1.2fr repeat(${ids.length}, 1fr)`, borderColor: PANEL_BORDER }}
+                  >
+                    <span />
+                    {ids.map((id, i) => {
+                      const p = profiles.get(id);
                       return (
-                        <tr key={row.key} className="border-b border-chartborder/60">
-                          <td className="whitespace-nowrap px-3 py-2 text-xs font-medium text-ink-muted">{row.label}</td>
-                          {ids.map((id) => {
-                            const p = profiles.get(id);
-                            return (
-                              <td
-                                key={id}
-                                className={clsx(
-                                  "tabular px-3 py-2 text-sm",
-                                  bestIds.has(id) ? "font-semibold text-verdict-good" : "text-ink-secondary",
-                                )}
-                              >
-                                {p ? row.fmt(p) : "—"}
-                                {bestIds.has(id) && (
-                                  <>
-                                    <span aria-hidden className="ml-1 text-[10px] text-verdict-good" title="Best in this row">
-                                      ▲
-                                    </span>
-                                    <span className="sr-only"> (best in this row)</span>
-                                  </>
-                                )}
-                              </td>
-                            );
-                          })}
-                        </tr>
+                        <div key={id} className="flex flex-col gap-1.5">
+                          <div className="flex items-start justify-between gap-1">
+                            {/* series dot ties the column to its line in the trends chart */}
+                            <span
+                              aria-hidden
+                              className="mt-1 h-2 w-2 shrink-0"
+                              style={{ backgroundColor: compareSeriesColor(i) }}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => remove(id)}
+                              aria-label={`Remove ${names.get(id)} from comparison`}
+                              title="Remove from comparison"
+                              className="-m-1 flex h-6 w-6 items-center justify-center text-xs text-ink-muted transition-colors hover:bg-ink-primary/[0.08] hover:text-ink-primary"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                          {p?.header_image ? (
+                            <img src={p.header_image} alt="" className="h-10 w-full object-cover" />
+                          ) : (
+                            <div aria-hidden className="h-10 w-full" style={{ background: STRIPE_THUMB }} />
+                          )}
+                          <Link
+                            to={`/games/${id}`}
+                            style={{ ...CONDENSED, fontWeight: 600 }}
+                            className="text-[17px] leading-tight text-ink-primary hover:text-brand hover:underline"
+                          >
+                            {names.get(id)}
+                          </Link>
+                          {p ? (
+                            <span className="text-[11px] text-ink-muted">
+                              {p.release_year ?? "—"} · {fmtPrice(p.price_initial)}
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-verdict-serious">
+                              {anyLoading ? "Loading…" : "Not in catalog"}
+                            </span>
+                          )}
+                        </div>
                       );
                     })}
-                    <tr>
-                      <td className="whitespace-nowrap px-3 py-2 align-top text-xs font-medium text-ink-muted">
-                        Top tags
-                        <span className="mt-0.5 block font-normal">(shared highlighted)</span>
-                      </td>
-                      {ids.map((id) => {
-                        const p = profiles.get(id);
-                        return (
-                          <td key={id} className="px-3 py-2 align-top">
-                            <div className="flex flex-wrap gap-1">
-                              {(p?.top_tags ?? []).slice(0, 8).map((t) => (
-                                <span
-                                  key={t}
-                                  className={clsx(
-                                    "rounded-full border px-1.5 py-0.5 text-[10px]",
-                                    sharedTags.has(t)
-                                      ? "border-brand bg-brand-tint font-medium text-brand"
-                                      : "text-ink-secondary",
-                                  )}
-                                  // Shared tags keep the brand highlight (that's the signal on this
-                                  // page); only the rest wear their categorical genre tint.
-                                  style={sharedTags.has(t) ? undefined : genreTintStyle(t)}
-                                >
-                                  {t}
+                  </div>
+
+                  {STAT_ROWS.map((row) => {
+                    if (row.verdict) {
+                      const verdictFn = row.verdict;
+                      return (
+                        <div
+                          key={row.key}
+                          className="grid gap-3.5 border-b px-5 py-[11px] text-sm"
+                          style={{ gridTemplateColumns: `1.2fr repeat(${ids.length}, 1fr)`, borderColor: ROW_RULE }}
+                        >
+                          <span className="text-ink-muted">{row.label}</span>
+                          {ids.map((id) => {
+                            const p = profiles.get(id);
+                            const v = p ? verdictFn(p) : null;
+                            if (v == null) {
+                              return (
+                                <span key={id} className="tabular text-ink-muted">
+                                  —
                                 </span>
-                              ))}
-                            </div>
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  </tbody>
-                </table>
+                              );
+                            }
+                            const up = v > 0;
+                            return (
+                              <span key={id} className={clsx("tabular", up ? "text-brand" : "text-ink-muted")}>
+                                {up ? "▲" : "▼"} {v >= 0 ? "+" : ""}
+                                {v.toFixed(1)}%
+                              </span>
+                            );
+                          })}
+                        </div>
+                      );
+                    }
+
+                    // Best-in-row (max) among the loaded, non-null values — only marked
+                    // when at least two games actually have the metric.
+                    let bestIds: Set<number> = new Set();
+                    if (row.best) {
+                      const bestFn = row.best;
+                      const vals = ids
+                        .map((id) => ({ id, v: profiles.has(id) ? bestFn(profiles.get(id)!) : null }))
+                        .filter((x): x is { id: number; v: number } => x.v != null);
+                      if (vals.length >= 2) {
+                        const max = Math.max(...vals.map((x) => x.v));
+                        bestIds = new Set(vals.filter((x) => x.v === max).map((x) => x.id));
+                      }
+                    }
+                    return (
+                      <div
+                        key={row.key}
+                        className="grid gap-3.5 border-b px-5 py-[11px] text-sm"
+                        style={{ gridTemplateColumns: `1.2fr repeat(${ids.length}, 1fr)`, borderColor: ROW_RULE }}
+                      >
+                        <span className="text-ink-muted">{row.label}</span>
+                        {ids.map((id) => {
+                          const p = profiles.get(id);
+                          return (
+                            <span
+                              key={id}
+                              className={clsx(
+                                "tabular",
+                                bestIds.has(id) ? "font-semibold text-brand" : "text-ink-primary",
+                              )}
+                            >
+                              {p ? row.fmt(p) : "—"}
+                              {bestIds.has(id) && <span className="sr-only"> (best in this row)</span>}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
+
+                  <div
+                    className="grid gap-3.5 px-5 py-[11px]"
+                    style={{ gridTemplateColumns: `1.2fr repeat(${ids.length}, 1fr)` }}
+                  >
+                    <span className="text-sm text-ink-muted">
+                      Top tags
+                      <span className="mt-0.5 block text-[11px] font-normal">(shared highlighted)</span>
+                    </span>
+                    {ids.map((id) => {
+                      const p = profiles.get(id);
+                      return (
+                        <div key={id} className="flex flex-wrap gap-1">
+                          {(p?.top_tags ?? []).slice(0, 8).map((t) => (
+                            <span
+                              key={t}
+                              className={clsx(
+                                "border px-1.5 py-0.5 text-[10px]",
+                                sharedTags.has(t)
+                                  ? "border-brand bg-brand-tint font-medium text-brand"
+                                  : "border-ink-primary/[0.18] text-ink-secondary",
+                              )}
+                              // Shared tags keep the brand highlight (that's the signal on this
+                              // page); only the rest wear their categorical genre tint.
+                              style={sharedTags.has(t) ? undefined : genreTintStyle(t)}
+                            >
+                              {t}
+                            </span>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
             )}
-          </Card>
-
-          <Card
-            title="Momentum — sampled review velocity"
-            subtitle="Monthly review velocity for every compared game on one axis (game 1 is the primary; the rest ride the trends endpoint's comps overlay)"
-          >
-            <CompareTrendsChart ids={ids} names={names} />
-          </Card>
+          </Panel>
         </>
       )}
     </div>
   );
 }
 
-function PageHeading({ n }: { n: number }) {
+function PageHeading({ ids }: { ids: number[] }) {
+  const n = ids.length;
+  const capReached = n >= COMPARE_CAP;
   return (
-    <div>
-      <h1 className="text-lg font-semibold text-ink-primary">Compare</h1>
-      <p className="mt-0.5 text-sm text-ink-muted">
-        {n >= 2
-          ? `Side-by-side across ${n} games — scale, quality, revenue, momentum, and tag overlap.`
-          : "Put up to six games side by side — scale, quality, revenue, momentum, and tag overlap."}
-      </p>
+    <div className="flex flex-wrap items-baseline gap-3.5">
+      <h1 className="text-[25px] leading-none text-ink-primary">Compare</h1>
+      {n > 0 && (
+        <span className="text-[13px] text-ink-muted">
+          {n} of {COMPARE_CAP} slots · share this view by URL
+        </span>
+      )}
+      {n > 0 && !capReached && (
+        <Link
+          to="/games"
+          style={CONDENSED}
+          className="ml-auto border border-borderstrong px-3 py-1 text-xs text-ink-primary transition-colors hover:bg-ink-primary/[0.08]"
+        >
+          + Add game
+        </Link>
+      )}
     </div>
   );
 }

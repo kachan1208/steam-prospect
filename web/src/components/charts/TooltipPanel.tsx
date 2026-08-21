@@ -1,7 +1,8 @@
 /**
  * Shared Recharts tooltip content: a surface-toned panel, value-leads-label rows,
- * line-key swatches (a short stroke, not a filled box). Used as the `content` render
- * prop on every <Tooltip> in the app so hover styling stays consistent.
+ * line-key swatches (a short stroke, not a filled box) sized to the design handoff's
+ * "Legend swatches 14×2px" spec. Used as the `content` render prop on every <Tooltip>
+ * in the app so hover styling stays consistent.
  */
 export interface TooltipRow {
   label: string;
@@ -17,7 +18,7 @@ export function TooltipPanel({ title, rows }: { title?: string; rows: TooltipRow
       <div className="flex flex-col gap-1">
         {rows.map((r, i) => (
           <div key={`${r.label}-${i}`} className="flex items-center gap-2">
-            {r.color && <span className="inline-block h-0.5 w-3 shrink-0" style={{ backgroundColor: r.color }} />}
+            {r.color && <span className="inline-block h-0.5 w-3.5 shrink-0" style={{ backgroundColor: r.color }} />}
             <span className="text-ink-secondary">{r.label}</span>
             <span className="tabular ml-auto pl-3 font-semibold text-ink-primary">{r.value}</span>
           </div>

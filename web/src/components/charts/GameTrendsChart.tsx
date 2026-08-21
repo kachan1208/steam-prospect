@@ -22,10 +22,15 @@ import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
  * small multiples (the same dual-axis-avoidance move as ReviewsTimelineChart /
  * SaturationTrend): a bar for the dominant COUNT metric plus one overlaid LINE on a
  * secondary axis for the audience/attention gauge that rides alongside it, so the two
- * very different scales never fight for one y-axis.
+ * very different scales never fight for one y-axis. Color is mono steel (lib/palette.ts):
+ * CSS_VAR.demand/qualityGap are accent-300, CSS_VAR.competition is paper ~50% — the two
+ * bar+line pairs stay visually distinct because mark TYPE (bar vs line) carries as much
+ * of the distinction as color does; the Twitch bars keep their categorical channel color
+ * (channelColor("twitch")) since that identity is shared with every other Twitch mark in
+ * the app.
  *
- *   Panel 1  sampled reviews / month (aqua bars) + avg live players (blue line, 2nd axis)
- *   Panel 2  Twitch viewers / month (purple bars) + creator mentions (yellow line, 2nd axis)
+ *   Panel 1  sampled reviews / month (paper bars) + avg live players (accent-300 line, 2nd axis)
+ *   Panel 2  Twitch viewers / month (channel-purple bars) + creator mentions (accent-300 line, 2nd axis)
  *
  * "My marketing events on the timeline" — one opt-in overlay rides on Panel 1 (the
  * review-velocity backbone): the org's own marketing log (GET /api/inputs/events?appid=…)
@@ -78,10 +83,13 @@ const XAXIS_PROPS = {
   axisLine: { stroke: "var(--baseline)" },
 };
 
+// 14x2px line-key swatch (design handoff: "Legend swatches 14×2px"), used for both the
+// bar and line series in this file's legends — a thin bar reads fine as a generic swatch
+// for either mark type, and matches every line-legend in the mockups pixel-for-pixel.
 function LegendDot({ color, label }: { color: string; label: string }) {
   return (
     <span className="inline-flex items-center gap-1.5">
-      <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+      <span className="h-0.5 w-3.5 shrink-0" style={{ backgroundColor: color }} />
       {label}
     </span>
   );
@@ -229,18 +237,19 @@ export function GameTrendsChart({
                 type="monotone"
                 dataKey="ccu_avg"
                 stroke={CSS_VAR.demand}
-                strokeWidth={2}
+                strokeWidth={1.5}
                 dot={{ r: 3, fill: CSS_VAR.demand, strokeWidth: 0 }}
                 connectNulls
               />
-              {/* my marketing events — a labelled plumb line at each event's month */}
+              {/* my marketing events — a labelled plumb line at each event's month.
+                  Dash "3 4" per the design handoff's event-marker spec. */}
               {eventMonths.map((month, i) => (
                 <ReferenceLine
                   key={month}
                   yAxisId="reviews"
                   x={month}
                   stroke={EVENT_COLOR}
-                  strokeDasharray="2 2"
+                  strokeDasharray="3 4"
                   strokeOpacity={0.85}
                   label={{
                     value: eventMarkerLabel(eventsByMonth.get(month)!),
@@ -308,7 +317,7 @@ export function GameTrendsChart({
                 type="monotone"
                 dataKey="n_mentions"
                 stroke={CSS_VAR.qualityGap}
-                strokeWidth={2}
+                strokeWidth={1.5}
                 dot={{ r: 3, fill: CSS_VAR.qualityGap, strokeWidth: 0 }}
                 connectNulls
               />

@@ -43,8 +43,9 @@ function standoutAspects(aspects: ReviewAspect[]): Set<string> {
  * aspect keyword (see mart_game_teardown.sql / build_marts.compute_aspect_sentiment), so it
  * reflects what reviewers actually SAY about the aspect — not their overall thumbs-up/down,
  * which is what the old (and still-shown-for-comparison) vote split conflated. Each row: a
- * 100%-stacked bar (positive blue / negative red — the app's documented diverging pair; see
- * lib/palette.ts) split by text_pos_share, plus a genre-baseline reference tick, so a bar
+ * 100%-stacked bar (positive accent-300 / negative paper 50% — mono steel, per the design
+ * handoff's "never red/green" rule for aspect sentiment; see lib/palette.ts) split by
+ * text_pos_share, plus a genre-baseline reference tick, so a bar
  * landing right of its tick is over-indexing vs genre peers on that aspect (the differential).
  * Hand-rolled rather than Recharts — same benchmark-tick-on-a-filled-bar shape BulletMeter
  * already owns, with two fill colors. Sorted by total_mentions (most-discussed first).

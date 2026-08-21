@@ -78,7 +78,7 @@ export function Histogram({ buckets, color, formatX, formatCount = fmtCompact, m
             key={m.label}
             x={bucketLabelFor(m.value)}
             stroke="var(--text-muted)"
-            strokeDasharray="3 3"
+            strokeDasharray="3 4"
             label={{
               value: m.label,
               position: "top",
