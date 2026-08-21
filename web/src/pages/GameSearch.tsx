@@ -186,6 +186,18 @@ function hasAdvanced(f: Filters): boolean {
   );
 }
 
+/** Everything that lives behind the "More filters" control (4e pictures only the search
+ * field, the chip row and the result rows — every other control, quick or advanced, is
+ * folded into one collapsible panel so it doesn't sit between the mockup's pictured
+ * elements). True if the panel should start open, e.g. a shared/back-navigated URL already
+ * has one of these set — the researcher shouldn't have to know to click a button to see
+ * why their results are narrowed. */
+function hasAnyFilterPanelValue(f: Filters): boolean {
+  return (
+    hasAdvanced(f) || f.genre !== "__all__" || f.tag !== "" || f.minReviews > 0 || f.window !== undefined
+  );
+}
+
 // ---- small UI pieces -----------------------------------------------------------------------
 
 // Condensed heading stack, matching the global h1–h6 / .kicker rule in index.css — applied
@@ -260,18 +272,22 @@ function TriToggle({
   );
 }
 
-/** Active-filter chip — outline accent, square corners (mockup 4e's filter row). Every chip
- * rendered here represents a filter that IS applied, so it always wears the "active" outline. */
+/** Active-filter chip — outline accent, accent TEXT (mockup 4e's "released 24m" chip: both
+ * the border and the label itself carry accent-300, not paper). Every chip rendered here
+ * represents a filter that IS applied, so it always wears the "active" state; the mockup's
+ * "inactive" paper-30% chips describe categories with nothing set, which this page already
+ * represents by omitting the chip entirely — an empty row is a more honest read than a row
+ * of chips reading "any". The ✕ (remove) isn't pictured but keeps the chip functional. */
 function FilterChip({ label, onClear }: { label: string; onClear: () => void }) {
   return (
     <button
       type="button"
       onClick={onClear}
       title="Remove filter"
-      className="group inline-flex items-center gap-1 border border-brand px-2 py-0.5 text-[11px] font-medium text-ink-primary transition-colors hover:bg-brand-tint"
+      className="group inline-flex items-center gap-1 border border-brand px-2 py-0.5 text-[11px] font-medium text-brand transition-colors hover:bg-brand-tint"
     >
       {label}
-      <span aria-hidden className="text-ink-muted group-hover:text-ink-primary">✕</span>
+      <span aria-hidden className="text-ink-muted group-hover:text-brand">✕</span>
     </button>
   );
 }
@@ -351,7 +367,7 @@ export default function GameSearch() {
   const filters = useMemo(() => readFilters(searchParams), [searchParams]);
 
   const [drafts, setDrafts] = useState<Drafts>(() => draftsFromFilters(filters));
-  const [moreOpen, setMoreOpen] = useState<boolean>(() => hasAdvanced(filters));
+  const [moreOpen, setMoreOpen] = useState<boolean>(() => hasAnyFilterPanelValue(filters));
   // Serialized canonical drafts we last wrote to (or read from) the URL — used to tell our
   // own commit's echo apart from an external navigation (back/forward/shared link).
   const lastCommitted = useRef<string>(JSON.stringify(canonicalizeDrafts(drafts)));
@@ -481,9 +497,9 @@ export default function GameSearch() {
     return out;
   }, [filters]);
 
-  const advancedCount = chips.filter((c) =>
-    ["price", "min_positive", "min_metacritic", "min_revenue", "years", "self_pub", "indie"].includes(c.key),
-  ).length;
+  // Badge on "More filters" — every chip except the search box itself, since q has its own
+  // field and everything else now lives behind this one control.
+  const advancedCount = chips.filter((c) => c.key !== "q").length;
 
   const total = data?.total ?? 0;
   const rangeStart = total === 0 ? 0 : filters.offset + 1;
@@ -497,7 +513,7 @@ export default function GameSearch() {
 
       {/* Large blueprint search field (4e): Lucide search glyph, accent caret, result count
           right in paper 55%. */}
-      <div className="blueprint flex items-center gap-3 px-4 py-3" style={{ borderColor: "var(--border-strong)" }}>
+      <div className="blueprint flex items-center gap-3 px-[18px] py-3" style={{ borderColor: "var(--border-strong)" }}>
         <i className="bp-corner" />
         <SearchIcon className="shrink-0 text-brand" />
         <input
@@ -513,71 +529,124 @@ export default function GameSearch() {
         </span>
       </div>
 
-      {/* Secondary controls — same filters as before, restyled square/hairline. Not pictured
-          in the 4e mock (which shows only the search field + filter-chip row), but the page
-          keeps every prior filter, so they get a compact home here. */}
-      <div className="flex flex-wrap items-center gap-2">
-        <select
-          value={filters.genre}
-          onChange={(e) => patchParams({ genre: e.target.value === "__all__" ? null : e.target.value })}
-          className={selectCls}
-        >
-          {genres.map((g) => (
-            <option key={g.value} value={g.value}>
-              {g.label}
-            </option>
-          ))}
-        </select>
-        <TagAutocomplete onSelect={(tag) => patchParams({ tag })} />
-        <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
-          Min reviews
-          <input
-            type="number"
-            min={0}
-            step={10}
-            value={drafts.minReviews}
-            onChange={setDraft("minReviews")}
-            placeholder="0"
-            className={clsx(inputCls, "w-16 !px-2 !py-1")}
-          />
-        </label>
-        <select
-          value={filters.window ?? ""}
-          onChange={(e) => {
-            const v = e.target.value === "" ? null : e.target.value;
-            // Narrowing to new releases → default to newest-first so the filter's intent is visible.
-            patchParams(v !== null ? { window: v, sort: "release_date", order: "desc" } : { window: null });
-          }}
-          title="Show only recently released games (by Steam release date)"
-          className={selectCls}
-        >
-          {RELEASE_WINDOWS.map((w) => (
-            <option key={w.label} value={w.days ?? ""}>
-              {w.label}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          onClick={() => setMoreOpen((o) => !o)}
-          aria-expanded={moreOpen}
-          className={clsx(
-            "ml-auto inline-flex items-center gap-1.5 border px-2.5 py-1.5 text-xs font-medium transition-colors",
-            moreOpen || advancedCount > 0
-              ? "border-brand text-ink-primary"
-              : "border-chartborder text-ink-muted hover:text-ink-secondary",
-          )}
-        >
-          More filters
-          {advancedCount > 0 && (
-            <span className="bg-brand-tint px-1.5 text-[10px] font-semibold text-brand">{advancedCount}</span>
-          )}
-          <span aria-hidden className="text-[10px]">{moreOpen ? "▲" : "▼"}</span>
-        </button>
+      {/* Filter chip row (4e): active filters as accent chips + "sorted by …" caption right —
+          exactly what's pictured, plus one addition the mock doesn't draw: "More filters",
+          the explicit control every OTHER filter (genre, tag, min reviews, release window,
+          price, rating, Metacritic, revenue, year range, publishing, indie) now lives behind.
+          Rather than sit those controls in an unpictured row between the search field and this
+          one, they're collapsed into the panel directly below, off by default. */}
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        {chips.length > 0 && (
+          <>
+            <span className="text-ink-muted">Filter:</span>
+            {chips.map((c) => (
+              <FilterChip key={c.key} label={c.label} onClear={() => patchParams(c.clear)} />
+            ))}
+            <button
+              type="button"
+              onClick={() =>
+                patchParams({
+                  q: null, genre: null, tag: null, min_reviews: null, window: null,
+                  price_min: null, price_max: null, min_positive: null, min_revenue: null,
+                  min_metacritic: null,
+                  after: null, before: null, self_pub: null, indie: null,
+                })
+              }
+              className="text-ink-muted underline decoration-dotted hover:text-ink-primary"
+            >
+              Clear all
+            </button>
+          </>
+        )}
+        <span className="ml-auto flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setMoreOpen((o) => !o)}
+            aria-expanded={moreOpen}
+            className={clsx(
+              "inline-flex items-center gap-1.5 border px-2.5 py-1 text-[11px] font-medium transition-colors",
+              moreOpen || advancedCount > 0
+                ? "border-brand text-brand"
+                : "border-chartborder text-ink-muted hover:text-ink-secondary",
+            )}
+          >
+            More filters
+            {advancedCount > 0 && (
+              <span className="bg-brand-tint px-1.5 text-[10px] font-semibold text-brand">{advancedCount}</span>
+            )}
+            <span aria-hidden className="text-[10px]">{moreOpen ? "▲" : "▼"}</span>
+          </button>
+          <span className="flex items-center gap-1.5 text-ink-muted">
+            sorted by
+            <select
+              value={filters.sort}
+              onChange={(e) => toggleSort(e.target.value as GameSortKey)}
+              aria-label="Sort by"
+              className="cursor-pointer bg-transparent text-ink-secondary outline-none hover:text-ink-primary"
+            >
+              {SORT_KEYS.map((k) => (
+                <option key={k} value={k}>
+                  {SORT_LABELS[k]}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => toggleSort(filters.sort)}
+              title={`Currently sorted ${filters.order === "desc" ? "highest first" : "lowest first"} — click to flip`}
+              className="text-ink-secondary hover:text-ink-primary"
+              aria-label="Toggle sort direction"
+            >
+              {filters.order === "desc" ? "▼" : "▲"}
+            </button>
+          </span>
+        </span>
       </div>
 
+      {/* Every filter not pictured in 4e, quick or advanced, behind the one explicit control
+          above — off by default so the page opens on exactly what the mock draws. */}
       {moreOpen && (
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-chartborder pt-2">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-chartborder pt-3">
+          <select
+            value={filters.genre}
+            onChange={(e) => patchParams({ genre: e.target.value === "__all__" ? null : e.target.value })}
+            className={selectCls}
+          >
+            {genres.map((g) => (
+              <option key={g.value} value={g.value}>
+                {g.label}
+              </option>
+            ))}
+          </select>
+          <TagAutocomplete onSelect={(tag) => patchParams({ tag })} />
+          <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
+            Min reviews
+            <input
+              type="number"
+              min={0}
+              step={10}
+              value={drafts.minReviews}
+              onChange={setDraft("minReviews")}
+              placeholder="0"
+              className={clsx(inputCls, "w-16 !px-2 !py-1")}
+            />
+          </label>
+          <select
+            value={filters.window ?? ""}
+            onChange={(e) => {
+              const v = e.target.value === "" ? null : e.target.value;
+              // Narrowing to new releases → default to newest-first so the filter's intent is visible.
+              patchParams(v !== null ? { window: v, sort: "release_date", order: "desc" } : { window: null });
+            }}
+            title="Show only recently released games (by Steam release date)"
+            className={selectCls}
+          >
+            {RELEASE_WINDOWS.map((w) => (
+              <option key={w.label} value={w.days ?? ""}>
+                {w.label}
+              </option>
+            ))}
+          </select>
           <label className="flex items-center gap-1.5 text-xs text-ink-secondary">
             Price $
             <input type="number" min={0} value={drafts.priceMin} onChange={setDraft("priceMin")} placeholder="min" className={clsx(inputCls, "w-16 !px-2 !py-1")} />
@@ -620,78 +689,6 @@ export default function GameSearch() {
             noLabel="Non-indie"
             onChange={(v) => patchParams({ indie: v === undefined ? null : v ? "1" : "0" })}
           />
-        </div>
-      )}
-
-      {/* Filter chip row (4e): active = accent outline · "sorted by …" caption right, now a
-          real sort-key control + order-toggle so column-header sorting survives the redesign. */}
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        {chips.length > 0 && (
-          <>
-            <span className="text-ink-muted">Filter:</span>
-            {chips.map((c) => (
-              <FilterChip key={c.key} label={c.label} onClear={() => patchParams(c.clear)} />
-            ))}
-            <button
-              type="button"
-              onClick={() =>
-                patchParams({
-                  q: null, genre: null, tag: null, min_reviews: null, window: null,
-                  price_min: null, price_max: null, min_positive: null, min_revenue: null,
-                  min_metacritic: null,
-                  after: null, before: null, self_pub: null, indie: null,
-                })
-              }
-              className="text-ink-muted underline decoration-dotted hover:text-ink-primary"
-            >
-              Clear all
-            </button>
-          </>
-        )}
-        <span className="ml-auto flex items-center gap-1.5 text-ink-muted">
-          sorted by
-          <select
-            value={filters.sort}
-            onChange={(e) => toggleSort(e.target.value as GameSortKey)}
-            aria-label="Sort by"
-            className="cursor-pointer bg-transparent text-ink-secondary outline-none hover:text-ink-primary"
-          >
-            {SORT_KEYS.map((k) => (
-              <option key={k} value={k}>
-                {SORT_LABELS[k]}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            onClick={() => toggleSort(filters.sort)}
-            title={`Currently sorted ${filters.order === "desc" ? "highest first" : "lowest first"} — click to flip`}
-            className="text-ink-secondary hover:text-ink-primary"
-            aria-label="Toggle sort direction"
-          >
-            {filters.order === "desc" ? "▼" : "▲"}
-          </button>
-        </span>
-      </div>
-
-      {tagChips.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5 text-xs">
-          <span className="text-ink-muted">Tags in these results:</span>
-          {tagChips.map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => patchParams({ tag: t })}
-              className={clsx(
-                "border px-2 py-0.5 text-[10px] font-medium transition-colors",
-                filters.tag === t
-                  ? "border-brand text-brand"
-                  : "border-chartborder text-ink-muted hover:border-borderstrong hover:text-ink-secondary",
-              )}
-            >
-              {t}
-            </button>
-          ))}
         </div>
       )}
 
@@ -754,7 +751,7 @@ export default function GameSearch() {
                     </Link>
                   </div>
                   <div className="flex items-center justify-between gap-4 sm:ml-auto sm:w-auto sm:shrink-0 sm:justify-end">
-                    <span className="w-[90px] shrink-0 text-[13px] text-ink-secondary">
+                    <span className="w-[90px] shrink-0 text-[13px] text-ink-primary">
                       {fmtPct(g.positive_ratio, 0)} · {fmtCompact(g.total_reviews)}
                     </span>
                     <span
@@ -780,6 +777,30 @@ export default function GameSearch() {
           </div>
         )}
       </div>
+
+      {/* Quick tag pivots sourced from this page's own results — not pictured in 4e (which
+          ends at the result rows), so this sits below them rather than between the chip row
+          and the list. */}
+      {tagChips.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+          <span className="text-ink-muted">Tags in these results:</span>
+          {tagChips.map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => patchParams({ tag: t })}
+              className={clsx(
+                "border px-2 py-0.5 text-[10px] font-medium transition-colors",
+                filters.tag === t
+                  ? "border-brand text-brand"
+                  : "border-chartborder text-ink-muted hover:border-borderstrong hover:text-ink-secondary",
+              )}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      )}
 
       {data && (
         <div className="flex items-center justify-between border-t border-chartborder pt-3 text-xs text-ink-muted">

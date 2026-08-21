@@ -227,7 +227,20 @@ export default function Compare() {
 
       {ids.length >= 2 && (
         <>
-          <Panel className="p-5">
+          {/* Mockup 4d titles this panel "Review velocity, first 12 weeks" — deliberately NOT
+              copied verbatim. CompareTrendsChart (components/charts/*, not editable here)
+              plots monthly-sampled review velocity over each game's FULL history, not a
+              12-week-since-launch window (see its own module doc); its x-axis literally
+              shows a decade of calendar months. Printing "first 12 weeks" directly above
+              that axis would be a checkable, immediately-falsified claim — the same honesty
+              call as relabeling "Peak CCU" to "Live players (now)" below. What the mockup
+              actually wants: a per-game launch-relative x-axis (week 0-12 since release) in
+              exactly three fixed mono-steel tones (accent-300 / paper 75% / paper 35%,
+              solid strokes) with no axis labels, just 3 gridlines. Reaching that needs (a) a
+              trends response keyed by weeks-since-launch instead of calendar period, and (b)
+              CompareTrendsChart switching its x-axis domain accordingly — both out of scope
+              for this page. */}
+          <Panel className="px-6 py-5">
             <div className="mb-3.5 flex flex-wrap items-baseline gap-4">
               <h2 className="text-[16px] text-ink-primary">Review velocity</h2>
               <div className="flex flex-wrap items-center gap-4 sm:ml-auto">
@@ -239,6 +252,12 @@ export default function Compare() {
                 ))}
               </div>
             </div>
+            {/* This row duplicates the legend CompareTrendsChart already renders below its
+                own chart (see that file — it isn't editable here). The mockup puts the ONLY
+                legend inline with the title, so that's the layout kept here; the second,
+                lower legend is the visible cost of composing around an uneditable chart
+                component. Fix belongs in CompareTrendsChart: accept a prop to suppress its
+                built-in legend when a caller (like this page) already renders one. */}
             <CompareTrendsChart ids={ids} names={names} />
           </Panel>
 
