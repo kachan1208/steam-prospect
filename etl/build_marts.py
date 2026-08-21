@@ -313,6 +313,8 @@ LANG_TOP_N = 15                  # top languages kept per genre (mart_lang) / pe
 
 # Phase 3 — Game Teardown tunables (review-aspect mining + press footprint).
 TEARDOWN_MIN_REVIEWS = 20        # sampled English reviews (w/ text) a game needs for mart_game_review_aspects
+GAME_EVENT_CAP = 40           # dated events kept per game for chart annotation. 98.9% of games
+                              # have <=20 events anyway; this only bounds the ~360 that do not.
 TEARDOWN_MIN_GENRE_GAMES = 30    # qualifying games a genre needs for its own aspect baseline (else falls back to __all__)
 PRESS_MIN_CONFIDENCE = 0.2       # article_game_mentions.match_confidence floor for mart_game_press_* (see mart_game_teardown.sql)
 PRESS_NOTABLE_N = 10             # "notable" articles kept per game (top by match_confidence, plus the earliest)
@@ -710,6 +712,7 @@ MART_FILES = [
                          # _niche_players_now) that mart_game.sql and mart_niche.sql join —
                          # so it must precede both. TEMPs persist across files (one connection).
     "mart_game.sql",
+    "mart_game_event.sql",  # dated events for chart annotation; reads stg_game + src.articles
     "mart_entity.sql",   # reads ONLY mart_game (+ the entity_suffix temp table) — must
                          # come anywhere after mart_game.sql; kept adjacent since it's
                          # a direct normalization of mart_game's entity strings.
@@ -802,6 +805,7 @@ def build_params() -> dict[str, str]:
         "GAME_DETAIL_MIN_REVIEWS": GAME_DETAIL_MIN_REVIEWS,
         "LANG_TOP_N": LANG_TOP_N,
         "TEARDOWN_MIN_REVIEWS": TEARDOWN_MIN_REVIEWS,
+        "GAME_EVENT_CAP": GAME_EVENT_CAP,
         "TEARDOWN_MIN_GENRE_GAMES": TEARDOWN_MIN_GENRE_GAMES,
         "PRESS_MIN_CONFIDENCE": PRESS_MIN_CONFIDENCE,
         "PRESS_NOTABLE_N": PRESS_NOTABLE_N,
