@@ -714,6 +714,15 @@ MART_FILES = [
                          # come anywhere after mart_game.sql; kept adjacent since it's
                          # a direct normalization of mart_game's entity strings.
     "mart_niche.sql",
+    "mart_niche_game.sql",  # niche -> game membership KEYS (the population mart_niche
+                            # aggregated). Must come straight after mart_niche.sql: it
+                            # INNER JOINs mart_niche to inherit that mart's
+                            # MIN_NICHE_GAMES publication gate instead of re-deriving it
+                            # (so the two can't disagree on which cuts exist), and it
+                            # re-reads the same staging tables (stg_game,
+                            # stg_tag/genre_membership — TEMPs that live for the whole
+                            # run, never dropped). Adjacency also keeps the CURRENT_DATE
+                            # both files evaluate for the 24m window seconds apart.
     "mart_market.sql",
     "mart_seasonality.sql",
     "mart_launch_curve.sql",

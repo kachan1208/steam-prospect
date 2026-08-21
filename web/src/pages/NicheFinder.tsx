@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import clsx from "clsx";
 
 import { OpportunityBars, OPPORTUNITY_LEGEND } from "../components/charts/OpportunityBars";
-import { NicheDetailDrawer } from "../components/NicheDetailDrawer";
 import { Card } from "../components/ui/Card";
 import { trackEvent } from "../lib/analytics";
 import {
@@ -20,6 +20,14 @@ import { fmtCompact, fmtInt, fmtMonths, fmtPct, fmtSigned, fmtUsd } from "../lib
 import { sequentialColorAt } from "../lib/palette";
 import { useDebounced } from "../lib/useDebounced";
 import { useTheme } from "../lib/theme";
+import {
+  formatNicheRef,
+  nicheCombinedPath,
+  nicheDetailPath,
+  parseNicheSelection,
+  NICHE_COMBINE_CAP,
+  type NicheSelection,
+} from "./NicheCombined";
 
 const LIMIT = 50;
 
@@ -147,12 +155,43 @@ export default function NicheFinder() {
     });
   }, []);
   const [offset, setOffset] = useState(0);
-  const [selected, setSelected] = useState<NicheRow | null>(null);
 
   // Any filter change re-pages to the top so offset never points past the new result set.
   useEffect(() => {
     setOffset(0);
   }, [dimension, windowParam, minReviews, tiers, debouncedQ, sort, order]);
+
+  // ---- multi-select ---------------------------------------------------------------
+  // A game carries many tags, so it lives in many niches — selecting 2..N and analysing
+  // the overlap is a first-class question. The selection rides the URL (repeated
+  // `niches=<dimension>:<key>`) so a half-built combination is shareable, exactly like
+  // /compare?ids=. Filters stay in component state: they're a browsing pose, the
+  // selection is the artifact worth sending someone.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const selection = useMemo(() => parseNicheSelection(searchParams), [searchParams]);
+  const selectedRefs = useMemo(() => new Set(selection.map(formatNicheRef)), [selection]);
+
+  const writeSelection = useCallback(
+    (next: NicheSelection[]) => {
+      const sp = new URLSearchParams(searchParams);
+      sp.delete("niches");
+      for (const s of next) sp.append("niches", formatNicheRef(s));
+      // replace: ticking checkboxes shouldn't bury the previous page in history.
+      setSearchParams(sp, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
+  const toggleSelected = useCallback(
+    (sel: NicheSelection) => {
+      const ref = formatNicheRef(sel);
+      const present = selection.some((s) => formatNicheRef(s) === ref);
+      if (present) writeSelection(selection.filter((s) => formatNicheRef(s) !== ref));
+      else if (selection.length < NICHE_COMBINE_CAP) writeSelection([...selection, sel]);
+    },
+    [selection, writeSelection],
+  );
 
   const tiersParam = dimension === "tag" ? tiers.join(",") : undefined;
   const { data, isLoading, isFetching, isError, error } = useNiches({
@@ -170,21 +209,48 @@ export default function NicheFinder() {
   const columnHelper = useMemo(() => createColumnHelper<NicheRow>(), []);
   const columns = useMemo(
     () => [
+      columnHelper.display({
+        id: "combine",
+        header: () => <span className="sr-only">Select for combined analysis</span>,
+        cell: (info) => {
+          const key = info.row.original.key;
+          const ref = `${dimension}:${key}`;
+          const on = selectedRefs.has(ref);
+          const full = !on && selectedRefs.size >= NICHE_COMBINE_CAP;
+          return (
+            <input
+              type="checkbox"
+              checked={on}
+              disabled={full}
+              onChange={() => toggleSelected({ dimension, key })}
+              aria-label={`${on ? "Remove" : "Add"} ${key} ${on ? "from" : "to"} the combined analysis`}
+              title={
+                full
+                  ? `You can combine up to ${NICHE_COMBINE_CAP} niches at once`
+                  : on
+                    ? "Selected — in the combination bar above the table"
+                    : "Select this niche to combine it with others"
+              }
+              className="h-3.5 w-3.5 cursor-pointer accent-[var(--brand)] disabled:cursor-not-allowed disabled:opacity-40"
+            />
+          );
+        },
+      }),
       columnHelper.accessor("key", {
         header: () => (
           <SortLabel label="Niche" help="A Steam community tag or Steam genre. The small badge marks non-buildable tiers (theme = a setting you attach to a game; umbrella = a genre container; meta = a reception tag)." col="key" active={sort === "key"} order={order} onSort={toggleSort} />
         ),
         cell: (info) => {
           const tier = info.row.original.tier;
+          const key = info.getValue();
           return (
-            <button
-              type="button"
-              onClick={() => setSelected(info.row.original)}
+            <Link
+              to={nicheDetailPath(dimension, key)}
+              onClick={() => trackEvent("niche_open")}
+              title={`Open the ${key} deep dive`}
               className="group/nk flex items-center gap-2 text-left"
             >
-              <span className="font-medium text-ink-primary transition-colors group-hover/nk:text-brand">
-                {info.getValue()}
-              </span>
+              <span className="font-medium text-ink-primary transition-colors group-hover/nk:text-brand">{key}</span>
               {tier && tier !== "micro" && tier !== "genre" && (
                 <span
                   className="rounded-full border border-chartborder px-1.5 py-px text-[10px] text-ink-muted"
@@ -193,7 +259,7 @@ export default function NicheFinder() {
                   {tier}
                 </span>
               )}
-            </button>
+            </Link>
           );
         },
       }),
@@ -417,7 +483,7 @@ export default function NicheFinder() {
         },
       }),
     ],
-    [columnHelper, theme, sort, order, toggleSort],
+    [columnHelper, theme, sort, order, toggleSort, dimension, selectedRefs, toggleSelected],
   );
 
   const table = useReactTable({
@@ -546,9 +612,23 @@ export default function NicheFinder() {
               </span>
             ))}
           </span>
-          <span className="ml-auto hidden sm:inline">Click a column header to sort · click a niche for the deep dive</span>
+          <span className="ml-auto hidden sm:inline">
+            Click a column header to sort · click a niche for the deep dive · tick 2+ to analyse them combined
+          </span>
         </div>
       </Card>
+
+      <NicheCombineBar
+        selection={selection}
+        onRemove={(sel) => toggleSelected(sel)}
+        onClear={() => writeSelection([])}
+        onAnalyse={() => {
+          trackEvent("niche_filter_apply");
+          navigate(
+            nicheCombinedPath(selection, "intersect", { win: windowParam, min_reviews: minReviews }),
+          );
+        }}
+      />
 
       <Card className={clsx("overflow-hidden !p-0", isFetching && "opacity-90 transition-opacity")}>
         {isLoading && <div className="p-8 text-center text-sm text-ink-muted">Loading niches…</div>}
@@ -619,8 +699,83 @@ export default function NicheFinder() {
           </div>
         )}
       </Card>
+    </div>
+  );
+}
 
-      {selected && <NicheDetailDrawer dimension={dimension} row={selected} onClose={() => setSelected(null)} />}
+/**
+ * The niche selection bar — the CompareTray idiom (chips with a ✕, a primary "(n)" action,
+ * a Clear) applied to niches, so the app's two multi-selects behave the same way.
+ *
+ * It is NOT CompareTray itself: that component is hard-wired to the localStorage-backed
+ * games compare list (appid/name entries, a global sticky footer rendered by AppShell), and
+ * generalising it would mean rewriting a file this change doesn't own. The differences are
+ * real, not cosmetic — niche selection lives in the URL, not localStorage, and is scoped to
+ * this page. It pins under the header (top-14) rather than to the bottom edge, which the
+ * global CompareTray already occupies: two sticky bars at bottom-0 would overlap.
+ */
+function NicheCombineBar({
+  selection,
+  onRemove,
+  onClear,
+  onAnalyse,
+}: {
+  selection: NicheSelection[];
+  onRemove: (sel: NicheSelection) => void;
+  onClear: () => void;
+  onAnalyse: () => void;
+}) {
+  if (selection.length === 0) return null;
+  const ready = selection.length >= 2;
+  return (
+    <div
+      data-testid="niche-combine-bar"
+      className="sticky top-14 z-20 -mt-2 flex flex-wrap items-center gap-2 rounded-card border border-brand bg-surface px-3 py-2 shadow-md"
+    >
+      <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Combine</span>
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+        {selection.map((s) => (
+          <span
+            key={formatNicheRef(s)}
+            className="inline-flex max-w-[200px] items-center gap-1 rounded-full border border-chartborder bg-page px-2 py-0.5 text-[11px] text-ink-secondary"
+          >
+            <span className="truncate" title={`${s.dimension}: ${s.key}`}>
+              {s.key}
+            </span>
+            <button
+              type="button"
+              onClick={() => onRemove(s)}
+              aria-label={`Remove ${s.key} from the combination`}
+              className="-my-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-ink-muted hover:bg-surface2 hover:text-ink-primary"
+            >
+              ✕
+            </button>
+          </span>
+        ))}
+        <span className="text-[10px] text-ink-muted">
+          {ready
+            ? selection.length < NICHE_COMBINE_CAP
+              ? `room for ${NICHE_COMBINE_CAP - selection.length} more`
+              : `max ${NICHE_COMBINE_CAP} niches`
+            : "pick one more — a combination needs at least two"}
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={onAnalyse}
+        disabled={!ready}
+        title={ready ? "See the games that carry all of these niches at once" : "Select at least two niches to combine them"}
+        className="rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg shadow-xs transition-colors hover:bg-brand-hover disabled:pointer-events-none disabled:opacity-40"
+      >
+        Analyse combined ({selection.length})
+      </button>
+      <button
+        type="button"
+        onClick={onClear}
+        className="rounded-md border border-chartborder px-2.5 py-1.5 text-[11px] font-medium text-ink-muted hover:text-ink-primary"
+      >
+        Clear
+      </button>
     </div>
   );
 }

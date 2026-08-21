@@ -33,8 +33,13 @@ from fastapi.responses import StreamingResponse
 from .. import analytics_db
 from ..schemas import (
     HistBucket,
+    NicheCombined,
+    NicheCombinedInput,
     NicheDetail,
+    NicheDistribution,
     NicheGame,
+    NicheGameList,
+    NicheGameRow,
     NicheList,
     NichePlayers,
     NichePlayersDistribution,
@@ -148,6 +153,145 @@ def _has_p90_trend() -> bool:
         "WHERE table_name = 'mart_niche_trend' AND column_name = 'p90_rev'"
     )
     return bool(rows)
+
+
+@lru_cache(maxsize=1)
+def _has_niche_games() -> bool:
+    """mart_niche_game — the (dimension, key, win, min_reviews) -> appid membership map that
+    backs the drill-down surface (/games, /distribution, /combined).
+
+    A TABLE probe, not a column probe, because the whole table is new. It only appears when
+    the nightly mart rebuild runs, and the API is always deployed BEFORE that rebuild lands
+    — so "absent" is the state production is genuinely in first, for hours, not an error.
+    Every endpoint below therefore degrades to an explicit 503 + rebuild hint (the same
+    convention as _niche_query's v2-columns 503), never a BinderException 500.
+
+    lru_cached for the usual reason: the whole DB is swapped atomically and the app
+    restarted on each ETL, so a per-process answer can't go stale in practice."""
+    rows = analytics_db.query(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'mart_niche_game'"
+    )
+    return bool(rows)
+
+
+_NO_NICHE_GAMES = (
+    "mart_niche_game (per-niche game membership) has not been built yet — rebuild the "
+    "marts (task etl). The niche list/detail endpoints are unaffected."
+)
+
+
+def _require_niche_games() -> None:
+    if not _has_niche_games():
+        raise HTTPException(status_code=503, detail=_NO_NICHE_GAMES)
+
+
+def _mq(sql: str, params: list) -> list[dict]:
+    """query() for the mart_niche_game-backed SQL below. _has_niche_games() is cached for
+    the process lifetime, so a DB swapped in under a running process could otherwise turn a
+    vanished table into a 500 — map it onto the same 503 the probe raises."""
+    try:
+        return analytics_db.query(sql, params)
+    except duckdb.CatalogException as exc:
+        raise HTTPException(status_code=503, detail=_NO_NICHE_GAMES) from exc
+
+
+def _mscalar(sql: str, params: list):
+    rows = _mq(sql, params)
+    if not rows:
+        return None
+    return next(iter(rows[0].values()))
+
+
+@lru_cache(maxsize=1)
+def _niche_game_cuts() -> tuple[tuple[str, int], ...]:
+    """The (win, min_reviews) cuts mart_niche_game actually materialises — MIN_REVIEWS_LEVELS
+    x {all, 24m} in etl/build_marts.py, but read off the data rather than hardcoded so a
+    mart built before a level was added still reports the truth. Asking for a cut that was
+    never built must be a loud 422 listing what exists, not a silent `total: 0` that the UI
+    would render as "this niche has no games".
+
+    One cached DISTINCT over two low-cardinality columns, once per process — the only full
+    scan in this module, and it buys every endpoint its input validation."""
+    rows = _mq("SELECT DISTINCT win, min_reviews FROM mart_niche_game", [])
+    return tuple(sorted((str(r["win"]), int(r["min_reviews"])) for r in rows))
+
+
+def _require_cut(win: str, min_reviews: int) -> None:
+    cuts = _niche_game_cuts()
+    if (win, min_reviews) not in cuts:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"cut (win={win}, min_reviews={min_reviews}) is not materialised in "
+                f"mart_niche_game; available: "
+                + ", ".join(f"({w}, {m})" for w, m in cuts)
+            ),
+        )
+
+
+def _require_dimension(dimension: str) -> None:
+    """422 (not niche_detail's 400) on the drill-down surface: the frozen web contract calls
+    for FastAPI's own validation status on bad input, and the /combined `niches` specs are
+    validated by hand, so all three endpoints answer malformed input identically."""
+    if dimension not in ("tag", "genre"):
+        raise HTTPException(status_code=422, detail="dimension must be tag or genre")
+
+
+# Games the client may sort on -> the mart_game column, whitelisted (never interpolate a
+# user string into SQL). `revenue`/`reviews` are the request-side names the web contract
+# froze; the marts call them est_rev_reviews / total_reviews.
+_GAME_SORT = {
+    "revenue": "g.est_rev_reviews",
+    "price": "g.price_initial",
+    "reviews": "g.total_reviews",
+    "release_year": "g.release_year",
+    "name": "g.name",
+}
+
+# The NicheGameRow projection. mart_niche_game carries keys only, so every attribute comes
+# from the mart_game join.
+_GAME_SELECT = (
+    "g.appid AS appid, g.name AS name, g.release_year AS release_year, "
+    "g.price_initial AS price_initial, g.est_rev_reviews AS est_revenue, "
+    "g.total_reviews AS total_reviews, g.owners_mid AS owners_est"
+)
+
+# mart_niche_hist is materialised for exactly ONE cut — win='all' and
+# min_reviews=MIN_REVIEWS_DEFAULT (etl/marts/mart_niche.sql builds it with a bare
+# `total_reviews >= @MIN_REVIEWS_DEFAULT@` and carries no win/min_reviews columns).
+_HIST_CUT = ("all", 50)
+
+_MAX_COMBINED_NICHES = 8
+
+
+def _bucket_filters(
+    rev_min: float | None,
+    rev_max: float | None,
+    price_min: float | None,
+    price_max: float | None,
+) -> tuple[str, list]:
+    """The chart cross-filter. HALF-OPEN [min, max) on both axes — deliberately the exact
+    semantics of /distribution's buckets, so handing a bucket's (x_min, x_max) straight back
+    returns precisely that bucket's `count` rows (including the free-to-play bucket, whose
+    [0.0, 0.01) window isolates $0 games and nothing else)."""
+    sql, params = "", []
+    for col, lo, hi in (
+        ("g.est_rev_reviews", rev_min, rev_max),
+        ("g.price_initial", price_min, price_max),
+    ):
+        if lo is not None:
+            sql += f" AND {col} >= ?"
+            params.append(lo)
+        if hi is not None:
+            sql += f" AND {col} < ?"
+            params.append(hi)
+    return sql, params
+
+
+def _order_by(sort: str, order: str) -> str:
+    # appid tiebreak keeps paging stable across requests when the sort key ties (it does a
+    # lot: whole niches share one price point, and release_year is coarse).
+    return f"ORDER BY {_GAME_SORT[sort]} {order.upper()} NULLS LAST, g.appid ASC"
 
 
 def _cols() -> list[str]:
@@ -280,6 +424,311 @@ def list_niches(
         total=int(total or 0),
         limit=limit,
         offset=offset,
+    )
+
+
+# =========================================================================================
+# Niche drill-down (mart_niche_game). ROUTE ORDER IS LOAD-BEARING: these three MUST be
+# registered before `/{dimension}/{key:path}` below, because that route's greedy path
+# converter would otherwise swallow /api/niches/tag/Roguelike/games as key="Roguelike/games"
+# and 404. Do not move them.
+# =========================================================================================
+
+
+@router.get("/combined", response_model=NicheCombined)
+def niches_combined(
+    niches: list[str] = Query(
+        ...,
+        description=(
+            "Repeated `dimension:key` specs, 2.."
+            f"{_MAX_COMBINED_NICHES} of them — e.g. niches=tag:Roguelike&niches=tag:Deckbuilding. "
+            "Split on the FIRST colon, so keys may themselves contain ':', '/' and spaces."
+        ),
+    ),
+    mode: str = Query("intersect", pattern="^(intersect|union)$"),
+    win: str = Query("all", pattern="^(all|24m)$"),
+    min_reviews: int = Query(50, ge=0, le=100000),
+    sort: str = Query("revenue", pattern="^(revenue|price|reviews|release_year|name)$"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=50000),
+) -> NicheCombined:
+    """Headline stats + a page of games over 2..N niches combined.
+
+    intersect (the default) = a game must be in EVERY listed niche; union = in any. Intersect
+    is the read that makes combined analysis mean anything: a game legitimately belongs to
+    many niches, so "Roguelike AND Deckbuilding" is a real sub-market while "Roguelike OR
+    Deckbuilding" is just a bigger bag.
+
+    The percentiles are recomputed over the combined set with mart_niche's own definitions
+    (quantile_cont over est_rev_reviews; median over price_initial with free games included)
+    — averaging the per-niche marts would be flatly wrong for an intersection.
+    """
+    pairs = _parse_niche_specs(niches)  # 422s before any capability/DB work
+    _require_niche_games()
+    _require_cut(win, min_reviews)
+
+    pair_sql = " OR ".join("(dimension = ? AND key = ?)" for _ in pairs)
+    pair_params = [v for p in pairs for v in p]
+    cut_params: list = [win, min_reviews]
+
+    # Per-input contribution. Counted straight off mart_niche_game, whose per-cut row count
+    # is guaranteed equal to mart_niche.n_games — so this is the same number the list page
+    # shows, not a re-derivation that could disagree with it.
+    per_niche = {
+        (r["dimension"], r["key"]): int(r["n"])
+        for r in _mq(
+            "SELECT dimension, key, COUNT(*) AS n FROM mart_niche_game "
+            f"WHERE win = ? AND min_reviews = ? AND ({pair_sql}) GROUP BY dimension, key",
+            cut_params + pair_params,
+        )
+    }
+    inputs = [
+        NicheCombinedInput(dimension=d, key=k, n_games=per_niche.get((d, k), 0))
+        for d, k in pairs
+    ]
+
+    # One membership pass: count how many of the requested niches each appid hits, then keep
+    # the ones that clear the threshold (N for intersect, 1 for union). Specs are de-duped in
+    # _parse_niche_specs, and 'tag'/'genre' can't collide across the ':' join, so
+    # COUNT(DISTINCT dimension || ':' || key) is injective here.
+    threshold = len(pairs) if mode == "intersect" else 1
+    sel_cte = (
+        "WITH hits AS ("
+        " SELECT appid, COUNT(DISTINCT dimension || ':' || key) AS n_hit"
+        " FROM mart_niche_game"
+        f" WHERE win = ? AND min_reviews = ? AND ({pair_sql})"
+        " GROUP BY appid"
+        "), sel AS (SELECT appid FROM hits WHERE n_hit >= ?) "
+    )
+    sel_params = cut_params + pair_params + [threshold]
+
+    stats = _mq(
+        sel_cte
+        + "SELECT COUNT(*) AS n_games, "
+        "median(g.est_rev_reviews) AS median_rev, "
+        "quantile_cont(g.est_rev_reviews, 0.25) AS p25_rev, "
+        "quantile_cont(g.est_rev_reviews, 0.75) AS p75_rev, "
+        "quantile_cont(g.est_rev_reviews, 0.90) AS p90_rev, "
+        "median(g.price_initial) AS median_price "
+        "FROM sel s JOIN mart_game g ON g.appid = s.appid",
+        sel_params,
+    )
+    head = stats[0] if stats else {}
+    n_games = int(head.get("n_games") or 0)
+
+    rows = _mq(
+        sel_cte
+        + f"SELECT {_GAME_SELECT} FROM sel s JOIN mart_game g ON g.appid = s.appid "
+        f"{_order_by(sort, order)} LIMIT ? OFFSET ?",
+        sel_params + [limit, offset],
+    )
+    return NicheCombined(
+        mode=mode,
+        win=win,
+        min_reviews=min_reviews,
+        inputs=inputs,
+        n_games=n_games,
+        median_rev=head.get("median_rev"),
+        p25_rev=head.get("p25_rev"),
+        p75_rev=head.get("p75_rev"),
+        p90_rev=head.get("p90_rev"),
+        median_price=head.get("median_price"),
+        # No bucket cross-filter on this surface, so the paging total IS the set size.
+        total=n_games,
+        items=[NicheGameRow(**r) for r in rows],
+        limit=limit,
+        offset=offset,
+    )
+
+
+def _parse_niche_specs(raw: list[str]) -> list[tuple[str, str]]:
+    """`dim:key` -> (dim, key), strictly. Split on the FIRST colon only: keys are Steam tag /
+    genre strings that can contain ':', '/' and spaces ("Sci-fi", "Rogue-lite", ...)."""
+    if len(raw) < 2:
+        raise HTTPException(
+            status_code=422, detail="niches: pass at least 2 `dimension:key` specs to combine"
+        )
+    if len(raw) > _MAX_COMBINED_NICHES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"niches: at most {_MAX_COMBINED_NICHES} niches may be combined, got {len(raw)}",
+        )
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for spec in raw:
+        dim, sep, key = spec.partition(":")
+        dim, key = dim.strip(), key.strip()
+        if not sep or not dim or not key:
+            raise HTTPException(
+                status_code=422,
+                detail=f"niches: expected 'dimension:key' (e.g. tag:Roguelike), got {spec!r}",
+            )
+        if dim not in ("tag", "genre"):
+            raise HTTPException(
+                status_code=422,
+                detail=f"niches: dimension must be tag or genre, got {dim!r} in {spec!r}",
+            )
+        if (dim, key) in seen:
+            # An intersect threshold of N assumes N distinct niches; a repeat would make the
+            # threshold unreachable and silently return nothing.
+            raise HTTPException(status_code=422, detail=f"niches: duplicate spec {spec!r}")
+        seen.add((dim, key))
+        pairs.append((dim, key))
+    return pairs
+
+
+@router.get("/{dimension}/{key:path}/games", response_model=NicheGameList)
+def niche_games(
+    dimension: str,
+    key: str,
+    win: str = Query("all", pattern="^(all|24m)$"),
+    min_reviews: int = Query(50, ge=0, le=100000),
+    sort: str = Query("revenue", pattern="^(revenue|price|reviews|release_year|name)$"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+    rev_min: float | None = Query(None, description="Cross-filter: est_revenue >= this"),
+    rev_max: float | None = Query(None, description="Cross-filter: est_revenue < this"),
+    price_min: float | None = Query(None, description="Cross-filter: price_initial >= this"),
+    price_max: float | None = Query(None, description="Cross-filter: price_initial < this"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=50000),
+) -> NicheGameList:
+    """Every member game of one niche cut, paged.
+
+    Defaults mirror the DETAIL endpoint's headline cut (win='all', min_reviews=50 — the
+    broadest population, and the one mart_niche_hist is built for), NOT the list endpoint's
+    24m default: this table sits under the detail page's charts and must agree with them.
+
+    `total` is the match count before limit/offset (and after any cross-filter), so the UI
+    can page honestly. A niche/cut with no rows returns total=0 rather than 404 — a real
+    niche can legitimately miss a cut that fell under the mart's MIN_NICHE_GAMES floor, and
+    distinguishing that from a typo would cost another full scan.
+    """
+    _require_dimension(dimension)
+    _require_niche_games()
+    _require_cut(win, min_reviews)
+
+    base = (
+        "FROM mart_niche_game m JOIN mart_game g ON g.appid = m.appid "
+        "WHERE m.dimension = ? AND m.key = ? AND m.win = ? AND m.min_reviews = ?"
+    )
+    params: list = [dimension, key, win, min_reviews]
+    bsql, bparams = _bucket_filters(rev_min, rev_max, price_min, price_max)
+
+    total = _mscalar(f"SELECT COUNT(*) AS n {base}{bsql}", params + bparams)
+    rows = _mq(
+        f"SELECT {_GAME_SELECT} {base}{bsql} {_order_by(sort, order)} LIMIT ? OFFSET ?",
+        params + bparams + [limit, offset],
+    )
+    return NicheGameList(
+        total=int(total or 0),
+        items=[NicheGameRow(**r) for r in rows],
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/{dimension}/{key:path}/distribution", response_model=NicheDistribution)
+def niche_distribution(
+    dimension: str,
+    key: str,
+    metric: str = Query(..., pattern="^(revenue|price)$"),
+    win: str = Query("all", pattern="^(all|24m)$"),
+    min_reviews: int = Query(50, ge=0, le=100000),
+) -> NicheDistribution:
+    """Revenue or price histogram for one niche cut. See schemas.NicheDistribution for the
+    bucket contract; the short version is that buckets are half-open [x_min, x_max) and
+    round-trip exactly into /games' rev_min/rev_max/price_min/price_max cross-filter.
+
+    revenue on the default cut is the one thing on this surface that works WITHOUT
+    mart_niche_game — mart_niche_hist already ships it — so the charts light up the moment
+    the API deploys, hours before the rebuild.
+    """
+    _require_dimension(dimension)
+
+    if metric == "revenue":
+        # Prefer the precomputed mart when the request matches the ONE cut it materialises
+        # (win='all', min_reviews=MIN_REVIEWS_DEFAULT — see _HIST_CUT): it is a small keyed
+        # lookup instead of a millions-row join, and it is the exact same binning, so the
+        # two paths are interchangeable. Empty means the niche fell under the mart's
+        # MIN_NICHE_GAMES floor — fall through and compute it.
+        if (win, min_reviews) == _HIST_CUT:
+            try:
+                hist = analytics_db.query(
+                    "SELECT bucket_index, x_min, x_max, count FROM mart_niche_hist "
+                    "WHERE dimension = ? AND key = ? ORDER BY bucket_index",
+                    [dimension, key],
+                )
+            except duckdb.CatalogException:  # mart older than mart_niche_hist itself
+                hist = []
+            if hist:
+                buckets = []
+                for h in hist:
+                    h = dict(h)
+                    # The mart's GREATEST(v, 1) floor lands $0 games in bucket 0 but labels
+                    # its lower edge 1.0. Report 0.0 so the cross-filter that the UI builds
+                    # from (x_min, x_max) doesn't silently drop free games.
+                    if int(h["bucket_index"]) == 0:
+                        h["x_min"] = 0.0
+                    buckets.append(HistBucket(**h))
+                return NicheDistribution(
+                    metric="revenue",
+                    buckets=buckets,
+                    n_games=sum(b.count for b in buckets),
+                    source="mart",
+                )
+
+    _require_niche_games()
+    _require_cut(win, min_reviews)
+
+    member_cte = (
+        "WITH m AS (SELECT appid FROM mart_niche_game "
+        "WHERE dimension = ? AND key = ? AND win = ? AND min_reviews = ?) "
+    )
+    params: list = [dimension, key, win, min_reviews]
+
+    if metric == "revenue":
+        sql = (
+            member_cte
+            + "SELECT CAST(floor(log10(GREATEST(g.est_rev_reviews, 1)) * 2) AS INTEGER) AS bucket_index, "
+            # bucket 0's lower edge is reported as 0.0, not 10^0 — same reason as the mart
+            # path above: it is the bucket that holds the $0 games.
+            "CASE WHEN CAST(floor(log10(GREATEST(g.est_rev_reviews, 1)) * 2) AS INTEGER) = 0 "
+            "THEN 0.0 ELSE pow(10, CAST(floor(log10(GREATEST(g.est_rev_reviews, 1)) * 2) AS INTEGER) / 2.0) END AS x_min, "
+            "pow(10, (CAST(floor(log10(GREATEST(g.est_rev_reviews, 1)) * 2) AS INTEGER) + 1) / 2.0) AS x_max, "
+            "COUNT(*) AS count "
+            "FROM m JOIN mart_game g ON g.appid = m.appid "
+            "WHERE g.est_rev_reviews IS NOT NULL "
+            "GROUP BY 1, 2, 3 ORDER BY 1"
+        )
+    else:
+        # Price: linear $2.50 bins (mart_market_hist's convention — price is bounded and
+        # clusters at price points, so log bins would be unreadable), with free-to-play
+        # pulled OUT into its own bucket_index = -1 spanning [0.0, 0.01). F2P is a large,
+        # genuinely different product category; folding $0 into a "$0-$2.50" bar would
+        # read as a pricing floor that nobody chose. Paid bucket 0 therefore starts at
+        # 0.01 (the first paid cent) so every bucket still round-trips exactly.
+        bkt = "CASE WHEN g.price_initial <= 0 THEN -1 ELSE CAST(floor(g.price_initial / 2.5) AS INTEGER) END"
+        # The edges are CAST to DOUBLE explicitly: mart_game.price_initial is DECIMAL in the
+        # real marts (DOUBLE only in the test fixture), and DuckDB would otherwise hand back
+        # Decimal edges here but plain floats on the revenue axis.
+        sql = (
+            member_cte
+            + f"SELECT {bkt} AS bucket_index, "
+            f"CAST(CASE WHEN {bkt} = -1 THEN 0.0 WHEN {bkt} = 0 THEN 0.01 ELSE {bkt} * 2.5 END AS DOUBLE) AS x_min, "
+            f"CAST(CASE WHEN {bkt} = -1 THEN 0.01 ELSE ({bkt} + 1) * 2.5 END AS DOUBLE) AS x_max, "
+            "COUNT(*) AS count "
+            "FROM m JOIN mart_game g ON g.appid = m.appid "
+            "WHERE g.price_initial IS NOT NULL "
+            "GROUP BY 1, 2, 3 ORDER BY 1"
+        )
+
+    buckets = [HistBucket(**b) for b in _mq(sql, params)]
+    return NicheDistribution(
+        metric=metric,  # type: ignore[arg-type]
+        buckets=buckets,
+        n_games=sum(b.count for b in buckets),
+        source="computed",
     )
 
 

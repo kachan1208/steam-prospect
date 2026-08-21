@@ -592,6 +592,106 @@ class NichePress(BaseModel):
     top_outlets: list[NichePressOutlet] = Field(default_factory=list)
 
 
+# ---- niche membership (the drill-down surface: which games are IN the niche) -----------
+# All three models below are backed by mart_niche_game — the (dimension, key, win,
+# min_reviews) -> appid membership map. It is built by the nightly mart rebuild and the API
+# always ships BEFORE that rebuild lands, so every endpoint that needs it degrades to a 503
+# with a rebuild hint (niches.py::_has_niche_games), never a 500.
+class NicheGameRow(BaseModel):
+    """One member game of a niche (or of a combined niche set). Field names are the
+    web-facing contract, not the mart's: est_revenue is mart_game.est_rev_reviews (the
+    review-count revenue estimate) and owners_est is mart_game.owners_mid (the midpoint of
+    the SteamSpy owners band) — both estimates, neither a reported figure."""
+
+    appid: int
+    name: Optional[str] = None
+    release_year: Optional[int] = None
+    price_initial: Optional[float] = None   # 0.0 = free-to-play, None = price unknown
+    est_revenue: Optional[float] = None
+    total_reviews: Optional[int] = None
+    owners_est: Optional[float] = None
+
+
+class NicheGameList(BaseModel):
+    """`total` is the match count BEFORE limit/offset (and AFTER any bucket cross-filter),
+    so the client can paginate honestly. limit/offset echo the resolved request."""
+
+    total: int
+    items: list[NicheGameRow] = Field(default_factory=list)
+    limit: int
+    offset: int
+
+
+class NicheDistribution(BaseModel):
+    """A niche's revenue or price histogram.
+
+    Buckets are HALF-OPEN [x_min, x_max) on both metrics, which makes them exactly
+    round-trippable: handing a bucket's (x_min, x_max) back to /games as
+    (rev_min, rev_max) / (price_min, price_max) returns precisely that bucket's `count`
+    rows. That is the whole point of the shape — the charts cross-filter by clicking a bar.
+
+    revenue: half-decade log10 bins, identical to mart_niche_hist's cut
+      (bucket_index = floor(log10(max(v,1))*2), x_max = 10^((i+1)/2)) so the precomputed
+      and the computed path are directly comparable. Bucket 0's x_min is reported as 0.0
+      rather than the mart's 1.0, because the mart's GREATEST(v, 1) floor puts $0 games in
+      bucket 0 and a 1.0 lower edge would make the cross-filter silently drop them.
+
+    price: linear $2.50 bins matching mart_market_hist's price convention, EXCEPT that
+      free-to-play gets its own bucket_index = -1 spanning [0.0, 0.01) instead of being
+      folded into the first paid bin. F2P is a large, genuinely distinct category, and a
+      "$0-$2.50" bar that silently mixes free games with $1.99 games misreads as a pricing
+      floor. Paid bucket 0 therefore starts at x_min = 0.01 (the first paid cent), and
+      every bucket stays exactly round-trippable.
+
+    `source` says which path served it: 'mart' = the precomputed mart_niche_hist row set
+    (only possible for revenue on its one materialised cut), 'computed' = aggregated live
+    off mart_niche_game join mart_game."""
+
+    metric: Literal["revenue", "price"]
+    buckets: list[HistBucket] = Field(default_factory=list)
+    n_games: int = 0  # sum of bucket counts (games with a non-null value for the metric)
+    source: Literal["mart", "computed"] = "computed"
+
+
+class NicheCombinedInput(BaseModel):
+    """One requested niche's own membership size, so the UI can show how much each input
+    contributes to the combined set. n_games is counted straight off mart_niche_game and is
+    guaranteed equal to mart_niche.n_games for the same (dimension, key, win, min_reviews)."""
+
+    dimension: str
+    key: str
+    n_games: int
+
+
+class NicheCombined(BaseModel):
+    """Headline stats over 2..N niches combined by intersect (a game must be in ALL of them
+    — the read that makes "combined analysis" meaningful, since a game legitimately belongs
+    to many niches) or union (in ANY of them).
+
+    The percentiles are computed over the combined set with the same definitions
+    mart_niche uses for a single niche (quantile_cont over est_rev_reviews; median over
+    price_initial, free games included) — NOT averaged from the per-niche marts, which
+    would be wrong for an intersection.
+
+    n_games == total: the combined set is not bucket-filtered, so the paging total is the
+    set size."""
+
+    mode: Literal["intersect", "union"]
+    win: Literal["all", "24m"]
+    min_reviews: int
+    inputs: list[NicheCombinedInput] = Field(default_factory=list)
+    n_games: int
+    median_rev: Optional[float] = None
+    p25_rev: Optional[float] = None
+    p75_rev: Optional[float] = None
+    p90_rev: Optional[float] = None
+    median_price: Optional[float] = None
+    total: int
+    items: list[NicheGameRow] = Field(default_factory=list)
+    limit: int
+    offset: int
+
+
 class NicheDetail(BaseModel):
     dimension: str
     key: str

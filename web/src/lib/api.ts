@@ -323,11 +323,121 @@ export interface NicheDetail {
   hit_rates: NicheHitRates;
 }
 
+/**
+ * Path for a niche sub-resource. Niche keys carry spaces and slashes ("Action Roguelike",
+ * "Massively Multiplayer/RPG"), so the key segment is ALWAYS percent-encoded here — the API
+ * matches it with a `{key:path}` converter and unquotes it back, which is exactly why the
+ * encoding has to be unconditional rather than "only when it looks unsafe".
+ */
+function nichePath(dimension: Dimension, key: string, suffix = ""): string {
+  return `/niches/${dimension}/${encodeURIComponent(key)}${suffix}`;
+}
+
 export function useNicheDetail(dimension: Dimension, key: string | null) {
   return useQuery({
     queryKey: ["niche-detail", dimension, key],
-    queryFn: () => request<NicheDetail>(`/niches/${dimension}/${encodeURIComponent(key ?? "")}`),
+    queryFn: () => request<NicheDetail>(nichePath(dimension, key ?? "")),
     enabled: key !== null,
+  });
+}
+
+// ---- niche drill-down: game list + distributions (the /niches/:dimension/:key page) ------
+// Both endpoints read the per-niche game mart, which only lands on a mart REBUILD — for the
+// first few hours after a deploy they answer 503 (or a degraded empty payload). Neither hook
+// retries a 503/404 so the page can degrade just those two sections with an honest message
+// instead of spinning; everything else on the niche page comes from useNicheDetail above and
+// keeps working untouched.
+
+export interface NicheGameRow {
+  appid: number;
+  name: string | null;
+  release_year: number | null;
+  price_initial: number | null;
+  est_revenue: number | null;
+  total_reviews: number | null;
+  owners_est: number | null;
+}
+
+export interface NicheGamesList {
+  /** Match count BEFORE limit/offset and AFTER any bucket cross-filter — page off this. */
+  total: number;
+  items: NicheGameRow[];
+  limit: number;
+  offset: number;
+}
+
+/** Mirrors the API's sortable whitelist (routers/niches.py `_GAME_SORT`). These are the
+ * REQUEST-side names, deliberately not the row field names: `revenue`/`reviews` map to
+ * est_rev_reviews / total_reviews server-side. Owners is not sortable. */
+export type NicheGameSortKey = "revenue" | "price" | "reviews" | "release_year" | "name";
+
+export interface NicheGamesParams {
+  win: Window;
+  min_reviews: number;
+  sort: NicheGameSortKey;
+  order: "asc" | "desc";
+  limit: number;
+  offset: number;
+  /** Bucket cross-filter driven by the revenue/price distribution charts (USD). Undefined
+   * on an axis = no filter there; both bounds always travel together. */
+  rev_min?: number;
+  rev_max?: number;
+  price_min?: number;
+  price_max?: number;
+}
+
+/** 503 (mart missing), 404 (no such niche) and 422 (a (win, min_reviews) cut that was never
+ * materialised) are all stable answers, not blips — surface them at once instead of
+ * retrying for seconds. */
+function retryUnlessUnavailable(failureCount: number, error: unknown): boolean {
+  return (
+    !(
+      error instanceof ApiError &&
+      (error.status === 503 || error.status === 404 || error.status === 422)
+    ) && failureCount < 2
+  );
+}
+
+export function useNicheGames(dimension: Dimension, key: string | null, params: NicheGamesParams) {
+  return useQuery({
+    queryKey: ["niche-games", dimension, key, params],
+    queryFn: () => request<NicheGamesList>(`${nichePath(dimension, key ?? "", "/games")}${qs(params)}`),
+    enabled: key !== null,
+    placeholderData: keepPreviousData,
+    retry: retryUnlessUnavailable,
+  });
+}
+
+export type NicheDistributionMetric = "revenue" | "price";
+
+export interface NicheDistributionResponse {
+  metric: string;
+  buckets: HistBucket[];
+  /** Games behind the histogram (sum of bucket counts) — the chart's denominator. */
+  n_games: number;
+  /** "mart" = served from the precomputed mart_niche_hist (the only cut that works before a
+   * rebuild), "computed" = derived from mart_niche_game. Informational. */
+  source?: "mart" | "computed";
+}
+
+/** One bucketed distribution (revenue or price) over the niche's games — the source for the
+ * page's brushable histograms. Deliberately NOT filtered by the bucket selection: the chart
+ * has to keep showing the full shape while a sub-range is highlighted. */
+export function useNicheDistribution(
+  dimension: Dimension,
+  key: string | null,
+  metric: NicheDistributionMetric,
+  params: { win: Window; min_reviews: number },
+) {
+  return useQuery({
+    queryKey: ["niche-distribution", dimension, key, metric, params],
+    queryFn: () =>
+      request<NicheDistributionResponse>(
+        `${nichePath(dimension, key ?? "", "/distribution")}${qs({ metric, ...params })}`,
+      ),
+    enabled: key !== null,
+    placeholderData: keepPreviousData,
+    retry: retryUnlessUnavailable,
   });
 }
 
@@ -1160,5 +1270,107 @@ export function useAspectReviews(
       ),
     enabled: enabled && appid !== null && !!aspect,
     staleTime: 5 * 60_000,
+  });
+}
+
+// ---- combined niches (multi-select: a game carries many tags, so it lives in many
+// niches — "Roguelike ∩ Deckbuilding" is a real, buildable segment) --------------------
+export type NicheCombineMode = "intersect" | "union";
+
+/** Per-niche input echo: the niche's OWN size in the same cut, so the UI can show the
+ * drop (8,000 and 3,000 → 40) that is the whole point of combining. */
+export interface NicheCombinedPerNiche {
+  dimension: string;
+  key: string;
+  n_games: number | null;
+}
+
+/** A member game of the combination (the API's NicheGameRow). `est_revenue` and
+ * `owners_est` are the web-facing names for mart_game's est_rev_reviews / owners_mid —
+ * both estimates. Everything but `appid` is optional: the mart is still landing, so
+ * render defensively rather than assume a column exists. */
+export interface NicheCombinedGame {
+  appid: number;
+  name?: string | null;
+  release_year?: number | null;
+  price_initial?: number | null;
+  est_revenue?: number | null;
+  total_reviews?: number | null;
+  owners_est?: number | null;
+}
+
+export interface NicheCombined {
+  /** Size of the combination itself: games in ALL niches (intersect) or in ANY (union).
+   * 0 is a legitimate answer — nobody has built that combination. */
+  n_games: number;
+  median_rev: number | null;
+  p25_rev: number | null;
+  p75_rev: number | null;
+  p90_rev: number | null;
+  median_price: number | null;
+  /** Each requested niche's own size in the same cut. The API calls this `inputs`; the
+   * originally-specced name was `per_niche` — both are accepted so a rename on either
+   * side degrades to "sizes unknown" instead of a crash. */
+  inputs?: NicheCombinedPerNiche[];
+  per_niche?: NicheCombinedPerNiche[];
+  items: NicheCombinedGame[];
+  /** Echoed back by the API; the UI trusts its own request when absent. */
+  mode?: NicheCombineMode;
+  win?: string | null;
+  min_reviews?: number | null;
+  /** n_games == total for this surface (no cross-filter), but both are sent. */
+  total?: number | null;
+  limit?: number | null;
+  offset?: number | null;
+  /** Set by the API when it answered from an incomplete mart — the numbers above are not
+   * trustworthy yet and the UI must say so instead of charting them. */
+  degraded?: boolean;
+  note?: string | null;
+}
+
+export interface NicheCombinedParams {
+  /** Dimension-qualified refs, e.g. ["tag:Roguelike", "tag:Deckbuilding"] — repeated as
+   * separate `niches=` params, not comma-joined (keys contain commas, &, apostrophes). */
+  niches: string[];
+  mode: NicheCombineMode;
+  win?: Window;
+  min_reviews?: number;
+  sort?: string;
+  order?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
+}
+
+/** `qs()` can't express a repeated key, so the combined query string is built here. */
+function combinedQs(p: NicheCombinedParams): string {
+  const sp = new URLSearchParams();
+  for (const n of p.niches) sp.append("niches", n);
+  sp.set("mode", p.mode);
+  if (p.win) sp.set("win", p.win);
+  if (p.min_reviews != null) sp.set("min_reviews", String(p.min_reviews));
+  if (p.sort) sp.set("sort", p.sort);
+  if (p.order) sp.set("order", p.order);
+  if (p.limit != null) sp.set("limit", String(p.limit));
+  if (p.offset) sp.set("offset", String(p.offset));
+  return `?${sp.toString()}`;
+}
+
+/**
+ * Stats for 2..N niches combined. Disabled below two niches (the API rejects it and the
+ * page says so itself). 503 = the combined mart hasn't been rebuilt yet, which is the
+ * expected state for hours after a deploy — surface it immediately as a degraded state
+ * instead of retrying for seconds; same convention as useTimingOverview.
+ */
+export function useNichesCombined(params: NicheCombinedParams) {
+  return useQuery({
+    queryKey: ["niches-combined", params],
+    queryFn: () => request<NicheCombined>(`/niches/combined${combinedQs(params)}`),
+    enabled: params.niches.length >= 2,
+    placeholderData: keepPreviousData,
+    retry: (failureCount, error) =>
+      !(
+        error instanceof ApiError &&
+        (error.status === 503 || error.status === 404 || error.status === 422 || error.status === 400)
+      ) && failureCount < 2,
   });
 }

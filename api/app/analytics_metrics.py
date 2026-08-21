@@ -32,11 +32,17 @@ from prometheus_client import Counter
 _ROUTE_RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"^/games/\d+$"), "/games/:appid"),
     (re.compile(r"^/docs/[^/]+$"), "/docs/:slug"),
+    # `.+` deliberately spans slashes: niche keys are raw tag names and some contain one
+    # ("Rogue/Lite"), which is why the API's own handler matches them with `{key:path}`. A
+    # `[^/]+` here would drop exactly those pages' views and nothing would ever say so.
+    # Three segments, so it cannot swallow the static two-segment /niches/combined below.
+    (re.compile(r"^/niches/(tag|genre)/.+$"), "/niches/:dimension/:key"),
 ]
 
 KNOWN_ROUTES: frozenset[str] = frozenset(
     {
-        "/", "/niches", "/benchmarks", "/timing", "/estimator", "/games", "/games/:appid",
+        "/", "/niches", "/niches/combined", "/niches/:dimension/:key",
+        "/benchmarks", "/timing", "/estimator", "/games", "/games/:appid",
         "/press", "/marketing", "/devlog", "/chat", "/datalog", "/welcome", "/settings",
         "/docs", "/docs/:slug", "/terms", "/privacy",
     }
