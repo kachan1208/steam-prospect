@@ -414,12 +414,27 @@ class GameChannelMix(BaseModel):
 
 # ---- aspect drill-down (Phase 3 — click a teardown bar to read the reviews) -----------
 class AspectReviewExcerpt(BaseModel):
+    """One representative review behind an aspect bar.
+
+    `excerpt` is the sentence around the matched keyword — what the drill-down SHOWS.
+    `review_text` + `steam_url` are what let the reader open the whole thing; both are
+    Optional because the mart columns behind them (mart_game_aspect_reviews.review_text /
+    .steam_url) only exist after the rebuild that added them, and the API always deploys
+    hours ahead of that rebuild. See games.py::_has_aspect_full_text — until the mart
+    catches up, every item comes back with these two null and the rest unchanged."""
+
     excerpt: str
     matched_keywords: list[str] = Field(default_factory=list)
     votes_up: Optional[int] = None
     playtime_minutes: Optional[int] = None
     date: Optional[str] = None
     language: str
+    # The full review, truncated by the mart to 2000 characters and ending in '…' when cut —
+    # so a client can render "…" honestly rather than guessing whether it has everything.
+    review_text: Optional[str] = None
+    # https://steamcommunity.com/profiles/<author_steamid>/recommended/<appid>/ — null when
+    # the review has no author_steamid, so a client must not assume there is a link.
+    steam_url: Optional[str] = None
 
 
 class AspectReviewsResponse(BaseModel):

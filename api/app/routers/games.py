@@ -645,6 +645,29 @@ _VALID_ASPECTS = {
 }
 
 
+@lru_cache(maxsize=1)
+def _has_aspect_full_text() -> bool:
+    """Whether mart_game_aspect_reviews carries the open-the-whole-review columns
+    (review_text + steam_url, added 2026-08-21).
+
+    THE ABSENT CASE IS THE NORMAL ONE FIRST: the API deploys hours before the nightly mart
+    rebuild, so for that whole window the table on disk is the old 9-column one. Selecting
+    the two columns unconditionally would turn every aspect drill-down into a DuckDB
+    BinderException 500 in exactly that window. Gated, the endpoint keeps returning the same
+    items it does today, with review_text/steam_url null, and starts filling them in the
+    moment the rebuilt mart is swapped in.
+
+    One probe for both columns on purpose: they are written by the same CREATE TABLE in
+    etl/marts/mart_game_aspect_reviews.sql, so there is no build in which one exists without
+    the other. Cached like _has_name_lower() — the DB is swapped atomically and the app
+    restarted on each ETL, so a per-process answer cannot go stale under a live process."""
+    rows = analytics_db.query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_game_aspect_reviews' AND column_name = 'review_text'"
+    )
+    return bool(rows)
+
+
 @router.get("/{appid}/aspect-reviews", response_model=AspectReviewsResponse)
 def game_aspect_reviews(
     appid: int,
@@ -659,13 +682,21 @@ def game_aspect_reviews(
     touches the raw `reviews` table at request time. A valid appid/aspect with no sampled
     reviews mentioning it (or an appid not in the mart at all) returns an empty `items`
     list rather than a 404 — only an unrecognized `aspect` label is rejected (400).
+
+    Each item also carries the FULL review (`review_text`, capped by the mart at 2000 chars
+    and ending in '…' when cut) and a `steam_url` permalink, so the drill-down can open the
+    whole review instead of stopping at the one-sentence excerpt. Both are null on a mart
+    built before those columns landed — see _has_aspect_full_text().
     """
     if aspect not in _VALID_ASPECTS:
         raise HTTPException(status_code=400, detail=f"aspect must be one of {sorted(_VALID_ASPECTS)}")
 
+    # Widen the projection only when the mart actually has the columns; the narrow SELECT is
+    # byte-for-byte the pre-2026-08-21 query, so the degraded path is the old behaviour exactly.
+    extra_cols = ", review_text, steam_url" if _has_aspect_full_text() else ""
     rows = analytics_db.query(
-        """
-        SELECT excerpt, matched_keywords, votes_up, playtime_minutes, date, language
+        f"""
+        SELECT excerpt, matched_keywords, votes_up, playtime_minutes, date, language{extra_cols}
         FROM mart_game_aspect_reviews
         WHERE appid = ? AND aspect = ? AND sentiment = ?
         ORDER BY votes_up DESC NULLS LAST
@@ -681,6 +712,9 @@ def game_aspect_reviews(
             playtime_minutes=r["playtime_minutes"],
             date=r["date"],
             language=r["language"],
+            # .get(), not [...]: on the pre-rebuild mart these keys are simply not in the row.
+            review_text=r.get("review_text"),
+            steam_url=r.get("steam_url"),
         )
         for r in rows
     ]
