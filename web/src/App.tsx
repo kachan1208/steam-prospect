@@ -6,7 +6,6 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { useHealth } from "./lib/api";
 import { initAnalytics, trackPageview } from "./lib/analytics";
-import { useTheme, ACCENTS, PRESETS } from "./lib/theme";
 import LaunchTiming from "./pages/LaunchTiming";
 import NicheFinder from "./pages/NicheFinder";
 import NicheDetail, { NICHE_ROUTE_PATH } from "./pages/NicheDetail";
@@ -115,138 +114,6 @@ function Logo() {
   );
 }
 
-function ThemeToggle() {
-  const { theme, toggle } = useTheme();
-  return (
-    <button
-      type="button"
-      onClick={toggle}
-      className="flex h-7 w-7 shrink-0 items-center justify-center text-ink-muted transition-colors hover:bg-surface2 hover:text-ink-primary"
-      aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-      title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-    >
-      {theme === "dark" ? (
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-          <circle cx="12" cy="12" r="4" />
-          <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
-        </svg>
-      ) : (
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z" />
-        </svg>
-      )}
-    </button>
-  );
-}
-
-function ThemePresetPicker() {
-  const { preset, setPreset } = useTheme();
-  return (
-    <div className="flex items-center justify-between gap-3">
-      <span className="kicker text-[10px] text-ink-muted">Theme</span>
-      <div className="inline-flex border border-chartborder">
-        {PRESETS.map((pz, i) => (
-          <button
-            key={pz.id}
-            type="button"
-            onClick={() => setPreset(pz.id)}
-            className={clsx(
-              "px-2 py-1 text-[11px] font-medium transition-colors",
-              i > 0 && "border-l border-chartborder",
-              preset === pz.id ? "bg-brand text-brand-fg" : "text-ink-muted hover:text-ink-secondary",
-            )}
-          >
-            {pz.name}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function AccentPicker() {
-  const { accent, setAccent } = useTheme();
-  return (
-    <div className="flex items-center justify-between gap-3">
-      <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">Accent</span>
-      <div className="flex items-center gap-1.5">
-        {ACCENTS.map((a) => {
-          const active = accent === a.id;
-          return (
-            <button
-              key={a.id}
-              type="button"
-              onClick={() => setAccent(a.id)}
-              title={a.name}
-              aria-label={`Accent color: ${a.name}`}
-              aria-pressed={active}
-              className="h-4 w-4 rounded-full transition-transform hover:scale-110"
-              style={{
-                backgroundColor: a.swatch,
-                outline: active ? `2px solid ${a.swatch}` : "2px solid transparent",
-                outlineOffset: "2px",
-              }}
-            />
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/** The Theme preset + Accent pickers, relocated from the old sidebar footer into a compact
- * header popover. Plain click-outside/Escape close — no positioning or portal deps. */
-function AppearancePopover() {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  return (
-    <div ref={ref} className="relative" data-testid="appearance-popover">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-haspopup="true"
-        aria-expanded={open}
-        title="Appearance — theme preset and accent color"
-        className={clsx(
-          "flex h-7 items-center gap-1.5 px-2 text-xs font-medium transition-colors",
-          open ? "bg-surface2 text-ink-primary" : "text-ink-muted hover:bg-surface2 hover:text-ink-primary",
-        )}
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-          <line x1="4" y1="8" x2="20" y2="8" />
-          <line x1="4" y1="16" x2="20" y2="16" />
-          <circle cx="9" cy="8" r="2.2" fill="var(--surface-1)" />
-          <circle cx="15" cy="16" r="2.2" fill="var(--surface-1)" />
-        </svg>
-        <span className="hidden sm:inline">Appearance</span>
-      </button>
-      {open && (
-        <div className="absolute right-0 top-full z-40 mt-2 flex w-60 flex-col gap-2.5 border border-chartborder bg-surface p-3 shadow-md">
-          <ThemePresetPicker />
-          <AccentPicker />
-        </div>
-      )}
-    </div>
-  );
-}
-
 function Header() {
   return (
     <header className="sticky top-0 z-30 border-b border-chartborder bg-page">
@@ -281,8 +148,6 @@ function Header() {
         </nav>
 
         <div className="ml-auto flex h-14 items-center gap-2">
-          <ThemeToggle />
-          <AppearancePopover />
           <NavLink
             to="/chat"
             className={({ isActive }) =>

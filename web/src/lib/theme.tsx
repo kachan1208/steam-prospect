@@ -191,47 +191,22 @@ const DEFAULT_ACCENT: AccentId = "industry";
 const DEFAULT_PRESET: PresetId = "industry";
 
 /**
- * One-time migration to the Industry identity.
+ * The identity is fixed, not a preference.
  *
- * The redesign changed the product's look, but theme/preset/accent are PERSISTED choices, and a
- * default only applies when nothing is stored. So every existing visitor kept light + soft +
- * blue and saw none of it — the redesign was invisible to exactly the people who had used the
- * app before. Verifying in a fresh browser context hid this completely.
- *
- * Runs once per browser: stamps a flag, overwrites the three stored keys. After that the pickers
- * work normally again — this resets the look once, it does not lock anyone out of choosing.
+ * These used to read localStorage, which is exactly how the redesign stayed invisible: a stored
+ * theme/preset/accent from an earlier visit silently outranked the new defaults, so returning
+ * users saw the old look and reported it as four separate bugs. The pickers are gone, so there is
+ * nothing left to restore — reading storage could now only resurrect a look the product no longer
+ * has. ThemeProvider still applies the variables (and SeasonalityHeatmap still reads `theme`).
  */
-const MIGRATION_KEY = "prospect-design-industry";
-function migrateStoredPreferences(): void {
-  if (typeof window === "undefined") return;
-  try {
-    if (window.localStorage.getItem(MIGRATION_KEY)) return;
-    window.localStorage.setItem(MIGRATION_KEY, "1");
-    window.localStorage.setItem(THEME_KEY, "dark");
-    window.localStorage.setItem(PRESET_KEY, DEFAULT_PRESET);
-    window.localStorage.setItem(ACCENT_KEY, DEFAULT_ACCENT);
-  } catch {
-    // Storage can throw (privacy mode, quota). Nothing to migrate then — the defaults apply.
-  }
-}
-migrateStoredPreferences();
-
 function initialTheme(): Theme {
-  if (typeof window === "undefined") return "light";
-  const stored = window.localStorage.getItem(THEME_KEY);
-  if (stored === "light" || stored === "dark") return stored;
-  // Dark is the designed mode — the handoff draws every screen on the steel ground.
   return "dark";
 }
 function initialAccent(): AccentId {
-  if (typeof window === "undefined") return DEFAULT_ACCENT;
-  const s = window.localStorage.getItem(ACCENT_KEY);
-  return ACCENTS.some((a) => a.id === s) ? (s as AccentId) : DEFAULT_ACCENT;
+  return DEFAULT_ACCENT;
 }
 function initialPreset(): PresetId {
-  if (typeof window === "undefined") return DEFAULT_PRESET;
-  const s = window.localStorage.getItem(PRESET_KEY);
-  return PRESETS.some((p) => p.id === s) ? (s as PresetId) : DEFAULT_PRESET;
+  return DEFAULT_PRESET;
 }
 
 interface ThemeCtx {
