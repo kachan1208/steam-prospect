@@ -191,6 +191,14 @@ fi
 # would multiply proxy/rate contention, not throughput. This lane is the critical path.
 
 run_step "steam_scrape"     3600 "./run_full.sh"
+# Games that RELEASED after we first saw them. `enrich --refresh-unreleased` was written for
+# exactly this ("placeholder date + NULL price frozen forever otherwise") and then never wired
+# into any schedule — the same built-but-never-invoked gap as game_genres above. Without it a
+# title discovered pre-launch keeps its "Coming soon" placeholder, NULL price and NULL release
+# year indefinitely, because run_full.sh's rotation takes many nights to come back around and
+# nothing prioritises the one cohort whose data flips on a known date. 23,214 games were sitting
+# in that state. Oldest-updated first, so the backlog drains in date order.
+run_step "refresh_released" 2700 "python3 -m steam_scraper.scraper --db steam_games.db enrich --refresh-unreleased --limit 6000 --workers 12 --rate 6.0"
 run_step "review_refresh"   2700 "python3 -m steam_scraper.scraper --db steam_games.db review-summary --workers 16 --rate 12.0 --refresh-older-than-days 7 --limit 25000"
 run_step "review_histogram" 1800 "python3 -m steam_scraper.scraper --db steam_games.db review-histogram --min-reviews 50 --workers 16 --rate 10.0"
 
