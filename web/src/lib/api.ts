@@ -1245,6 +1245,12 @@ export interface AspectReviewExcerpt {
   playtime_minutes: number | null;
   date: string | null;
   language: string;
+  /** Full review body the excerpt was cut from — capped at 2000 chars server-side, ending in
+   * "…" when it was truncated. OPTIONAL: the teardown mart is rebuilt hours after a deploy, so
+   * treat "absent" as normal and degrade to the excerpt alone (see AspectReviewExamples). */
+  review_text?: string | null;
+  /** Permalink to this review on Steam. Optional for the same reason as `review_text`. */
+  steam_url?: string | null;
 }
 
 export interface AspectReviewsResponse {

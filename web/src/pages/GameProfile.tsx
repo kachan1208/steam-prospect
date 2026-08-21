@@ -200,48 +200,56 @@ export default function GameProfile() {
                   </a>
                   <CompareToggle appid={profile.appid} name={profile.name} />
                 </div>
-                <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-ink-muted">
-                  {profile.primary_genre && <Badge color={CSS_VAR.demand}>{profile.primary_genre}</Badge>}
+                {/* The header used to put ALL of this on one wrapping line at one weight: genre
+                    badge, date, price, "Indie", "Self-published", catalog provenance, the
+                    lifetime badge, "Demo", and the four social icons — ten heterogeneous things
+                    competing as equals, so nothing was findable. Split by what each answers, and
+                    badges are now spent only on the two that are a SIGNAL rather than a label. */}
+
+                {/* What is this game: when, how much, what kind. */}
+                <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-secondary">
                   <span>{profile.release_date ?? "Release date unknown"}</span>
-                  <span>·</span>
+                  <span aria-hidden="true">·</span>
                   <span>{fmtPrice(profile.price_initial)}</span>
-                  {profile.is_indie === 1 && <Badge>Indie</Badge>}
-                  <Badge>{profile.self_published ? "Self-published" : "Publisher"}</Badge>
-                  {profile.first_seen && !Number.isNaN(Date.parse(profile.first_seen)) && (
+                  {profile.primary_genre && (
                     <>
                       <span aria-hidden="true">·</span>
-                      <span title={`First seen in our catalog: ${profile.first_seen}`}>
-                        In catalog since{" "}
-                        {new Date(profile.first_seen).toLocaleDateString(undefined, { year: "numeric", month: "short" })}
-                      </span>
+                      <span>{profile.primary_genre}</span>
                     </>
                   )}
-                  {profile.lifetime_alive === true && profile.lifetime_first_100_month && (
-                    <span title="Reached a monthly average of 100+ concurrent players then and still averages 10+ (steamcharts monthly history, top-8k coverage).">
-                      <Badge color={CSS_VAR.demand}>
-                        Audience alive since {monthName(Number(profile.lifetime_first_100_month.slice(5, 7)))}{" "}
-                        {profile.lifetime_first_100_month.slice(0, 4)}
-                      </Badge>
-                    </span>
+                  {profile.is_indie === 1 && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span>Indie</span>
+                    </>
                   )}
-                  {profile.lifetime_alive === false && profile.lifetime_months != null && (
-                    <span title="Audience lifetime: months from the game's first month averaging 100+ concurrent players to its first full month averaging under 10 (steamcharts monthly history, top-8k coverage).">
-                      <Badge color="var(--status-critical)">
-                        Audience: {fmtMonths(profile.lifetime_months)} (100+ → &lt;10)
-                      </Badge>
-                    </span>
-                  )}
-                  {profile.has_demo === true && (
-                    <a
-                      href={`https://store.steampowered.com/app/${profile.demo_appid ?? profile.appid}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      title="Has a playable demo on Steam (from the game's own store metadata)"
-                      className="hover:underline"
+                  {profile.first_seen && !Number.isNaN(Date.parse(profile.first_seen)) && (
+                    <span
+                      className="text-ink-muted"
+                      title={`First seen in our catalog: ${profile.first_seen}`}
                     >
-                      <Badge color={CSS_VAR.demand}>Demo</Badge>
-                    </a>
+                      · in catalog since{" "}
+                      {new Date(profile.first_seen).toLocaleDateString(undefined, { year: "numeric", month: "short" })}
+                    </span>
                   )}
+                </div>
+
+                {/* Who made it — with their channels attached to them, instead of floating among
+                    unrelated badges where they read as just more chrome. */}
+                <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-secondary">
+                  {profile.developers ? (
+                    <CreditLinks role="developer" joined={profile.developers} />
+                  ) : (
+                    "Unknown developer"
+                  )}
+                  {profile.publishers && profile.publishers !== profile.developers && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <CreditLinks role="publisher" joined={profile.publishers} />
+                    </>
+                  )}
+                  <span aria-hidden="true">·</span>
+                  <span>{profile.self_published ? "Self-published" : "Has a publisher"}</span>
                   <SocialLinks
                     x={profile.dev_x_handle}
                     xUrl={profile.dev_x_url}
@@ -251,19 +259,42 @@ export default function GameProfile() {
                     blueskyUrl={profile.dev_bluesky_url}
                   />
                 </div>
-                <div className="mt-1 text-xs text-ink-secondary">
-                  {profile.developers ? (
-                    <CreditLinks role="developer" joined={profile.developers} />
-                  ) : (
-                    "Unknown developer"
-                  )}
-                  {profile.publishers && profile.publishers !== profile.developers && (
-                    <>
-                      {" · "}
-                      <CreditLinks role="publisher" joined={profile.publishers} />
-                    </>
-                  )}
-                </div>
+
+                {/* Badges, and only here: a playable demo, and whether the audience survived.
+                    Both are findings a reader would act on. The row disappears entirely when
+                    neither applies, rather than leaving an empty gutter. */}
+                {(profile.has_demo === true ||
+                  (profile.lifetime_alive === true && profile.lifetime_first_100_month) ||
+                  (profile.lifetime_alive === false && profile.lifetime_months != null)) && (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                    {profile.lifetime_alive === true && profile.lifetime_first_100_month && (
+                      <span title="Reached a monthly average of 100+ concurrent players then and still averages 10+ (steamcharts monthly history, top-8k coverage).">
+                        <Badge color={CSS_VAR.demand}>
+                          Audience alive since {monthName(Number(profile.lifetime_first_100_month.slice(5, 7)))}{" "}
+                          {profile.lifetime_first_100_month.slice(0, 4)}
+                        </Badge>
+                      </span>
+                    )}
+                    {profile.lifetime_alive === false && profile.lifetime_months != null && (
+                      <span title="Audience lifetime: months from the game's first month averaging 100+ concurrent players to its first full month averaging under 10 (steamcharts monthly history, top-8k coverage).">
+                        <Badge color="var(--status-critical)">
+                          Audience: {fmtMonths(profile.lifetime_months)} (100+ → &lt;10)
+                        </Badge>
+                      </span>
+                    )}
+                    {profile.has_demo === true && (
+                      <a
+                        href={`https://store.steampowered.com/app/${profile.demo_appid ?? profile.appid}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="Has a playable demo on Steam (from the game's own store metadata)"
+                        className="hover:underline"
+                      >
+                        <Badge color={CSS_VAR.demand}>Demo</Badge>
+                      </a>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
             {profile.short_description && (
