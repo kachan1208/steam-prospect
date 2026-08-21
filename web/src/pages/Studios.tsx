@@ -8,7 +8,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { ApiError, useEntitySearch, type EntityRole, type EntitySearchRow } from "../lib/api";
 import { fmtInt, fmtPct, fmtUsd } from "../lib/format";
 import { genreTintStyle, heatDomain, heatStyle } from "../lib/heat";
-import { CSS_VAR } from "../lib/palette";
+import { CSS_VAR, MONO} from "../lib/palette";
 import { useDebounced } from "../lib/useDebounced";
 
 const LIMIT = 50;
@@ -166,7 +166,7 @@ export default function Studios() {
                     </td>
                     <td className="px-3 py-2 align-middle">
                       {(e.n_recent_24m ?? 0) > 0 ? (
-                        <Badge color={CSS_VAR.good}>Active</Badge>
+                        <Badge color={MONO.primary}>Active</Badge>
                       ) : (
                         <span className="text-ink-muted">—</span>
                       )}
@@ -191,11 +191,14 @@ export default function Studios() {
                       </span>
                     </td>
                     <td className="px-3 py-2 align-middle">
-                      <div className="flex max-w-[220px] flex-wrap gap-1">
+                      {/* nowrap, not wrap: every other cell in this table is whitespace-nowrap and rides the
+                          horizontal scroll. Wrapping three badges onto three lines here dragged the
+                          WHOLE row to 103px at 390px, because table cells share a row height. */}
+                      <div className="flex max-w-[220px] flex-nowrap gap-1">
                         {e.top_genres.slice(0, 3).map((g) => (
                           <span
                             key={g}
-                            className="rounded-full border px-1.5 py-0.5 text-[10px] text-ink-secondary"
+                            className="whitespace-nowrap border px-1.5 py-0.5 text-[10px] text-ink-secondary"
                             style={genreTintStyle(g)}
                           >
                             {g}

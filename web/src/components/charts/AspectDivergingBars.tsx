@@ -3,7 +3,7 @@ import clsx from "clsx";
 
 import type { ReviewAspect } from "../../lib/api";
 import { fmtInt, fmtPct } from "../../lib/format";
-import { CSS_VAR } from "../../lib/palette";
+import { CSS_VAR, MONO} from "../../lib/palette";
 import { Badge } from "../ui/Badge";
 import { AspectReviewExamples } from "./AspectReviewExamples";
 
@@ -165,7 +165,7 @@ function AspectRow({
               <path d="M9 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
             {a.aspect}
-            {isStandout && <Badge color={CSS_VAR.good}>Standout strength</Badge>}
+            {isStandout && <Badge color={MONO.primary}>Standout strength</Badge>}
           </span>
           <span className="tabular shrink-0 text-[11px] text-ink-muted">{fmtInt(a.total_mentions)} mentions</span>
         </div>

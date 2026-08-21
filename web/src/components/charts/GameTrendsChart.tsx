@@ -234,7 +234,7 @@ export function GameTrendsChart({
               <Bar yAxisId="reviews" dataKey="n_reviews" fill={CSS_VAR.competition} radius={[4, 4, 0, 0]} maxBarSize={20} />
               <Line
                 yAxisId="ccu"
-                type="monotone"
+                type="linear"
                 dataKey="ccu_avg"
                 stroke={CSS_VAR.demand}
                 strokeWidth={1.5}
@@ -314,7 +314,7 @@ export function GameTrendsChart({
               <Bar yAxisId="twitch" dataKey="twitch_viewers" fill={twitchColor} radius={[4, 4, 0, 0]} maxBarSize={20} />
               <Line
                 yAxisId="mentions"
-                type="monotone"
+                type="linear"
                 dataKey="n_mentions"
                 stroke={CSS_VAR.qualityGap}
                 strokeWidth={1.5}

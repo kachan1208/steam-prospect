@@ -82,7 +82,7 @@ export function ReviewsTimelineChart({ points }: { points: ReviewTimelinePoint[]
               }}
             />
             <Line
-              type="monotone"
+              type="linear"
               dataKey="trailing_positive_share"
               stroke={CSS_VAR.demand}
               strokeWidth={1.5}

@@ -278,7 +278,7 @@ function PlayersSeriesChart({ points }: { points: NichePlayersPoint[] }) {
           }}
         />
         <Line
-          type="monotone"
+          type="linear"
           dataKey="total_players"
           stroke={CSS_VAR.demand}
           strokeWidth={2}
@@ -756,7 +756,7 @@ export default function NicheDetail() {
                       aria-hidden
                       className={clsx(
                         "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
-                        f.serious ? "bg-[var(--status-critical)]" : "bg-[var(--status-warn,#d97706)]",
+                        f.serious ? "bg-[var(--text-primary)]" : "bg-[color-mix(in_srgb,var(--text-primary)_50%,transparent)]",
                       )}
                     />
                     {f.text}
@@ -830,7 +830,7 @@ export default function NicheDetail() {
                     />
                     <Line
                       yAxisId="revenue"
-                      type="monotone"
+                      type="linear"
                       dataKey={hasP90Trend ? "p90_rev" : "median_rev"}
                       stroke="var(--brand)"
                       strokeWidth={1.5}
@@ -839,7 +839,7 @@ export default function NicheDetail() {
                     />
                     <Line
                       yAxisId="releases"
-                      type="monotone"
+                      type="linear"
                       dataKey="n_releases"
                       stroke="color-mix(in srgb, var(--text-primary) 45%, transparent)"
                       strokeWidth={1.5}
@@ -1066,7 +1066,7 @@ export default function NicheDetail() {
                           }}
                         />
                         <Line
-                          type="monotone"
+                          type="linear"
                           dataKey="avg_players_sum"
                           stroke={CSS_VAR.demand}
                           strokeWidth={2}
