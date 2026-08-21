@@ -31,7 +31,7 @@ import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
 import { fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName } from "../lib/format";
 import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
-import { CSS_VAR } from "../lib/palette";
+import { CSS_VAR, MONO} from "../lib/palette";
 import { useDetailView } from "../lib/viewMode";
 
 const TABS = [
@@ -470,7 +470,7 @@ export default function GameProfile() {
                   )}
                   {profile.lifetime_alive === false && profile.lifetime_months != null && (
                     <span title="Audience lifetime: months from the game's first month averaging 100+ concurrent players to its first full month averaging under 10 (steamcharts monthly history, top-8k coverage).">
-                      <Badge color="var(--status-critical)">
+                      <Badge color={MONO.paper50}>
                         Audience: {fmtMonths(profile.lifetime_months)} (100+ → &lt;10)
                       </Badge>
                     </span>

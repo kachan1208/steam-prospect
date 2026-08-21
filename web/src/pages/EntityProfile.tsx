@@ -16,7 +16,7 @@ import clsx from "clsx";
 
 import { fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
 import { genreTintStyle, heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
-import { CSS_VAR } from "../lib/palette";
+import { CSS_VAR, MONO} from "../lib/palette";
 
 const ROLES: EntityRole[] = ["developer", "publisher"];
 
@@ -160,7 +160,7 @@ export default function EntityProfile() {
             <h1 className="text-lg font-semibold text-ink-primary">{entity.name}</h1>
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs text-ink-muted">
               <Badge color={CSS_VAR.demand}>{entity.role === "developer" ? "Developer" : "Publisher"}</Badge>
-              <Badge color={active ? CSS_VAR.good : CSS_VAR.warning}>{active ? "Active" : "Dormant"}</Badge>
+              <Badge color={active ? MONO.primary : MONO.paper50}>{active ? "Active" : "Dormant"}</Badge>
               {years && (
                 <span title="Years spanned by this entity's releases in our catalog">Releases {years}</span>
               )}

@@ -60,3 +60,20 @@ the history only starts accruing once the job does.
 Deviations between the shipped redesign and its spec, plus the data gaps behind them, live in the
 working register rather than here — see the redesign PRs (#70, #71, #72) and the ETL gap work
 (#69) for the decisions already taken.
+
+---
+
+## Consolidate the blueprint frame into one component
+
+Ten hand-rolled `<div className="blueprint"><i className="bp-corner"/>` blocks across six page
+files, because seven agents restyled in parallel and none could see the others. They agree on the
+frame and the corner marks — they disagree on panel-title type (14px in `Card`, 16px in the
+hand-rolled panels), which is the visible symptom.
+
+`Card` briefly carried a `blueprint` prop for this. It was never called once, so it was deleted:
+dead code that looked like a shared primitive was worse than no primitive at all.
+
+The fix is a single exported `BlueprintPanel` (frame + corner marks + one title scale) that all
+six pages import. Deliberately NOT done in the same pass as the red/green fixes — it touches six
+live pages at once and needs per-page visual verification, which is a different kind of risk from
+a five-line colour correction.

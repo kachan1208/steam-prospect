@@ -756,7 +756,7 @@ export default function NicheDetail() {
                       aria-hidden
                       className={clsx(
                         "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
-                        f.serious ? "bg-[var(--status-critical)]" : "bg-[var(--status-warn,#d97706)]",
+                        f.serious ? "bg-[var(--text-primary)]" : "bg-[color-mix(in_srgb,var(--text-primary)_50%,transparent)]",
                       )}
                     />
                     {f.text}
