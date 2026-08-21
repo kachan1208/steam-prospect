@@ -94,19 +94,25 @@ FROM _aspectrev_base;
 -- tool and the web's two-column layout, and text_pos_share already excludes neutrals — so
 -- excluding them is what makes the excerpts agree with the bars above them.
 CREATE TEMP TABLE _aspectrev_ranked AS
+-- SOURCE OF THE LABEL (changed 2026-08-21): the split is now the model's sentiment head
+-- (stg_aspect_mention_sentiment.text_sentiment), not the sign of VADER's compound. The band
+-- described below still exists — it is the fallback inside text_sentiment when no model verdict
+-- was stored — but it no longer decides the common case. On a blind 120-window sample VADER
+-- matched a human read 65.8% of the time against the head's 81.7%, winning 28 disagreements to 9:
+-- VADER scores words, so "not worth full price" and "the boss and the ending are not so cool"
+-- both came out as praise.
 SELECT m.appid, m.recommendationid, s.aspect, s.kw_aspect,
-    CASE WHEN s.compound >= @SENTIMENT_POS_THRESHOLD@ THEN 'praise' ELSE 'complaint' END AS sentiment,
+    s.text_sentiment AS sentiment,
     m.votes_up, m.playtime_minutes, m.timestamp_created, m.language,
     row_number() OVER (
-        PARTITION BY m.appid, s.aspect,
-            CASE WHEN s.compound >= @SENTIMENT_POS_THRESHOLD@ THEN 'praise' ELSE 'complaint' END
+        PARTITION BY m.appid, s.aspect, s.text_sentiment
         ORDER BY m.votes_up DESC NULLS LAST, m.timestamp_created DESC NULLS LAST
     ) AS rn
 FROM stg_aspect_mention_sentiment s
 JOIN _aspectrev_meta m ON m.appid = s.appid AND m.recommendationid = s.recommendationid
--- Drop the neutral band BEFORE ranking, so a neutral mention can never occupy one of the
+-- Drop neutrals BEFORE ranking, so a neutral mention can never occupy one of the
 -- @ASPECT_REVIEWS_TOP_K@ slots that should hold a genuinely positive or negative excerpt.
-WHERE s.compound >= @SENTIMENT_POS_THRESHOLD@ OR s.compound <= @SENTIMENT_NEG_THRESHOLD@
+WHERE s.text_sentiment IN ('praise', 'complaint')
 QUALIFY rn <= @ASPECT_REVIEWS_TOP_K@;
 
 DROP TABLE _aspectrev_meta;
