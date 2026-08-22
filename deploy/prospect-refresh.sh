@@ -329,6 +329,26 @@ if [ "$ETL_RC" -eq 0 ]; then
     echo "[etl] OK ${ETL_DUR}s — app restarted"
 else
     echo "[etl] FAILED rc=$ETL_RC after ${ETL_DUR}s — kept previous mart, app not restarted"
+    # Reclaim the spill. A dead build leaves its DuckDB scratch directory behind, and on this
+    # corpus that is enormous: the 2026-08-21 timeout left 24GB and held the disk at 91% until it
+    # was cleared by hand. The pre-build sweep would have caught it, but only at the NEXT nightly
+    # ~18 hours later, so every job in between ran against a nearly-full disk.
+    #
+    # The .tmp spill directory is the space; the .building file is the forensics. Delete the
+    # former, keep the latter — it is a few tens of MB and is the only artifact left to inspect.
+    #
+    # Scoped to THIS build's version, read back from the log, rather than a bare
+    # prospect_*.duckdb.building.tmp glob: a manual build runs outside the flock, and the glob
+    # would delete the spill out from under one that is still running. Note the version cannot be
+    # derived from `date -u` here — the run starts at 21:00 and can fail after midnight, which is
+    # exactly what happened on 2026-08-21 (version 20260821, failure timestamped the 22nd).
+    ETL_VERSION=$(grep -m1 -oE 'prospect_[0-9]{8}\.duckdb' "$ETL_LOG" 2>/dev/null | head -1)
+    if [ -n "$ETL_VERSION" ]; then
+        rm -rf "/root/prospect/data/${ETL_VERSION}.building.tmp" 2>/dev/null || true
+    else
+        echo "[etl] could not read build version from $ETL_LOG — leaving scratch for the pre-build sweep"
+    fi
+    df -h /root/prospect/data | tail -1 | awk '{print "[etl] disk after cleanup: " $4 " free (" $5 " used)"}'
 fi
 push "prospect_pipeline_step_duration_seconds{step=\"etl\"} $ETL_DUR
 prospect_pipeline_step_success{step=\"etl\"} $([ "$ETL_RC" -eq 0 ] && echo 1 || echo 0)
