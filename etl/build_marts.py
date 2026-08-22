@@ -1649,7 +1649,26 @@ def _attach_sentiment_cache(con: duckdb.DuckDBPyConnection, data_dir: Path) -> P
     con.execute(
         "CREATE TABLE IF NOT EXISTS cache.press_article(article_id BIGINT, compound DOUBLE)"
     )
+    # Which reviews have been SCANNED — regardless of whether the scan produced any mention rows.
+    # This table exists because aspect_mention cannot answer that question: a review whose text
+    # matches no aspect keyword produces zero rows there, so "not in aspect_mention" conflates
+    # "never scanned" with "scanned, found nothing". The old code made exactly that conflation and
+    # bet it was cheap ("the vast majority of reviews match at least one arm"). Measured on
+    # 2026-08-22, the bet was off by an order of magnitude: three consecutive nightlies re-scanned
+    # 10.96M / 10.38M / 10.77M "new" reviews — one of them producing literally 0 new mention rows —
+    # burning ~20 minutes of the 2-core box EVERY night on regex over text that can never match.
+    con.execute("CREATE TABLE IF NOT EXISTS cache.scored_review(recommendationid VARCHAR)")
     con.execute("CREATE TABLE IF NOT EXISTS cache.meta(key VARCHAR, value VARCHAR)")
+    # Migration seed, first run only: reviews with mention rows are proof of a past scan, so count
+    # them scanned instead of re-scanning ~1.8M of them. Guarded on scored_review being empty, so
+    # it runs once; after a config-change wipe both tables are empty and the seed is a no-op.
+    # The ~10M zero-mention reviews have no trace anywhere and get their one final rescan.
+    if con.execute("SELECT count(*) FROM cache.scored_review").fetchone()[0] == 0:
+        con.execute(
+            "INSERT INTO cache.scored_review "
+            "SELECT DISTINCT recommendationid FROM cache.aspect_mention "
+            "WHERE recommendationid IS NOT NULL"
+        )
     # CREATE TABLE IF NOT EXISTS is a no-op on a table that already exists — it does NOT add
     # columns. A cache file created before the classifier landed therefore keeps the old
     # three-column shape, and the six-value INSERT below fails at runtime, hours into a build.
@@ -1677,6 +1696,10 @@ def _refresh_sentiment_cache(con: duckdb.DuckDBPyConnection) -> bool:
         return False
     con.execute("DELETE FROM cache.aspect_mention")
     con.execute("DELETE FROM cache.press_article")
+    # scored_review must die with aspect_mention: it asserts "scanned under the current config",
+    # and keeping it across a config change would silently skip the full rescore this wipe exists
+    # to force.
+    con.execute("DELETE FROM cache.scored_review")
     con.execute("DELETE FROM cache.meta WHERE key = 'config_hash'")
     con.execute("INSERT INTO cache.meta VALUES ('config_hash', ?)", [current])
     return True
@@ -1727,6 +1750,11 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
     Scoring streams through _stream_vader_scores (a per-mention window table built in SQL, read
     via an independent cursor in bounded batches) — peak memory is one batch, never the whole
     ~1.7M-row corpus (matters on the 2GB Droplet)."""
+    # Idempotent per connection: the nightly calls this once per process, but tests (and any
+    # future re-entry) may not, and CREATE TEMP TABLE has no IF NOT EXISTS to fall back on.
+    con.execute("DROP TABLE IF EXISTS stg_aspect_mention_sentiment")
+    con.execute("DROP TABLE IF EXISTS stg_aspect_sentiment")
+    con.execute("DROP TABLE IF EXISTS _sent_pool")
     # Eligible English-text review pool (identical population + floor to stg_review_text /
     # _teardown_elig, but carrying recommendationid). TEMP: only read on this connection.
     con.execute(
@@ -1808,14 +1836,15 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             if _refresh_sentiment_cache(con):
                 print("[etl] sentiment cache: config/version changed -> cache cleared, full rescore")
 
-            # _new = pool reviews not yet represented in the cache AT ALL. Invariant this relies
-            # on (maintained by construction below — every recommendationid selected into _new in
-            # a given run gets every aspect row it matches inserted in that same run): a cached
-            # recommendationid always carries ALL of the aspect rows it ever matched, never a
-            # partial subset — so "no row in cache.aspect_mention" is exactly "needs (re)scoring",
-            # with no risk of mistaking a review that simply matched zero aspects for "cached"
-            # (it has no cache row either, so it's correctly retried — cheap, since the vast
-            # majority of reviews match at least one of the 10 broad aspect arms).
+            # _new = pool reviews not yet SCANNED, per cache.scored_review — NOT "not in
+            # aspect_mention". The old membership test conflated "never scanned" with "scanned,
+            # matched no keyword", and the second class is ~10M reviews on this corpus: three
+            # consecutive nightlies re-ran the regex over 10.96M / 10.38M / 10.77M reviews
+            # (~20 min/night on 2 cores), one of them yielding exactly 0 new mention rows.
+            # scored_review records the scan itself, so a zero-mention review is scanned once,
+            # ever. Invariant (maintained by construction below): a recommendationid enters
+            # scored_review only in the same run that inserted ALL the aspect rows it matches, so
+            # membership there always means "fully represented in aspect_mention".
             con.execute("DROP TABLE IF EXISTS _sent_new")
             con.execute(
                 """
@@ -1823,11 +1852,20 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
                 SELECT p.appid, p.recommendationid, p.review_text
                 FROM _sent_pool p
                 WHERE p.recommendationid NOT IN (
-                    SELECT recommendationid FROM cache.aspect_mention WHERE recommendationid IS NOT NULL
+                    SELECT recommendationid FROM cache.scored_review WHERE recommendationid IS NOT NULL
                 )
                 """
             )
             n_new_reviews = con.execute("SELECT COUNT(*) FROM _sent_new").fetchone()[0]
+            # Idempotent rescan: if a previous run died between inserting a review's mention rows
+            # and recording it in scored_review, that review is selected again here — clear its
+            # partial rows first so the re-insert can't double-count it. (The pre-scored_review
+            # code had the mirror-image failure: such a review was skipped forever with a partial
+            # subset, quietly violating the completeness invariant above.)
+            con.execute(
+                "DELETE FROM cache.aspect_mention WHERE recommendationid IN "
+                "(SELECT recommendationid FROM _sent_new)"
+            )
 
             # The expensive regex now runs ONLY over the delta (_sent_new), not the full pool.
             # REGULAR (not TEMP) so the independent read cursor in _stream_vader_scores can see
@@ -1850,6 +1888,12 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
                     "INSERT INTO cache.aspect_mention (recommendationid, aspect, compound) VALUES (?, ?, ?)",
                 )
             con.execute("DROP TABLE IF EXISTS _sent_windows")
+            # Record the scan LAST, after every mention row for these reviews is in — the order is
+            # what makes the completeness invariant crash-safe (a death anywhere above leaves the
+            # review out of scored_review, and the next run redoes it via the DELETE + rescan).
+            con.execute(
+                "INSERT INTO cache.scored_review SELECT recommendationid FROM _sent_new"
+            )
             con.execute("DROP TABLE IF EXISTS _sent_new")
 
             # Full in-scope set, read back from the cache (untouched old rows + just-inserted new

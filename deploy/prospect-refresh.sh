@@ -16,8 +16,46 @@
 set -uo pipefail
 export PATH=/root/steam-scraper/.venv/bin:/root/.local/bin:$PATH
 export PROSPECT_DUCKDB_MEMORY_LIMIT=2500MB   # cap DuckDB on the 4GB box
+# Unbuffered stdout for EVERY python step. Not cosmetic: a step killed by `timeout` never gets to
+# flush, so a buffered step that dies takes its whole output with it. The 2026-08-21 ETL ran four
+# hours, hit rc=124, and left ZERO lines to diagnose from — it prints per-mart timings the entire
+# way and every one of them died in the buffer.
+export PYTHONUNBUFFERED=1
 
 LOG=/var/log/prospect-refresh.log
+# One log file per step. The main log is a timeline (start/done/rc); the detail lives here.
+# Two reasons this is not just tidiness:
+#  - The parallel lane (news/twitch/ccu/tags_refresh/dev_socials) writes concurrently, so on a
+#    shared stdout their lines interleave mid-traceback and the failure reason is unreadable.
+#  - `[twitch]` failed 22 of 26 nightlies on "database is locked" and nobody could see why: the
+#    run logged `WARN: exited rc=1` and the traceback explaining it was shredded among four other
+#    steps' output. A failing step now tails its own log into the main one (see run_step).
+STEP_LOG_DIR=/var/log/prospect-steps
+mkdir -p "$STEP_LOG_DIR"
+find "$STEP_LOG_DIR" -type f -mtime +14 -delete 2>/dev/null || true
+RUN_TS=$(date -u +%Y%m%d-%H%M%S)
+
+# Every step appends "label rc dur" here; step_summary() prints the scoreboard at the end of the
+# run. A FILE, not a bash array, because the parallel lane runs each step in a subshell and a
+# subshell cannot write to the parent's array.
+#
+# This is the piece that would have caught the twitch breakage. A run that ends "OK" while one of
+# its steps has failed every night for a month is not OK, but nothing said so: the WARN scrolled
+# past among thousands of lines and the final line only reported the ETL's fate.
+STEP_RESULTS="$STEP_LOG_DIR/.results.$RUN_TS"
+: > "$STEP_RESULTS"
+
+step_summary() {
+    [ -s "$STEP_RESULTS" ] || return 0
+    echo "------------------- step summary -------------------"
+    local nfail
+    nfail=$(awk '$2 != 0' "$STEP_RESULTS" | wc -l | tr -d ' ')
+    # Failures first and loudly — the whole point is that a bad step cannot scroll past unnoticed.
+    awk '$2 != 0 {printf "  FAIL  %-16s rc=%-4s %ss\n", $1, $2, $3}' "$STEP_RESULTS"
+    awk '$2 == 0 {printf "  ok    %-16s        %ss\n", $1, $3}' "$STEP_RESULTS"
+    echo "  ${nfail} step(s) failed · logs in $STEP_LOG_DIR/*.${RUN_TS}.log"
+    echo "----------------------------------------------------"
+}
 VM_IMPORT="http://localhost:8428/api/v1/import/prometheus"
 START=$(date -u +%s)
 RESULT="FAILED"   # flipped to OK only after a clean ETL
@@ -28,16 +66,31 @@ push() { curl -s -m 8 -X POST "$VM_IMPORT" --data-binary "$1" >/dev/null 2>&1 ||
 
 # run_step LABEL TIMEOUT_SECS "shell command" — time it, bound it with `timeout`, push per-step
 # duration + success(1/0) + last-run timestamp. Never aborts the run on a step failure.
+# explain_failure LABEL RC LOGFILE — put the reason INTO the main log, next to the WARN that
+# announced it. Without this a failure is a bare rc and you have to go find the step log by hand,
+# which is exactly why the chronic twitch breakage went unnoticed for weeks. rc=124 is `timeout`'s
+# own exit code, so name it rather than making the reader look it up.
+explain_failure() {
+    local label="$1" rc="$2" log="$3"
+    [ "$rc" -eq 124 ] && echo "       [$label] rc=124 means it hit its timeout, not an internal error"
+    echo "       ---- [$label] last 25 lines of $log ----"
+    tail -25 "$log" 2>/dev/null | sed 's/^/       | /'
+    echo "       ---- end [$label] ----"
+}
+
 run_step() {
     local label="$1" tmo="$2" cmd="$3"
     STEP="$label"
     local t0 dur rc=0
+    local slog="$STEP_LOG_DIR/${label}.${RUN_TS}.log"
     t0=$(date -u +%s)
-    echo "[$label] start $(date -u)"
-    timeout "$tmo" bash -c "$cmd" || rc=$?
+    echo "[$label] start $(date -u) -> $slog"
+    timeout "$tmo" bash -c "$cmd" > "$slog" 2>&1 || rc=$?
     dur=$(( $(date -u +%s) - t0 ))
-    local ok=1; [ "$rc" -ne 0 ] && { ok=0; echo "WARN: [$label] exited rc=$rc after ${dur}s"; }
+    local ok=1
+    [ "$rc" -ne 0 ] && { ok=0; echo "WARN: [$label] exited rc=$rc after ${dur}s"; explain_failure "$label" "$rc" "$slog"; }
     echo "[$label] done ${dur}s (rc=$rc)"
+    echo "$label $rc $dur" >> "$STEP_RESULTS"
     push "prospect_pipeline_step_duration_seconds{step=\"$label\"} $dur
 prospect_pipeline_step_success{step=\"$label\"} $ok
 prospect_pipeline_step_last_run_timestamp{step=\"$label\"} $(date -u +%s)"
@@ -53,14 +106,20 @@ prospect_pipeline_step_last_run_timestamp{step=\"$label\"} $(date -u +%s)"
 BG_PIDS=()
 run_step_bg() {
     local label="$1" tmo="$2" cmd="$3"
+    local slog="$STEP_LOG_DIR/${label}.${RUN_TS}.log"
     (
         local t0 dur rc=0
         t0=$(date -u +%s)
-        echo "[$label] start $(date -u) (parallel lane)"
-        timeout "$tmo" bash -c "$cmd" || rc=$?
+        echo "[$label] start $(date -u) (parallel lane) -> $slog"
+        # Redirect is what makes the parallel lane legible: five steps sharing one stdout
+        # interleave line-by-line, so a traceback arrives shredded among four other steps.
+        timeout "$tmo" bash -c "$cmd" > "$slog" 2>&1 || rc=$?
         dur=$(( $(date -u +%s) - t0 ))
-        local ok=1; [ "$rc" -ne 0 ] && { ok=0; echo "WARN: [$label] exited rc=$rc after ${dur}s"; }
+        local ok=1
+        [ "$rc" -ne 0 ] && { ok=0; echo "WARN: [$label] exited rc=$rc after ${dur}s"; explain_failure "$label" "$rc" "$slog"; }
         echo "[$label] done ${dur}s (rc=$rc)"
+        # >> is atomic for short lines on Linux, so concurrent lane steps cannot interleave here.
+        echo "$label $rc $dur" >> "$STEP_RESULTS"
         push "prospect_pipeline_step_duration_seconds{step=\"$label\"} $dur
 prospect_pipeline_step_success{step=\"$label\"} $ok
 prospect_pipeline_step_last_run_timestamp{step=\"$label\"} $(date -u +%s)"
@@ -162,7 +221,17 @@ cd /root/steam-scraper || exit 1
 # unreachable state. Lane B (~40min) is hidden under steam_scrape/review_refresh, so the barrier
 # costs ~no wall time; it only caps peak memory.
 run_step_bg "news"   2400 "./run_news.sh"
-run_step_bg "twitch" 3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=6 RATE_PER_WORKER=1.5 MIN_REVIEWS=50 python3 twitch_bulk.py"
+# twitch REMOVED from this lane (2026-08-22). It failed 22 of 26 nightlies here with "database is
+# locked" — not for lack of safeguards (twitch_bulk sets busy_timeout=120000 and commits every 15
+# games), but because SQLite gives no fairness guarantee: against four concurrent lane-B writers
+# plus Lane A, one writer can lose the race indefinitely. No timeout tuning fixes that; only
+# scheduling does. It now runs from its own cron at 05:00 UTC (see deploy/crontab notes), a slot
+# where it is the ONLY writer: lane B is long done, the ETL doesn't write SQLite, and the 06:00
+# review keeper hasn't started. It grabs the same refresh flock non-blocking, so a nightly that
+# overruns simply costs twitch one day instead of corrupting anything, and its 3000s timeout ends
+# it by 05:50, before the keeper's own flock -n at 06:00 would be starved.
+# The mart consumes its data one nightly later — a day of lag against the WEEKS of staleness the
+# lock-race caused.
 run_step_bg "ccu"    3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=8 RATE_PER_WORKER=3.0 MIN_REVIEWS=50 python3 steam_players_bulk.py"
 # Rotating tag refresh (SteamSpy + store-page fallback — its own endpoints, so Lane B):
 # community tags evolve after release, and a one-time fetch drifts ~2%/month from the
@@ -259,7 +328,35 @@ find /root/prospect/data -maxdepth 1 -name 'prospect_*.duckdb.building*' \
 df -h /root/prospect/data | tail -1 | awk '{print "[etl] disk before build: " $4 " free (" $5 " used)"}'
 cd /root/prospect/etl || exit 1
 ETL_RC=0
-timeout 14400 /root/prospect/etl/.venv/bin/python build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data || ETL_RC=$?
+# The ETL is the one step that does NOT go through run_step (it has a bespoke success path below:
+# restart, prune, metrics). It still needs the same logging contract, so it gets one by hand.
+#
+# `python -u`: build_marts prints `[etl] ran <mart>.sql (Ns)` for every mart as it goes. On
+# 2026-08-21 it was killed at the 4h timeout and not one of those lines survived the buffer,
+# leaving a four-hour failure with nothing to diagnose. Unbuffered, a timeout now leaves behind
+# the exact mart it died in.
+#
+# Timeout raised 4h -> 6h, because 4h was never above the distribution it was meant to bound.
+# Historical ETL durations from this log (`grep '^\[etl\] \(OK\|FAILED\)'`):
+#
+#   2225 2402 2361 2413 ... 11245 12128 12469 12477 12652 12729 13267 13350 15151 16467 17403
+#
+# Three successful runs took 15151s, 16467s and 17403s — every one of them longer than the 14400s
+# ceiling. They only survived because the timeout was added after they ran. So the 2026-08-21
+# rc=124 was not a new regression; it was a mine laid earlier, and the marts added that day cost
+# ~49s in total (mart_niche 35.3s + mart_game_event 9.7s + mart_niche_game 4.2s, measured).
+#
+# 6h sits 24% above the observed 17403s maximum, which leaves room for a corpus that keeps
+# growing. It also still fits the schedule: the ETL starts ~23:08, so 6h ends ~05:08, before the
+# 06:00 review keeper that shares this flock. The failure mode of a ceiling set too low is losing
+# the ENTIRE night's mart, which is far worse than a run that goes long.
+ETL_LOG="$STEP_LOG_DIR/etl.${RUN_TS}.log"
+echo "[etl] log: $ETL_LOG"
+timeout 21600 /root/prospect/etl/.venv/bin/python -u build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data > "$ETL_LOG" 2>&1 || ETL_RC=$?
+[ "$ETL_RC" -ne 0 ] && explain_failure "etl" "$ETL_RC" "$ETL_LOG"
+# Per-mart timings, slowest first — the run's own profile, kept even on success so a slow build is
+# visible BEFORE it becomes a failed one.
+grep -E '^\[etl\] ran ' "$ETL_LOG" 2>/dev/null | sort -t'(' -k2 -rn | head -8 | sed 's/^/[etl] slowest: /'
 ETL_DUR=$(( $(date -u +%s) - ETL_T0 ))
 if [ "$ETL_RC" -eq 0 ]; then
     docker restart prospect
@@ -277,8 +374,31 @@ if [ "$ETL_RC" -eq 0 ]; then
     echo "[etl] OK ${ETL_DUR}s — app restarted"
 else
     echo "[etl] FAILED rc=$ETL_RC after ${ETL_DUR}s — kept previous mart, app not restarted"
+    # Reclaim the spill. A dead build leaves its DuckDB scratch directory behind, and on this
+    # corpus that is enormous: the 2026-08-21 timeout left 24GB and held the disk at 91% until it
+    # was cleared by hand. The pre-build sweep would have caught it, but only at the NEXT nightly
+    # ~18 hours later, so every job in between ran against a nearly-full disk.
+    #
+    # The .tmp spill directory is the space; the .building file is the forensics. Delete the
+    # former, keep the latter — it is a few tens of MB and is the only artifact left to inspect.
+    #
+    # Scoped to THIS build's version, read back from the log, rather than a bare
+    # prospect_*.duckdb.building.tmp glob: a manual build runs outside the flock, and the glob
+    # would delete the spill out from under one that is still running. Note the version cannot be
+    # derived from `date -u` here — the run starts at 21:00 and can fail after midnight, which is
+    # exactly what happened on 2026-08-21 (version 20260821, failure timestamped the 22nd).
+    ETL_VERSION=$(grep -m1 -oE 'prospect_[0-9]{8}\.duckdb' "$ETL_LOG" 2>/dev/null | head -1)
+    if [ -n "$ETL_VERSION" ]; then
+        rm -rf "/root/prospect/data/${ETL_VERSION}.building.tmp" 2>/dev/null || true
+    else
+        echo "[etl] could not read build version from $ETL_LOG — leaving scratch for the pre-build sweep"
+    fi
+    df -h /root/prospect/data | tail -1 | awk '{print "[etl] disk after cleanup: " $4 " free (" $5 " used)"}'
 fi
 push "prospect_pipeline_step_duration_seconds{step=\"etl\"} $ETL_DUR
 prospect_pipeline_step_success{step=\"etl\"} $([ "$ETL_RC" -eq 0 ] && echo 1 || echo 0)
 prospect_pipeline_step_last_run_timestamp{step=\"etl\"} $(date -u +%s)"
+echo "etl $ETL_RC $ETL_DUR" >> "$STEP_RESULTS"
+step_summary
+rm -f "$STEP_RESULTS"
 echo "=================== refresh done: $(date -u) · $RESULT ==================="
