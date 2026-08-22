@@ -16,8 +16,24 @@
 set -uo pipefail
 export PATH=/root/steam-scraper/.venv/bin:/root/.local/bin:$PATH
 export PROSPECT_DUCKDB_MEMORY_LIMIT=2500MB   # cap DuckDB on the 4GB box
+# Unbuffered stdout for EVERY python step. Not cosmetic: a step killed by `timeout` never gets to
+# flush, so a buffered step that dies takes its whole output with it. The 2026-08-21 ETL ran four
+# hours, hit rc=124, and left ZERO lines to diagnose from — it prints per-mart timings the entire
+# way and every one of them died in the buffer.
+export PYTHONUNBUFFERED=1
 
 LOG=/var/log/prospect-refresh.log
+# One log file per step. The main log is a timeline (start/done/rc); the detail lives here.
+# Two reasons this is not just tidiness:
+#  - The parallel lane (news/twitch/ccu/tags_refresh/dev_socials) writes concurrently, so on a
+#    shared stdout their lines interleave mid-traceback and the failure reason is unreadable.
+#  - `[twitch]` failed 22 of 26 nightlies on "database is locked" and nobody could see why: the
+#    run logged `WARN: exited rc=1` and the traceback explaining it was shredded among four other
+#    steps' output. A failing step now tails its own log into the main one (see run_step).
+STEP_LOG_DIR=/var/log/prospect-steps
+mkdir -p "$STEP_LOG_DIR"
+find "$STEP_LOG_DIR" -type f -mtime +14 -delete 2>/dev/null || true
+RUN_TS=$(date -u +%Y%m%d-%H%M%S)
 VM_IMPORT="http://localhost:8428/api/v1/import/prometheus"
 START=$(date -u +%s)
 RESULT="FAILED"   # flipped to OK only after a clean ETL
@@ -28,15 +44,29 @@ push() { curl -s -m 8 -X POST "$VM_IMPORT" --data-binary "$1" >/dev/null 2>&1 ||
 
 # run_step LABEL TIMEOUT_SECS "shell command" — time it, bound it with `timeout`, push per-step
 # duration + success(1/0) + last-run timestamp. Never aborts the run on a step failure.
+# explain_failure LABEL RC LOGFILE — put the reason INTO the main log, next to the WARN that
+# announced it. Without this a failure is a bare rc and you have to go find the step log by hand,
+# which is exactly why the chronic twitch breakage went unnoticed for weeks. rc=124 is `timeout`'s
+# own exit code, so name it rather than making the reader look it up.
+explain_failure() {
+    local label="$1" rc="$2" log="$3"
+    [ "$rc" -eq 124 ] && echo "       [$label] rc=124 means it hit its timeout, not an internal error"
+    echo "       ---- [$label] last 25 lines of $log ----"
+    tail -25 "$log" 2>/dev/null | sed 's/^/       | /'
+    echo "       ---- end [$label] ----"
+}
+
 run_step() {
     local label="$1" tmo="$2" cmd="$3"
     STEP="$label"
     local t0 dur rc=0
+    local slog="$STEP_LOG_DIR/${label}.${RUN_TS}.log"
     t0=$(date -u +%s)
-    echo "[$label] start $(date -u)"
-    timeout "$tmo" bash -c "$cmd" || rc=$?
+    echo "[$label] start $(date -u) -> $slog"
+    timeout "$tmo" bash -c "$cmd" > "$slog" 2>&1 || rc=$?
     dur=$(( $(date -u +%s) - t0 ))
-    local ok=1; [ "$rc" -ne 0 ] && { ok=0; echo "WARN: [$label] exited rc=$rc after ${dur}s"; }
+    local ok=1
+    [ "$rc" -ne 0 ] && { ok=0; echo "WARN: [$label] exited rc=$rc after ${dur}s"; explain_failure "$label" "$rc" "$slog"; }
     echo "[$label] done ${dur}s (rc=$rc)"
     push "prospect_pipeline_step_duration_seconds{step=\"$label\"} $dur
 prospect_pipeline_step_success{step=\"$label\"} $ok
@@ -53,13 +83,17 @@ prospect_pipeline_step_last_run_timestamp{step=\"$label\"} $(date -u +%s)"
 BG_PIDS=()
 run_step_bg() {
     local label="$1" tmo="$2" cmd="$3"
+    local slog="$STEP_LOG_DIR/${label}.${RUN_TS}.log"
     (
         local t0 dur rc=0
         t0=$(date -u +%s)
-        echo "[$label] start $(date -u) (parallel lane)"
-        timeout "$tmo" bash -c "$cmd" || rc=$?
+        echo "[$label] start $(date -u) (parallel lane) -> $slog"
+        # Redirect is what makes the parallel lane legible: five steps sharing one stdout
+        # interleave line-by-line, so a traceback arrives shredded among four other steps.
+        timeout "$tmo" bash -c "$cmd" > "$slog" 2>&1 || rc=$?
         dur=$(( $(date -u +%s) - t0 ))
-        local ok=1; [ "$rc" -ne 0 ] && { ok=0; echo "WARN: [$label] exited rc=$rc after ${dur}s"; }
+        local ok=1
+        [ "$rc" -ne 0 ] && { ok=0; echo "WARN: [$label] exited rc=$rc after ${dur}s"; explain_failure "$label" "$rc" "$slog"; }
         echo "[$label] done ${dur}s (rc=$rc)"
         push "prospect_pipeline_step_duration_seconds{step=\"$label\"} $dur
 prospect_pipeline_step_success{step=\"$label\"} $ok
@@ -259,7 +293,25 @@ find /root/prospect/data -maxdepth 1 -name 'prospect_*.duckdb.building*' \
 df -h /root/prospect/data | tail -1 | awk '{print "[etl] disk before build: " $4 " free (" $5 " used)"}'
 cd /root/prospect/etl || exit 1
 ETL_RC=0
-timeout 14400 /root/prospect/etl/.venv/bin/python build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data || ETL_RC=$?
+# The ETL is the one step that does NOT go through run_step (it has a bespoke success path below:
+# restart, prune, metrics). It still needs the same logging contract, so it gets one by hand.
+#
+# `python -u`: build_marts prints `[etl] ran <mart>.sql (Ns)` for every mart as it goes. On
+# 2026-08-21 it was killed at the 4h timeout and not one of those lines survived the buffer,
+# leaving a four-hour failure with nothing to diagnose. Unbuffered, a timeout now leaves behind
+# the exact mart it died in.
+#
+# Timeout raised 4h -> 5h. The 4h ceiling was set when a build took ~2h10m; the corpus has since
+# grown (the 2026-08-21 genre backfill alone moved genre membership from 141,486 games to 174,048,
+# which widens every niche mart downstream) and the build now spills far more to disk. 4h stopped
+# being headroom and became the thing that killed the run.
+ETL_LOG="$STEP_LOG_DIR/etl.${RUN_TS}.log"
+echo "[etl] log: $ETL_LOG"
+timeout 18000 /root/prospect/etl/.venv/bin/python -u build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data > "$ETL_LOG" 2>&1 || ETL_RC=$?
+[ "$ETL_RC" -ne 0 ] && explain_failure "etl" "$ETL_RC" "$ETL_LOG"
+# Per-mart timings, slowest first — the run's own profile, kept even on success so a slow build is
+# visible BEFORE it becomes a failed one.
+grep -E '^\[etl\] ran ' "$ETL_LOG" 2>/dev/null | sort -t'(' -k2 -rn | head -8 | sed 's/^/[etl] slowest: /'
 ETL_DUR=$(( $(date -u +%s) - ETL_T0 ))
 if [ "$ETL_RC" -eq 0 ]; then
     docker restart prospect
