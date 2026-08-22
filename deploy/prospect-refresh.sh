@@ -221,7 +221,17 @@ cd /root/steam-scraper || exit 1
 # unreachable state. Lane B (~40min) is hidden under steam_scrape/review_refresh, so the barrier
 # costs ~no wall time; it only caps peak memory.
 run_step_bg "news"   2400 "./run_news.sh"
-run_step_bg "twitch" 3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=6 RATE_PER_WORKER=1.5 MIN_REVIEWS=50 python3 twitch_bulk.py"
+# twitch REMOVED from this lane (2026-08-22). It failed 22 of 26 nightlies here with "database is
+# locked" — not for lack of safeguards (twitch_bulk sets busy_timeout=120000 and commits every 15
+# games), but because SQLite gives no fairness guarantee: against four concurrent lane-B writers
+# plus Lane A, one writer can lose the race indefinitely. No timeout tuning fixes that; only
+# scheduling does. It now runs from its own cron at 05:00 UTC (see deploy/crontab notes), a slot
+# where it is the ONLY writer: lane B is long done, the ETL doesn't write SQLite, and the 06:00
+# review keeper hasn't started. It grabs the same refresh flock non-blocking, so a nightly that
+# overruns simply costs twitch one day instead of corrupting anything, and its 3000s timeout ends
+# it by 05:50, before the keeper's own flock -n at 06:00 would be starved.
+# The mart consumes its data one nightly later — a day of lag against the WEEKS of staleness the
+# lock-race caused.
 run_step_bg "ccu"    3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=8 RATE_PER_WORKER=3.0 MIN_REVIEWS=50 python3 steam_players_bulk.py"
 # Rotating tag refresh (SteamSpy + store-page fallback — its own endpoints, so Lane B):
 # community tags evolve after release, and a one-time fetch drifts ~2%/month from the
