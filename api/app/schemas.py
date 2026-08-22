@@ -292,6 +292,30 @@ class GameReviewsSummary(BaseModel):
     launch_curve: list[GameLaunchCurvePoint]
 
 
+# ---- game events (chart annotations) ---------------------------------------------------
+class GameEvent(BaseModel):
+    """One dated, nameable thing that plausibly moved this game's curves — from
+    mart_game_event: the release itself, developer updates (patch notes), and journalist
+    coverage. A spike is data; a spike with "PATCH 1.4" against it is an explanation.
+
+    kind is a closed set the mart enforces: 'release' | 'update' | 'press'. url is the
+    article/patch-note permalink; NULL for the release row (there is nothing to link)."""
+
+    event_date: str  # 'YYYY-MM-DD'
+    kind: Literal["release", "update", "press"]
+    title: str
+    url: Optional[str] = None
+
+
+class GameEventList(BaseModel):
+    """Chart-annotation feed. items == [] both for a game with no recorded events AND when
+    the mart predates mart_game_event — annotations are additive, so an old mart degrades
+    to charts without markers, never to a 503 (same convention as the radar sparklines)."""
+
+    appid: int
+    items: list[GameEvent]
+
+
 # ---- game teardown (Phase 3 — "Why it works") -----------------------------------------
 class ReviewAspect(BaseModel):
     aspect: str
