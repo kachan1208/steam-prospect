@@ -34,6 +34,28 @@ STEP_LOG_DIR=/var/log/prospect-steps
 mkdir -p "$STEP_LOG_DIR"
 find "$STEP_LOG_DIR" -type f -mtime +14 -delete 2>/dev/null || true
 RUN_TS=$(date -u +%Y%m%d-%H%M%S)
+
+# Every step appends "label rc dur" here; step_summary() prints the scoreboard at the end of the
+# run. A FILE, not a bash array, because the parallel lane runs each step in a subshell and a
+# subshell cannot write to the parent's array.
+#
+# This is the piece that would have caught the twitch breakage. A run that ends "OK" while one of
+# its steps has failed every night for a month is not OK, but nothing said so: the WARN scrolled
+# past among thousands of lines and the final line only reported the ETL's fate.
+STEP_RESULTS="$STEP_LOG_DIR/.results.$RUN_TS"
+: > "$STEP_RESULTS"
+
+step_summary() {
+    [ -s "$STEP_RESULTS" ] || return 0
+    echo "------------------- step summary -------------------"
+    local nfail
+    nfail=$(awk '$2 != 0' "$STEP_RESULTS" | wc -l | tr -d ' ')
+    # Failures first and loudly — the whole point is that a bad step cannot scroll past unnoticed.
+    awk '$2 != 0 {printf "  FAIL  %-16s rc=%-4s %ss\n", $1, $2, $3}' "$STEP_RESULTS"
+    awk '$2 == 0 {printf "  ok    %-16s        %ss\n", $1, $3}' "$STEP_RESULTS"
+    echo "  ${nfail} step(s) failed · logs in $STEP_LOG_DIR/*.${RUN_TS}.log"
+    echo "----------------------------------------------------"
+}
 VM_IMPORT="http://localhost:8428/api/v1/import/prometheus"
 START=$(date -u +%s)
 RESULT="FAILED"   # flipped to OK only after a clean ETL
@@ -68,6 +90,7 @@ run_step() {
     local ok=1
     [ "$rc" -ne 0 ] && { ok=0; echo "WARN: [$label] exited rc=$rc after ${dur}s"; explain_failure "$label" "$rc" "$slog"; }
     echo "[$label] done ${dur}s (rc=$rc)"
+    echo "$label $rc $dur" >> "$STEP_RESULTS"
     push "prospect_pipeline_step_duration_seconds{step=\"$label\"} $dur
 prospect_pipeline_step_success{step=\"$label\"} $ok
 prospect_pipeline_step_last_run_timestamp{step=\"$label\"} $(date -u +%s)"
@@ -95,6 +118,8 @@ run_step_bg() {
         local ok=1
         [ "$rc" -ne 0 ] && { ok=0; echo "WARN: [$label] exited rc=$rc after ${dur}s"; explain_failure "$label" "$rc" "$slog"; }
         echo "[$label] done ${dur}s (rc=$rc)"
+        # >> is atomic for short lines on Linux, so concurrent lane steps cannot interleave here.
+        echo "$label $rc $dur" >> "$STEP_RESULTS"
         push "prospect_pipeline_step_duration_seconds{step=\"$label\"} $dur
 prospect_pipeline_step_success{step=\"$label\"} $ok
 prospect_pipeline_step_last_run_timestamp{step=\"$label\"} $(date -u +%s)"
@@ -353,4 +378,7 @@ fi
 push "prospect_pipeline_step_duration_seconds{step=\"etl\"} $ETL_DUR
 prospect_pipeline_step_success{step=\"etl\"} $([ "$ETL_RC" -eq 0 ] && echo 1 || echo 0)
 prospect_pipeline_step_last_run_timestamp{step=\"etl\"} $(date -u +%s)"
+echo "etl $ETL_RC $ETL_DUR" >> "$STEP_RESULTS"
+step_summary
+rm -f "$STEP_RESULTS"
 echo "=================== refresh done: $(date -u) · $RESULT ==================="
