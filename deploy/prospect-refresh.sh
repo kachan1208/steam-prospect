@@ -326,13 +326,23 @@ ETL_RC=0
 # leaving a four-hour failure with nothing to diagnose. Unbuffered, a timeout now leaves behind
 # the exact mart it died in.
 #
-# Timeout raised 4h -> 5h. The 4h ceiling was set when a build took ~2h10m; the corpus has since
-# grown (the 2026-08-21 genre backfill alone moved genre membership from 141,486 games to 174,048,
-# which widens every niche mart downstream) and the build now spills far more to disk. 4h stopped
-# being headroom and became the thing that killed the run.
+# Timeout raised 4h -> 6h, because 4h was never above the distribution it was meant to bound.
+# Historical ETL durations from this log (`grep '^\[etl\] \(OK\|FAILED\)'`):
+#
+#   2225 2402 2361 2413 ... 11245 12128 12469 12477 12652 12729 13267 13350 15151 16467 17403
+#
+# Three successful runs took 15151s, 16467s and 17403s — every one of them longer than the 14400s
+# ceiling. They only survived because the timeout was added after they ran. So the 2026-08-21
+# rc=124 was not a new regression; it was a mine laid earlier, and the marts added that day cost
+# ~49s in total (mart_niche 35.3s + mart_game_event 9.7s + mart_niche_game 4.2s, measured).
+#
+# 6h sits 24% above the observed 17403s maximum, which leaves room for a corpus that keeps
+# growing. It also still fits the schedule: the ETL starts ~23:08, so 6h ends ~05:08, before the
+# 06:00 review keeper that shares this flock. The failure mode of a ceiling set too low is losing
+# the ENTIRE night's mart, which is far worse than a run that goes long.
 ETL_LOG="$STEP_LOG_DIR/etl.${RUN_TS}.log"
 echo "[etl] log: $ETL_LOG"
-timeout 18000 /root/prospect/etl/.venv/bin/python -u build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data > "$ETL_LOG" 2>&1 || ETL_RC=$?
+timeout 21600 /root/prospect/etl/.venv/bin/python -u build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data > "$ETL_LOG" 2>&1 || ETL_RC=$?
 [ "$ETL_RC" -ne 0 ] && explain_failure "etl" "$ETL_RC" "$ETL_LOG"
 # Per-mart timings, slowest first — the run's own profile, kept even on success so a slow build is
 # visible BEFORE it becomes a failed one.
