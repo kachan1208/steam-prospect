@@ -122,10 +122,13 @@ def main() -> int:
 
     # ---- staging tables the two marts read (TEMP, exactly as create_staging() makes them)
     con.execute("CREATE TEMP TABLE stg_tag_membership(appid INTEGER, tag VARCHAR)")
-    # mart_niche.sql's 90-day demand window reads stg_review (created by create_staging()
-    # in the real build, so it exists before any mart file runs). Two reviews per game,
-    # one in each 90-day window, is enough to exercise the join and the NULL-baseline rule.
-    con.execute("CREATE TEMP TABLE stg_review(appid INTEGER, review_date DATE, dsr INTEGER, playtime_forever INTEGER)")
+    # mart_niche.sql's 90-day demand window reads stg_review_histogram (Steam's true
+    # monthly counts — see the mart's SOURCE CHANGED note: the sampled stg_review inflated
+    # the trend ~10-350x per game). Shape mirrors create_timing_staging().
+    con.execute(
+        "CREATE TEMP TABLE stg_review_histogram("
+        "appid INTEGER, period_month DATE, n_reviews BIGINT, n_positive BIGINT)"
+    )
     con.executemany("INSERT INTO stg_tag_membership VALUES (?, ?)", tag_rows)
 
     con.execute("CREATE TEMP TABLE stg_genre_membership(appid INTEGER, genre VARCHAR)")
@@ -173,10 +176,18 @@ def main() -> int:
         """
     )
 
-    con.execute("""INSERT INTO stg_review
-        SELECT appid, CURRENT_DATE - INTERVAL 30 DAY, 30, 100 FROM stg_game
+    # Three histogram rows per game, chosen to pin the window semantics on paper:
+    #   base month (the global max)  999 reviews -> anchor = base - 1, so 999 must be
+    #                                EXCLUDED (that month is truncated at fetch time)
+    #   base - 1 month                30 reviews -> inside now  [anchor-2 .. anchor]
+    #   base - 4 months               60 reviews -> inside prev [anchor-5 .. anchor-3]
+    # => per niche: reviews_90d = 30 * n_games, prev = 60 * n_games, trend = -50.0.
+    con.execute("""INSERT INTO stg_review_histogram
+        SELECT appid, date_trunc('month', CURRENT_DATE), 999, 500 FROM stg_game
         UNION ALL
-        SELECT appid, CURRENT_DATE - INTERVAL 120 DAY, 120, 100 FROM stg_game""")
+        SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 1 MONTH, 30, 20 FROM stg_game
+        UNION ALL
+        SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 4 MONTH, 60, 40 FROM stg_game""")
 
     # ---- render + execute through the REAL renderer -----------------------------------
     params = bm.build_params()
@@ -204,6 +215,19 @@ def main() -> int:
     ]
     assert schema == expected, f"schema mismatch: {schema} != {expected}"
     print("[ok] schema matches the contract exactly")
+
+    # ---- 1b. demand windows read the histogram with the documented anchor -------------
+    # The fixture put 999 reviews in the anchor-excluded truncated month; if any of that
+    # leaks into reviews_90d the window arithmetic regressed. Values per the fixture:
+    # now = 30/game, prev = 60/game, trend = -50.0 for every published niche.
+    bad = con.execute("""
+        SELECT COUNT(*) FROM mart_niche
+        WHERE reviews_90d != 30 * n_games
+           OR reviews_prev_90d != 60 * n_games
+           OR demand_trend_90d_pct != -50.0
+    """).fetchone()[0]
+    assert bad == 0, f"{bad} niche(s) have demand windows off the histogram fixture"
+    print("[ok] demand_90d: histogram-sourced, truncated month excluded, trend = -50.0")
 
     n_rows = con.execute("SELECT COUNT(*) FROM mart_niche_game").fetchone()[0]
     n_niche = con.execute("SELECT COUNT(*) FROM mart_niche").fetchone()[0]

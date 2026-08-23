@@ -741,10 +741,15 @@ class RadarSparklinePoint(BaseModel):
 class RadarNicheCard(BaseModel):
     """One niche in the feed — the hero pick and every 'Moving niches' grid card share this
     shape (the hero repeats as the grid's first card, same as mockup 3a). reviews_90d /
-    reviews_prev_90d are counts from stg_review, a recency-biased SAMPLE (the review keeper
-    deepens toward min(true_total, 20k) per game) — sample review velocity, not Steam's true
-    counts. demand_trend_90d_pct is the ratio between them, directionally sound even though the
-    raw counts aren't Steam's; it is guaranteed non-null here (see module note)."""
+    reviews_prev_90d are Steam's own monthly review totals (review_histogram; 42K games
+    carrying ~98% of review volume), summed over 3-calendar-month windows anchored on the
+    last complete month — see mart_niche.sql's SOURCE CHANGED note. They were briefly
+    counted from the sampled reviews table instead, which inflated every top trend to
+    +1000%..+1500% (the keeper collects new reviews near-completely while big games' tails
+    stay capped, so the ratio amplifies collector bias; measured: Rainbow Six read 16x on
+    the sample and flat on the histogram). demand_trend_90d_pct is the ratio between the
+    two windows, guaranteed non-null here (see module note); it lags reality by up to a
+    month until histogram refresh cadence improves."""
 
     dimension: str
     key: str
