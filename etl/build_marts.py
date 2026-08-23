@@ -1845,28 +1845,37 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             # ever. Invariant (maintained by construction below): a recommendationid enters
             # scored_review only in the same run that inserted ALL the aspect rows it matches, so
             # membership there always means "fully represented in aspect_mention".
-            con.execute("DROP TABLE IF EXISTS _sent_new")
+            # TWO-STEP ON PURPOSE — ids materialize, text does NOT. The obvious single CTAS
+            # (SELECT appid, recommendationid, review_text FROM _sent_pool WHERE id NOT IN ...)
+            # killed two consecutive nightlies (2026-08-22/23) with DuckDB's temp-directory cap:
+            # "failed to offload data block (25.3 GiB/25.3 GiB used)". Until scored_review's
+            # migration completes, the delta is nearly the whole pool, so that CTAS builds a
+            # second ~15M-row text set (~6GB) NEXT TO _sent_pool's — on top of the staging
+            # temps, that crossed the disk's spill allowance. The anti-join below touches only
+            # ids (~30 bytes/row); text is never copied at all — _sent_new becomes a VIEW that
+            # streams it straight out of _sent_pool during the one scan that needs it.
+            con.execute("DROP TABLE IF EXISTS _sent_new_ids")
             con.execute(
                 """
-                CREATE TEMP TABLE _sent_new AS
-                SELECT p.appid, p.recommendationid, p.review_text
-                FROM _sent_pool p
-                WHERE p.recommendationid NOT IN (
-                    SELECT recommendationid FROM cache.scored_review WHERE recommendationid IS NOT NULL
+                CREATE TEMP TABLE _sent_new_ids AS
+                SELECT p.recommendationid
+                FROM (SELECT recommendationid FROM _sent_pool) p
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM cache.scored_review s
+                    WHERE s.recommendationid = p.recommendationid
                 )
                 """
             )
-            n_new_reviews = con.execute("SELECT COUNT(*) FROM _sent_new").fetchone()[0]
-            # LEAN ids-only copy for the two places below that need "which reviews", not their
-            # text. _sent_new carries full review_text, and on migration night it held ~10M rows
-            # (~3.4GB of text); the DELETE's IN-subquery dragged that text into its semi-join hash
-            # and spilled 25.4GiB to disk until DuckDB's temp cap killed the 2026-08-22 nightly
-            # (OutOfMemoryException at this very statement). Materialized barrier, exactly like
-            # mart_game_aspect_reviews' _aspectrev_meta: DuckDB's optimizer provably does NOT
-            # always project a wide column out through a join, so force it.
-            con.execute("DROP TABLE IF EXISTS _sent_new_ids")
+            n_new_reviews = con.execute("SELECT COUNT(*) FROM _sent_new_ids").fetchone()[0]
+            con.execute("DROP TABLE IF EXISTS _sent_new")
+            con.execute("DROP VIEW IF EXISTS _sent_new")
             con.execute(
-                "CREATE TEMP TABLE _sent_new_ids AS SELECT recommendationid FROM _sent_new"
+                """
+                CREATE TEMP VIEW _sent_new AS
+                SELECT p.appid, p.recommendationid, p.review_text
+                FROM _sent_pool p
+                JOIN _sent_new_ids n USING (recommendationid)
+                """
             )
             # Idempotent rescan: if a previous run died between inserting a review's mention rows
             # and recording it in scored_review, that review is selected again here — clear its
@@ -1906,8 +1915,8 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             con.execute(
                 "INSERT INTO cache.scored_review SELECT recommendationid FROM _sent_new_ids"
             )
+            con.execute("DROP VIEW IF EXISTS _sent_new")
             con.execute("DROP TABLE IF EXISTS _sent_new_ids")
-            con.execute("DROP TABLE IF EXISTS _sent_new")
 
             # Full in-scope set, read back from the cache (untouched old rows + just-inserted new
             # ones alike). Same shape/columns as the uncached branch above.
