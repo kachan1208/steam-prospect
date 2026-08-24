@@ -237,6 +237,14 @@ run_step_bg "news"   2400 "./run_news.sh"
 # The mart consumes its data one nightly later — a day of lag against the WEEKS of staleness the
 # lock-race caused.
 run_step_bg "ccu"    3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=8 RATE_PER_WORKER=3.0 MIN_REVIEWS=50 python3 steam_players_bulk.py"
+# Signals collectors (2026-08-24, docs/steam-data-sources.md). Both write signals.db — their
+# OWN single-writer SQLite, so unlike everything above they cannot join the steam_games.db
+# lock war; lane B is safe for them by construction. followers = the pre-release demand
+# series (community-group member counts, can never be backfilled); prices = keyed catalog
+# diff (price_change_number) -> batched GetItems snapshots, the raw material for sale
+# markers and price history.
+run_step_bg "followers" 7200 "/root/steam-scraper/.venv/bin/python -u /root/collectors/followers_bulk.py"
+run_step_bg "prices"    5400 "/root/steam-scraper/.venv/bin/python -u /root/collectors/catalog_prices.py"
 # tags_refresh MOVED OUT of this lane (2026-08-24) to the 19:15 quiet-window cron, following
 # the twitch precedent: it lost the SQLite write race two nights running ("database is
 # locked"), and the same night refresh_released and review_refresh lost it too — three
