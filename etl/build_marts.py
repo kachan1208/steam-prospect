@@ -1203,7 +1203,11 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         -- design (the fixed keyword lexicon is English). Not joined to stg_game /
         -- release date since aspect mining doesn't need days-since-release.
         CREATE TEMP TABLE stg_review_text AS
-        SELECT r.appid, r.voted_up, r.review_text
+        -- recommendationid added 2026-08-24 so compute_aspect_sentiment can key off THIS
+        -- table instead of materializing _sent_pool — a byte-for-byte duplicate of the same
+        -- ~7GB of review text. Both copies living in the temp directory at once is what kept
+        -- pushing the build past DuckDB's disk-spill cap (three OOM-failed builds in a row).
+        SELECT r.appid, r.recommendationid, r.voted_up, r.review_text
         FROM src.reviews r
         WHERE r.language = 'english'
           AND r.review_text IS NOT NULL
@@ -1755,25 +1759,40 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
     con.execute("DROP TABLE IF EXISTS stg_aspect_mention_sentiment")
     con.execute("DROP TABLE IF EXISTS stg_aspect_sentiment")
     con.execute("DROP TABLE IF EXISTS _sent_pool")
-    # Eligible English-text review pool (identical population + floor to stg_review_text /
-    # _teardown_elig, but carrying recommendationid). TEMP: only read on this connection.
+    con.execute("DROP TABLE IF EXISTS _sent_pool_meta")
+    # The eligible pool is stg_review_text (built by create_staging, same filters) plus the
+    # per-game floor. The LEAN meta table carries only (appid, recommendationid) — DuckDB's
+    # columnar scan never touches the text column for it — and is what every id-keyed step
+    # below reads. Review TEXT is never copied out of stg_review_text in the cached path:
+    # a second ~7GB text table (_sent_pool, removed 2026-08-24) next to it in the temp dir is
+    # what pushed three consecutive builds past the disk-spill cap.
     con.execute(
         f"""
-        CREATE TEMP TABLE _sent_pool AS
+        CREATE TEMP TABLE _sent_pool_meta AS
         WITH elig AS (
-            SELECT appid FROM src.reviews
-            WHERE language='english' AND review_text IS NOT NULL AND length(trim(review_text)) > 0
+            SELECT appid FROM stg_review_text
             GROUP BY appid HAVING COUNT(*) >= {TEARDOWN_MIN_REVIEWS}
         )
-        SELECT r.appid, r.recommendationid, r.review_text
-        FROM src.reviews r
-        JOIN elig e ON e.appid = r.appid
-        WHERE r.language='english' AND r.review_text IS NOT NULL AND length(trim(r.review_text)) > 0
+        SELECT t.appid, t.recommendationid
+        FROM stg_review_text t
+        JOIN elig e ON e.appid = t.appid
         """
     )
 
     if not _sentiment_cache_enabled():
-        # Original, uncached path: score the WHOLE pool every run.
+        # Original, uncached path: score the WHOLE pool every run. This branch does still
+        # materialize the text copy — _aspect_window_sql fans its source into a 10-arm UNION,
+        # and 10 re-executions of a join-view cost far more than one copy (measured on the
+        # cached path, 2026-08-23: 9.7h and a 22.7GiB spill). Acceptable here because the
+        # uncached path is the explicit PROSPECT_SENTIMENT_CACHE=off fallback, not the nightly.
+        con.execute(
+            """
+            CREATE TEMP TABLE _sent_pool AS
+            SELECT t.appid, t.recommendationid, t.review_text
+            FROM stg_review_text t
+            JOIN (SELECT DISTINCT appid FROM _sent_pool_meta) e ON e.appid = t.appid
+            """
+        )
         con.execute("DROP TABLE IF EXISTS _sent_windows")
         con.execute(f"CREATE TABLE _sent_windows AS {_aspect_window_sql('_sent_pool')}")
         clf = _get_classifier()
@@ -1845,21 +1864,20 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             # ever. Invariant (maintained by construction below): a recommendationid enters
             # scored_review only in the same run that inserted ALL the aspect rows it matches, so
             # membership there always means "fully represented in aspect_mention".
-            # TWO-STEP ON PURPOSE — ids materialize, text does NOT. The obvious single CTAS
-            # (SELECT appid, recommendationid, review_text FROM _sent_pool WHERE id NOT IN ...)
-            # killed two consecutive nightlies (2026-08-22/23) with DuckDB's temp-directory cap:
-            # "failed to offload data block (25.3 GiB/25.3 GiB used)". Until scored_review's
-            # migration completes, the delta is nearly the whole pool, so that CTAS builds a
-            # second ~15M-row text set (~6GB) NEXT TO _sent_pool's — on top of the staging
-            # temps, that crossed the disk's spill allowance. The anti-join below touches only
-            # ids (~30 bytes/row); text is never copied at all — _sent_new becomes a VIEW that
-            # streams it straight out of _sent_pool during the one scan that needs it.
+            # The anti-join runs over the LEAN meta table (~30 bytes/row) — never over text.
+            # History of this block, because three builds in a row died here in three ways:
+            # a text-carrying NOT IN CTAS (25.3GiB spill), then a view whose ids-to-pool join
+            # _aspect_window_sql's 10-arm UNION re-executed ten times (22.7GiB / a 9.7h phase),
+            # then a delta CTAS off a second full text pool (22.5GiB — cumulative: staging's
+            # stg_review_text AND _sent_pool both held the same ~7GB of text). The invariant
+            # that survived all three: review text exists ONCE, in stg_review_text; ids live
+            # in lean tables; the only text ever copied is the delta's own rows, below.
             con.execute("DROP TABLE IF EXISTS _sent_new_ids")
             con.execute(
                 """
                 CREATE TEMP TABLE _sent_new_ids AS
                 SELECT p.recommendationid
-                FROM (SELECT recommendationid FROM _sent_pool) p
+                FROM _sent_pool_meta p
                 WHERE NOT EXISTS (
                     SELECT 1 FROM cache.scored_review s
                     WHERE s.recommendationid = p.recommendationid
@@ -1869,32 +1887,19 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             n_new_reviews = con.execute("SELECT COUNT(*) FROM _sent_new_ids").fetchone()[0]
             con.execute("DROP VIEW IF EXISTS _sent_new")
             con.execute("DROP TABLE IF EXISTS _sent_new")
-            # A TABLE, not a VIEW — the view variant (2026-08-23) failed the very next night.
-            # _aspect_window_sql fans _sent_new into a 10-arm UNION of regex scans, so a view
-            # re-executes the ids-to-pool join TEN times, and the planner put the 15M-row text
-            # side into the hash: 22.7GiB of spill on a 1.7M-review delta (and the 9.7h
-            # sentiment phase the same day — same cause). Materializing the delta pays its text
-            # ONCE: in steady state that is the nightly delta (~1-2M reviews, well under 1GB).
-            # The pathological case — delta == whole pool — happens only on a config-wipe
-            # rescore, and the DROP of _sent_pool right below keeps even that to one extra
-            # copy for the duration of this single CTAS.
+            # A TABLE, not a VIEW, so the 10-arm window scan reads it without re-running the
+            # join per arm. In steady state this is the nightly delta (~1-2M reviews, well
+            # under 1GB of text); on a config-wipe rescore it is the whole pool for the
+            # duration of the sentiment phase — the one remaining full-copy case, accepted
+            # because wipes are rare and deliberate.
             con.execute(
                 """
                 CREATE TEMP TABLE _sent_new AS
-                SELECT p.appid, p.recommendationid, p.review_text
-                FROM _sent_pool p
+                SELECT t.appid, t.recommendationid, t.review_text
+                FROM stg_review_text t
                 JOIN _sent_new_ids n USING (recommendationid)
                 """
             )
-            # Everything after this point needs the pool only as (appid, recommendationid) —
-            # the final in-scope join below. Shed the ~6GB of pool text NOW, before the window
-            # regex starts spilling next to it.
-            con.execute("DROP TABLE IF EXISTS _sent_pool_meta")
-            con.execute(
-                "CREATE TEMP TABLE _sent_pool_meta AS "
-                "SELECT appid, recommendationid FROM _sent_pool"
-            )
-            con.execute("DROP TABLE _sent_pool")
             # Idempotent rescan: if a previous run died between inserting a review's mention rows
             # and recording it in scored_review, that review is selected again here — clear its
             # partial rows first so the re-insert can't double-count it. (The pre-scored_review
