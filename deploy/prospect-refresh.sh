@@ -16,6 +16,10 @@
 set -uo pipefail
 export PATH=/root/steam-scraper/.venv/bin:/root/.local/bin:$PATH
 export PROSPECT_DUCKDB_MEMORY_LIMIT=2500MB   # cap DuckDB on the 4GB box
+# Droplet-local secrets (STEAM_API_KEY, ...) — file lives only on the box, chmod 600,
+# never in git. Steps that can use a key pick it up from the environment; every keyless
+# path keeps working if the file is absent.
+[ -f /root/.prospect-env ] && . /root/.prospect-env
 # Unbuffered stdout for EVERY python step. Not cosmetic: a step killed by `timeout` never gets to
 # flush, so a buffered step that dies takes its whole output with it. The 2026-08-21 ETL ran four
 # hours, hit rc=124, and left ZERO lines to diagnose from — it prints per-mart timings the entire
