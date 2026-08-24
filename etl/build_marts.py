@@ -1867,16 +1867,34 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
                 """
             )
             n_new_reviews = con.execute("SELECT COUNT(*) FROM _sent_new_ids").fetchone()[0]
-            con.execute("DROP TABLE IF EXISTS _sent_new")
             con.execute("DROP VIEW IF EXISTS _sent_new")
+            con.execute("DROP TABLE IF EXISTS _sent_new")
+            # A TABLE, not a VIEW — the view variant (2026-08-23) failed the very next night.
+            # _aspect_window_sql fans _sent_new into a 10-arm UNION of regex scans, so a view
+            # re-executes the ids-to-pool join TEN times, and the planner put the 15M-row text
+            # side into the hash: 22.7GiB of spill on a 1.7M-review delta (and the 9.7h
+            # sentiment phase the same day — same cause). Materializing the delta pays its text
+            # ONCE: in steady state that is the nightly delta (~1-2M reviews, well under 1GB).
+            # The pathological case — delta == whole pool — happens only on a config-wipe
+            # rescore, and the DROP of _sent_pool right below keeps even that to one extra
+            # copy for the duration of this single CTAS.
             con.execute(
                 """
-                CREATE TEMP VIEW _sent_new AS
+                CREATE TEMP TABLE _sent_new AS
                 SELECT p.appid, p.recommendationid, p.review_text
                 FROM _sent_pool p
                 JOIN _sent_new_ids n USING (recommendationid)
                 """
             )
+            # Everything after this point needs the pool only as (appid, recommendationid) —
+            # the final in-scope join below. Shed the ~6GB of pool text NOW, before the window
+            # regex starts spilling next to it.
+            con.execute("DROP TABLE IF EXISTS _sent_pool_meta")
+            con.execute(
+                "CREATE TEMP TABLE _sent_pool_meta AS "
+                "SELECT appid, recommendationid FROM _sent_pool"
+            )
+            con.execute("DROP TABLE _sent_pool")
             # Idempotent rescan: if a previous run died between inserting a review's mention rows
             # and recording it in scored_review, that review is selected again here — clear its
             # partial rows first so the re-insert can't double-count it. (The pre-scored_review
@@ -1915,7 +1933,7 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             con.execute(
                 "INSERT INTO cache.scored_review SELECT recommendationid FROM _sent_new_ids"
             )
-            con.execute("DROP VIEW IF EXISTS _sent_new")
+            con.execute("DROP TABLE IF EXISTS _sent_new")
             con.execute("DROP TABLE IF EXISTS _sent_new_ids")
 
             # Full in-scope set, read back from the cache (untouched old rows + just-inserted new
@@ -1959,8 +1977,10 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
                                PARTITION BY p.appid, m.recommendationid, COALESCE(m.clf_aspect, m.aspect)
                                ORDER BY m.clf_margin DESC NULLS LAST
                            ) AS rn
+                    -- _sent_pool_meta, not _sent_pool: the pool's text was shed right after
+                    -- the delta materialized (see above); this join only needs appid + id.
                     FROM cache.aspect_mention m
-                    JOIN _sent_pool p ON p.recommendationid = m.recommendationid
+                    JOIN _sent_pool_meta p ON p.recommendationid = m.recommendationid
                     WHERE m.clf_aspect IS NULL OR m.clf_aspect <> 'NONE'
                 ) WHERE rn = 1
                 """
@@ -1972,6 +1992,7 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             _detach_sentiment_cache(con)
 
     con.execute("DROP TABLE IF EXISTS _sent_pool")
+    con.execute("DROP TABLE IF EXISTS _sent_pool_meta")
 
     # Aggregate per (appid, aspect). pos/neg/neutral use VADER's ±0.05 band; sum_compound lets
     # the genre baseline pool a mention-weighted mean compound downstream.
