@@ -233,10 +233,11 @@ run_step_bg "news"   2400 "./run_news.sh"
 # The mart consumes its data one nightly later — a day of lag against the WEEKS of staleness the
 # lock-race caused.
 run_step_bg "ccu"    3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=8 RATE_PER_WORKER=3.0 MIN_REVIEWS=50 python3 steam_players_bulk.py"
-# Rotating tag refresh (SteamSpy + store-page fallback — its own endpoints, so Lane B):
-# community tags evolve after release, and a one-time fetch drifts ~2%/month from the
-# storefront. 4000/night ≈ the whole 50+-review head every ~10 nights.
-run_step_bg "tags_refresh" 3600 "python3 -m steam_scraper.scraper --db steam_games.db refresh-stale-tags --workers 12 --rate 3.0 --limit 4000"
+# tags_refresh MOVED OUT of this lane (2026-08-24) to the 19:15 quiet-window cron, following
+# the twitch precedent: it lost the SQLite write race two nights running ("database is
+# locked"), and the same night refresh_released and review_refresh lost it too — three
+# casualties in one run. Every writer removed from this window also improves the odds for
+# the ones that remain. See the crontab entry; log in /var/log/prospect-steps/quiet1915.cron.log.
 # Dev socials — official X/Discord/YouTube/Bluesky links harvested from store pages +
 # dev websites (X itself is unscrapeable; the devs publish their handles HERE). Feeds
 # mart_game.dev_x_handle / mart_entity.x_handle. 90d rotation, 3000/night steady state.
@@ -267,7 +268,10 @@ run_step "steam_scrape"     3600 "./run_full.sh"
 # year indefinitely, because run_full.sh's rotation takes many nights to come back around and
 # nothing prioritises the one cohort whose data flips on a known date. 23,214 games were sitting
 # in that state. Oldest-updated first, so the backlog drains in date order.
-run_step "refresh_released" 2700 "python3 -m steam_scraper.scraper --db steam_games.db enrich --refresh-unreleased --limit 6000 --workers 12 --rate 6.0"
+# refresh_released MOVED OUT (2026-08-24) to the 19:15 quiet-window cron with tags_refresh —
+# it hit "database is locked" two nights running while Lane B wrote alongside it. Its data
+# (unreleased-cohort metadata) is a rotation, not a dependency of the steps below; fetching
+# it at 19:15 instead of ~22:30 costs nothing.
 run_step "review_refresh"   2700 "python3 -m steam_scraper.scraper --db steam_games.db review-summary --workers 16 --rate 12.0 --refresh-older-than-days 7 --limit 25000"
 run_step "review_histogram" 1800 "python3 -m steam_scraper.scraper --db steam_games.db review-histogram --min-reviews 50 --workers 16 --rate 10.0"
 
