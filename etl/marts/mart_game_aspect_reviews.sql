@@ -163,182 +163,251 @@ JOIN _aspectrev_base b ON b.appid = r.appid AND b.recommendationid = r.recommend
 
 DROP TABLE _aspectrev_base;
 
--- Per-aspect excerpt window, computed on the survivors only. Each arm handles one aspect's
--- survivors (WHERE aspect = '<label>' — no regexp_matches filter needed, they already matched)
--- and applies that aspect's own @RX_*@ keyword regex. This has to stay per-arm because each
--- branch needs its own @RX_*@ text on hand for the window regex; the aspect label alone (after the
--- UNION ALL collapses all 10 arms) can't reconstruct it. The kw_matches / kw_pos / window slice /
--- sentence regex are byte-for-byte identical to the pre-optimization version AND to
--- _aspect_window_sql() / _aspect_keyword_position_regex() in build_marts.py (same
--- @ASPECT_SENTENCE_CHARS@, same @ASPECT_WINDOW_SLICE_BEFORE@/@ASPECT_WINDOW_SLICE_CHARS@, same
--- @RX_*@), run over the same full review_text — so every excerpt is unchanged. See build_marts.py
--- for the full rationale on the lazy `^([\s\S]*?)(?:rx)` position capture (NOT strpos — respects
--- rx's \b anchors and crosses newlines) and the `^\S+` mid-word-fragment strip.
+-- Per-aspect excerpt window, computed on the survivors only — and EVERYTHING ELSE that is
+-- per-row computable folded into the same arms (2026-08-25). The previous shape ran the arms,
+-- then materialized a separate _aspectrev_windowed pass to locate the window and cap the full
+-- text: one more multi-GB temp table carrying the UNCAPPED review_text, on the disk whose free
+-- space is the build's spill ceiling. Folding it here means uncapped text never survives past
+-- the arm boundary — the widest thing this step emits is the 2000-char capped copy.
+--
+-- Two cost changes vs the old arms, both measured-at-heart:
+--   * matched_keywords is extracted from the ~300-char excerpt window, not the full review.
+--     The old extract_all re-scanned the ENTIRE text with the same huge alternation the window
+--     regex had already run — pure duplicate regex over ~1.77M rows — and the chips it feeds
+--     exist to explain the excerpt the user is LOOKING AT, so scoping them to it is also the
+--     more honest semantics (a keyword mentioned 3 paragraphs away no longer shows as a chip).
+--   * window_text / excerpt_body / win_start chain through DuckDB lateral column aliases in a
+--     single SELECT — no second pass re-reading the text.
+--
+-- Each branch still needs its own @RX_*@ text on hand for the window regex; the aspect label
+-- alone (after the UNION ALL collapses all 10 arms) can't reconstruct it. The kw_pos / window
+-- slice / sentence regex stay byte-for-byte identical to _aspect_window_sql() /
+-- _aspect_keyword_position_regex() in build_marts.py (same @ASPECT_SENTENCE_CHARS@, same
+-- slice placeholders, same @RX_*@) — see build_marts.py for the lazy `^([\s\S]*?)(?:rx)`
+-- position-capture rationale (NOT strpos — respects rx's \b anchors and crosses newlines) and
+-- the `^\S+` mid-word-fragment strip. The 2000-char cap and NULL-propagating steam_url
+-- concatenation keep their original contracts (see the header note "OPEN THE WHOLE REVIEW").
 CREATE TEMP TABLE _aspectrev_matched AS
-SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text, author_steamid,
-    regexp_extract_all(review_text, '@RX_COMBAT@', 1, 'i') AS kw_matches,
+SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract(
         CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
              THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
              ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
         END,
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_COMBAT@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
-    ) AS window_text
+    ) AS window_text,
+    COALESCE(window_text, substr(review_text, 1, 2 * @ASPECT_SENTENCE_CHARS@)) AS excerpt_body,
+    strpos(review_text, window_text) AS win_start,
+    length(review_text) AS text_len,
+    list_distinct(list_transform(regexp_extract_all(excerpt_body, '@RX_COMBAT@', 1, 'i'), x -> lower(x))) AS matched_keywords,
+    CASE WHEN length(review_text) > 2000
+         THEN substr(review_text, 1, 1999) || '…'
+         ELSE review_text
+    END AS full_text,
+    'https://steamcommunity.com/profiles/' || author_steamid
+        || '/recommended/' || appid || '/' AS steam_url
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_COMBAT@)', 1, 'i')) + 1 AS kw_pos
       FROM _aspectrev_surv WHERE kw_aspect = 'Combat & Bosses')
 
 UNION ALL
-SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text, author_steamid,
-    regexp_extract_all(review_text, '@RX_WORLD@', 1, 'i'),
+SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract(
         CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
              THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
              ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
         END,
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_WORLD@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
-    )
+    ) AS window_text,
+    COALESCE(window_text, substr(review_text, 1, 2 * @ASPECT_SENTENCE_CHARS@)) AS excerpt_body,
+    strpos(review_text, window_text) AS win_start,
+    length(review_text) AS text_len,
+    list_distinct(list_transform(regexp_extract_all(excerpt_body, '@RX_WORLD@', 1, 'i'), x -> lower(x))) AS matched_keywords,
+    CASE WHEN length(review_text) > 2000
+         THEN substr(review_text, 1, 1999) || '…'
+         ELSE review_text
+    END AS full_text,
+    'https://steamcommunity.com/profiles/' || author_steamid
+        || '/recommended/' || appid || '/' AS steam_url
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_WORLD@)', 1, 'i')) + 1 AS kw_pos
       FROM _aspectrev_surv WHERE kw_aspect = 'World & Exploration')
 
 UNION ALL
-SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text, author_steamid,
-    regexp_extract_all(review_text, '@RX_ART@', 1, 'i'),
+SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract(
         CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
              THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
              ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
         END,
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_ART@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
-    )
+    ) AS window_text,
+    COALESCE(window_text, substr(review_text, 1, 2 * @ASPECT_SENTENCE_CHARS@)) AS excerpt_body,
+    strpos(review_text, window_text) AS win_start,
+    length(review_text) AS text_len,
+    list_distinct(list_transform(regexp_extract_all(excerpt_body, '@RX_ART@', 1, 'i'), x -> lower(x))) AS matched_keywords,
+    CASE WHEN length(review_text) > 2000
+         THEN substr(review_text, 1, 1999) || '…'
+         ELSE review_text
+    END AS full_text,
+    'https://steamcommunity.com/profiles/' || author_steamid
+        || '/recommended/' || appid || '/' AS steam_url
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_ART@)', 1, 'i')) + 1 AS kw_pos
       FROM _aspectrev_surv WHERE kw_aspect = 'Art & Visuals')
 
 UNION ALL
-SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text, author_steamid,
-    regexp_extract_all(review_text, '@RX_MUSIC@', 1, 'i'),
+SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract(
         CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
              THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
              ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
         END,
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_MUSIC@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
-    )
+    ) AS window_text,
+    COALESCE(window_text, substr(review_text, 1, 2 * @ASPECT_SENTENCE_CHARS@)) AS excerpt_body,
+    strpos(review_text, window_text) AS win_start,
+    length(review_text) AS text_len,
+    list_distinct(list_transform(regexp_extract_all(excerpt_body, '@RX_MUSIC@', 1, 'i'), x -> lower(x))) AS matched_keywords,
+    CASE WHEN length(review_text) > 2000
+         THEN substr(review_text, 1, 1999) || '…'
+         ELSE review_text
+    END AS full_text,
+    'https://steamcommunity.com/profiles/' || author_steamid
+        || '/recommended/' || appid || '/' AS steam_url
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_MUSIC@)', 1, 'i')) + 1 AS kw_pos
       FROM _aspectrev_surv WHERE kw_aspect = 'Music & Audio')
 
 UNION ALL
-SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text, author_steamid,
-    regexp_extract_all(review_text, '@RX_STORY@', 1, 'i'),
+SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract(
         CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
              THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
              ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
         END,
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_STORY@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
-    )
+    ) AS window_text,
+    COALESCE(window_text, substr(review_text, 1, 2 * @ASPECT_SENTENCE_CHARS@)) AS excerpt_body,
+    strpos(review_text, window_text) AS win_start,
+    length(review_text) AS text_len,
+    list_distinct(list_transform(regexp_extract_all(excerpt_body, '@RX_STORY@', 1, 'i'), x -> lower(x))) AS matched_keywords,
+    CASE WHEN length(review_text) > 2000
+         THEN substr(review_text, 1, 1999) || '…'
+         ELSE review_text
+    END AS full_text,
+    'https://steamcommunity.com/profiles/' || author_steamid
+        || '/recommended/' || appid || '/' AS steam_url
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_STORY@)', 1, 'i')) + 1 AS kw_pos
       FROM _aspectrev_surv WHERE kw_aspect = 'Story & Writing')
 
 UNION ALL
-SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text, author_steamid,
-    regexp_extract_all(review_text, '@RX_DIFFICULTY@', 1, 'i'),
+SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract(
         CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
              THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
              ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
         END,
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_DIFFICULTY@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
-    )
+    ) AS window_text,
+    COALESCE(window_text, substr(review_text, 1, 2 * @ASPECT_SENTENCE_CHARS@)) AS excerpt_body,
+    strpos(review_text, window_text) AS win_start,
+    length(review_text) AS text_len,
+    list_distinct(list_transform(regexp_extract_all(excerpt_body, '@RX_DIFFICULTY@', 1, 'i'), x -> lower(x))) AS matched_keywords,
+    CASE WHEN length(review_text) > 2000
+         THEN substr(review_text, 1, 1999) || '…'
+         ELSE review_text
+    END AS full_text,
+    'https://steamcommunity.com/profiles/' || author_steamid
+        || '/recommended/' || appid || '/' AS steam_url
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_DIFFICULTY@)', 1, 'i')) + 1 AS kw_pos
       FROM _aspectrev_surv WHERE kw_aspect = 'Difficulty')
 
 UNION ALL
-SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text, author_steamid,
-    regexp_extract_all(review_text, '@RX_CONTROLS@', 1, 'i'),
+SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract(
         CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
              THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
              ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
         END,
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_CONTROLS@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
-    )
+    ) AS window_text,
+    COALESCE(window_text, substr(review_text, 1, 2 * @ASPECT_SENTENCE_CHARS@)) AS excerpt_body,
+    strpos(review_text, window_text) AS win_start,
+    length(review_text) AS text_len,
+    list_distinct(list_transform(regexp_extract_all(excerpt_body, '@RX_CONTROLS@', 1, 'i'), x -> lower(x))) AS matched_keywords,
+    CASE WHEN length(review_text) > 2000
+         THEN substr(review_text, 1, 1999) || '…'
+         ELSE review_text
+    END AS full_text,
+    'https://steamcommunity.com/profiles/' || author_steamid
+        || '/recommended/' || appid || '/' AS steam_url
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_CONTROLS@)', 1, 'i')) + 1 AS kw_pos
       FROM _aspectrev_surv WHERE kw_aspect = 'Controls & Performance')
 
 UNION ALL
-SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text, author_steamid,
-    regexp_extract_all(review_text, '@RX_MAPNAV@', 1, 'i'),
+SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract(
         CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
              THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
              ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
         END,
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_MAPNAV@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
-    )
+    ) AS window_text,
+    COALESCE(window_text, substr(review_text, 1, 2 * @ASPECT_SENTENCE_CHARS@)) AS excerpt_body,
+    strpos(review_text, window_text) AS win_start,
+    length(review_text) AS text_len,
+    list_distinct(list_transform(regexp_extract_all(excerpt_body, '@RX_MAPNAV@', 1, 'i'), x -> lower(x))) AS matched_keywords,
+    CASE WHEN length(review_text) > 2000
+         THEN substr(review_text, 1, 1999) || '…'
+         ELSE review_text
+    END AS full_text,
+    'https://steamcommunity.com/profiles/' || author_steamid
+        || '/recommended/' || appid || '/' AS steam_url
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_MAPNAV@)', 1, 'i')) + 1 AS kw_pos
       FROM _aspectrev_surv WHERE kw_aspect = 'Map & Navigation / Backtracking')
 
 UNION ALL
-SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text, author_steamid,
-    regexp_extract_all(review_text, '@RX_CONTENT@', 1, 'i'),
+SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract(
         CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
              THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
              ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
         END,
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_CONTENT@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
-    )
+    ) AS window_text,
+    COALESCE(window_text, substr(review_text, 1, 2 * @ASPECT_SENTENCE_CHARS@)) AS excerpt_body,
+    strpos(review_text, window_text) AS win_start,
+    length(review_text) AS text_len,
+    list_distinct(list_transform(regexp_extract_all(excerpt_body, '@RX_CONTENT@', 1, 'i'), x -> lower(x))) AS matched_keywords,
+    CASE WHEN length(review_text) > 2000
+         THEN substr(review_text, 1, 1999) || '…'
+         ELSE review_text
+    END AS full_text,
+    'https://steamcommunity.com/profiles/' || author_steamid
+        || '/recommended/' || appid || '/' AS steam_url
 FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_CONTENT@)', 1, 'i')) + 1 AS kw_pos
       FROM _aspectrev_surv WHERE kw_aspect = 'Content & Length')
 
 UNION ALL
-SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language, review_text, author_steamid,
-    regexp_extract_all(review_text, '@RX_PRICEVALUE@', 1, 'i'),
+SELECT appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language,
     regexp_extract(
         CASE WHEN kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@ > 1
              THEN regexp_replace(substr(review_text, kw_pos - @ASPECT_WINDOW_SLICE_BEFORE@, @ASPECT_WINDOW_SLICE_CHARS@), '^\S+', '')
              ELSE substr(review_text, 1, @ASPECT_WINDOW_SLICE_CHARS@)
         END,
         '[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}(?:@RX_PRICEVALUE@)[^.!?;\n]{0,@ASPECT_SENTENCE_CHARS@}', 0, 'i'
-    )
-FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_PRICEVALUE@)', 1, 'i')) + 1 AS kw_pos
-      FROM _aspectrev_surv WHERE kw_aspect = 'Price & Value');
-
-DROP TABLE _aspectrev_surv;
-
--- Locate the window's offset in review_text (strpos) so the final SELECT knows whether to
--- prefix/suffix an ellipsis (i.e. whether the excerpt starts/ends mid-review rather than at the
--- text's own start/end). Falls back to a plain lead substring in the should-never-happen case of
--- a NULL window_text. Identical to the previous version's _aspectrev_windowed step, plus the two
--- open-the-whole-review columns (see the header): this is the LAST step that still has the full
--- review_text in hand, so the 2000-char cap is applied here rather than downstream.
---
--- The cap is expressed as substr(..., 1, 1999) || '…' on purpose: the emitted value is at most
--- 2000 characters INCLUDING the ellipsis, so "capped at 2000" is a fact about the column the API
--- serves, not about some intermediate the ellipsis then overflows. length() and substr() are
--- DuckDB's CHARACTER-based (not byte-based) functions, so the cap counts what a reader counts and
--- can never split a multi-byte codepoint.
-CREATE TEMP TABLE _aspectrev_windowed AS
-SELECT
-    appid, aspect, sentiment, votes_up, playtime_minutes, timestamp_created, language,
-    list_distinct(list_transform(kw_matches, x -> lower(x))) AS matched_keywords,
-    length(review_text) AS text_len,
+    ) AS window_text,
     COALESCE(window_text, substr(review_text, 1, 2 * @ASPECT_SENTENCE_CHARS@)) AS excerpt_body,
     strpos(review_text, window_text) AS win_start,
+    length(review_text) AS text_len,
+    list_distinct(list_transform(regexp_extract_all(excerpt_body, '@RX_PRICEVALUE@', 1, 'i'), x -> lower(x))) AS matched_keywords,
     CASE WHEN length(review_text) > 2000
          THEN substr(review_text, 1, 1999) || '…'
          ELSE review_text
     END AS full_text,
-    -- NULL-propagating concatenation: a NULL author_steamid yields a NULL steam_url, never a
-    -- .../profiles//recommended/... link that 404s on Steam.
     'https://steamcommunity.com/profiles/' || author_steamid
         || '/recommended/' || appid || '/' AS steam_url
-FROM _aspectrev_matched;
+FROM (SELECT *, length(regexp_extract(review_text, '^([\s\S]*?)(?:@RX_PRICEVALUE@)', 1, 'i')) + 1 AS kw_pos
+      FROM _aspectrev_surv WHERE kw_aspect = 'Price & Value');
 
--- The pool is done with: _aspectrev_matched holds the UNCAPPED review_text for every survivor,
--- and _aspectrev_windowed now holds a capped copy of the same text. Dropping it here keeps only
--- one full-text-sized structure alive while the final table is written, instead of three.
-DROP TABLE _aspectrev_matched;
+DROP TABLE _aspectrev_surv;
 
 CREATE TABLE mart_game_aspect_reviews AS
 SELECT
@@ -355,7 +424,7 @@ SELECT
     language,
     full_text AS review_text,
     steam_url
-FROM _aspectrev_windowed
+FROM _aspectrev_matched
 ORDER BY appid, aspect, sentiment, votes_up DESC NULLS LAST;
 
-DROP TABLE _aspectrev_windowed;
+DROP TABLE _aspectrev_matched;
