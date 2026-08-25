@@ -80,7 +80,10 @@ export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimeline
   // events; only the plumb lines are gated, release always drawn.
   const notable = notableMonths(points.map((p) => ({ period: p.period, value: p.n_reviews })));
   const releaseMonth = (eventsQuery.data ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
-  const eventMonths = [...eventsByMonth.keys()].filter((m) => notable.has(m) || m === releaseMonth).sort();
+  // Spikes always marked; an event in the same month is the tooltip's explanation (see the
+  // GameProfile note — CS2's real inflections predate our article scrape).
+  const eventMonths = [...new Set([...notable, ...(releaseMonth ? [releaseMonth] : [])])]
+    .filter((m) => periodSet.has(m)).sort();
 
   if (points.length === 0) {
     return (

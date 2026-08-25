@@ -315,7 +315,12 @@ function ReviewVelocityBars({
   // readable in the tooltip; the release line is always drawn.
   const notable = notableMonths(points.map((p) => ({ period: p.period, value: p.n_reviews })));
   const releaseMonth = (events ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
-  const eventMonths = [...eventsByMonth.keys()].filter((m) => notable.has(m) || m === releaseMonth).sort();
+  // Spike months are ALWAYS marked, event or not — the marker's job is to make the change
+  // spottable; the event (when our feed has one) is the explanation in the tooltip. Verified
+  // on CS2: its real inflections (2019 operations, the 2023-03 CS2 announcement, the 2023-09
+  // release) predate our article scrape, so gating lines on having an event erased them all.
+  const eventMonths = [...new Set([...notable, ...(releaseMonth ? [releaseMonth] : [])])]
+    .filter((m) => periodSet.has(m)).sort();
 
   return (
     <div>

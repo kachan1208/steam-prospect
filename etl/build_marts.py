@@ -2176,6 +2176,12 @@ def main() -> int:
     ap.add_argument("--data-dir", default=str(HERE.parent / "data"),
                     help="Directory for versioned duckdb files + current.duckdb symlink.")
     ap.add_argument("--keep", type=int, default=3, help="How many versioned marts to retain.")
+    ap.add_argument("--light", action="store_true",
+                    help="Fast partial build: rebuild every mart EXCEPT the two full-text "
+                         "monsters (teardown family + aspect excerpts), whose tables are "
+                         "copied verbatim from the currently published mart instead. Turns a "
+                         "~3h build into ~30min so a data/mart fix is visible the same hour; "
+                         "the copied review-text tables stay as fresh as the last full build.")
     args = ap.parse_args()
 
     source_db = str(Path(args.source).resolve())
@@ -2244,11 +2250,37 @@ def main() -> int:
             print("[etl] sentiment cache  : DISABLED (PROSPECT_SENTIMENT_CACHE=off) "
                   "-- full rescore every run, cache file untouched")
 
-        print("[etl] scoring aspect text sentiment (VADER) ...")
-        t_sent = time.perf_counter()
-        n_sent = compute_aspect_sentiment(con, data_dir)
-        print(f"[etl] aspect sentiment: scored {n_sent:,} aspect mentions "
-              f"({time.perf_counter() - t_sent:.1f}s)")
+        # --light: the two full-text monsters (teardown family + aspect excerpts) are ~80% of
+        # a full build; instead of running them, copy their OUTPUT TABLES verbatim from the
+        # currently published mart. The copies happen at each file's slot in MART_FILES, so
+        # downstream marts that read them (mart_niche_themes reads mart_game_review_aspects)
+        # see them exactly where the full build would have put them. Aspect sentiment scoring
+        # is skipped with them — its staging is read by those two files only (the delta stays
+        # in src and is scored by the next full build; the cache loses nothing).
+        LIGHT_COPY: dict[str, list[str]] = {
+            "mart_game_teardown.sql": [
+                "mart_game_review_aspects", "mart_genre_aspect_baseline",
+                "mart_game_press_summary", "mart_game_press_by_source",
+                "mart_game_press_timeline", "mart_game_press_notable",
+            ],
+            "mart_game_aspect_reviews.sql": ["mart_game_aspect_reviews"],
+        }
+        if args.light:
+            prev_mart = (data_dir / "current.duckdb").resolve()
+            if not prev_mart.exists():
+                print("ERROR: --light needs a published mart to copy the heavy tables from "
+                      f"({prev_mart} missing) — run a full build first.", file=sys.stderr)
+                return 2
+            con.execute(f"ATTACH '{prev_mart}' AS prevmart (READ_ONLY)")
+            print(f"[etl] LIGHT build: heavy tables copied from {prev_mart.name}, "
+                  "aspect sentiment scoring skipped")
+            n_sent = 0
+        else:
+            print("[etl] scoring aspect text sentiment (VADER) ...")
+            t_sent = time.perf_counter()
+            n_sent = compute_aspect_sentiment(con, data_dir)
+            print(f"[etl] aspect sentiment: scored {n_sent:,} aspect mentions "
+                  f"({time.perf_counter() - t_sent:.1f}s)")
 
         print("[etl] scoring press-coverage sentiment (VADER) ...")
         t_press = time.perf_counter()
@@ -2257,11 +2289,20 @@ def main() -> int:
               f"({time.perf_counter() - t_press:.1f}s)")
 
         for fname in MART_FILES:
+            t = time.perf_counter()
+            if args.light and fname in LIGHT_COPY:
+                for tbl in LIGHT_COPY[fname]:
+                    con.execute(f'CREATE TABLE "{tbl}" AS SELECT * FROM prevmart."{tbl}"')
+                print(f"[etl] copied {fname:21s} ({time.perf_counter() - t:5.2f}s, "
+                      f"{len(LIGHT_COPY[fname])} table(s) from previous mart)")
+                continue
             sql_path = HERE / "marts" / fname
             sql = render(sql_path.read_text(), params)
-            t = time.perf_counter()
             con.execute(sql)
             print(f"[etl] ran {fname:24s} ({time.perf_counter() - t:5.2f}s)")
+
+        if args.light:
+            con.execute("DETACH prevmart")
 
         write_meta(con, source_db, mart_version)
 

@@ -6,7 +6,7 @@ from typing import Literal
 import duckdb
 from fastapi import APIRouter, HTTPException, Query
 
-from .. import analytics_db
+from .. import analytics_db, signals_db
 from ..schemas import (
     AspectReviewExcerpt,
     AspectReviewsResponse,
@@ -14,8 +14,12 @@ from ..schemas import (
     GameChannelMix,
     GameComparable,
     GameComparablesResponse,
+    FollowerPoint,
     GameEvent,
     GameEventList,
+    GameFollowers,
+    GamePriceHistory,
+    PricePoint,
     GameLaunchCurvePoint,
     GamePress,
     GameProfile,
@@ -530,6 +534,32 @@ def game_events(appid: int) -> GameEventList:
     except duckdb.CatalogException:
         rows = []
     return GameEventList(appid=appid, items=[GameEvent(**r) for r in rows])
+
+
+@router.get("/{appid}/followers", response_model=GameFollowers)
+def game_followers(appid: int) -> GameFollowers:
+    """Live follower series from signals.db — skips the nightly mart cycle entirely (see
+    signals_db.py). Empty until the rotating collector first reaches this game."""
+    rows = signals_db.query(
+        "SELECT captured_on, member_count FROM game_followers"
+        " WHERE appid = ? ORDER BY captured_on",
+        (appid,),
+    )
+    return GameFollowers(appid=appid, items=[FollowerPoint(**r) for r in rows])
+
+
+@router.get("/{appid}/price-history", response_model=GamePriceHistory)
+def game_price_history(appid: int) -> GamePriceHistory:
+    """Live daily price snapshots from signals.db; depth accrues from 2026-08-24."""
+    rows = signals_db.query(
+        "SELECT captured_on, final_cents, original_cents, COALESCE(discount_pct, 0) AS discount_pct,"
+        " is_free, country FROM price_snapshots WHERE appid = ? ORDER BY captured_on",
+        (appid,),
+    )
+    return GamePriceHistory(
+        appid=appid,
+        items=[PricePoint(**{**r, "is_free": bool(r["is_free"])}) for r in rows],
+    )
 
 
 # Must mirror etl/build_marts.py's TEARDOWN_MIN_REVIEWS — only used to word the caveat
