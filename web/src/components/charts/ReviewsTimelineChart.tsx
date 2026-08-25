@@ -1,9 +1,26 @@
-import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { useQuery } from "@tanstack/react-query";
+import { Bar, BarChart, CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
-import type { ReviewTimelinePoint } from "../../lib/api";
+import { request, type ReviewTimelinePoint } from "../../lib/api";
 import { fmtCompact, fmtPct } from "../../lib/format";
 import { CSS_VAR } from "../../lib/palette";
-import { TooltipPanel } from "./TooltipPanel";
+import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
+
+/** Catalog events (GET /api/games/{appid}/events ← mart_game_event) — the "what happened
+ * back there" annotations this lifetime chart exists to make explainable: the release,
+ * shipped updates, press coverage. Same contract as the GameTrendsChart overlay. */
+interface CatalogEvent {
+  event_date: string; // 'YYYY-MM-DD'
+  kind: "release" | "update" | "press";
+  title: string;
+  url: string | null;
+}
+
+const EVENT_COLOR = CSS_VAR.textMuted;
+
+function capitalize(s: string): string {
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+}
 
 /**
  * Two single-axis small multiples (same dual-axis-avoidance move as SaturationTrend)
@@ -32,7 +49,35 @@ import { TooltipPanel } from "./TooltipPanel";
  * by another route. Padding is symmetric and clamped to valid [0,1], and the axis still
  * carries real tick labels, so this stays an honest read, not a misleading zoom.
  */
-export function ReviewsTimelineChart({ points }: { points: ReviewTimelinePoint[] }) {
+export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimelinePoint[]; appid?: number }) {
+  // Catalog-event overlay ("why did the curve move HERE"): optional, additive, and it
+  // swallows errors — a chart without markers is complete, just less explained.
+  const eventsQuery = useQuery({
+    queryKey: ["game-catalog-events", appid],
+    queryFn: async () => {
+      try {
+        const r = await request<{ appid: number; items: CatalogEvent[] }>(`/games/${appid}/events`);
+        return r.items;
+      } catch {
+        return [] as CatalogEvent[];
+      }
+    },
+    enabled: appid !== undefined,
+    staleTime: 5 * 60_000,
+  });
+
+  const periodSet = new Set(points.map((d) => d.period));
+  const eventsByMonth = new Map<string, CatalogEvent[]>();
+  for (const e of eventsQuery.data ?? []) {
+    const month = e.event_date.slice(0, 7);
+    if (!periodSet.has(month)) continue;
+    const bucket = eventsByMonth.get(month);
+    if (bucket) bucket.push(e);
+    else eventsByMonth.set(month, [e]);
+  }
+  const eventMonths = [...eventsByMonth.keys()].sort();
+  const releaseMonth = (eventsQuery.data ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
+
   if (points.length === 0) {
     return (
       <div className="flex h-32 items-center justify-center text-xs text-ink-muted">
@@ -118,18 +163,35 @@ export function ReviewsTimelineChart({ points }: { points: ReviewTimelinePoint[]
               content={({ active, payload, label }) => {
                 if (!active || !payload || payload.length === 0) return null;
                 const p = payload[0].payload as ReviewTimelinePoint;
-                return (
-                  <TooltipPanel
-                    title={String(label)}
-                    rows={[
-                      { label: "Reviews", value: fmtCompact(p.n_reviews), color: CSS_VAR.competition },
-                      { label: "Positive", value: fmtCompact(p.n_positive) },
-                    ]}
-                  />
-                );
+                const rows: TooltipRow[] = [
+                  { label: "Reviews", value: fmtCompact(p.n_reviews), color: CSS_VAR.competition },
+                  { label: "Positive", value: fmtCompact(p.n_positive) },
+                ];
+                for (const e of eventsByMonth.get(String(label)) ?? []) {
+                  const title = e.title.length > 60 ? `${e.title.slice(0, 57)}…` : e.title;
+                  rows.push({ label: capitalize(e.kind), value: title, color: EVENT_COLOR });
+                }
+                return <TooltipPanel title={String(label)} rows={rows} />;
               }}
             />
             <Bar dataKey="n_reviews" fill={CSS_VAR.competition} radius={[4, 4, 0, 0]} maxBarSize={20} />
+            {/* catalog events — muted plumb lines; only the release month carries a text
+                label (a patch-heavy game like CS2 ships updates most months, and a label
+                per line would picket-fence the whole lifetime). Titles live in the tooltip. */}
+            {eventMonths.map((month) => (
+              <ReferenceLine
+                key={month}
+                x={month}
+                stroke={EVENT_COLOR}
+                strokeDasharray="2 5"
+                strokeOpacity={month === releaseMonth ? 0.9 : 0.5}
+                label={
+                  month === releaseMonth
+                    ? { value: "Released", position: "top", fill: EVENT_COLOR, fontSize: 9 }
+                    : undefined
+                }
+              />
+            ))}
           </BarChart>
         </ResponsiveContainer>
       </div>
