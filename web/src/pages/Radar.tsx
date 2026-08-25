@@ -1,24 +1,39 @@
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import clsx from "clsx";
 
+import { RadarBoard, type RadarBoardBlip, type RadarSector } from "../components/RadarBoard";
 import { TooltipPanel } from "../components/charts/TooltipPanel";
 import { trackEvent } from "../lib/analytics";
 import {
   ApiError,
+  useNiches,
   useRadarFeed,
+  type NicheRow,
   type RadarHero,
   type RadarNicheCard,
   type RadarSparklinePoint,
   type TrendPoint,
 } from "../lib/api";
 import { fmtInt, fmtSigned, fmtUsd } from "../lib/format";
+import { radarVerdict } from "../lib/radarVerdict";
 import { nicheDetailPath } from "./NicheDetail";
 
 /**
- * Radar — the opportunity feed that is now the index route (mockup 3a): a hero "blueprint"
- * plate on the cut's single biggest 90-day demand riser, then a grid of the cut's biggest
- * movers in either direction.
+ * Radar — the index route. Two plates, top to bottom:
+ *
+ * 1. THE BOARD (RadarBoardSection) — a radial tech-radar: every niche in the cut plotted
+ *    as a dot in (sector = Genres / Micro-genres / Themes, ring = client-side verdict from
+ *    lib/radarVerdict.ts). Fed by the /api/niches LIST endpoint (two cuts: dimension=genre
+ *    and dimension=tag tiers=micro,theme), NOT the radar feed — the feed caps at 24 movers.
+ *    NicheRow carries no demand_trend_90d_pct (only the feed cards do), so the feed's top
+ *    movers are joined in as best-effort trend evidence and every other niche degrades to
+ *    the verdict lib's structural rules — documented there, flagged "caution" in the UI.
+ *
+ * 2. The original opportunity feed (mockup 3a): a hero "blueprint" plate on the cut's
+ *    single biggest 90-day demand riser, then a grid of the cut's biggest movers in either
+ *    direction — unchanged, reflowed under an "Opportunity feed" section title.
  *
  * THE DATA (read niches.py::radar_feed / _has_demand90 for the full story): the feed ranks
  * on demand_trend_90d_pct, a mart_niche column that landed 2026-08-21 — it is not in the
@@ -37,6 +52,177 @@ function verdictLabel(v: number, digits = 1): string {
   return `${up ? "▲" : "▼"} ${up ? "+" : "−"}${Math.abs(v).toFixed(digits)}%`;
 }
 
+// ---- the board --------------------------------------------------------------------------
+
+/** The mart materializes exactly these review floors (see NicheFinder's own note). */
+const MIN_REVIEWS_OPTIONS = [
+  { v: 0, label: "No floor" },
+  { v: 50, label: "50+" },
+  { v: 100, label: "100+" },
+];
+/** Blip cap so the board stays readable; "top N by opportunity_v2" across all sectors. */
+const TOP_N_OPTIONS = [
+  { v: 40, label: "40" },
+  { v: 80, label: "80" },
+  { v: 120, label: "120" },
+];
+
+/** Minimal segmented control in the app's hairline-border language (square, no fills
+ * except the active brand chip) — same shape NicheFinder draws locally. */
+function SegRow({
+  label,
+  options,
+  value,
+  onChange,
+}: {
+  label: string;
+  options: { v: number; label: string }[];
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="kicker text-[10px] tracking-[.1em] text-ink-muted">{label}</span>
+      <div className="inline-flex border border-ink-primary/30">
+        {options.map((o, i) => (
+          <button
+            key={o.v}
+            type="button"
+            onClick={() => onChange(o.v)}
+            className={clsx(
+              "px-2.5 py-1 text-[12px] transition-colors",
+              i > 0 && "border-l border-ink-primary/30",
+              o.v === value ? "bg-brand font-semibold text-brand-fg" : "text-ink-primary hover:bg-ink-primary/[0.08]",
+            )}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The radial board plate: filters, data assembly (list cuts + best-effort trend join),
+ * verdicts, and the RadarBoard itself. Filter state is local — this page has no URL-param
+ * convention to reuse (the feed below it is unparameterized too).
+ */
+function RadarBoardSection() {
+  const [minReviews, setMinReviews] = useState(50);
+  const [topN, setTopN] = useState(80);
+
+  // The board population: the two cuts that make up the three sectors. Each query asks for
+  // topN rows by opportunity_v2 so the merged top-N cap can never starve one dimension.
+  const genreQ = useNiches({
+    dimension: "genre",
+    window: "24m",
+    min_reviews: minReviews,
+    sort: "opportunity_v2",
+    order: "desc",
+    limit: topN,
+    offset: 0,
+  });
+  const tagQ = useNiches({
+    dimension: "tag",
+    window: "24m",
+    min_reviews: minReviews,
+    sort: "opportunity_v2",
+    order: "desc",
+    tiers: "micro,theme",
+    limit: topN,
+    offset: 0,
+  });
+
+  // Best-effort 90-day demand trend: GET /api/niches (NicheRow) does NOT carry
+  // demand_trend_90d_pct — only the radar feed's cards do, and that endpoint caps at 24
+  // movers per dimension. Join what it knows; everything else degrades in radarVerdict()
+  // (structural evidence only, caution-flagged). A feed 503/404 (mart not rebuilt yet)
+  // simply means no trends join — the board still renders.
+  const tagTrendQ = useRadarFeed({ dimension: "tag", min_reviews: minReviews, limit: 24 });
+  const genreTrendQ = useRadarFeed({ dimension: "genre", min_reviews: minReviews, limit: 24 });
+  const trendByNiche = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const feed of [tagTrendQ.data, genreTrendQ.data]) {
+      for (const c of feed?.movers ?? []) m.set(`${c.dimension}:${c.key}`, c.demand_trend_90d_pct);
+    }
+    return m;
+  }, [tagTrendQ.data, genreTrendQ.data]);
+
+  const blips = useMemo<RadarBoardBlip[]>(() => {
+    const rows: RadarBoardBlip[] = [];
+    const push = (row: NicheRow) => {
+      const sector: RadarSector | null =
+        row.dimension === "genre" ? "genre" : row.tier === "micro" ? "micro" : row.tier === "theme" ? "theme" : null;
+      if (!sector) return; // tag tiers outside micro/theme have no sector on this board
+      const demandTrendPct = trendByNiche.get(`${row.dimension}:${row.key}`) ?? null;
+      rows.push({
+        dimension: row.dimension,
+        key: row.key,
+        tier: row.tier,
+        sector,
+        n_games: row.n_games,
+        p90_rev: row.p90_rev ?? null,
+        opportunity_v2: row.opportunity_v2,
+        demandTrendPct,
+        verdict: radarVerdict({
+          demand_trend_90d_pct: demandTrendPct,
+          saturation_yoy: row.saturation_yoy,
+          winner_concentration: row.winner_concentration,
+          opportunity_v2: row.opportunity_v2,
+        }),
+      });
+    };
+    for (const r of genreQ.data?.items ?? []) push(r);
+    for (const r of tagQ.data?.items ?? []) push(r);
+    rows.sort((a, b) => (b.opportunity_v2 ?? -1) - (a.opportunity_v2 ?? -1) || a.key.localeCompare(b.key));
+    return rows.slice(0, topN);
+  }, [genreQ.data, tagQ.data, trendByNiche, topN]);
+
+  const loading = genreQ.isLoading || tagQ.isLoading;
+  const bothFailed = genreQ.isError && tagQ.isError;
+  const partialFail = !bothFailed && (genreQ.isError || tagQ.isError);
+
+  return (
+    <section className="blueprint relative border-ink-primary/25 px-6 py-6 lg:px-[30px] lg:py-[26px]">
+      <i className="bp-corner" />
+      <div className="flex flex-wrap items-end gap-x-6 gap-y-3 pb-6">
+        <div className="flex flex-col gap-1.5">
+          <div className="kicker text-[10px] tracking-[.12em] text-brand">
+            Verdict rings · last 24 months · genres + micro + theme tags
+          </div>
+          <h2 className="text-[26px] text-ink-primary sm:text-[30px]">Niche radar</h2>
+        </div>
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 sm:ml-auto">
+          <SegRow label="Min reviews" options={MIN_REVIEWS_OPTIONS} value={minReviews} onChange={setMinReviews} />
+          <SegRow label="Top" options={TOP_N_OPTIONS} value={topN} onChange={setTopN} />
+        </div>
+      </div>
+
+      {loading && <div className="py-16 text-center text-sm text-ink-muted">Plotting the board…</div>}
+      {bothFailed && (
+        <div className="py-16 text-center text-sm text-status-serious">
+          Failed to load the niche cuts{genreQ.error instanceof Error ? `: ${genreQ.error.message}` : "."}
+        </div>
+      )}
+      {!loading && !bothFailed && <RadarBoard blips={blips} />}
+
+      {partialFail && (
+        <p className="pt-3 text-[11px] text-ink-muted">
+          One dimension failed to load — the board shows what arrived.
+        </p>
+      )}
+      <p className="pt-4 text-[11px] text-ink-muted">
+        Ring verdicts are computed client-side (lib/radarVerdict.ts): Enter now = demand up ≥15% over 90 days without a
+        flooding pipeline · Watch = demand holding, or score-only evidence · Crowded = releases up &gt;15% YoY against
+        flat demand, or winner-take-most · Declining = demand down ≥15%. The 90-day demand trend rides only the radar
+        feed&rsquo;s top movers; niches without one are placed on structural evidence and marked &ldquo;caution&rdquo; in
+        the tooltip. Dot area tracks P90 revenue.
+      </p>
+    </section>
+  );
+}
+
 export default function Radar() {
   const feedQ = useRadarFeed({ limit: 6 });
   const apiError = feedQ.error instanceof ApiError ? feedQ.error : null;
@@ -51,6 +237,14 @@ export default function Radar() {
 
   return (
     <div className="mx-auto flex max-w-[1180px] flex-col gap-[30px]">
+      {/* The board is the page's hero; the original feed reflows below it. */}
+      <RadarBoardSection />
+
+      <div className="flex flex-wrap items-baseline gap-3">
+        <h4 className="text-ink-primary">Opportunity feed</h4>
+        <span className="text-[11px] text-ink-muted">the cut&rsquo;s biggest 90-day demand riser + movers</span>
+      </div>
+
       {feedQ.isLoading && (
         <div className="py-10 text-center text-sm text-ink-muted">Loading the opportunity feed…</div>
       )}
