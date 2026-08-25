@@ -223,7 +223,9 @@ export function GameTrendsChart({
   // Lines only where the review curve moved (lib/notable.ts); tooltip keeps all months.
   const notable = notableMonths(data.map((d) => ({ period: d.period, value: d.n_reviews })));
   const releaseMonth = (catalogQuery.data ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
-  const catalogMonths = [...catalogByMonth.keys()].filter((m) => notable.has(m) || m === releaseMonth).sort();
+  // Spikes always marked; events explain them in the tooltip when the feed has one.
+  const catalogMonths = [...new Set([...notable, ...(releaseMonth ? [releaseMonth] : [])])]
+    .filter((m) => periodSet.has(m)).sort();
   const hasCatalog = catalogMonths.length > 0;
 
   const twitchColor = channelColor("twitch");

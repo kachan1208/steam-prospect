@@ -307,6 +307,39 @@ class GameEvent(BaseModel):
     url: Optional[str] = None
 
 
+class FollowerPoint(BaseModel):
+    captured_on: str  # 'YYYY-MM-DD'
+    member_count: int
+
+
+class GameFollowers(BaseModel):
+    """Community-group follower series from signals.db — LIVE collector data, not the mart:
+    a point captured this morning is served this morning. items == [] until the rotating
+    collector first reaches this game (the cohort refreshes on a ~10-day wheel; games people
+    are waiting for refresh most often — see deploy/collectors/followers_bulk.py)."""
+
+    appid: int
+    items: list[FollowerPoint]
+
+
+class PricePoint(BaseModel):
+    captured_on: str  # 'YYYY-MM-DD'
+    final_cents: Optional[int] = None  # NULL = unpriced/delisted that day
+    original_cents: Optional[int] = None
+    discount_pct: int
+    is_free: bool
+    country: str
+
+
+class GamePriceHistory(BaseModel):
+    """Daily price snapshots from signals.db (catalog price_change_number diff -> batched
+    GetItems). Live like GameFollowers; depth grows one day at a time from 2026-08-24 —
+    the raw material for '-20% SALE' chart markers once discount deltas exist."""
+
+    appid: int
+    items: list[PricePoint]
+
+
 class GameEventList(BaseModel):
     """Chart-annotation feed. items == [] both for a game with no recorded events AND when
     the mart predates mart_game_event — annotations are additive, so an old mart degrades
