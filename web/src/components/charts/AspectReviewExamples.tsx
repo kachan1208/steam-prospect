@@ -101,7 +101,12 @@ function ReviewProse({
 }) {
   // `select-text`: the expanded body lives inside a <button>, and WebKit's UA sheet makes
   // button content unselectable — a 2000-char review you cannot copy out of is a bug.
-  const base = "select-text whitespace-pre-line text-[13px] leading-[1.65]";
+  // `text-sm leading-relaxed`: this is prose the reader came to READ — 13px was chart-label
+  // sizing left over from the panel's cramped half-width days; meta lines stay text-[11px].
+  // `max-w-prose` (~65ch at text-sm): below xl the groups stack across the whole main column
+  // (~900px on a laptop), and an uncapped 2000-char expanded review would run ~120ch lines;
+  // in the xl+ two-column grid each column is already narrower than the cap, so it's inert.
+  const base = "select-text max-w-prose whitespace-pre-line text-sm leading-relaxed";
   const full = expanded ? fullReviewText(item) : null;
 
   if (!full) {
@@ -313,14 +318,17 @@ function SentimentGroup({
  * state), not on initial teardown load. Excerpts are grouped by the TEXT sentiment of the shown
  * passage, matching the bar above — a thumbs-up review can appear under "Negative" here.
  *
- * Layout: the two groups only sit side by side from `lg` up. Splitting at `sm` put ~40-character
- * lines of prose in each column on a small laptop, which is what made this panel hard to read;
- * below `lg` they stack and each quote gets the full measure.
+ * Layout: the two groups only sit side by side from `xl` up. Splitting at `sm` put ~40-character
+ * lines in each column on a small laptop; `lg` was no better, because lg is exactly where
+ * GameProfile's [1.7fr_1fr] body grid kicks in — the main column drops to ~580px there, and
+ * halving THAT gave ~32ch columns. From `xl` the main column is ~740px (capping at ~770px under
+ * the app shell's 1320px), so each column's prose runs ~45ch; below `xl` the groups stack and
+ * each quote gets the full, max-w-prose-capped measure (see ReviewProse).
  */
 export function AspectReviewExamples({ appid, aspect }: { appid: number; aspect: string }) {
   return (
     <div>
-      <div className="grid grid-cols-1 gap-6 pt-1 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-6 pt-1 xl:grid-cols-2">
         <SentimentGroup
           appid={appid}
           aspect={aspect}

@@ -692,7 +692,12 @@ export default function GameProfile() {
             {reviewsQ.data && <ReviewVelocityBars points={reviewsQ.data.timeline} events={eventsQ.data} />}
           </BlueprintPanel>
 
-          <div className="grid grid-cols-1 gap-[22px] sm:grid-cols-2">
+          {/* FULL-WIDTH stack, not the mockup's sm:grid-cols-2 pair (changed 2026-08-25):
+              pairing "What reviews praise / pan" with Price history squeezed the aspect
+              panel into ~a third of the page, and its drill-down excerpts — two prose
+              columns inside that third — wrapped at ~25 characters. Unreadable prose loses
+              to mockup fidelity; both panels now get the main column's full measure. */}
+          <div className="grid grid-cols-1 gap-[22px]">
             {/* Price history has no backing data: the API has no price-history field, and
                 game_snapshots holds ~1 row per game — there is nothing honest to plot, so
                 this states that plainly rather than fabricating a series (§4c calls the
