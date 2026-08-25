@@ -1038,6 +1038,34 @@ export function useGameReviewsSummary(appid: number | null) {
   });
 }
 
+// ---- game events (chart annotations: release / shipped updates / press) -----------------
+export interface GameEvent {
+  event_date: string; // 'YYYY-MM-DD'
+  kind: "release" | "update" | "press";
+  title: string;
+  url: string | null;
+}
+
+/** Catalog events for chart annotation. Same queryKey as the chart-local fetches in
+ * GameTrendsChart / ReviewsTimelineChart, so however many charts on a page want the
+ * overlay, react-query collapses them into one network request. Errors resolve to []
+ * — markers are additive, and a chart without them is complete, just less explained. */
+export function useGameEvents(appid: number | null) {
+  return useQuery({
+    queryKey: ["game-catalog-events", appid],
+    queryFn: async () => {
+      try {
+        const r = await request<{ appid: number; items: GameEvent[] }>(`/games/${appid}/events`);
+        return r.items;
+      } catch {
+        return [] as GameEvent[];
+      }
+    },
+    enabled: appid !== null,
+    staleTime: 5 * 60_000,
+  });
+}
+
 // ---- game teardown (Phase 3 — "Why it works") -------------------------------------------
 export interface ReviewAspect {
   aspect: string;
