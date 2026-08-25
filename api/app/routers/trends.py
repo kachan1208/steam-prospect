@@ -15,7 +15,7 @@ base shape ({appid, eligible, points}) is unchanged; `comps` is null unless requ
 Data caveats (surfaced so the UI can caption the chart honestly):
 - n_reviews is from the per-game review SAMPLE (recency-biased for older/popular titles),
   so it tracks sampled review velocity, not the true full-history review count.
-- ccu_avg / twitch_viewers / n_mentions are only as deep as the collectors have run:
+- ccu_avg is only as deep as the collectors have run:
   player-count and creator-mention snapshots are recent, so those series are typically a
   single current month today and thicken as history accumulates. ccu_avg is NULL (a gap,
   not zero) for any month without a snapshot.
@@ -40,15 +40,13 @@ router = APIRouter(prefix="/api/games", tags=["games"])
 # actually contributed).
 MAX_COMPS = 12
 
-_POINT_COLS = "period, n_reviews, ccu_avg, twitch_viewers, n_mentions"
+_POINT_COLS = "period, n_reviews, ccu_avg"
 
 
 class GameTrendPoint(BaseModel):
     period: str  # 'YYYY-MM'
     n_reviews: int
     ccu_avg: float | None  # NULL when no live-player snapshot landed that month
-    twitch_viewers: int
-    n_mentions: int
 
 
 class CompSeries(BaseModel):
@@ -68,8 +66,6 @@ class CohortTrendPoint(BaseModel):
     n_reviews_p25: int  # 25th pct — lower edge of the review-velocity band
     n_reviews_p75: int  # 75th pct — upper edge of the review-velocity band
     ccu_avg: float | None  # MEDIAN live players (NULL when no comp had a snapshot that month)
-    twitch_viewers: int  # MEDIAN Twitch viewers/mo
-    n_mentions: int  # MEDIAN creator mentions/mo
 
 
 class GameTrendsComps(BaseModel):
@@ -140,9 +136,7 @@ def _build_comps(requested: list[int]) -> GameTrendsComps:
             "CAST(ROUND(MEDIAN(n_reviews)) AS BIGINT) AS n_reviews, "
             "CAST(ROUND(QUANTILE_CONT(n_reviews, 0.25)) AS BIGINT) AS n_reviews_p25, "
             "CAST(ROUND(QUANTILE_CONT(n_reviews, 0.75)) AS BIGINT) AS n_reviews_p75, "
-            "MEDIAN(ccu_avg) AS ccu_avg, "
-            "CAST(ROUND(MEDIAN(twitch_viewers)) AS BIGINT) AS twitch_viewers, "
-            "CAST(ROUND(MEDIAN(n_mentions)) AS BIGINT) AS n_mentions "
+            "MEDIAN(ccu_avg) AS ccu_avg "
             f"FROM mart_game_trends WHERE appid IN ({cohort_ph}) "
             "GROUP BY period ORDER BY period ASC",
             matched,

@@ -55,8 +55,6 @@ function profile(overrides: Partial<GameProfile> & { appid: number; name: string
     playtime_p50: 200,
     playtime_p75: 400,
     live_players: 500,
-    twitch_viewers: 0,
-    twitch_streams: 0,
     first_seen: "2024-01-01",
     players_trend_7d_pct: 5,
     ...overrides,

@@ -317,7 +317,7 @@ mcp = FastMCP(
         "timing, look up games and rank a game's closest competitors (find_comparables), "
         "profile developers/publishers and scout publishers active in a genre "
         "(entity_profile, publisher_pitch_list), and find press/creator pitch targets "
-        "across every marketing channel (Press, YouTube, Reddit, Twitch, X). Read the "
+        "across the press marketing channel. Read the "
         "prospect-data-dictionary resource first. "
         "For 'what should I build' questions, keep find_niches' defaults (24m window, "
         "opportunity_v2 sort, micro+theme tags only) and apply its falsification rules: "
@@ -576,11 +576,8 @@ games clearing the review floor).
   coverage, precomputed pitch-list source. -> `press_pitch_list`.
 - **mart_buzz_trends / mart_buzz_trends_summary** — rising/cooling game-concept bigrams
   mined from journalist article titles. -> `buzz_trends`.
-- **mart_creator_pitch** — per (genre, platform, creator): reach x recent-activity ranked
-  creator pitch list, for YouTube/Reddit/Twitch/X (the creator-platform analogue of
-  mart_press_author). -> `creator_pitch_list`.
 - **mart_channel_mix** — per (genre, channel): share of marketing attention (raw mention
-  count AND reach-weighted) across Press/YouTube/Reddit/Twitch/X — "where does this genre
+  count AND reach-weighted) for the press channel — "where does this genre
   actually get attention." -> `channel_mix`.
 - **mart_channel_buzz / mart_channel_buzz_summary** — reach-weighted trending game-concept
   bigrams across EVERY channel (press + creator platforms combined), the multi-channel,
@@ -1884,7 +1881,7 @@ def game_profile(appid: int) -> dict:
                reviews_pct_in_genre, owners_pct_in_genre, top_tags, n_reviews_sampled,
                n_reviews_first_30d, n_reviews_first_90d,
                n_reviews_first_365d, n_reviews_trailing_30d, playtime_p25, playtime_p50,
-               playtime_p75, twitch_viewers, twitch_streams{players_cols}{lifetime_cols}{socials_cols}{demo_cols}
+               playtime_p75{players_cols}{lifetime_cols}{socials_cols}{demo_cols}
         FROM mart_game WHERE appid = ?
         """,
         [appid],
@@ -2636,56 +2633,14 @@ def buzz_trends(
 
 
 # ==========================================================================================
-# Marketing / multi-channel tools (Track M — Press · YouTube · Reddit · Twitch · X)
+# Marketing tools (Track M — Press; creator platforms removed 2026-08-25)
 # ==========================================================================================
-_MARKETING_PLATFORMS = {"youtube", "reddit", "twitch", "x"}
-
-
-@mcp.tool()
-def creator_pitch_list(genre: str, platform: Literal["youtube", "reddit", "twitch", "x"], limit: int = 15) -> dict:
-    """Who to pitch on ONE creator platform (YouTube channels, Reddit communities/posters,
-    Twitch streamers, or X accounts) for one Steam genre (exact label — see game_profile /
-    market_benchmarks for valid labels). For press/journalist pitching use press_pitch_list
-    instead — this tool is creator-platform only.
-
-    Ranked by reach x recent activity (pitch_score = latest known reach x (1 + mentions in
-    the last 24 months)) — a creator with no reach snapshot yet still appears, ranked by
-    recent activity alone (reach shows as null, not zero — a null means "no snapshot
-    captured yet," not "no audience"). Each row includes an example mention
-    (title/url/date) to sanity-check before pitching.
-
-    Empty results is a real, honest answer — either no scraper has been run for this
-    platform yet, or genuinely no confidence-filtered coverage exists for this genre on it.
-    """
-    if platform not in _MARKETING_PLATFORMS:
-        return {"error": f"platform must be one of {sorted(_MARKETING_PLATFORMS)}"}
-    limit = max(1, min(limit, 50))
-    rows = query(
-        "SELECT platform, creator_id, handle, display_name, creator_url, n_mentions, "
-        "n_mentions_recent, n_games_covered, reach, reach_captured_at, pitch_score, "
-        "example_title, example_url, example_published_at "
-        "FROM mart_creator_pitch WHERE genre = ? AND platform = ? ORDER BY pitch_score DESC LIMIT ?",
-        [genre, platform, limit],
-    )
-    caveats = [
-        "Selection bias: these creators already chose to cover this genre — descriptive, not a "
-        "guarantee of future coverage.",
-        "reach is a SNAPSHOT, not live — check reach_captured_at before citing it.",
-        "Fuzzy-matched to games and confidence-filtered — not proof of a correct match.",
-    ]
-    if not rows:
-        caveats.insert(
-            0,
-            f"No {platform} coverage found for genre '{genre}' — run the {platform} channel "
-            "scraper to start collecting data, or this genre may genuinely have none yet.",
-        )
-    return {"genre": genre, "platform": platform, "n_returned": len(rows), "creators": clean_rows(rows), "caveats": caveats}
 
 
 @mcp.tool()
 def channel_mix(genre: str | None = None) -> dict:
-    """Share of marketing "attention" by channel (Press vs YouTube vs Reddit vs Twitch vs X)
-    for one genre, or the full genre x channel matrix if genre is omitted. Two parallel
+    """Share of marketing "attention" by channel — press-only since 2026-08-25 (the creator
+    platforms were decommissioned) — for one genre, or the full matrix if genre is omitted. Two parallel
     measures per channel: n_mentions (raw coverage volume) and reach_weighted (mentions
     weighted by audience size — press = 1/mention since outlets carry no audience-size
     figure here; creator mentions = reach at the time of the mention, falling back to the
@@ -2719,7 +2674,7 @@ def channel_mix(genre: str | None = None) -> dict:
 @mcp.tool()
 def channel_buzz(direction: Literal["rising", "cooling"] = "rising", limit: int = 15, include_series: bool = False) -> dict:
     """Reach-WEIGHTED trending game-concepts across every marketing channel (press + YouTube +
-    Reddit + Twitch + X combined) — the multi-channel sequel to buzz_trends (which is press-
+    press) — the sequel to buzz_trends (which is press-
     title-only and unweighted). Same bigram/concept-allowlist mining as buzz_trends, but each
     mention is weighted by its audience size (a mega-channel's coverage moves this more than
     a tiny one) instead of counted equally — see total_weighted vs total_mentions (raw count)

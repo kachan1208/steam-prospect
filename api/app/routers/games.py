@@ -80,7 +80,7 @@ _PROFILE_COLS = (
     "reviews_pct_in_genre, owners_pct_in_genre, top_tags, n_reviews_sampled, "
     "n_reviews_first_30d, n_reviews_first_90d, n_reviews_first_365d, n_reviews_trailing_30d, "
     "playtime_p25, playtime_p50, playtime_p75, "
-    "live_players, twitch_viewers, twitch_streams, first_seen"
+    "live_players, first_seen"
 )
 
 

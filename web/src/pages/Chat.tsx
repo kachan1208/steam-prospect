@@ -13,7 +13,7 @@ const CAPABILITIES = [
   "Estimate revenue for a given price × review-count scenario",
   "Check launch timing & seasonality for a genre",
   "Look up or compare specific games",
-  "Build press & creator pitch lists across Press, YouTube, Reddit, Twitch & X",
+  "Build press pitch lists from 500K+ articles across 17 gaming outlets",
 ];
 
 function CopyField({ value, label }: { value: string; label?: string }) {

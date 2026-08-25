@@ -914,8 +914,6 @@ export interface GameProfile {
   // Daily-CCU summaries (absent/null on marts that predate the players marts).
   players_7d_avg?: number | null;
   players_trend_7d_pct?: number | null;
-  twitch_viewers: number | null;
-  twitch_streams: number | null;
   first_seen: string | null;
   // Lifetime (steamcharts top-8k) — absent on marts that predate the lifetime ETL.
   lifetime_first_100_month?: string | null;
@@ -1161,7 +1159,7 @@ export function useGameTeardown(appid: number | null) {
 
 // ---- channel mix (Track M — where a genre gets marketing attention) ---------------------
 export interface ChannelMixRow {
-  channel: string; // 'press' | 'youtube' | 'reddit' | 'twitch' | 'x'
+  channel: string; // 'press' (creator channels removed 2026-08-25)
   n_mentions: number;
   reach_weighted: number;
   share_mentions: number | null;
@@ -1195,8 +1193,6 @@ export interface GameTrendPoint {
   period: string; // 'YYYY-MM'
   n_reviews: number;
   ccu_avg: number | null;
-  twitch_viewers: number;
-  n_mentions: number;
 }
 
 export interface CompSeries {

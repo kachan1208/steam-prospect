@@ -39,7 +39,7 @@ import type { GameTrendPoint } from "./GameTrendsChart";
  *   revenue      the owners curve x price_initial — same Boxleiter method as the "Est. revenue"
  *                card above, just walked out over time instead of collapsed to one number.
  *   live_players ccu_avg over months (a real gap, not zero, for any month without a snapshot —
- *                rendered as an honest break in the line, no connectNulls) plus twitch_viewers
+ *                rendered as an honest break in the line, no connectNulls)
  *                alongside it and today's playing-vs-watching split ("who's watching, and
  *                where") from the profile snapshot.
  *
@@ -71,7 +71,7 @@ export const DRILLDOWN_META: Record<DrilldownMetric, { title: string; subtitle: 
   },
   live_players: {
     title: "Live players — over time, and who's watching where",
-    subtitle: "Daily concurrent-player samples (nightly, not peaks), Twitch reach alongside, and today's split.",
+    subtitle: "Daily concurrent-player samples (nightly point samples, not peaks).",
   },
 };
 
@@ -85,7 +85,6 @@ export interface DrilldownProfile {
   total_reviews: number | null;
   owners_mid: number | null;
   live_players: number | null;
-  twitch_viewers: number | null;
 }
 
 interface TrendsResponse {
@@ -404,19 +403,16 @@ function LivePlayersDrilldown({
   points,
   daily,
   livePlayers,
-  twitchViewers,
   thin,
 }: {
   points: GameTrendPoint[];
   daily: PlayersResponse | null;
   livePlayers: number | null;
-  twitchViewers: number | null;
   thin: boolean;
 }) {
-  const twitchColor = channelColor("twitch");
   const hasCcu = points.some((p) => p.ccu_avg != null);
-  const splitMax = Math.max(livePlayers ?? 0, twitchViewers ?? 0, 1);
-  const noSplitSnapshot = livePlayers == null && twitchViewers == null;
+  const splitMax = Math.max(livePlayers ?? 0, 1);
+  const noSplitSnapshot = livePlayers == null;
   // Daily point samples when the mart carries them (mart_game_players_daily); otherwise the
   // pre-existing monthly ccu_avg fallback so older marts still show something.
   const dailyPoints = daily?.available ? daily.points : [];
@@ -510,37 +506,6 @@ function LivePlayersDrilldown({
             )}
           </ResponsiveContainer>
         </div>
-        <div>
-          <div className="mb-1 text-xs text-ink-muted">Twitch viewers / month</div>
-          <ResponsiveContainer width="100%" height={168}>
-            <BarChart data={points} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-              <CartesianGrid stroke="var(--gridline)" vertical={false} />
-              <XAxis {...XAXIS_PROPS} />
-              <YAxis
-                tick={{ fontSize: 10 }}
-                tickFormatter={(v: number) => fmtCompact(v)}
-                tickLine={false}
-                axisLine={false}
-                width={40}
-                allowDecimals={false}
-              />
-              <Tooltip
-                cursor={{ fill: "var(--gridline)", opacity: 0.5 }}
-                content={({ active, payload, label }) => {
-                  if (!active || !payload || payload.length === 0) return null;
-                  const p = payload[0].payload as GameTrendPoint;
-                  return (
-                    <TooltipPanel
-                      title={String(label)}
-                      rows={[{ label: "Twitch viewers", value: fmtCompact(p.twitch_viewers), color: twitchColor }]}
-                    />
-                  );
-                }}
-              />
-              <Bar dataKey="twitch_viewers" fill={twitchColor} radius={[4, 4, 0, 0]} maxBarSize={20} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
       </div>
 
       <div>
@@ -553,12 +518,6 @@ function LivePlayersDrilldown({
             value={livePlayers != null ? livePlayers / splitMax : null}
             color={CSS_VAR.demand}
             valueLabel={livePlayers != null ? fmtCompact(livePlayers) : "—"}
-          />
-          <BulletMeter
-            label="Watching now (Twitch)"
-            value={twitchViewers != null ? twitchViewers / splitMax : null}
-            color={twitchColor}
-            valueLabel={twitchViewers != null ? fmtCompact(twitchViewers) : "—"}
           />
         </div>
         {summary?.players_7d_avg != null && (
@@ -649,8 +608,8 @@ function LivePlayersDrilldown({
             "elsewhere run higher. Missing days are real gaps in monitoring (this title may be on the capture " +
             "rotation), never zero players."
           : "ccu_avg is left blank for months with no player-count snapshot — gaps in the line above are real gaps in " +
-            `monitoring, not zero players.${!hasCcu ? " This title has no CCU snapshot at all yet, and" : " Live-player and"} ` +
-            "Twitch snapshots are recent collectors, so these series typically thicken as more months accumulate."}
+            `monitoring, not zero players.${!hasCcu ? " This title has no CCU snapshot at all yet — the" : " The"} ` +
+            "live-player collector is recent, so this series typically thickens as more months accumulate."}
         <ThinDataNote thin={thin} />
       </p>
     </div>
@@ -734,7 +693,6 @@ export function GameMetricDrilldown({
           points={points}
           daily={playersQuery.data ?? null}
           livePlayers={profile.live_players}
-          twitchViewers={profile.twitch_viewers}
           thin={thin}
         />
       );

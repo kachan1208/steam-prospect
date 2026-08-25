@@ -55,18 +55,9 @@ WHERE a.source != 'steam_news'
   AND a.title IS NOT NULL AND TRIM(a.title) != ''
   AND a.published_at IS NOT NULL;
 
-CREATE TEMP TABLE _cb_creator_rows AS
-SELECT cm.title, cm.published_at, COALESCE(cm.reach_at_time, rl.reach, 1)::DOUBLE AS weight, cm.platform AS channel
-FROM stg_game_creator_mention cm
-LEFT JOIN stg_creator_reach_latest rl ON rl.creator_id = cm.creator_id
-WHERE cm.confidence >= @CREATOR_MIN_CONFIDENCE@
-  AND cm.title IS NOT NULL AND TRIM(cm.title) != ''
-  AND cm.published_at IS NOT NULL;
-
+-- Creator rows (twitch/youtube) removed 2026-08-25 — vertical decommissioned product-wide.
 CREATE TEMP TABLE _cb_rows AS
-SELECT title, published_at, weight, channel FROM _cb_press_rows
-UNION ALL
-SELECT title, published_at, weight, channel FROM _cb_creator_rows;
+SELECT title, published_at, weight, channel FROM _cb_press_rows;
 
 CREATE TEMP TABLE _cb_articles AS
 SELECT title, weight, channel,

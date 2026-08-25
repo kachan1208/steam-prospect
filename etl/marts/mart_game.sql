@@ -58,17 +58,6 @@ ccu AS (
     -- Live concurrent players (steam_players_bulk.py -> player_counts, latest snapshot).
     SELECT appid, live_players FROM stg_player_count_latest
 ),
-twitch AS (
-    -- Current Twitch footprint per game from the twitch collector's mentions: total live
-    -- viewers (sum of per-stream reach_at_time — the viewer count when each streamer was seen
-    -- on this game) and the live stream count. Reflects the latest sweep.
-    SELECT appid,
-        SUM(COALESCE(reach_at_time, 0)) AS twitch_viewers,
-        COUNT(*) AS twitch_streams
-    FROM stg_game_creator_mention
-    WHERE platform = 'twitch'
-    GROUP BY appid
-),
 dev_x AS (
     -- The game's most PROMINENT official link PER PLATFORM, from stg_game_socials (guarded
     -- staging over the scraper's game_socials table — links harvested from the game's
@@ -148,9 +137,7 @@ SELECT
     -- none — which is most of the catalog (~2.6% coverage); never read it as "badly reviewed".
     gh.metacritic_url,
     gh.demo_appid,
-    CASE WHEN gh.demos_checked_at IS NOT NULL THEN gh.demo_appid IS NOT NULL END AS has_demo,
-    COALESCE(tw.twitch_viewers, 0) AS twitch_viewers,
-    COALESCE(tw.twitch_streams, 0) AS twitch_streams
+    CASE WHEN gh.demos_checked_at IS NOT NULL THEN gh.demo_appid IS NOT NULL END AS has_demo
 FROM stg_game g
 LEFT JOIN stg_primary_genre pg ON pg.appid = g.appid
 LEFT JOIN pct_ranks pr ON pr.appid = g.appid
@@ -160,5 +147,4 @@ LEFT JOIN ccu cc ON cc.appid = g.appid
 LEFT JOIN _game_players_summary gps ON gps.appid = g.appid
 LEFT JOIN _game_lifetime gl ON gl.appid = g.appid
 LEFT JOIN dev_x dx ON dx.appid = g.appid
-LEFT JOIN twitch tw ON tw.appid = g.appid
 LEFT JOIN src.games gh ON gh.appid = g.appid;

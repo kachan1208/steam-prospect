@@ -29,7 +29,7 @@ import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
  * the mockup DOES show (75% and 35%) rather than invented from nothing.
  *
  * Review velocity is the only series deep enough to compare across months today (CCU/
- * Twitch snapshots are typically a single current month — see GameTrendsChart's caveat),
+ * player snapshots are typically a single current month — see GameTrendsChart's caveat),
  * which is why this chart draws n_reviews only. Months before a game existed are gaps
  * (connectNulls off), not zeros.
  */
