@@ -13,6 +13,7 @@ import {
 
 import { request } from "../../lib/api";
 import { fmtCompact } from "../../lib/format";
+import { notableMonths } from "../../lib/notable";
 import { channelColor, CSS_VAR } from "../../lib/palette";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 
@@ -219,8 +220,10 @@ export function GameTrendsChart({
     if (bucket) bucket.push(e);
     else catalogByMonth.set(month, [e]);
   }
-  const catalogMonths = [...catalogByMonth.keys()].sort();
+  // Lines only where the review curve moved (lib/notable.ts); tooltip keeps all months.
+  const notable = notableMonths(data.map((d) => ({ period: d.period, value: d.n_reviews })));
   const releaseMonth = (catalogQuery.data ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
+  const catalogMonths = [...catalogByMonth.keys()].filter((m) => notable.has(m) || m === releaseMonth).sort();
   const hasCatalog = catalogMonths.length > 0;
 
   const twitchColor = channelColor("twitch");
@@ -334,7 +337,7 @@ export function GameTrendsChart({
             <LegendDot color={CSS_VAR.competition} label="Reviews / mo" />
             <LegendDot color={CSS_VAR.demand} label="Live players (avg)" />
             {hasEvents && <LegendTick color={EVENT_COLOR} label="Marketing event" />}
-            {hasCatalog && <LegendTick color={CATALOG_EVENT_COLOR} label="Release / patch / press" />}
+            {hasCatalog && <LegendTick color={CATALOG_EVENT_COLOR} label="Release / notable event" />}
           </div>
         </div>
 

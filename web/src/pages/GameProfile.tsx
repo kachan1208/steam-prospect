@@ -36,6 +36,7 @@ import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
 import { fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName } from "../lib/format";
 import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
+import { notableMonths } from "../lib/notable";
 import { CSS_VAR, MONO} from "../lib/palette";
 import { useDetailView } from "../lib/viewMode";
 
@@ -297,8 +298,11 @@ function ReviewVelocityBars({
     if (bucket) bucket.push(e);
     else eventsByMonth.set(month, [e]);
   }
-  const eventMonths = [...eventsByMonth.keys()].sort();
+  // Lines only where the CURVE moved (see lib/notable.ts) — every month's events stay
+  // readable in the tooltip; the release line is always drawn.
+  const notable = notableMonths(points.map((p) => ({ period: p.period, value: p.n_reviews })));
   const releaseMonth = (events ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
+  const eventMonths = [...eventsByMonth.keys()].filter((m) => notable.has(m) || m === releaseMonth).sort();
 
   return (
     <div>
