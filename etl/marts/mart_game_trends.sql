@@ -1,7 +1,7 @@
 -- mart_game_trends.sql
 -- Per-(appid, month) momentum time series: the signals Prospect collects, bucketed into a
--- single monthly grain so a game's trajectory (review velocity, live players, Twitch reach,
--- creator mentions) can be charted over time. Powers GET /api/games/{appid}/trends.
+-- single monthly grain so a game's trajectory (review velocity, live players reach,
+-- ) can be charted over time. Powers GET /api/games/{appid}/trends.
 --
 -- Columns (grain = one row per appid per 'YYYY-MM' that has ANY signal):
 --   n_reviews       reviews created that month. Sourced from src.review_histogram (Steam's
@@ -14,10 +14,6 @@
 --                    (GetNumberOfCurrentPlayers snapshots). Left NULL when no snapshot landed
 --                    that month — a gauge we did not measure, NOT zero players (0 would draw a
 --                    false floor on the line).
---   twitch_viewers  SUM(reach_at_time) of that month's Twitch creator mentions — identical
---                    definition to mart_game.twitch_viewers (the viewer count when each
---                    streamer was seen on the game). See the creator_reach_snapshot note below.
---   n_mentions      count of src.game_creator_mention rows dated that month (any platform),
 --                    bucketed on published_at.
 --
 -- Population: appids that are BOTH in mart_game AND have >= 1 review (the review requirement
@@ -29,14 +25,7 @@
 -- LEFT-JOINed onto that spine, COALESCE 0 for the count/sum metrics (a real "none observed"),
 -- NULL preserved for ccu_avg (see above).
 --
--- WHY NOT creator_reach_snapshot for twitch_viewers: creator_reach_snapshot(creator_id,
--- platform, captured_at, reach) has NO appid, so it cannot be attributed to a game per month
--- without cross-joining a creator's ENTIRE reach history onto every game they ever mentioned
--- (which would smear one mention across unrelated months). game_creator_mention.reach_at_time
--- is the correct per-(appid, month) figure — the reach captured AT the moment of a mention
--- that is itself tied to a specific appid and published_at — and is exactly what the app's
--- canonical mart_game.twitch_viewers already uses. Standalone SQL (no template placeholders), so
--- this file runs against `src` alone for testing.
+-- Creator/twitch columns removed 2026-08-25 with the creator vertical.
 
 DROP TABLE IF EXISTS mart_game_trends;
 
@@ -84,44 +73,20 @@ ccu AS (
     WHERE TRY_CAST(pc.captured_at AS TIMESTAMP) IS NOT NULL
     GROUP BY 1, 2
 ),
-twitch AS (
-    SELECT m.appid,
-        strftime(date_trunc('month', TRY_CAST(m.published_at AS TIMESTAMP)), '%Y-%m') AS period,
-        SUM(COALESCE(m.reach_at_time, 0)) AS twitch_viewers
-    FROM src.game_creator_mention m
-    WHERE m.platform = 'twitch'
-      AND TRY_CAST(m.published_at AS TIMESTAMP) IS NOT NULL
-    GROUP BY 1, 2
-),
-mentions AS (
-    SELECT m.appid,
-        strftime(date_trunc('month', TRY_CAST(m.published_at AS TIMESTAMP)), '%Y-%m') AS period,
-        COUNT(*) AS n_mentions
-    FROM src.game_creator_mention m
-    WHERE TRY_CAST(m.published_at AS TIMESTAMP) IS NOT NULL
-    GROUP BY 1, 2
-),
 spine AS (
     SELECT appid, period FROM rev
     UNION
     SELECT appid, period FROM ccu
-    UNION
-    SELECT appid, period FROM twitch
-    UNION
-    SELECT appid, period FROM mentions
+
 )
 SELECT
     s.appid,
     s.period,
     COALESCE(rev.n_reviews, 0)                 AS n_reviews,
-    ccu.ccu_avg                                AS ccu_avg,   -- NULL when unmeasured (not 0)
-    CAST(COALESCE(twitch.twitch_viewers, 0) AS BIGINT) AS twitch_viewers,
-    COALESCE(mentions.n_mentions, 0)           AS n_mentions
+    ccu.ccu_avg                                AS ccu_avg    -- NULL when unmeasured (not 0)
 FROM spine s
 JOIN elig e            ON e.appid = s.appid
 LEFT JOIN rev          ON rev.appid = s.appid      AND rev.period = s.period
 LEFT JOIN ccu          ON ccu.appid = s.appid      AND ccu.period = s.period
-LEFT JOIN twitch       ON twitch.appid = s.appid   AND twitch.period = s.period
-LEFT JOIN mentions     ON mentions.appid = s.appid AND mentions.period = s.period
 WHERE s.period IS NOT NULL
 ORDER BY s.appid, s.period;

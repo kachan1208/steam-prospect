@@ -37,20 +37,11 @@ JOIN stg_genre_membership gm ON gm.appid = m.appid
 WHERE a.source != 'steam_news' AND m.match_confidence >= @PRESS_MIN_CONFIDENCE@
 GROUP BY gm.genre;
 
-CREATE TEMP TABLE _mix_creator AS
-SELECT gm.genre, cm.platform AS channel,
-    COUNT(*) AS n_mentions,
-    SUM(COALESCE(cm.reach_at_time, rl.reach, 1))::DOUBLE AS reach_weighted
-FROM stg_game_creator_mention cm
-JOIN stg_genre_membership gm ON gm.appid = cm.appid
-LEFT JOIN stg_creator_reach_latest rl ON rl.creator_id = cm.creator_id
-WHERE cm.confidence >= @CREATOR_MIN_CONFIDENCE@
-GROUP BY gm.genre, cm.platform;
-
+-- Creator platforms (twitch/youtube) removed 2026-08-25 — that vertical is decommissioned
+-- product-wide; press is the marketing channel this mart measures now. The _mix_all shell
+-- stays so re-adding a channel later is a UNION arm, not a rewrite.
 CREATE TEMP TABLE _mix_all AS
-SELECT * FROM _mix_press
-UNION ALL
-SELECT * FROM _mix_creator;
+SELECT * FROM _mix_press;
 
 CREATE TEMP TABLE _mix_genre_totals AS
 SELECT genre, SUM(n_mentions) AS total_mentions, SUM(reach_weighted) AS total_reach_weighted

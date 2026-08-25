@@ -194,8 +194,6 @@ class GameProfile(BaseModel):
     # the router omits the columns there (see games.py::_has_players_summary).
     players_7d_avg: Optional[float] = None
     players_trend_7d_pct: Optional[float] = None
-    twitch_viewers: Optional[int] = None
-    twitch_streams: Optional[int] = None
     first_seen: Optional[str] = None   # when this game first entered our catalog (not Steam's release date)
     # Lifetime (steamcharts monthly, top-8k coverage): t0 = first month averaging 100+
     # concurrent players, death = first full month under 10. None = unknown, never zero
@@ -451,7 +449,7 @@ class ChannelMixRow(BaseModel):
     outlets carry no audience figure) — usually the more decision-relevant read, but a
     single huge channel can dominate it, so both are returned."""
 
-    channel: str  # 'press' | 'youtube' | 'reddit' | 'twitch' | 'x'
+    channel: str  # 'press' (creator channels removed 2026-08-25)
     n_mentions: int
     reach_weighted: float
     share_mentions: Optional[float] = None

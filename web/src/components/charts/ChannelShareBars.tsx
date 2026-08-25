@@ -4,7 +4,7 @@ import { channelColor, channelLabel, channelSortOrder } from "../../lib/palette"
 
 /**
  * Compact channel-mix bars — one horizontal share bar per marketing channel (Press /
- * YouTube / Reddit / Twitch / X), colored by CHANNEL IDENTITY (the fixed validated slots in
+ * — press-only since the creator vertical retired), colored by CHANNEL IDENTITY (slots in
  * lib/palette's channelColor — color follows the channel, never its rank), sorted by share.
  *
  * The bar encodes share of MENTION VOLUME (share_mentions) on an absolute 0-100% track —

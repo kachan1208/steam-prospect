@@ -14,7 +14,7 @@ import {
 import { request } from "../../lib/api";
 import { fmtCompact } from "../../lib/format";
 import { notableMonths } from "../../lib/notable";
-import { channelColor, CSS_VAR } from "../../lib/palette";
+import { CSS_VAR } from "../../lib/palette";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 
 /**
@@ -23,15 +23,9 @@ import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
  * small multiples (the same dual-axis-avoidance move as ReviewsTimelineChart /
  * SaturationTrend): a bar for the dominant COUNT metric plus one overlaid LINE on a
  * secondary axis for the audience/attention gauge that rides alongside it, so the two
- * very different scales never fight for one y-axis. Color is mono steel (lib/palette.ts):
- * CSS_VAR.demand/qualityGap are accent-300, CSS_VAR.competition is paper ~50% — the two
- * bar+line pairs stay visually distinct because mark TYPE (bar vs line) carries as much
- * of the distinction as color does; the Twitch bars keep their categorical channel color
- * (channelColor("twitch")) since that identity is shared with every other Twitch mark in
- * the app.
+ * very different scales never fight for one y-axis. Color is mono steel (lib/palette.ts).
  *
  *   Panel 1  sampled reviews / month (paper bars) + avg live players (accent-300 line, 2nd axis)
- *   Panel 2  Twitch viewers / month (channel-purple bars) + creator mentions (accent-300 line, 2nd axis)
  *
  * "My marketing events on the timeline" — one opt-in overlay rides on Panel 1 (the
  * review-velocity backbone): the org's own marketing log (GET /api/inputs/events?appid=…)
@@ -39,10 +33,9 @@ import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
  * the tooltip. Months with no charted trend row (no signal) are skipped so markers never
  * float.
  *
- * Reviews are the real multi-month backbone; the player-count / Twitch / mention series
- * are only as deep as the collectors have run (today typically a single current month),
- * so they render as a lone dot until history accumulates — see the caveat line below and
- * the mart header. ccu_avg is NULL (a gap, not zero) for any month with no snapshot;
+ * Reviews are the real multi-month backbone; the player-count series is only as deep as
+ * the collector has run, so it renders as a lone dot until history accumulates — see the
+ * caveat line below and the mart header. ccu_avg is NULL (a gap, not zero) for any month with no snapshot;
  * connectNulls keeps a single reading visible as a dot.
  *
  * Self-fetches by `appid` (via react-query + the exported `request`) unless `points` is
@@ -53,8 +46,6 @@ export interface GameTrendPoint {
   period: string; // 'YYYY-MM'
   n_reviews: number;
   ccu_avg: number | null;
-  twitch_viewers: number;
-  n_mentions: number;
 }
 
 interface GameTrendsResponse {
@@ -228,10 +219,7 @@ export function GameTrendsChart({
     .filter((m) => periodSet.has(m)).sort();
   const hasCatalog = catalogMonths.length > 0;
 
-  const twitchColor = channelColor("twitch");
   const hasCcu = data.some((d) => d.ccu_avg != null);
-  const hasTwitch = data.some((d) => d.twitch_viewers > 0);
-  const hasMentions = data.some((d) => d.n_mentions > 0);
 
   return (
     <div className="flex flex-col gap-4">
@@ -343,72 +331,13 @@ export function GameTrendsChart({
           </div>
         </div>
 
-        {/* Panel 2 — Twitch viewers + creator mentions */}
-        <div>
-          <div className="mb-1 text-xs text-ink-muted">Twitch viewers &amp; creator mentions / month</div>
-          <ResponsiveContainer width="100%" height={168}>
-            <ComposedChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-              <CartesianGrid stroke="var(--gridline)" vertical={false} />
-              <XAxis {...XAXIS_PROPS} />
-              <YAxis
-                yAxisId="twitch"
-                tick={{ fontSize: 10 }}
-                tickFormatter={(v: number) => fmtCompact(v)}
-                tickLine={false}
-                axisLine={false}
-                width={40}
-                allowDecimals={false}
-              />
-              <YAxis
-                yAxisId="mentions"
-                orientation="right"
-                tick={{ fontSize: 10 }}
-                tickFormatter={(v: number) => fmtCompact(v)}
-                tickLine={false}
-                axisLine={false}
-                width={32}
-                allowDecimals={false}
-              />
-              <Tooltip
-                cursor={{ fill: "var(--gridline)", opacity: 0.5 }}
-                content={({ active, payload, label }) => {
-                  if (!active || !payload || payload.length === 0) return null;
-                  const p = payload[0].payload as GameTrendPoint;
-                  return (
-                    <TooltipPanel
-                      title={String(label)}
-                      rows={[
-                        { label: "Twitch viewers", value: fmtCompact(p.twitch_viewers), color: twitchColor },
-                        { label: "Creator mentions", value: fmtCompact(p.n_mentions), color: CSS_VAR.qualityGap },
-                      ]}
-                    />
-                  );
-                }}
-              />
-              <Bar yAxisId="twitch" dataKey="twitch_viewers" fill={twitchColor} radius={[4, 4, 0, 0]} maxBarSize={20} />
-              <Line
-                yAxisId="mentions"
-                type="linear"
-                dataKey="n_mentions"
-                stroke={CSS_VAR.qualityGap}
-                strokeWidth={1.5}
-                dot={{ r: 3, fill: CSS_VAR.qualityGap, strokeWidth: 0 }}
-                connectNulls
-              />
-            </ComposedChart>
-          </ResponsiveContainer>
-          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-ink-muted">
-            <LegendDot color={twitchColor} label="Twitch viewers" />
-            <LegendDot color={CSS_VAR.qualityGap} label="Creator mentions" />
-          </div>
-        </div>
       </div>
 
-      {(!hasCcu || !hasTwitch || !hasMentions) && (
+      {!hasCcu && (
         <p className="text-[11px] italic text-ink-muted">
           Reviews/month is the real multi-month history (from the sampled reviews table — recency-biased for
-          older/popular titles). Live-player, Twitch, and creator-mention snapshots are recent, so those series are
-          typically a single current month today and thicken as the collectors keep running.
+          older/popular titles). Live-player snapshots are recent, so that series is typically a single current
+          month today and thickens as the collector keeps running.
         </p>
       )}
     </div>

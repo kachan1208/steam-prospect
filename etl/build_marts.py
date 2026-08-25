@@ -641,7 +641,6 @@ DENYLIST_BUZZ_WORD = [
 # article_game_mentions -- hence constants that mirror PRESS_MIN_CONFIDENCE /
 # PRESS_AUTHOR_MIN_ARTICLES, kept as separate names in case creator-match tuning needs to
 # diverge from article-match tuning later (same starting values today).
-CREATOR_MIN_CONFIDENCE = 0.2      # game_creator_mention.confidence floor (mirrors PRESS_MIN_CONFIDENCE)
 CREATOR_PITCH_MIN_MENTIONS = 1    # a (creator, genre) needs >= this many mentions to be kept
                                   # (mirrors PRESS_AUTHOR_MIN_ARTICLES's role but floored at 1,
                                   # not 3 -- channel collection is new/low-volume; raise once
@@ -740,7 +739,6 @@ MART_FILES = [
     "mart_game_teardown.sql",
     "mart_game_aspect_reviews.sql",
     "mart_press.sql",
-    "mart_creator_pitch.sql",
     "mart_channel_mix.sql",
     "mart_channel_buzz.sql",
     # These are LAST on purpose: they read marts built above (mart_game, mart_niche,
@@ -820,7 +818,6 @@ def build_params() -> dict[str, str]:
         "BUZZ_RECENT_MONTHS": BUZZ_RECENT_MONTHS,
         "BUZZ_MIN_TOTAL_MENTIONS": BUZZ_MIN_TOTAL_MENTIONS,
         "BUZZ_SLOPE_EPSILON": BUZZ_SLOPE_EPSILON,
-        "CREATOR_MIN_CONFIDENCE": CREATOR_MIN_CONFIDENCE,
         "CREATOR_PITCH_MIN_MENTIONS": CREATOR_PITCH_MIN_MENTIONS,
         "TAG_PAIR_MIN_GAMES": TAG_PAIR_MIN_GAMES,
         "CCU_STALE_DAYS": CCU_STALE_DAYS,
@@ -1232,7 +1229,6 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
 # app's "connect a channel" empty state) -- the .sql files never need to know which mode
 # they're in.
 # --------------------------------------------------------------------------------------
-MARKETING_SOURCE_TABLES = ["creator", "game_creator_mention", "creator_reach_snapshot"]
 
 
 def _sqlite_table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
@@ -1242,71 +1238,6 @@ def _sqlite_table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
     except duckdb.Error:
         return False
 
-
-def create_marketing_staging(con: duckdb.DuckDBPyConnection) -> bool:
-    """Creates stg_creator / stg_game_creator_mention / stg_creator_reach_snapshot /
-    stg_creator_reach_latest from the scraper's creator/game_creator_mention/
-    creator_reach_snapshot SQLite tables when all three exist, or as empty typed tables
-    otherwise (see MARKETING_SOURCE_TABLES / module docstring above). Returns True if real
-    source tables were found (only used for the build-time log line) -- the staging tables
-    themselves look identical to downstream SQL either way."""
-    have_all = all(_sqlite_table_exists(con, t) for t in MARKETING_SOURCE_TABLES)
-
-    if have_all:
-        con.execute(
-            """
-            CREATE TEMP TABLE stg_creator AS
-            SELECT creator_id, platform, handle, display_name, url, first_seen
-            FROM src.creator;
-
-            CREATE TEMP TABLE stg_game_creator_mention AS
-            SELECT m.appid, m.creator_id, m.platform,
-                TRY_CAST(m.published_at AS TIMESTAMP) AS published_at,
-                m.url, m.title, m.reach_at_time, m.confidence
-            FROM src.game_creator_mention m
-            WHERE m.appid IS NOT NULL AND m.creator_id IS NOT NULL;
-
-            CREATE TEMP TABLE stg_creator_reach_snapshot AS
-            SELECT creator_id, platform, TRY_CAST(captured_at AS TIMESTAMP) AS captured_at, reach
-            FROM src.creator_reach_snapshot;
-            """
-        )
-    else:
-        con.execute(
-            """
-            CREATE TEMP TABLE stg_creator (
-                creator_id INTEGER, platform VARCHAR, handle VARCHAR, display_name VARCHAR,
-                url VARCHAR, first_seen VARCHAR
-            );
-
-            CREATE TEMP TABLE stg_game_creator_mention (
-                appid INTEGER, creator_id INTEGER, platform VARCHAR,
-                published_at TIMESTAMP, url VARCHAR, title VARCHAR, reach_at_time INTEGER,
-                confidence DOUBLE
-            );
-
-            CREATE TEMP TABLE stg_creator_reach_snapshot (
-                creator_id INTEGER, platform VARCHAR, captured_at TIMESTAMP, reach INTEGER
-            );
-            """
-        )
-
-    # Latest reach snapshot per creator -- built either way (empty in the degraded case) so
-    # downstream marts have exactly one place to look up "current known reach" regardless of
-    # mode.
-    con.execute(
-        """
-        CREATE TEMP TABLE stg_creator_reach_latest AS
-        SELECT creator_id, platform, reach, captured_at
-        FROM (
-            SELECT creator_id, platform, reach, captured_at,
-                row_number() OVER (PARTITION BY creator_id ORDER BY captured_at DESC) AS rn
-            FROM stg_creator_reach_snapshot
-        )
-        WHERE rn = 1;
-        """
-    )
-    return have_all
 
 
 def create_ccu_staging(con: duckdb.DuckDBPyConnection) -> bool:
@@ -2225,12 +2156,6 @@ def main() -> int:
 
         print("[etl] building staging tables ...")
         create_staging(con, params)
-
-        have_marketing = create_marketing_staging(con)
-        print(
-            "[etl] marketing source tables (creator/game_creator_mention/creator_reach_snapshot): "
-            + ("found" if have_marketing else "ABSENT or not yet migrated — building empty marketing marts")
-        )
 
         have_ccu = create_ccu_staging(con)
         print("[etl] player_counts (live CCU): "

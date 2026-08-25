@@ -173,6 +173,8 @@ export function tierColor(tier: string, theme: Theme): string {
 // fewer simultaneous channel colors); the standing mitigation is that ChannelShareBars
 // always prints the channel name next to its swatch, so identity is never color-alone
 // even where two channels' hues sit close together.
+// Creator channels (youtube/twitch) retired 2026-08-25; slots kept for stable colors
+// if a channel ever returns.
 const CHANNEL_ORDER = ["press", "youtube", "reddit", "twitch", "x"] as const;
 export type MarketingChannel = (typeof CHANNEL_ORDER)[number];
 

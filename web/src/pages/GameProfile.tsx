@@ -810,7 +810,6 @@ export default function GameProfile() {
                     profile.players_trend_7d_pct != null
                       ? `${profile.players_trend_7d_pct >= 0 ? "+" : ""}${profile.players_trend_7d_pct.toFixed(1)}% vs prior 7d`
                       : null,
-                    profile.twitch_viewers ? `${fmtCompact(profile.twitch_viewers)} watching on Twitch` : null,
                   ]
                     .filter(Boolean)
                     .join(" · ") || undefined
@@ -872,7 +871,6 @@ export default function GameProfile() {
               total_reviews: profile.total_reviews,
               owners_mid: profile.owners_mid,
               live_players: profile.live_players,
-              twitch_viewers: profile.twitch_viewers,
             }}
             ownersPerReview={ownersPerReview}
           />
