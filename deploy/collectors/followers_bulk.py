@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
 STEAM_DB = os.environ.get("STEAM_DB", "/root/steam-scraper/steam_games.db")
-SIGNALS_DB = os.environ.get("SIGNALS_DB", "/root/steam-scraper/signals.db")
+SIGNALS_DB = os.environ.get("SIGNALS_DB", "/root/prospect/data/signals.db")
 WORKERS = int(os.environ.get("WORKERS", "3"))
 RATE_PER_SEC = float(os.environ.get("RATE_PER_SEC", "0.8"))
 # One 429 pauses EVERYTHING this long. Retrying a 429 immediately just multiplies the

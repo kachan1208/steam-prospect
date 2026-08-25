@@ -27,7 +27,7 @@ import requests
 
 API_KEY = os.environ["STEAM_API_KEY"]
 STEAM_DB = os.environ.get("STEAM_DB", "/root/steam-scraper/steam_games.db")
-SIGNALS_DB = os.environ.get("SIGNALS_DB", "/root/steam-scraper/signals.db")
+SIGNALS_DB = os.environ.get("SIGNALS_DB", "/root/prospect/data/signals.db")
 BATCH = int(os.environ.get("BATCH", "30"))
 RATE_PER_SEC = float(os.environ.get("RATE_PER_SEC", "1.5"))
 COUNTRY = os.environ.get("COUNTRY", "US")
