@@ -100,23 +100,48 @@ WHERE g.total_reviews >= mr.min_reviews
 
 -- DEMAND OVER 90 DAYS — the metric the Radar feed ranks on ("top movers by 90d demand
 -- trend"). Nothing in the marts carried it: players_trend_7d_pct is a 7-day window, and
--- saturation_yoy counts RELEASES (pipeline), not demand. So it is computed here, from the
--- same _niche_pop the rest of this file aggregates.
+-- saturation_yoy counts RELEASES (pipeline), not demand.
 --
--- CAVEAT, and it is not small: stg_review is a recency-biased SAMPLE (the keeper deepens
--- toward min(true_total, 20k) per game), so this is sample velocity, not Steam's true
--- review velocity. mart_game.n_reviews_trailing_30d already ships with exactly this
--- caveat. It is directionally sound BECAUSE both windows are drawn from the same sample —
--- the bias largely cancels in a ratio — but the absolute counts are not Steam's.
+-- SOURCE CHANGED 2026-08-23: stg_review_histogram (Steam's own per-month review totals),
+-- NOT stg_review. The first cut counted the sampled reviews table and asserted the bias
+-- "largely cancels in a ratio". Measured, it does the opposite: the keeper collects NEW
+-- reviews near-completely while a big game's historical tail stays capped by deepen-reviews,
+-- so the recent window is full and the prior window is a sparse sample. Radar's entire top
+-- row read +980%..+1530%; against the histogram, Rainbow Six (sampled ratio 16.0x) is FLAT
+-- (~11K/mo both windows), NBA 2K26 (55x) is flat, EA FC 26 (354x) is a real but ~2.5x
+-- riser. The bias is asymmetric BETWEEN the windows, so a ratio amplifies it.
+--
+-- The histogram is uncapped truth for every game with >=50 total reviews — 42,103 games
+-- carrying 97.6% of all review volume. Games without one (the <50-review tail) contribute
+-- nothing here, which biases niche totals toward covered games; for a per-niche demand
+-- TREND that is the acceptable side of the trade, because the alternative contributes
+-- fiction.
+--
+-- Windows are whole months anchored on the last GLOBALLY complete month (max period - 1):
+-- "90 days" = 3 calendar months, now = [anchor-2 .. anchor] vs prev = [anchor-5 .. anchor-3].
+-- A global anchor, not per-game: anchoring on each game's own last month would date a dead
+-- game's "current" trend to whenever it died. Known softness: histograms are refreshed in
+-- bulk (most fetched ~monthly), so the anchor month is truncated at fetch date for most
+-- games — uniformly across every game and niche, which preserves ranking; the trend lags
+-- reality by up to a month until histogram refresh cadence improves.
 DROP TABLE IF EXISTS _niche_demand90;
 CREATE TEMP TABLE _niche_demand90 AS
-WITH v AS (
-    SELECT appid,
-        COUNT(*) FILTER (WHERE review_date >= CURRENT_DATE - INTERVAL 90 DAY) AS r_now,
-        COUNT(*) FILTER (WHERE review_date >= CURRENT_DATE - INTERVAL 180 DAY
-                           AND review_date <  CURRENT_DATE - INTERVAL 90 DAY) AS r_prev
-    FROM stg_review
-    GROUP BY appid
+WITH anchor AS (
+    SELECT date_trunc('month', MAX(period_month)) - INTERVAL 1 MONTH AS m
+    FROM stg_review_histogram
+),
+v AS (
+    SELECT h.appid,
+        SUM(h.n_reviews) FILTER (
+            WHERE h.period_month >  (SELECT m FROM anchor) - INTERVAL 3 MONTH
+              AND h.period_month <= (SELECT m FROM anchor)
+        ) AS r_now,
+        SUM(h.n_reviews) FILTER (
+            WHERE h.period_month >  (SELECT m FROM anchor) - INTERVAL 6 MONTH
+              AND h.period_month <= (SELECT m FROM anchor) - INTERVAL 3 MONTH
+        ) AS r_prev
+    FROM stg_review_histogram h
+    GROUP BY h.appid
 )
 SELECT p.dimension, p.key, p.win, p.min_reviews,
        SUM(COALESCE(v.r_now, 0))  AS reviews_90d,
