@@ -13,7 +13,7 @@ import {
 
 import { request } from "../../lib/api";
 import { fmtCompact } from "../../lib/format";
-import { notableMonths } from "../../lib/notable";
+import { markerMonths } from "../../lib/notable";
 import { CSS_VAR } from "../../lib/palette";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 
@@ -211,12 +211,17 @@ export function GameTrendsChart({
     if (bucket) bucket.push(e);
     else catalogByMonth.set(month, [e]);
   }
-  // Lines only where the review curve moved (lib/notable.ts); tooltip keeps all months.
-  const notable = notableMonths(data.map((d) => ({ period: d.period, value: d.n_reviews })));
+  // One shared gate for the catalog plumb lines (lib/notable.ts markerMonths: adaptive
+  // spike/drop rule, sparse-events fallback, 14-line cap, release always drawn); the
+  // tooltip keeps every month's events either way.
   const releaseMonth = (catalogQuery.data ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
-  // Spikes always marked; events explain them in the tooltip when the feed has one.
-  const catalogMonths = [...new Set([...notable, ...(releaseMonth ? [releaseMonth] : [])])]
-    .filter((m) => periodSet.has(m)).sort();
+  const catalogMonths = [
+    ...markerMonths(
+      data.map((d) => ({ period: d.period, value: d.n_reviews })),
+      catalogByMonth.keys(),
+      releaseMonth,
+    ),
+  ].sort();
   const hasCatalog = catalogMonths.length > 0;
 
   const hasCcu = data.some((d) => d.ccu_avg != null);
