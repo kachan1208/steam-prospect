@@ -151,7 +151,7 @@ def n(t):
     try: return con.execute("SELECT count(*) FROM " + t).fetchone()[0]
     except Exception: return None
 counts = {"games": n("games"), "reviews": n("reviews"), "articles": n("articles"),
-          "mentions": n("game_creator_mention"), "players": n("player_counts")}
+          "players": n("player_counts")}
 def fresh_hours(sql):  # hours since the newest row of a source (data freshness)
     try:
         v = con.execute(sql).fetchone()[0]
@@ -166,7 +166,6 @@ def fresh_hours(sql):  # hours since the newest row of a source (data freshness)
 freshness = {
     "reviews":  fresh_hours("SELECT max(timestamp_created) FROM reviews"),
     "articles": fresh_hours("SELECT max(fetched_at) FROM articles"),
-    "twitch":   fresh_hours("SELECT max(published_at) FROM game_creator_mention WHERE platform='twitch'"),
     "players":  fresh_hours("SELECT max(captured_at) FROM player_counts"),
     "games":    fresh_hours("SELECT max(updated_at) FROM games"),
 }
