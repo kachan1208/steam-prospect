@@ -5,6 +5,29 @@ committed work — a place where an idea keeps its reasoning until someone picks
 
 ---
 
+## Cut mart_game_aspect_reviews' 4-hour build step
+
+**The problem, measured (2026-08-22).** This one mart takes 14,239s of an 18,276s ETL — 78% of
+the whole build, 15× the next-slowest mart. The cost arrived with the full-review columns
+(review_text capped at 2000 chars + steam_url): all ~1.77M surviving rows now carry up to 2KB of
+text through the 10-arm excerpt regex, the windowing pass, and the final
+`ORDER BY appid, aspect, sentiment, votes_up` — a multi-GB sort on a box with a 2.5GB DuckDB
+memory limit, so it spills (the run's scratch peaked at 20GB). The mart file's own header warns
+about dragging review_text through a sort; the final ORDER BY is the same trap one step later.
+
+**The shape of the fix.** Keep the pipeline text-free end to end and attach the capped text LAST,
+keyed on recommendationid: build the final table without review_text/steam_url (ordered as
+today), then attach the two columns via a keyed join against a small (recommendationid →
+capped_text, author_steamid) side table built once from the survivors. The sort then moves ~50
+bytes/row instead of ~2KB. Ballpark from the pre-column era: this step ran minutes, not hours.
+
+**Guardrails already in place.** etl/tests/test_mart_aspect_reviews_full_text.py pins the cap
+boundary (1999/2000/2001), character-vs-byte truncation, and the NULL-steamid permalink rule —
+the fix must keep all of it green. Don't rush it into a nightly: validate the rewrite against a
+timed run on the droplet first (the 2026-08-21 nightly died at a 4h timeout exactly here).
+
+---
+
 ## Event markers on lifetime charts
 
 **The idea.** On every chart that runs across a game's life — review velocity, owners, players,
