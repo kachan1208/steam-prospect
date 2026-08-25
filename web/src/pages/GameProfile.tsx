@@ -37,7 +37,7 @@ import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
 import { fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName } from "../lib/format";
 import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
-import { notableMonths } from "../lib/notable";
+import { markerMonths } from "../lib/notable";
 import { CSS_VAR, MONO} from "../lib/palette";
 import { useDetailView } from "../lib/viewMode";
 
@@ -311,16 +311,20 @@ function ReviewVelocityBars({
     if (bucket) bucket.push(e);
     else eventsByMonth.set(month, [e]);
   }
-  // Lines only where the CURVE moved (see lib/notable.ts) — every month's events stay
-  // readable in the tooltip; the release line is always drawn.
-  const notable = notableMonths(points.map((p) => ({ period: p.period, value: p.n_reviews })));
+  // One shared gate for the plumb lines (see lib/notable.ts markerMonths): adaptive
+  // spike/drop detection so small/mid games mark too, a sparse-events fallback, a 14-line
+  // readability cap, and the release always drawn. Spike months are marked event or not —
+  // CS2's real inflections (2019 operations, the 2023-03 CS2 announcement, the 2023-09
+  // release) predate our article scrape, so gating lines on having an event erased them
+  // all. Every month's events stay readable in the tooltip regardless.
   const releaseMonth = (events ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
-  // Spike months are ALWAYS marked, event or not — the marker's job is to make the change
-  // spottable; the event (when our feed has one) is the explanation in the tooltip. Verified
-  // on CS2: its real inflections (2019 operations, the 2023-03 CS2 announcement, the 2023-09
-  // release) predate our article scrape, so gating lines on having an event erased them all.
-  const eventMonths = [...new Set([...notable, ...(releaseMonth ? [releaseMonth] : [])])]
-    .filter((m) => periodSet.has(m)).sort();
+  const eventMonths = [
+    ...markerMonths(
+      points.map((p) => ({ period: p.period, value: p.n_reviews })),
+      eventsByMonth.keys(),
+      releaseMonth,
+    ),
+  ].sort();
 
   return (
     <div>

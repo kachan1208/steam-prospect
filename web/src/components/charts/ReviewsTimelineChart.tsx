@@ -3,7 +3,7 @@ import { Bar, BarChart, CartesianGrid, Line, LineChart, ReferenceLine, Responsiv
 
 import { request, type ReviewTimelinePoint } from "../../lib/api";
 import { fmtCompact, fmtPct } from "../../lib/format";
-import { notableMonths } from "../../lib/notable";
+import { markerMonths } from "../../lib/notable";
 import { CSS_VAR } from "../../lib/palette";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 
@@ -76,14 +76,17 @@ export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimeline
     if (bucket) bucket.push(e);
     else eventsByMonth.set(month, [e]);
   }
-  // Lines only where the CURVE moved (see lib/notable.ts) — tooltips keep every month's
-  // events; only the plumb lines are gated, release always drawn.
-  const notable = notableMonths(points.map((p) => ({ period: p.period, value: p.n_reviews })));
+  // One shared gate for the plumb lines (see lib/notable.ts markerMonths: adaptive
+  // spike/drop rule, sparse-events fallback, 14-line cap, release always drawn). Tooltips
+  // keep every month's events; only the lines are gated.
   const releaseMonth = (eventsQuery.data ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
-  // Spikes always marked; an event in the same month is the tooltip's explanation (see the
-  // GameProfile note — CS2's real inflections predate our article scrape).
-  const eventMonths = [...new Set([...notable, ...(releaseMonth ? [releaseMonth] : [])])]
-    .filter((m) => periodSet.has(m)).sort();
+  const eventMonths = [
+    ...markerMonths(
+      points.map((p) => ({ period: p.period, value: p.n_reviews })),
+      eventsByMonth.keys(),
+      releaseMonth,
+    ),
+  ].sort();
 
   if (points.length === 0) {
     return (
