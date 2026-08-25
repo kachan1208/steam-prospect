@@ -224,7 +224,7 @@ cd /root/steam-scraper || exit 1
 # concurrent WITH review_deepen + 2 app workers) peaked past 4GB and swap-thrashed the box into an
 # unreachable state. Lane B (~40min) is hidden under steam_scrape/review_refresh, so the barrier
 # costs ~no wall time; it only caps peak memory.
-run_step_bg "news"   2400 "./run_news.sh"
+run_step_bg "news"   3000 "./run_news.sh"
 # twitch REMOVED from this lane (2026-08-22). It failed 22 of 26 nightlies here with "database is
 # locked" — not for lack of safeguards (twitch_bulk sets busy_timeout=120000 and commits every 15
 # games), but because SQLite gives no fairness guarantee: against four concurrent lane-B writers
@@ -284,7 +284,7 @@ run_step "steam_scrape"     3600 "./run_full.sh"
 # it hit "database is locked" two nights running while Lane B wrote alongside it. Its data
 # (unreleased-cohort metadata) is a rotation, not a dependency of the steps below; fetching
 # it at 19:15 instead of ~22:30 costs nothing.
-run_step "review_refresh"   2700 "python3 -m steam_scraper.scraper --db steam_games.db review-summary --workers 16 --rate 12.0 --refresh-older-than-days 7 --limit 25000"
+run_step "review_refresh"   3600 "python3 -m steam_scraper.scraper --db steam_games.db review-summary --workers 16 --rate 12.0 --refresh-older-than-days 7 --limit 25000"
 run_step "review_histogram" 1800 "python3 -m steam_scraper.scraper --db steam_games.db review-histogram --min-reviews 50 --workers 16 --rate 10.0"
 
 # ── Barrier: Lane B must finish BEFORE review_deepen so the two heavy concurrent-worker phases
@@ -376,7 +376,11 @@ grep -E '^\[etl\] ran ' "$ETL_LOG" 2>/dev/null | sort -t'(' -k2 -rn | head -8 | 
 ETL_DUR=$(( $(date -u +%s) - ETL_T0 ))
 if [ "$ETL_RC" -eq 0 ]; then
     docker restart prospect
-    ls -t /root/prospect/data/prospect_*.duckdb 2>/dev/null | tail -n +4 | xargs -r rm -f
+    # Keep TWO marts, not three (2026-08-25). The full-review-text columns grew each mart to
+    # ~2.4GB; three of them is 7.3GB on a disk whose free space IS the ETL's spill ceiling —
+    # the 2026-08-24 nightly OOMed at a 20.2GiB cap that used to be 25+. Two marts = current
+    # + one rollback, which is all the rollback that has ever been used.
+    ls -t /root/prospect/data/prospect_*.duckdb 2>/dev/null | tail -n +3 | xargs -r rm -f
     # Corrected globs: the scratch artifacts are named <version>.duckdb.building{,.wal,.tmp/},
     # so the old *.duckdb.tmp / *.duckdb.wal patterns matched NOTHING and every run's spill
     # (up to 18GB) leaked. The pre-build sweep above is the belt; this is the braces.
