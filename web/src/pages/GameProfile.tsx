@@ -11,7 +11,7 @@ import { LaunchShapeBars } from "../components/charts/LaunchShapeBars";
 import { PressBySourceChart } from "../components/charts/PressBySourceChart";
 import { PressTimelineChart } from "../components/charts/PressTimelineChart";
 import { ReviewsTimelineChart } from "../components/charts/ReviewsTimelineChart";
-import { TooltipPanel } from "../components/charts/TooltipPanel";
+import { TooltipPanel, type TooltipRow } from "../components/charts/TooltipPanel";
 import { GameTrendsChart } from "../components/charts/GameTrendsChart";
 import { NotableCoverageCard } from "../components/NotableCoverageCard";
 import { Badge } from "../components/ui/Badge";
@@ -22,12 +22,14 @@ import { trackEvent } from "../lib/analytics";
 import {
   useGameChannelMix,
   useGameComparables,
+  useGameEvents,
   useGameProfile,
   useGameReviewsSummary,
   useGameTeardown,
   useLaunchCurve,
   useMarketBenchmarks,
   useNicheDetail,
+  type GameEvent,
   type ReviewTimelinePoint,
 } from "../lib/api";
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
@@ -258,18 +260,21 @@ function EstimateRow({
  * the mockup's arbitrary "highlight week" — not a fabricated sale event.
  *
  * `eventMarker` wires the mockup's dashed vertical "-20% SALE · JUL 30" annotation through to
- * a real <ReferenceLine> (dashed "3 4" per the handoff's event-marker spec) — cheap to add
- * since this chart owns its own recharts tree. No caller passes one: Prospect doesn't collect
- * discount/event history, so inventing a date here would be exactly the fabricated series the
- * brief warns against. Left wired rather than deleted so a future price-event feed is a
- * one-line change, not a new chart.
+ * a real <ReferenceLine> (dashed "3 4" per the handoff's event-marker spec). It sat with no
+ * caller until 2026-08-25 because Prospect had no real event feed and inventing a date would
+ * be a fabricated series; mart_game_event (release / shipped updates / press) is that feed
+ * now, passed in as `events` — the "why did THIS month spike" answer this chart's mockup
+ * annotation was always sketching. The single-marker prop stays for the future price-drop
+ * feed (price_snapshots started accruing 2026-08-24).
  */
 function ReviewVelocityBars({
   points,
   eventMarker,
+  events,
 }: {
   points: ReviewTimelinePoint[];
   eventMarker?: { period: string; label: string };
+  events?: GameEvent[];
 }) {
   if (points.length === 0) {
     return (
@@ -280,6 +285,20 @@ function ReviewVelocityBars({
   }
 
   const peak = points.reduce((best, p) => (p.n_reviews > best.n_reviews ? p : best), points[0]);
+
+  // Catalog events bucketed onto charted months — same overlay language as the lifetime and
+  // trends charts: muted plumb lines, release month labelled, titles in the tooltip.
+  const periodSet = new Set(points.map((p) => p.period));
+  const eventsByMonth = new Map<string, GameEvent[]>();
+  for (const e of events ?? []) {
+    const month = e.event_date.slice(0, 7);
+    if (!periodSet.has(month)) continue;
+    const bucket = eventsByMonth.get(month);
+    if (bucket) bucket.push(e);
+    else eventsByMonth.set(month, [e]);
+  }
+  const eventMonths = [...eventsByMonth.keys()].sort();
+  const releaseMonth = (events ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
 
   return (
     <div>
@@ -315,24 +334,38 @@ function ReviewVelocityBars({
               }}
             />
           )}
+          {eventMonths.map((month) => (
+            <ReferenceLine
+              key={`ev-${month}`}
+              x={month}
+              stroke="var(--text-muted)"
+              strokeDasharray="2 5"
+              strokeOpacity={month === releaseMonth ? 0.9 : 0.5}
+              label={
+                month === releaseMonth
+                  ? { value: "Released", position: "top", fill: "var(--text-muted)", fontSize: 9 }
+                  : undefined
+              }
+            />
+          ))}
           <Tooltip
             cursor={{ fill: "var(--gridline)", opacity: 0.5 }}
             content={({ active, payload, label }) => {
               if (!active || !payload || payload.length === 0) return null;
               const p = payload[0].payload as ReviewTimelinePoint;
-              return (
-                <TooltipPanel
-                  title={monthLabel(String(label))}
-                  rows={[
-                    {
-                      label: "Reviews",
-                      value: fmtCompact(p.n_reviews),
-                      color: p.period === peak.period ? "var(--brand)" : BAR_MUTED,
-                    },
-                    { label: "Positive", value: fmtCompact(p.n_positive) },
-                  ]}
-                />
-              );
+              const rows: TooltipRow[] = [
+                {
+                  label: "Reviews",
+                  value: fmtCompact(p.n_reviews),
+                  color: p.period === peak.period ? "var(--brand)" : BAR_MUTED,
+                },
+                { label: "Positive", value: fmtCompact(p.n_positive) },
+              ];
+              for (const e of eventsByMonth.get(String(label)) ?? []) {
+                const t = e.title.length > 60 ? `${e.title.slice(0, 57)}…` : e.title;
+                rows.push({ label: e.kind.charAt(0).toUpperCase() + e.kind.slice(1), value: t, color: "var(--text-muted)" });
+              }
+              return <TooltipPanel title={monthLabel(String(label))} rows={rows} />;
             }}
           />
           <Bar dataKey="n_reviews" radius={[2, 2, 0, 0]} maxBarSize={28}>
@@ -360,6 +393,7 @@ export default function GameProfile() {
   const profileQ = useGameProfile(validAppid ? appid : null);
   const comparablesQ = useGameComparables(validAppid ? appid : null);
   const reviewsQ = useGameReviewsSummary(validAppid ? appid : null);
+  const eventsQ = useGameEvents(validAppid ? appid : null);
   const genreCurveQ = useLaunchCurve(profileQ.data?.primary_genre ?? "__all__");
   const benchmarksQ = useMarketBenchmarks();
   const teardownQ = useGameTeardown(validAppid ? appid : null);
@@ -633,7 +667,7 @@ export default function GameProfile() {
             {reviewsQ.isLoading && (
               <div className="flex h-[150px] items-center justify-center text-xs text-ink-muted">Loading…</div>
             )}
-            {reviewsQ.data && <ReviewVelocityBars points={reviewsQ.data.timeline} />}
+            {reviewsQ.data && <ReviewVelocityBars points={reviewsQ.data.timeline} events={eventsQ.data} />}
           </BlueprintPanel>
 
           <div className="grid grid-cols-1 gap-[22px] sm:grid-cols-2">
