@@ -19,6 +19,7 @@ import { SocialLinks } from "../components/ui/SocialLinks";
 import { Meter, BulletMeter } from "../components/ui/Meter";
 import { ViewToggle } from "../components/ui/ViewToggle";
 import { trackEvent } from "../lib/analytics";
+import { gameWatchlistId, toggleGameWatchlist, useWatchlist, WATCHLIST_CAP } from "../lib/watchlist";
 import {
   useGameChannelMix,
   useGameComparables,
@@ -155,20 +156,32 @@ function CompareToggle({ appid, name }: { appid: number; name: string | null }) 
   );
 }
 
-/** "+ Watchlist" — the mockup's secondary header action (4c) and the trigger for the
- * Watchlist feature (4f). That page is still a shell (src/pages/Watchlist.tsx — another
- * agent's file) with no persisted store behind it yet, and wiring one up isn't this page's
- * to build (it would live in src/lib/*, also out of scope here) — so this renders the
- * correct hairline affordance but stays honestly inert rather than faking a save. */
-function WatchlistButton() {
+/** "+ Watchlist" — the mockup's secondary header action (4c) and the entry point to the
+ * Watchlist page (4f). It was deliberately inert while the store did not exist; it does now
+ * (src/lib/watchlist.ts, same versioned-localStorage shape as compareList), so this is wired.
+ * An inert button here would have made the Watchlist page a dead end: reachable, and
+ * impossible to put anything into. */
+function WatchlistButton({ appid, name }: { appid: number; name?: string | null }) {
+  const entries = useWatchlist();
+  const on = entries.some((e) => e.id === gameWatchlistId(appid));
   return (
     <button
       type="button"
-      disabled
-      title="Watchlist is coming soon — not yet wired to persistent storage."
-      className="inline-flex cursor-not-allowed items-center gap-1.5 border border-chartborder px-3.5 py-[7px] text-xs font-semibold text-ink-secondary opacity-50"
+      aria-pressed={on}
+      onClick={() => {
+        const r = toggleGameWatchlist(appid, name);
+        if (r === "full") window.alert(`Watchlist is full (${WATCHLIST_CAP} items).`);
+        else trackEvent("view_save");
+      }}
+      title={on ? "Remove from watchlist" : "Track this game on the Watchlist page"}
+      className={clsx(
+        "inline-flex items-center gap-1.5 border px-3.5 py-[7px] text-xs font-semibold transition-colors",
+        on
+          ? "border-brand bg-brand-tint text-brand"
+          : "border-chartborder text-ink-secondary hover:text-ink-primary",
+      )}
     >
-      + Watchlist
+      {on ? "✓ Watchlist" : "+ Watchlist"}
     </button>
   );
 }
@@ -646,7 +659,7 @@ export default function GameProfile() {
             {/* Actions: "+ Watchlist" (hairline) / "+ Compare" (primary) — right-aligned per
                 the 4c mock's header row. */}
             <div className="flex shrink-0 items-center gap-2.5">
-              <WatchlistButton />
+              <WatchlistButton appid={profile.appid} name={profile.name} />
               <CompareToggle appid={profile.appid} name={profile.name} />
             </div>
           </div>

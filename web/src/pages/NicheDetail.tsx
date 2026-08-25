@@ -16,6 +16,7 @@ import { BulletMeter } from "../components/ui/Meter";
 import { StatTile } from "../components/ui/StatTile";
 import { ViewToggle } from "../components/ui/ViewToggle";
 import { trackEvent } from "../lib/analytics";
+import { nicheWatchlistId, toggleNicheWatchlist, useWatchlist, WATCHLIST_CAP } from "../lib/watchlist";
 import {
   ApiError,
   nicheExportCsvUrl,
@@ -416,14 +417,19 @@ export default function NicheDetail() {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const [view, setView] = useDetailView();
-  // Local-only: Watchlist alerts (mockup 4f) have no backend yet, so this just gives the
-  // button honest click feedback for the visit rather than pretending to persist anything.
-  const [watchlisted, setWatchlisted] = useState(false);
+  // Persisted since lib/watchlist.ts landed — the earlier local-only toggle was honest about
+  // not saving, but it left the Watchlist page unreachable in practice: nothing could put an
+  // entry into it. Same versioned-localStorage store the Watchlist page reads.
+  const watchlistEntries = useWatchlist();
 
   const dimension = DIMENSIONS.includes(dimensionParam as Dimension) ? (dimensionParam as Dimension) : null;
   // React Router has already decoded the segment (and restored an escaped "/"), so this is
   // the niche key exactly as the finder linked it.
   const nicheKey = keyParam ?? null;
+  const watchlisted =
+    dimension != null &&
+    nicheKey != null &&
+    watchlistEntries.some((e) => e.id === nicheWatchlistId(dimension, nicheKey));
 
   const tab: TabKey = searchParams.get("tab") === "games" ? "games" : "overview";
   const urlWindow: Window = searchParams.get("win") === "all" ? "all" : "24m";
@@ -630,8 +636,14 @@ export default function NicheDetail() {
             </a>
             <button
               type="button"
-              onClick={() => setWatchlisted((w) => !w)}
-              title="Watchlist alerts aren't wired up to a backend yet — this only remembers the click for this visit."
+              onClick={() => {
+                if (!dimension || !nicheKey) return;
+                const r = toggleNicheWatchlist(dimension, nicheKey, nicheKey);
+                if (r === "full") window.alert(`Watchlist is full (${WATCHLIST_CAP} items).`);
+                else trackEvent("view_save");
+              }}
+              aria-pressed={watchlisted}
+              title={watchlisted ? "Remove from watchlist" : "Track this niche on the Watchlist page"}
               className="border border-ink-primary/35 px-3 py-1.5 text-xs font-medium text-ink-primary transition-colors hover:bg-ink-primary/[0.08]"
             >
               {watchlisted ? "✓ Watchlisted" : "+ Watchlist"}
