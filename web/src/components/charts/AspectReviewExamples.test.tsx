@@ -339,13 +339,33 @@ describe("locateExcerpt — anchoring the sampled sentence", () => {
 });
 
 describe("AspectReviewExamples — layout", () => {
-  it("stacks the two groups until lg so quotes keep a readable measure", () => {
+  it("stacks the two groups until xl so quotes keep a readable measure", () => {
     const { container } = renderPanel({ praise: [excerpt()] });
 
     const grid = container.querySelector(".grid") as HTMLElement;
     expect(grid.className).toContain("grid-cols-1");
-    expect(grid.className).toContain("lg:grid-cols-2");
+    expect(grid.className).toContain("xl:grid-cols-2");
+    // Both earlier split points produced unreadable columns: `sm` split ~40ch on a small
+    // laptop, and `lg` split at exactly the width where GameProfile's sidebar grid shrinks
+    // the main column (~32ch each). See the layout note on AspectReviewExamples.
     expect(grid.className).not.toContain("sm:grid-cols-2");
+    expect(grid.className).not.toContain("lg:grid-cols-2");
     expect(within(grid).getAllByRole("heading", { level: 4 })).toHaveLength(2);
+  });
+
+  it("caps the review prose measure so a full-width stacked card cannot run 120ch lines", () => {
+    const { container } = renderPanel({ praise: [excerpt({ review_text: FULL })] });
+
+    // Collapsed excerpt and expanded full body both carry the cap and the readable size.
+    let prose = container.querySelector("p") as HTMLElement;
+    expect(prose.className).toContain("max-w-prose");
+    expect(prose.className).toContain("text-sm");
+    expect(prose.className).toContain("leading-relaxed");
+
+    fireEvent.click(readMore());
+    prose = container.querySelector("p") as HTMLElement;
+    expect(prose.className).toContain("max-w-prose");
+    expect(prose.className).toContain("text-sm");
+    expect(prose.className).toContain("leading-relaxed");
   });
 });
