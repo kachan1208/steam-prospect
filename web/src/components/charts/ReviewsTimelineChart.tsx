@@ -3,6 +3,7 @@ import { Bar, BarChart, CartesianGrid, Line, LineChart, ReferenceLine, Responsiv
 
 import { request, type ReviewTimelinePoint } from "../../lib/api";
 import { fmtCompact, fmtPct } from "../../lib/format";
+import { notableMonths } from "../../lib/notable";
 import { CSS_VAR } from "../../lib/palette";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 
@@ -75,8 +76,11 @@ export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimeline
     if (bucket) bucket.push(e);
     else eventsByMonth.set(month, [e]);
   }
-  const eventMonths = [...eventsByMonth.keys()].sort();
+  // Lines only where the CURVE moved (see lib/notable.ts) — tooltips keep every month's
+  // events; only the plumb lines are gated, release always drawn.
+  const notable = notableMonths(points.map((p) => ({ period: p.period, value: p.n_reviews })));
   const releaseMonth = (eventsQuery.data ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
+  const eventMonths = [...eventsByMonth.keys()].filter((m) => notable.has(m) || m === releaseMonth).sort();
 
   if (points.length === 0) {
     return (
