@@ -20,8 +20,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-REPO = Path("/Users/maximbaginskiy/hobby/prospect")
-ETL = REPO / "etl"
+# Derived from this file's own location (tests/ lives inside etl/) — a hardcoded absolute
+# path here passed locally and failed every CI run with FileNotFoundError.
+ETL = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ETL))
 
 import duckdb  # noqa: E402

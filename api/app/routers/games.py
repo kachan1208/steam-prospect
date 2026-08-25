@@ -14,6 +14,8 @@ from ..schemas import (
     GameChannelMix,
     GameComparable,
     GameComparablesResponse,
+    GameEvent,
+    GameEventList,
     GameLaunchCurvePoint,
     GamePress,
     GameProfile,
@@ -505,6 +507,29 @@ def reviews_summary(appid: int) -> GameReviewsSummary:
         playtime_at_review=[PlaytimePoint(**p) for p in playtime],
         launch_curve=[GameLaunchCurvePoint(**c) for c in curve],
     )
+
+
+@router.get("/{appid}/events", response_model=GameEventList)
+def game_events(appid: int) -> GameEventList:
+    """Dated catalog events for annotating this game's lifetime charts — release, developer
+    updates (patch notes), journalist coverage — from mart_game_event (capped at 40/game by
+    the ETL, release always kept).
+
+    Degrades to items=[] when the mart predates mart_game_event, via CatalogException rather
+    than an information_schema probe: annotations are ADDITIVE (a chart without markers is
+    complete, just less explained), so the absent-table case is an empty feed, not a 503 —
+    the same convention as the radar sparklines. Not 404-guarded against mart_game either,
+    mirroring teardown/aspect-reviews: the game page 404s upstream via /games/{appid} before
+    this is ever fetched for a nonexistent appid."""
+    try:
+        rows = analytics_db.query(
+            "SELECT CAST(event_date AS VARCHAR) AS event_date, kind, title, url "
+            "FROM mart_game_event WHERE appid = ? ORDER BY event_date",
+            [appid],
+        )
+    except duckdb.CatalogException:
+        rows = []
+    return GameEventList(appid=appid, items=[GameEvent(**r) for r in rows])
 
 
 # Must mirror etl/build_marts.py's TEARDOWN_MIN_REVIEWS — only used to word the caveat

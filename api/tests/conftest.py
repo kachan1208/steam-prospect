@@ -157,6 +157,7 @@ def _build_fixture_mart(path: Path) -> None:
         _create_mart_meta(con)
         _create_mart_entity(con)
         _create_mart_timing(con)
+        _create_mart_game_event(con)
     finally:
         con.close()  # MUST close before analytics_db opens its own read_only connection
 
@@ -368,6 +369,24 @@ def _create_mart_timing(con: duckdb.DuckDBPyConnection) -> None:
         for m, share in enumerate(TIMING_DECAY_SHARES):
             decay_rows.append((genre, m, share, share * 1.1, 40))
     con.executemany("INSERT INTO mart_timing_decay VALUES (?, ?, ?, ?, ?)", decay_rows)
+
+
+def _create_mart_game_event(con: duckdb.DuckDBPyConnection) -> None:
+    """Chart-annotation events for appid 1001 only — 1002+ deliberately have none, so the
+    empty-feed case is a real fixture state rather than a mocked one. Shape mirrors
+    etl/marts/mart_game_event.sql: release carries url NULL (nothing to link)."""
+    con.execute(
+        "CREATE TABLE mart_game_event (appid INTEGER, event_date DATE, kind VARCHAR,"
+        " title VARCHAR, url VARCHAR)"
+    )
+    con.executemany(
+        "INSERT INTO mart_game_event VALUES (?, ?, ?, ?, ?)",
+        [
+            (1001, "2024-03-01", "release", "Released", None),
+            (1001, "2024-04-10", "update", "Patch 1.1 — balance pass", "https://example.test/p11"),
+            (1001, "2024-05-20", "press", "Rogue Cellar review — PC Gamer", "https://example.test/rev"),
+        ],
+    )
 
 
 def _create_mart_meta(con: duckdb.DuckDBPyConnection) -> None:

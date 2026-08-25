@@ -892,7 +892,7 @@ export default function GameProfile() {
               {reviewsQ.isLoading && (
                 <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading…</div>
               )}
-              {reviewsQ.data && <ReviewsTimelineChart points={reviewsQ.data.timeline} />}
+              {reviewsQ.data && <ReviewsTimelineChart points={reviewsQ.data.timeline} appid={appid} />}
             </BlueprintPanel>
 
             <BlueprintPanel

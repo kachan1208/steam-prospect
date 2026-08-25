@@ -70,9 +70,24 @@ interface MarketingEvent {
   note: string | null;
 }
 
+/** Catalog events (GET /api/games/{appid}/events ← mart_game_event): the release, developer
+ * patch notes, journalist coverage — the "why did the curve move HERE" annotations, capped at
+ * 40/game by the ETL with the release always kept. */
+interface CatalogEvent {
+  event_date: string; // 'YYYY-MM-DD'
+  kind: "release" | "update" | "press";
+  title: string;
+  url: string | null;
+}
+
 // "My marketing events" are user milestones, not a data series — brand-toned so they read
 // as annotations distinct from the aqua review bars and blue player line.
 const EVENT_COLOR = "var(--brand)";
+// Catalog events recede to muted ink: they are context, and a patch-heavy game can have one in
+// almost every charted month — at brand strength that would shout down the data. Only the
+// release line carries a text label; every other marker explains itself in the tooltip, which
+// is what keeps a 24-line month axis readable instead of a picket fence of labels.
+const CATALOG_EVENT_COLOR = CSS_VAR.textMuted;
 
 const XAXIS_PROPS = {
   dataKey: "period",
@@ -143,6 +158,22 @@ export function GameTrendsChart({
     staleTime: 5 * 60_000,
   });
 
+  // Same swallow-errors contract as the marketing overlay: catalog annotations are additive,
+  // and an old mart (no mart_game_event yet) answers items=[] server-side anyway.
+  const catalogQuery = useQuery({
+    queryKey: ["game-catalog-events", appid],
+    queryFn: async () => {
+      try {
+        const r = await request<{ appid: number; items: CatalogEvent[] }>(`/games/${appid}/events`);
+        return r.items;
+      } catch {
+        return [] as CatalogEvent[];
+      }
+    },
+    enabled: selfFetch,
+    staleTime: 5 * 60_000,
+  });
+
   const basePoints = points ?? trendsQuery.data?.points ?? [];
 
   if (selfFetch && trendsQuery.isLoading) {
@@ -177,6 +208,20 @@ export function GameTrendsChart({
   }
   const eventMonths = [...eventsByMonth.keys()].sort();
   const hasEvents = eventMonths.length > 0;
+
+  // Catalog events bucket by charted month exactly like the marketing ones. The release month
+  // is singled out: it is the one marker whose label earns axis space.
+  const catalogByMonth = new Map<string, CatalogEvent[]>();
+  for (const e of catalogQuery.data ?? []) {
+    const month = e.event_date.slice(0, 7);
+    if (!periodSet.has(month)) continue;
+    const bucket = catalogByMonth.get(month);
+    if (bucket) bucket.push(e);
+    else catalogByMonth.set(month, [e]);
+  }
+  const catalogMonths = [...catalogByMonth.keys()].sort();
+  const releaseMonth = (catalogQuery.data ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
+  const hasCatalog = catalogMonths.length > 0;
 
   const twitchColor = channelColor("twitch");
   const hasCcu = data.some((d) => d.ccu_avg != null);
@@ -228,6 +273,10 @@ export function GameTrendsChart({
                     const note = e.note ? (e.note.length > 60 ? `${e.note.slice(0, 57)}…` : e.note) : "—";
                     rows.push({ label: capitalize(e.kind), value: note, color: EVENT_COLOR });
                   }
+                  for (const e of catalogByMonth.get(String(label)) ?? []) {
+                    const title = e.title.length > 60 ? `${e.title.slice(0, 57)}…` : e.title;
+                    rows.push({ label: capitalize(e.kind), value: title, color: CATALOG_EVENT_COLOR });
+                  }
                   return <TooltipPanel title={String(label)} rows={rows} />;
                 }}
               />
@@ -241,6 +290,25 @@ export function GameTrendsChart({
                 dot={{ r: 3, fill: CSS_VAR.demand, strokeWidth: 0 }}
                 connectNulls
               />
+              {/* catalog events — muted, mostly-unlabelled plumb lines UNDER the marketing
+                  layer. Dash "2 5" (sparser than the marketing "3 4") so overlapping months
+                  stay tellable apart; only the release line gets a text label. Details are
+                  in the tooltip, which is what keeps a patch-heavy game readable. */}
+              {catalogMonths.map((month) => (
+                <ReferenceLine
+                  key={`cat-${month}`}
+                  yAxisId="reviews"
+                  x={month}
+                  stroke={CATALOG_EVENT_COLOR}
+                  strokeDasharray="2 5"
+                  strokeOpacity={month === releaseMonth ? 0.9 : 0.55}
+                  label={
+                    month === releaseMonth
+                      ? { value: "Released", position: "top", fill: CATALOG_EVENT_COLOR, fontSize: 9 }
+                      : undefined
+                  }
+                />
+              ))}
               {/* my marketing events — a labelled plumb line at each event's month.
                   Dash "3 4" per the design handoff's event-marker spec. */}
               {eventMonths.map((month, i) => (
@@ -266,6 +334,7 @@ export function GameTrendsChart({
             <LegendDot color={CSS_VAR.competition} label="Reviews / mo" />
             <LegendDot color={CSS_VAR.demand} label="Live players (avg)" />
             {hasEvents && <LegendTick color={EVENT_COLOR} label="Marketing event" />}
+            {hasCatalog && <LegendTick color={CATALOG_EVENT_COLOR} label="Release / patch / press" />}
           </div>
         </div>
 
