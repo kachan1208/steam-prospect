@@ -218,16 +218,55 @@ def main() -> int:
 
     # ---- 1b. demand windows read the histogram with the documented anchor -------------
     # The fixture put 999 reviews in the anchor-excluded truncated month; if any of that
-    # leaks into reviews_90d the window arithmetic regressed. Values per the fixture:
-    # now = 30/game, prev = 60/game, trend = -50.0 for every published niche.
-    bad = con.execute("""
-        SELECT COUNT(*) FROM mart_niche
-        WHERE reviews_90d != 30 * n_games
-           OR reviews_prev_90d != 60 * n_games
-           OR demand_trend_90d_pct != -50.0
+    # leaks into reviews_90d the window arithmetic regressed. Since 2026-08-26 the demand
+    # columns are FLOOR-INDEPENDENT (see _niche_demand90's header in mart_niche.sql):
+    # every min_reviews cut of a (dimension, key, win) carries the same numbers, computed
+    # over the min_reviews=0 superset population — so the expected value is 30/60 per game
+    # of the (win, min_reviews=0) cut's n_games, on EVERY cut, and trend stays -50.0.
+    n_niche_rows = con.execute("SELECT COUNT(*) FROM mart_niche").fetchone()[0]
+    joined = con.execute("""
+        WITH n0 AS (
+            SELECT dimension, key, win, n_games FROM mart_niche WHERE min_reviews = 0
+        )
+        SELECT COUNT(*),
+               COUNT(*) FILTER (
+                   WHERE n.reviews_90d != 30 * n0.n_games
+                      OR n.reviews_prev_90d != 60 * n0.n_games
+                      OR n.demand_trend_90d_pct != -50.0
+               )
+        FROM mart_niche n
+        JOIN n0 ON n0.dimension = n.dimension AND n0.key = n.key AND n0.win = n.win
+    """).fetchone()
+    # The JOIN itself is part of the check: every published cut must have a published
+    # min_reviews=0 sibling (its population is a superset), so nothing may drop out.
+    assert joined[0] == n_niche_rows, (
+        f"{n_niche_rows - joined[0]} cut(s) have no published min_reviews=0 sibling"
+    )
+    assert joined[1] == 0, f"{joined[1]} niche cut(s) have demand windows off the histogram fixture"
+    print("[ok] demand_90d: histogram-sourced, truncated month excluded, floor-0 population, trend = -50.0")
+
+    # ---- 1c. floor independence: the stats floor must never move demand ---------------
+    # This is the Radar-board regression this change exists to prevent: a min_reviews
+    # toggle used to shrink "demand" (a different population summed), which could flip a
+    # niche's client-side verdict ring. Demand is a property of (dimension, key, win).
+    multi_cut = con.execute("""
+        SELECT COUNT(*) FROM (
+            SELECT dimension, key, win FROM mart_niche
+            GROUP BY 1, 2, 3 HAVING COUNT(*) > 1
+        )
     """).fetchone()[0]
-    assert bad == 0, f"{bad} niche(s) have demand windows off the histogram fixture"
-    print("[ok] demand_90d: histogram-sourced, truncated month excluded, trend = -50.0")
+    assert multi_cut > 0, "fixture lost its teeth: no (dimension, key, win) spans several floors"
+    varying = con.execute("""
+        SELECT dimension, key, win FROM mart_niche
+        GROUP BY 1, 2, 3
+        HAVING COUNT(DISTINCT COALESCE(reviews_90d, -1)) > 1
+            OR COUNT(DISTINCT COALESCE(reviews_prev_90d, -1)) > 1
+            OR COUNT(DISTINCT COALESCE(demand_trend_90d_pct, -1e18)) > 1
+    """).fetchall()
+    for row in varying[:10]:
+        print("            FLOOR-DEPENDENT DEMAND", row)
+    assert not varying, f"{len(varying)} (dimension, key, win) group(s) vary demand by min_reviews"
+    print(f"[ok] demand identical across review floors for every niche ({multi_cut} multi-floor groups checked)")
 
     n_rows = con.execute("SELECT COUNT(*) FROM mart_niche_game").fetchone()[0]
     n_niche = con.execute("SELECT COUNT(*) FROM mart_niche").fetchone()[0]

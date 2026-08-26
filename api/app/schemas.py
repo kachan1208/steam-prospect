@@ -548,6 +548,11 @@ class NicheRow(BaseModel):
     lifetime_n_games: Optional[int] = None            # covered games that ever hit 100+
     lifetime_survival_12m: Optional[float] = None     # share still >=10 a year after t0
     lifetime_median_dead_months: Optional[float] = None  # median life of the already-dead (biased LOW)
+    # 90-day demand (review-histogram windows; floor-independent — identical on every
+    # min_reviews cut of a niche). Absent on marts that predate 2026-08-21.
+    reviews_90d: Optional[float] = None
+    reviews_prev_90d: Optional[float] = None
+    demand_trend_90d_pct: Optional[float] = None      # NULL = no prior-window baseline
 
 
 class NicheList(BaseModel):

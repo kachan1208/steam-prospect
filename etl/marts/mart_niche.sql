@@ -124,6 +124,18 @@ WHERE g.total_reviews >= mr.min_reviews
 -- bulk (most fetched ~monthly), so the anchor month is truncated at fetch date for most
 -- games — uniformly across every game and niche, which preserves ranking; the trend lags
 -- reality by up to a month until histogram refresh cadence improves.
+--
+-- FLOOR-INDEPENDENT (2026-08-25): demand is the niche's overall review inflow in the
+-- window — the SAME number on every min_reviews cut. The first cut grouped _niche_pop by
+-- its full (dimension, key, win, min_reviews) grid, so raising the stats floor shrank
+-- "demand" — a display toggle changed a niche's demand trend and, through the Radar
+-- board's client-side verdicts, its ring. The `members` DISTINCT below collapses the
+-- min_reviews grid (the min_reviews=0 population is the superset of every other floor),
+-- and the final SELECT joins ON (dimension, key, win) alone, stamping identical
+-- reviews_90d / reviews_prev_90d / demand_trend_90d_pct on every cut of a niche.
+-- Honest caveat: stg_review_histogram only covers games with >= 50 total reviews, so
+-- sub-50-review games contribute no inflow under ANY floor — collapsing the floors loses
+-- nothing the per-floor grouping was actually adding.
 DROP TABLE IF EXISTS _niche_demand90;
 CREATE TEMP TABLE _niche_demand90 AS
 WITH anchor AS (
@@ -142,13 +154,19 @@ v AS (
         ) AS r_prev
     FROM stg_review_histogram h
     GROUP BY h.appid
+),
+-- Collapse the min_reviews grid: one membership row per (dimension, key, win, appid).
+-- The min_reviews=0 population is the superset of every other floor, so this IS the
+-- niche's full scored membership for the window.
+members AS (
+    SELECT DISTINCT dimension, key, win, appid FROM _niche_pop
 )
-SELECT p.dimension, p.key, p.win, p.min_reviews,
+SELECT p.dimension, p.key, p.win,
        SUM(COALESCE(v.r_now, 0))  AS reviews_90d,
        SUM(COALESCE(v.r_prev, 0)) AS reviews_prev_90d
-FROM _niche_pop p
+FROM members p
 LEFT JOIN v ON v.appid = p.appid
-GROUP BY 1, 2, 3, 4;
+GROUP BY 1, 2, 3;
 
 CREATE TABLE mart_niche AS
 WITH membership AS (
@@ -323,9 +341,10 @@ FROM gated g
 LEFT JOIN tag_tier tt ON g.dimension = 'tag' AND tt.tag = g.key
 LEFT JOIN _niche_players_now np ON np.dimension = g.dimension AND np.key = g.key
 LEFT JOIN _niche_lifetime nl ON nl.dimension = g.dimension AND nl.key = g.key
+-- Floor-independent on purpose (see _niche_demand90's header): every min_reviews cut of a
+-- (dimension, key, win) carries the SAME demand numbers.
 LEFT JOIN _niche_demand90 d
-       ON d.dimension = g.dimension AND d.key = g.key
-      AND d.win = g.win AND d.min_reviews = g.min_reviews;
+       ON d.dimension = g.dimension AND d.key = g.key AND d.win = g.win;
 
 CREATE TABLE mart_niche_top AS
 WITH membership AS (

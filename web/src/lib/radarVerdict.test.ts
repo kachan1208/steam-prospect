@@ -8,11 +8,13 @@ import {
   OPP_WATCH_SCORE,
   RING_ORDER,
   SAT_FLOOD_YOY,
+  SOLO_FRIENDLY_MIN,
   WC_WINNER_TAKE_MOST,
   blipRadius,
   hash01,
   hashString,
   radarVerdict,
+  soloBucket,
 } from "./radarVerdict";
 
 describe("radarVerdict — ring rules", () => {
@@ -201,5 +203,29 @@ describe("blipRadius — bounded sqrt scale", () => {
       expect(r).toBeGreaterThan(prev);
       prev = r;
     }
+  });
+});
+
+describe("soloBucket — the solo-viability lens", () => {
+  it("classifies at the documented threshold (boundary counts as solo-friendly)", () => {
+    expect(soloBucket(0.95)).toBe("solo");
+    expect(soloBucket(SOLO_FRIENDLY_MIN)).toBe("solo");
+    expect(soloBucket(0.79)).toBe("team");
+    expect(soloBucket(0)).toBe("team");
+  });
+
+  it("null/undefined/NaN are 'unknown' — an honest bucket, never claimed either way", () => {
+    expect(soloBucket(null)).toBe("unknown");
+    expect(soloBucket(undefined)).toBe("unknown");
+    expect(soloBucket(Number.NaN)).toBe("unknown");
+  });
+
+  it("is a lens, not a ring: the verdict input has no solo field to read", () => {
+    // Pins the module-doc claim behaviorally: identical market evidence yields an
+    // identical verdict — there is no solo channel that could differentiate them.
+    const a = radarVerdict({ demand_trend_90d_pct: 20, saturation_yoy: 0.05 });
+    const b = radarVerdict({ demand_trend_90d_pct: 20, saturation_yoy: 0.05 });
+    expect(a).toEqual(b);
+    expect(a.ring).toBe("enter");
   });
 });

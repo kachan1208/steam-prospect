@@ -178,6 +178,12 @@ export interface NicheRow {
   lifetime_n_games?: number | null;
   lifetime_survival_12m?: number | null;
   lifetime_median_dead_months?: number | null;
+  // 90-day demand (review-histogram windows; floor-independent — identical on every
+  // min_reviews cut of a niche) — absent on marts that predate 2026-08-21. On LIST rows
+  // since 2026-08-26 so the Radar board rings every blip on its own trend.
+  reviews_90d?: number | null;
+  reviews_prev_90d?: number | null;
+  demand_trend_90d_pct?: number | null; // null = no prior-window baseline
 }
 
 export interface NicheList {

@@ -8,8 +8,10 @@ import { MONO } from "../lib/palette";
 import {
   RING_LABEL,
   RING_ORDER,
+  SOLO_FRIENDLY_MIN,
   blipRadius,
   hash01,
+  soloBucket,
   type RadarRing,
   type RadarVerdict,
 } from "../lib/radarVerdict";
@@ -25,6 +27,10 @@ import { nicheDetailPath } from "../pages/NicheDetail";
  * polar scatter anyway. All colors are CSS vars; the ring verdict is encoded by POSITION
  * (which annulus) and spelled in the legend/tooltip, never by hue alone — dots follow the
  * app's mono-steel vocabulary (enter = --verdict-up accent, then receding paper alphas).
+ * A second, orthogonal encoding carries the solo-viability LENS: team-scale niches
+ * (solo_viability < SOLO_FRIENDLY_MIN) draw hollow (ring-colored stroke, transparent
+ * fill), solo-friendly and unknown draw filled; the dot legend and tooltip spell it out.
+ * Deliberately a lens, not a ring — see lib/radarVerdict.ts.
  *
  * LAYOUT IS DETERMINISTIC: every jitter comes from hash01(dimension:key), never
  * Math.random, so a niche holds its position across renders, visits and machines. A small
@@ -55,9 +61,13 @@ export interface RadarBoardBlip {
   n_games: number;
   p90_rev: number | null;
   opportunity_v2: number | null;
-  /** Percent units; null = no 90-day demand trend joined for this niche (see Radar.tsx —
-   * GET /api/niches does not carry it; only the radar feed's top movers do). */
+  /** Percent units; null = this niche has no 90-day demand trend (the mart predates the
+   * column, or the niche had no prior-window baseline — see mart_niche.sql). */
   demandTrendPct: number | null;
+  /** 0..1 share of the cut's scored games playable single-player; null = unknown (mart
+   * predates the column). A LENS only — drawn as dot style (hollow = team-scale), never
+   * fed into the verdict; see lib/radarVerdict.ts. */
+  solo_viability: number | null;
   verdict: RadarVerdict;
 }
 
@@ -192,7 +202,7 @@ const RING_FILL: Record<RadarRing, string> = {
 };
 
 function fmtTrendPct(v: number | null): string {
-  if (v === null) return "n/a";
+  if (v === null) return "no demand data";
   return `${v >= 0 ? "▲ +" : "▼ −"}${Math.abs(v).toFixed(1)}%`;
 }
 
@@ -317,7 +327,11 @@ export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
             );
           })}
 
-          {/* Blips — dots only; the legend carries the accessible links. */}
+          {/* Blips — dots only; the legend carries the accessible links. Solo lens as dot
+              STYLE: team-scale (solo_viability < SOLO_FRIENDLY_MIN) draws hollow — ring-
+              colored stroke over a `transparent` fill (transparent, not "none", so the
+              interior still hit-tests for hover/click); solo-friendly and unknown draw
+              filled as before. Ring POSITION is untouched — solo never moves a verdict. */}
           <g aria-hidden>
             {placed.map((b) => (
               <g key={b.id}>
@@ -325,9 +339,9 @@ export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
                   cx={b.x}
                   cy={b.y}
                   r={b.r}
-                  fill={RING_FILL[b.verdict.ring]}
-                  stroke="var(--page-plane)"
-                  strokeWidth={1}
+                  fill={soloBucket(b.solo_viability) === "team" ? "transparent" : RING_FILL[b.verdict.ring]}
+                  stroke={soloBucket(b.solo_viability) === "team" ? RING_FILL[b.verdict.ring] : "var(--page-plane)"}
+                  strokeWidth={soloBucket(b.solo_viability) === "team" ? 1.5 : 1}
                   opacity={hoverId !== null && hoverId !== b.id ? 0.35 : 1}
                   style={{ cursor: "pointer", transition: "opacity 120ms" }}
                   onMouseEnter={(e) => {
@@ -348,6 +362,24 @@ export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
             ))}
           </g>
         </svg>
+
+        {/* Dot-style legend for the solo lens. Honest about the overlap: unknown draws
+            filled like solo-friendly (unchanged rendering), so the filled sample says so. */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-2 text-[11px] text-ink-muted">
+          <span className="inline-flex items-center gap-1.5">
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="shrink-0">
+              <circle cx="5" cy="5" r="4" fill="currentColor" />
+            </svg>
+            solo-friendly (solo viability ≥ {SOLO_FRIENDLY_MIN}) or unknown
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="shrink-0">
+              <circle cx="5" cy="5" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
+            </svg>
+            team-scale (&lt; {SOLO_FRIENDLY_MIN})
+          </span>
+          <span>dot area = P90 revenue · ring = verdict (solo never moves a dot between rings)</span>
+        </div>
 
         {/* Hover tooltip — HTML over the SVG, same TooltipPanel language as every chart. */}
         {hovered && tip && (
@@ -371,6 +403,10 @@ export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
                 { label: "P90 revenue", value: fmtUsd(hovered.p90_rev) },
                 { label: "Games", value: fmtInt(hovered.n_games) },
                 { label: "Opp v2", value: hovered.opportunity_v2 != null ? hovered.opportunity_v2.toFixed(1) : "—" },
+                {
+                  label: "Solo viability",
+                  value: hovered.solo_viability != null ? hovered.solo_viability.toFixed(2) : "unknown",
+                },
               ]}
             />
           </div>
