@@ -872,9 +872,34 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
 
     staging_sql = render(
         """
+        -- Single normalized read of src.game_tags — every tag consumer (staging below,
+        -- mart_game/mart_press/mart_channel_buzz) reads THIS, never src.game_tags directly:
+        -- the scraper's store-page fallback briefly stored HTML-entity-escaped tag names
+        -- ('Point &amp; Click'), and such phantom-twin tags skew toward recently-fetched
+        -- games, faking explosive niche demand trends. The source was fixed 2026-08-26, but
+        -- stale snapshots / future scraper regressions must not resurrect the twins.
+        -- '&amp;' is unescaped FIRST; twins that merge into one (appid, tag) keep MAX(votes),
+        -- and rank is recomputed by votes DESC (source rank can't be trusted across a merge).
+        CREATE TEMP TABLE stg_game_tags AS
+        WITH unescaped AS (
+            SELECT gt.appid,
+                replace(replace(replace(replace(replace(gt.tag,
+                    '&amp;', '&'), '&quot;', '"'), '&#39;', ''''), '&lt;', '<'), '&gt;', '>') AS tag,
+                gt.votes
+            FROM src.game_tags gt
+        ),
+        merged AS (
+            SELECT appid, tag, MAX(votes) AS votes
+            FROM unescaped
+            GROUP BY appid, tag
+        )
+        SELECT appid, tag, votes,
+            row_number() OVER (PARTITION BY appid ORDER BY votes DESC, tag) AS rank
+        FROM merged;
+
         CREATE TEMP TABLE stg_tag_membership AS
         SELECT DISTINCT gt.appid, gt.tag
-        FROM src.game_tags gt
+        FROM stg_game_tags gt
         WHERE gt.votes >= @TAG_VOTE_FLOOR@
           AND gt.rank <= @TAG_RANK_FLOOR@
           AND gt.tag NOT IN (SELECT tag FROM denylist_tag);
@@ -891,7 +916,7 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         -- Only consulted when the game's raw Steam `categories` field is missing/empty
         -- (~0.6 percent of the catalog); Steam's own category list wins whenever present.
         CREATE TEMP TABLE stg_singleplayer_tag AS
-        SELECT DISTINCT gt.appid FROM src.game_tags gt WHERE gt.tag = 'Singleplayer';
+        SELECT DISTINCT gt.appid FROM stg_game_tags gt WHERE gt.tag = 'Singleplayer';
 
         -- Moved ahead of stg_game (below needs it for the owners-floor genre lookup).
         CREATE TEMP TABLE stg_primary_genre AS

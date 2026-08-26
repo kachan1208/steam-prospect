@@ -78,9 +78,11 @@ WHERE len(tw.words) >= 2;
 
 -- Concept allowlist, re-derived (see header) with a _cb_ prefix so it never collides with
 -- mart_press.sql's own concept_unigram/concept_bigram temp tables in the same session.
+-- stg_game_tags, NOT src.game_tags: HTML-entity phantom-twin tags fake niche demand
+-- trends (source fixed 2026-08-26; stale snapshots/regressions must not resurrect them).
 CREATE TEMP TABLE _cb_concept_source AS
 SELECT DISTINCT lower(trim(tag)) AS phrase
-FROM src.game_tags
+FROM stg_game_tags
 WHERE tag NOT IN (SELECT tag FROM denylist_tag)
 UNION
 SELECT DISTINCT lower(trim(genre)) AS phrase

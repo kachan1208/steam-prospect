@@ -2,7 +2,7 @@
 -- Per-appid fact row: metadata + revenue/owners + positive_ratio + percentile rank of
 -- est_rev_reviews within the game's primary genre. Powers lookups / "where do I land".
 -- Uses staging stg_game, stg_primary_genre, stg_review + src.games (header art,
--- description) + src.game_tags (top-tags vector, filtered same as stg_tag_membership).
+-- description) + stg_game_tags (top-tags vector, filtered same as stg_tag_membership).
 --
 -- Phase 2 additions: percentile-vs-genre for reviews/owners (alongside the existing
 -- revenue percentile), a top-N tag vector (powers on-demand comparables + tag search —
@@ -29,9 +29,11 @@ WITH pct_ranks AS (
     WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@ AND g.est_rev_reviews IS NOT NULL
 ),
 tag_ranked AS (
+    -- stg_game_tags, NOT src.game_tags: HTML-entity phantom-twin tags fake niche demand
+    -- trends (source fixed 2026-08-26; stale snapshots/regressions must not resurrect them).
     SELECT gt.appid, gt.tag,
         row_number() OVER (PARTITION BY gt.appid ORDER BY gt.rank) AS rn
-    FROM src.game_tags gt
+    FROM stg_game_tags gt
     WHERE gt.votes >= @TAG_VOTE_FLOOR@
       AND gt.tag NOT IN (SELECT tag FROM denylist_tag)
 ),
