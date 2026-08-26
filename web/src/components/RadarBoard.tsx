@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import clsx from "clsx";
 
 import { trackEvent } from "../lib/analytics";
@@ -14,6 +14,7 @@ import {
   soloBucket,
   type RadarRing,
   type RadarVerdict,
+  type VerdictCheck,
 } from "../lib/radarVerdict";
 import { TooltipPanel } from "./charts/TooltipPanel";
 import { nicheDetailPath } from "../pages/NicheDetail";
@@ -35,6 +36,21 @@ import { nicheDetailPath } from "../pages/NicheDetail";
  * around the dot, a NEW + absolute-volume legend glyph instead of a trend %, and a
  * tooltip that never prints the non-representative % — still mono-steel, radius 0,
  * no red/green.
+ *
+ * POPULATION (`soloOnly` prop): the board's default population is solo-friendly niches
+ * only — filtered SERVER-side (the API's solo_only param, same 0.8 bar as
+ * SOLO_FRIENDLY_MIN; NULL solo_viability = unknown = excluded, because the population is
+ * an explicit positive claim). With soloOnly the hollow/filled encoding is redundant (all
+ * dots are solo-friendly by construction), so the dot legend states the population rule
+ * instead of drawing lens samples; with the toggle off the full population returns and
+ * the lens samples come back with it.
+ *
+ * THE DOSSIER: clicking a dot no longer navigates — it opens the VerdictDossier panel
+ * under the plate, which decomposes WHY the niche got its ring: the verdict-trace rows
+ * from lib/radarVerdict.ts's radarVerdictTrace (the same evaluation that placed the dot,
+ * so the explanation can never disagree with the position), pass/fail in neutral steel
+ * glyphs (never red/green), plus the raw context numbers and the deep-dive link. The
+ * legend entries stay plain <Link>s — the keyboard-reachable route to the detail page.
  *
  * LAYOUT IS DETERMINISTIC: every jitter comes from hash01(dimension:key), never
  * Math.random, so a niche holds its position across renders, visits and machines. A small
@@ -76,11 +92,16 @@ export interface RadarBoardBlip {
   /** Absolute review inflow over the last 24 months — the number an emerging niche is
    * judged by (its % has no comparable base). null on marts without the demand columns. */
   reviews24m: number | null;
+  /** Prior-window review inflow — the dossier's demand-base context. */
+  reviewsPrev24m: number | null;
   /** 0..1 share of the cut's scored games playable single-player; null = unknown (mart
    * predates the column). A LENS only — drawn as dot style (hollow = team-scale), never
    * fed into the verdict; see lib/radarVerdict.ts. */
   solo_viability: number | null;
   verdict: RadarVerdict;
+  /** The verdict's decomposition (radarVerdictTrace's checks — produced by the SAME
+   * evaluation as `verdict`); rendered by the dossier when the dot is clicked. */
+  trace: VerdictCheck[];
 }
 
 // ---- geometry ---------------------------------------------------------------------------
@@ -251,10 +272,118 @@ function EmergingGlyph({ reviews24m }: { reviews24m: number | null }) {
   );
 }
 
-export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
-  const navigate = useNavigate();
+/** Pass/fail glyph in the app's neutral steel vocabulary — NEVER red/green (Industry
+ * constraint): pass = filled steel tile, fail = hollow outlined tile, unknown = muted
+ * dash. The row also carries an sr-only outcome word, so the glyph is never the only
+ * channel. */
+function CheckGlyph({ pass }: { pass: boolean | null }) {
+  const style =
+    pass === true
+      ? { backgroundColor: "var(--text-primary)", color: "var(--page-plane)", border: "1px solid var(--text-primary)" }
+      : pass === false
+        ? { color: "var(--text-primary)", border: "1px solid var(--baseline)" }
+        : { color: "var(--text-muted)", border: "1px solid var(--gridline)" };
+  return (
+    <span
+      aria-hidden
+      className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-[10px] leading-none"
+      style={style}
+    >
+      {pass === null ? "–" : pass ? "✓" : "✕"}
+    </span>
+  );
+}
+
+/**
+ * The verdict dossier — the per-niche analysis panel a blip click opens. Decomposes WHY
+ * the niche got its ring: one row per VerdictCheck from radarVerdictTrace (the SAME
+ * evaluation that placed the dot — see lib/radarVerdict.ts), each with the niche's own
+ * number, the bar it was judged against, pass/fail in neutral steel, and a one-clause
+ * reading. decides:false rows (the entrant-economics falsification tell, the solo lens)
+ * are labeled "· context": they can talk you out of a niche, they never move its ring.
+ * Below the trace: the raw context numbers and the deep-dive link (the dossier explains;
+ * the detail page is where the full workup lives).
+ */
+function VerdictDossier({ blip, onClose }: { blip: PlacedBlip; onClose: () => void }) {
+  const v = blip.verdict;
+  const context = [
+    blip.reviews24m != null ? `reviews 24m ${fmtInt(blip.reviews24m)}` : null,
+    blip.reviewsPrev24m != null ? `prior 24m ${fmtInt(blip.reviewsPrev24m)}` : null,
+    `P90 rev ${fmtUsd(blip.p90_rev)}`,
+    `${fmtInt(blip.n_games)} games`,
+    blip.opportunity_v2 != null ? `opp v2 ${blip.opportunity_v2.toFixed(1)}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <section
+      aria-label={`Verdict dossier: ${blip.key}`}
+      data-testid="verdict-dossier"
+      className="relative mt-4 border border-ink-primary/25"
+    >
+      <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1 border-b border-chartborder px-4 py-2.5">
+        <span
+          className="inline-block h-2 w-2 shrink-0 self-center"
+          style={{ backgroundColor: RING_FILL[v.ring] }}
+          aria-hidden
+        />
+        <span className="kicker text-[11px] tracking-[.08em] text-ink-primary">
+          {blip.n}. {blip.key}
+        </span>
+        <span className="text-[11px] text-ink-muted">{SECTOR_LABEL[blip.sector]}</span>
+        <span className="text-[12px] text-ink-secondary sm:ml-auto">
+          <span className="font-semibold text-ink-primary">{RING_LABEL[v.ring]}</span>
+          {v.caution ? " · caution" : ""} — {v.reason}
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close dossier"
+          className="ml-auto self-center border border-ink-primary/35 px-1.5 py-0.5 text-[10px] leading-none text-ink-primary transition-colors hover:bg-ink-primary/[0.08] sm:ml-2"
+        >
+          ✕
+        </button>
+      </div>
+
+      <div className="flex flex-col">
+        {blip.trace.map((c) => (
+          <div
+            key={c.id}
+            className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 border-b border-chartborder px-4 py-2 last:border-b-0"
+          >
+            <span className="self-center">
+              <CheckGlyph pass={c.pass} />
+            </span>
+            <span className="sr-only">{c.pass === null ? "unknown" : c.pass ? "passes" : "fails"}</span>
+            <span className="kicker w-[168px] shrink-0 text-[10px] tracking-[.08em] text-ink-muted">
+              {c.decides ? c.label : `${c.label} · context`}
+            </span>
+            <span className="tabular w-[168px] shrink-0 text-[12px] text-ink-primary">{c.value}</span>
+            <span className="tabular w-[210px] shrink-0 text-[11px] text-ink-muted">bar {c.threshold}</span>
+            <span className="min-w-0 flex-1 basis-[220px] text-[11px] text-ink-secondary">{c.note}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3 border-t border-chartborder px-4 py-2.5">
+        <span className="tabular text-[11px] text-ink-muted">{context}</span>
+        <Link
+          to={nicheDetailPath(blip.dimension, blip.key)}
+          onClick={() => trackEvent("niche_open")}
+          className="ml-auto text-[13px] text-brand transition-colors hover:text-brand-hover"
+        >
+          Open deep dive →
+        </Link>
+      </div>
+    </section>
+  );
+}
+
+export function RadarBoard({ blips, soloOnly }: { blips: RadarBoardBlip[]; soloOnly: boolean }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
 
   const placed = useMemo(() => layoutBlips(blips), [blips]);
@@ -264,6 +393,8 @@ export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
     return m;
   }, [placed]);
   const hovered = hoverId === null ? null : (placed.find((b) => b.id === hoverId) ?? null);
+  // Selection survives population toggles only if the niche is still on the board.
+  const selected = selectedId === null ? null : (placed.find((b) => b.id === selectedId) ?? null);
 
   const moveTip = (e: React.MouseEvent) => {
     const rect = wrapRef.current?.getBoundingClientRect();
@@ -275,7 +406,11 @@ export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
   };
 
   if (blips.length === 0) {
-    return <div className="py-10 text-center text-sm text-ink-muted">No niches match this cut.</div>;
+    return (
+      <div className="py-10 text-center text-sm text-ink-muted">
+        {soloOnly ? "No solo-friendly niches match this cut." : "No niches match this cut."}
+      </div>
+    );
   }
 
   return (
@@ -383,6 +518,7 @@ export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
                   />
                 )}
                 <circle
+                  data-testid={`radar-blip-${b.id}`}
                   cx={b.x}
                   cy={b.y}
                   r={b.r}
@@ -397,12 +533,12 @@ export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
                   }}
                   onMouseMove={moveTip}
                   onMouseLeave={clearHover}
-                  onClick={() => {
-                    trackEvent("niche_open");
-                    navigate(nicheDetailPath(b.dimension, b.key));
-                  }}
+                  // A dot click opens the VERDICT DOSSIER (the analysis is the board's
+                  // first answer); navigation to the detail page lives on the legend
+                  // links and on the dossier's own deep-dive link.
+                  onClick={() => setSelectedId(b.id)}
                 />
-                {hoverId === b.id && (
+                {(hoverId === b.id || selectedId === b.id) && (
                   <circle cx={b.x} cy={b.y} r={b.r + (b.demandEmerging ? 5 : 2.5)} fill="none" stroke="var(--text-primary)" strokeWidth={1} pointerEvents="none" />
                 )}
               </g>
@@ -410,21 +546,40 @@ export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
           </g>
         </svg>
 
-        {/* Dot-style legend for the solo lens. Honest about the overlap: unknown draws
-            filled like solo-friendly (unchanged rendering), so the filled sample says so. */}
+        {/* Dot-style legend. Under the default solo-only population the hollow/filled lens
+            encoding is redundant (every dot is solo-friendly by construction), so the
+            legend states the POPULATION RULE instead of drawing lens samples — the UI must
+            never imply team-scale niches might be hiding on the board. With the toggle off
+            the full population returns and the lens samples come back with it (honest
+            about the overlap: unknown draws filled like solo-friendly, and the sample says
+            so). */}
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-2 text-[11px] text-ink-muted">
-          <span className="inline-flex items-center gap-1.5">
-            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="shrink-0">
-              <circle cx="5" cy="5" r="4" fill="currentColor" />
-            </svg>
-            solo-friendly (solo viability ≥ {SOLO_FRIENDLY_MIN}) or unknown
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="shrink-0">
-              <circle cx="5" cy="5" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
-            </svg>
-            team-scale (&lt; {SOLO_FRIENDLY_MIN})
-          </span>
+          {soloOnly ? (
+            <span className="inline-flex items-center gap-1.5">
+              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="shrink-0">
+                <circle cx="5" cy="5" r="4" fill="currentColor" />
+              </svg>
+              <span>
+                population: solo-friendly only · solo viability ≥ {SOLO_FRIENDLY_MIN} (server-filtered; unknown
+                excluded)
+              </span>
+            </span>
+          ) : (
+            <>
+              <span className="inline-flex items-center gap-1.5">
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="shrink-0">
+                  <circle cx="5" cy="5" r="4" fill="currentColor" />
+                </svg>
+                solo-friendly (solo viability ≥ {SOLO_FRIENDLY_MIN}) or unknown
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="shrink-0">
+                  <circle cx="5" cy="5" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
+                </svg>
+                team-scale (&lt; {SOLO_FRIENDLY_MIN})
+              </span>
+            </>
+          )}
           <span className="inline-flex items-center gap-1.5">
             <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden className="shrink-0">
               <circle cx="6" cy="6" r="2.5" fill="currentColor" />
@@ -434,6 +589,9 @@ export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
           </span>
           <span>dot area = P90 revenue · ring = verdict (solo never moves a dot between rings)</span>
         </div>
+
+        {/* The verdict dossier — the click-through analysis for the selected blip. */}
+        {selected && <VerdictDossier blip={selected} onClose={() => setSelectedId(null)} />}
 
         {/* Hover tooltip — HTML over the SVG, same TooltipPanel language as every chart. */}
         {hovered && tip && (

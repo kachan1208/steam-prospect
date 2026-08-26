@@ -77,12 +77,26 @@
  * SOLO VIABILITY IS A LENS, NOT A RING — deliberately. mart_niche.solo_viability is the
  * share of the cut's scored games playable single-player (catalog norm ~0.9; below ~0.8
  * leans multiplayer/team-scale — the same reading the MCP guidance uses). It never feeds
- * radarVerdict(): a ring answers "is this market worth entering", which holds regardless
+ * the ring decision: a ring answers "is this market worth entering", which holds regardless
  * of team size, while solo-buildability is a property of the READER, not the market.
  * Folding it into the verdict would move dots between rings when the market itself did
- * not change. The board instead encodes it orthogonally — a filter chip plus dot style
- * (hollow = team-scale) — via soloBucket() below.
+ * not change. Since 2026-08-26 the radar POPULATION is solo-friendly-by-default — but
+ * server-side (the API's solo_only param filters on the same 0.8 bar), never by moving
+ * rings: with the board's "Solo-friendly only" toggle off, team-scale dots return, drawn
+ * hollow via soloBucket() below, in exactly the ring the market evidence puts them.
+ *
+ * THE TRACE (radarVerdictTrace) — the dossier's data. The radar must EXPLAIN its verdicts,
+ * not just assert them, so the evaluation returns an ordered list of VerdictCheck rows
+ * alongside {ring, caution, reason}: each check carries the niche's own number, the bar it
+ * was judged against, and pass/fail/unknown. The checks and the ring come from the SAME
+ * booleans in the same function body — a threshold can never drift between the verdict and
+ * its explanation. Two of the rows are deliberately decides:false: entrant_ratio (a
+ * falsification TELL — it can talk you out of a niche, it never moves a ring) and
+ * solo_viability (the lens above). Emerging niches get their own trace shape (absolute
+ * volume + new-game share + "no comparable base") because no %-check is honest there.
  */
+
+import { fmtCompact, fmtSigned } from "./format";
 
 // ---- thresholds -------------------------------------------------------------------------
 //
@@ -123,6 +137,12 @@ export const SAT_FLOOD_YOY = 0.15;
 export const WC_WINNER_TAKE_MOST = 0.85;
 /** opportunity_v2 score at or above which a trend-less niche still earns "watch". */
 export const OPP_WATCH_SCORE = 60;
+/** entrant_ratio at or above which recent entrants earn at least the niche median. A
+ * falsification TELL, not a ring input (below 1.0 = recent entrants underearn — the same
+ * check the MCP guidance runs before recommending a niche). Dossier-only. */
+export const ENTRANT_RATIO_PAR = 1.0;
+/** Catalog-median entrant_ratio (~1.08) — display context for the dossier's tell row. */
+export const ENTRANT_RATIO_CATALOG_NORM = 1.08;
 
 // ---- verdict ----------------------------------------------------------------------------
 
@@ -152,6 +172,17 @@ export interface RadarVerdictInput {
   winner_concentration?: number | null;
   /** 0..100 v2 opportunity score. */
   opportunity_v2?: number | null;
+  // ---- dossier context — NEVER read by the ring decision (pinned by tests) ----
+  /** Recent-entrant median rev / niche median rev; the falsification tell's trace row. */
+  entrant_ratio?: number | null;
+  /** 0..1 solo-buildable share; the lens' trace row. */
+  solo_viability?: number | null;
+  /** Absolute 24-month review volume — the emerging trace's headline number. */
+  reviews_24m?: number | null;
+  /** Prior-window review volume — the demand row's base clause ("on a 204.7K base"). */
+  reviews_prev_24m?: number | null;
+  /** Share of reviews_24m from games released in the last 24 months (emerging tell 2). */
+  reviews_24m_new_share?: number | null;
 }
 
 export interface RadarVerdict {
@@ -163,72 +194,244 @@ export interface RadarVerdict {
   reason: string;
 }
 
+/** One row of the verdict dossier: the niche's own number, the bar it was judged
+ * against, and the outcome. Produced by radarVerdictTrace() from the SAME evaluation
+ * that picks the ring — see the module doc's THE TRACE section. */
+export interface VerdictCheck {
+  /** Stable machine id (tests/keys). "volume"/"new_share" appear on emerging traces only. */
+  id: "demand" | "supply" | "concentration" | "entrants" | "solo" | "volume" | "new_share";
+  label: string;
+  /** The niche's own number, formatted; "unknown" when absent. */
+  value: string;
+  /** The bar the value is judged against, spelled out. */
+  threshold: string;
+  /** true = clears the bar, false = fails it, null = unknown / no pass-fail claim. */
+  pass: boolean | null;
+  /** One short clause of interpretation. */
+  note: string;
+  /** True when this check can move the ring (demand / supply / concentration, or the
+   * mart's youth flag on emerging traces). The falsification tell (entrants) and the
+   * solo lens are decides:false BY CONSTRUCTION — the trace is built by the same
+   * evaluation that picks the ring, so a tell cannot leak into the decision. */
+  decides: boolean;
+}
+
+export interface RadarVerdictTrace extends RadarVerdict {
+  checks: VerdictCheck[];
+}
+
 /** null/undefined/NaN/Infinity all collapse to "unknown". */
 function num(v: number | null | undefined): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
-export function radarVerdict(input: RadarVerdictInput): RadarVerdict {
+/** Percent-UNITS formatter (demand_trend_24m_pct is already %): "+40.0%", "−16.0%".
+ * (fmtSigned takes fractions; this one exists for the columns that arrive as percent.) */
+function fmtPctUnits(v: number, digits = 1): string {
+  return `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(digits)}%`;
+}
+
+/**
+ * The full verdict evaluation: ring + caution + reason PLUS the dossier trace. The pass/
+ * fail atoms below fill the trace rows AND decide the ring — same booleans, same body —
+ * so the explanation can never disagree with the verdict. radarVerdict() is this minus
+ * the checks.
+ */
+export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
   const demand = num(input.demand_trend_24m_pct);
   const sat = num(input.saturation_yoy);
   const wc = num(input.winner_concentration);
   const opp = num(input.opportunity_v2);
+  const er = num(input.entrant_ratio);
+  const solo = num(input.solo_viability);
+  const vol = num(input.reviews_24m);
+  const prev = num(input.reviews_prev_24m);
+  const newShare = num(input.reviews_24m_new_share);
+
+  // The solo LENS row — shared by both trace shapes. decides:false: see module doc.
+  const soloPass = solo === null ? null : solo >= SOLO_FRIENDLY_MIN;
+  const soloCheck: VerdictCheck = {
+    id: "solo",
+    label: "Solo viability",
+    value: solo === null ? "unknown" : solo.toFixed(2),
+    threshold: `≥ ${SOLO_FRIENDLY_MIN} solo-friendly`,
+    pass: soloPass,
+    note:
+      soloPass === null
+        ? "unknown — never counted as solo-friendly (lens, not a ring input)"
+        : soloPass
+          ? "solo-buildable share of the cut's games (lens — never moves a ring)"
+          : "leans multiplayer/team-scale (lens — never moves a ring)",
+    decides: false,
+  };
 
   // 0. emerging — pre-empts EVERYTHING (see precedence doc): a young tag's trend % AND
   //    its saturation read are both artifacts of the label's age, so neither the demand
   //    verdicts nor the crowding arms may fire. Not a caution: the evidence (youth) is
   //    solid; the honest claim is "no comparable base", and the meaningful number is
-  //    absolute volume, which the board/feed render instead of the %.
+  //    absolute volume — so the TRACE swaps the %-checks for volume + new-game share.
   if (input.demand_emerging === true) {
-    return { ring: "emerging", caution: false, reason: "young market — no comparable demand base" };
-  }
-
-  // 1. enter — demand in structural growth AND supply not flooding (unknown saturation
-  //    passes: the demand evidence is the claim; absence of a pipeline count doesn't
-  //    veto it).
-  if (demand !== null && demand >= DEMAND_ENTER_PCT && (sat === null || sat <= SAT_FLOOD_YOY)) {
-    return { ring: "enter", caution: false, reason: "demand in structural growth, supply not flooding" };
-  }
-
-  // 2. declining — sustained demand decay, checked BEFORE crowded (see precedence doc).
-  if (demand !== null && demand <= DEMAND_DECLINE_PCT) {
-    return { ring: "declining", caution: false, reason: "demand in sustained decline" };
-  }
-
-  // 3. crowded — winner-take-most is a structural fact independent of trend...
-  if (wc !== null && wc > WC_WINNER_TAKE_MOST) {
-    return { ring: "crowded", caution: false, reason: "winner-take-most revenue" };
-  }
-  //    ...and a flooding pipeline is crowding unless demand is demonstrably keeping up
-  //    (demand unknown does NOT rescue a flooding niche — but it is flagged caution).
-  if (sat !== null && sat > SAT_FLOOD_YOY && (demand === null || demand <= 0)) {
     return {
+      ring: "emerging",
+      caution: false,
+      reason: "young market — no comparable demand base",
+      checks: [
+        {
+          id: "volume",
+          label: "Review volume",
+          value: vol === null ? "unknown" : `${fmtCompact(vol)} reviews / 24m`,
+          threshold: "judged on absolute volume",
+          pass: null,
+          note:
+            "young tag — its prior 24-month window is near zero by construction, so no " +
+            "trend-% check is honest in either direction",
+          decides: true, // the mart's youth flag IS the ring decision
+        },
+        {
+          id: "new_share",
+          label: "New-game share",
+          value: newShare === null ? "unknown" : `${Math.round(newShare * 100)}% from games ≤ 24m old`,
+          threshold: "≥ 80% marks a young label",
+          pass: null,
+          note: "how much of the volume comes from newly released games — the mart's second youth tell",
+          decides: false,
+        },
+        soloCheck,
+      ],
+    };
+  }
+
+  // The pass/fail atoms — these SAME booleans fill the trace rows and decide the ring.
+  const demandEnter = demand !== null && demand >= DEMAND_ENTER_PCT;
+  const demandDecline = demand !== null && demand <= DEMAND_DECLINE_PCT;
+  const demandHolding = demand !== null && demand >= DEMAND_HOLD_PCT;
+  const supplyCalm = sat === null || sat <= SAT_FLOOD_YOY; // unknown does not veto enter
+  const flooding = sat !== null && sat > SAT_FLOOD_YOY;
+  const winnerTakeMost = wc !== null && wc > WC_WINNER_TAKE_MOST;
+
+  const baseClause = prev !== null ? ` · prior window ${fmtCompact(prev)} reviews` : "";
+  const checks: VerdictCheck[] = [
+    {
+      id: "demand",
+      label: "Demand",
+      value: demand === null ? "unknown" : `${fmtPctUnits(demand)} / 24m`,
+      threshold: `≥ ${fmtPctUnits(DEMAND_ENTER_PCT)} / 24m to enter`,
+      pass: demand === null ? null : demandEnter,
+      note:
+        demand === null
+          ? "no prior-window baseline — the enter/declining verdicts are unreachable"
+          : demandEnter
+            ? `structural growth — clears the enter bar${baseClause}`
+            : demandDecline
+              ? `sustained decline (≤ ${fmtPctUnits(DEMAND_DECLINE_PCT, 0)} / 24m)${baseClause}`
+              : demandHolding
+                ? `holding — real demand, below the enter bar${baseClause}`
+                : `softening — mild multi-year drift${baseClause}`,
+      decides: true,
+    },
+    {
+      id: "supply",
+      label: "Supply",
+      value: sat === null ? "unknown" : `${fmtSigned(sat, 1)} releases YoY`,
+      threshold: `≤ ${fmtSigned(SAT_FLOOD_YOY, 0)} YoY`,
+      pass: sat === null ? null : !flooding,
+      note:
+        sat === null
+          ? "unknown — does not veto enter, but the flooding read is unreachable"
+          : flooding
+            ? "supply flooding — vetoes enter"
+            : "pipeline calm",
+      decides: true,
+    },
+    {
+      id: "concentration",
+      label: "Concentration",
+      value: wc === null ? "unknown" : wc.toFixed(2),
+      threshold: `≤ ${WC_WINNER_TAKE_MOST} (winner-take-most above)`,
+      pass: wc === null ? null : !winnerTakeMost,
+      note:
+        wc === null
+          ? "unknown — the winner-take-most read is unreachable"
+          : winnerTakeMost
+            ? "winner-take-most revenue — judge by the median, not the hits"
+            : wc > WC_WINNER_TAKE_MOST - 0.05
+              ? "a hair under the winner-take-most bar"
+              : "revenue spread across the field",
+      decides: true,
+    },
+    {
+      id: "entrants",
+      label: "Newcomer economics",
+      value: er === null ? "unknown" : er.toFixed(2),
+      threshold: `≥ ${ENTRANT_RATIO_PAR.toFixed(1)} (catalog norm ~${ENTRANT_RATIO_CATALOG_NORM})`,
+      pass: er === null ? null : er >= ENTRANT_RATIO_PAR,
+      note:
+        er === null
+          ? "unknown — no read on how recent entrants earn"
+          : er >= ENTRANT_RATIO_PAR
+            ? "recent entrants earn at or above the niche median"
+            : `recent entrants earn ${Math.round((1 - er) * 100)}% below the niche median — falsification tell, never moves the ring`,
+      decides: false,
+    },
+    soloCheck,
+  ];
+
+  // Ring decision — the same precedence chain as ever (see module doc), expressed over
+  // the atoms above so the trace can't drift from it.
+  let verdict: RadarVerdict;
+  if (demandEnter && supplyCalm) {
+    // 1. enter — structural growth AND supply not flooding (unknown saturation passes).
+    verdict = { ring: "enter", caution: false, reason: "demand in structural growth, supply not flooding" };
+  } else if (demandDecline) {
+    // 2. declining — sustained demand decay, checked BEFORE crowded (precedence doc).
+    verdict = { ring: "declining", caution: false, reason: "demand in sustained decline" };
+  } else if (winnerTakeMost) {
+    // 3. crowded — winner-take-most is a structural fact independent of trend...
+    verdict = { ring: "crowded", caution: false, reason: "winner-take-most revenue" };
+  } else if (flooding && (demand === null || demand <= 0)) {
+    //    ...and a flooding pipeline is crowding unless demand is demonstrably keeping up
+    //    (demand unknown does NOT rescue a flooding niche — but it is flagged caution).
+    verdict = {
       ring: "crowded",
       caution: demand === null,
       reason: demand === null ? "supply flooding, demand unknown" : "supply flooding, demand not keeping up",
     };
-  }
-
-  // 4. watch — a real demand reading (holding or merely softening) is solid evidence; a
-  //    bare v2 score is not, so it carries the caution flag; everything else parks here
-  //    as the honest no-signal default.
-  if (demand !== null && demand >= DEMAND_HOLD_PCT) {
-    return { ring: "watch", caution: false, reason: "demand holding" };
-  }
-  if (demand !== null) {
+  } else if (demandEnter) {
+    // Demand cleared the enter bar but supply floods (and positive demand keeps it out
+    // of crowded): watch, with the honest reason — the dossier's supply row carries the
+    // failing check. Same ring as before the trace existed; only the reason sharpened.
+    verdict = { ring: "watch", caution: false, reason: "demand surging, but supply flooding" };
+  } else if (demandHolding) {
+    // 4. watch — a real demand reading is solid evidence...
+    verdict = { ring: "watch", caution: false, reason: "demand holding" };
+  } else if (demand !== null) {
     // -30% < demand < -10% per 24m: mild multi-year drift — watch, but honestly labeled.
-    return { ring: "watch", caution: false, reason: "demand softening" };
+    verdict = { ring: "watch", caution: false, reason: "demand softening" };
+  } else if (opp !== null && opp >= OPP_WATCH_SCORE) {
+    // ...a bare v2 score is not, so it carries the caution flag...
+    verdict = { ring: "watch", caution: true, reason: "high v2 score, no demand trend" };
+  } else {
+    // ...and everything else parks here as the honest no-signal default.
+    verdict = { ring: "watch", caution: true, reason: "no strong signal" };
   }
-  if (opp !== null && opp >= OPP_WATCH_SCORE) {
-    return { ring: "watch", caution: true, reason: "high v2 score, no demand trend" };
-  }
-  return { ring: "watch", caution: true, reason: "no strong signal" };
+  return { ...verdict, checks };
+}
+
+/** The ring verdict alone — radarVerdictTrace() minus the checks (same evaluation, by
+ * construction: this is a destructure, not a re-implementation). */
+export function radarVerdict(input: RadarVerdictInput): RadarVerdict {
+  const { ring, caution, reason } = radarVerdictTrace(input);
+  return { ring, caution, reason };
 }
 
 // ---- solo-viability lens (NOT part of the verdict — see module doc) ---------------------
 
 /** solo_viability at or above which a niche counts as solo-buildable. The catalog norm is
- * ~0.9; below 0.8 the MCP guidance flags meaningful multiplayer/team-scale dependence. */
+ * ~0.9; below 0.8 the MCP guidance flags meaningful multiplayer/team-scale dependence.
+ * MUST stay in lockstep with RADAR_SOLO_FRIENDLY_MIN in api/app/routers/niches.py — the
+ * server filters the radar population (`solo_only`, the board's default-on toggle) on the
+ * SAME bar this module renders in the legend, tooltip and dossier; a drift would make the
+ * legend lie about what the server filtered. */
 export const SOLO_FRIENDLY_MIN = 0.8;
 
 export type SoloBucket = "solo" | "team" | "unknown";

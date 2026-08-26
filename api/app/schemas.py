@@ -839,6 +839,11 @@ class RadarNicheCard(BaseModel):
     # NOT headlining a non-representative % is the client's presentation call.
     reviews_24m_new_share: Optional[float] = None
     demand_emerging: bool = False
+    # The radar population rule's input (share of the cut's scored games playable
+    # single-player; the feed filters on solo_viability >= RADAR_SOLO_FRIENDLY_MIN unless
+    # solo_only=0) — served on every card so clients can show the score that gated the
+    # population. None = unknown, which the filter treats as NOT solo-friendly.
+    solo_viability: Optional[float] = None
     # Live-player momentum (mart_niche, gated like p90_rev) — absent on older marts.
     players_trend_7d_pct: Optional[float] = None
     sparkline: list[RadarSparklinePoint] = Field(default_factory=list)

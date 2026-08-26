@@ -66,6 +66,37 @@ router = APIRouter(prefix="/api/niches", tags=["niches"])
 
 _TIERS = {"micro", "theme", "umbrella", "meta"}
 
+# The radar's solo-friendliness bar: mart_niche.solo_viability (share of the cut's scored
+# games playable single-player; catalog norm ~0.9, below ~0.8 leans multiplayer) at or
+# above which a niche counts as solo-buildable. Applied server-side wherever the RADAR
+# consumes niches — the `solo_only` param on GET /api/niches (opt-in, default OFF: the
+# list is a shared surface and non-radar consumers must see the unfiltered population) and
+# on GET /api/niches/radar (default ON: the radar page is solo-first by user directive,
+# 2026-08-26; the board toggle can turn it off).
+#
+# MUST stay in lockstep with SOLO_FRIENDLY_MIN in web/src/lib/radarVerdict.ts — the web
+# renders the same 0.8 bar in the board legend, the solo lens and the verdict dossier, so
+# a drift here would make the legend lie about what the server filtered.
+#
+# NULL policy: NULL solo_viability is "unknown", and unknown is NOT solo-friendly — the
+# radar population is an explicit positive claim ("you could build this solo"), so
+# unmeasured niches are excluded rather than given the benefit of the doubt. The plain
+# `solo_viability >= ?` predicate already does this (a NULL comparison is never TRUE in
+# SQL) — deliberate, not an accident.
+RADAR_SOLO_FRIENDLY_MIN = 0.8
+
+_SOLO_ONLY_DESC = (
+    "Radar population rule: keep only solo-friendly niches "
+    f"(solo_viability >= {RADAR_SOLO_FRIENDLY_MIN}; NULL = unknown = excluded)."
+)
+
+
+def _apply_solo_only(where: str, params: list) -> tuple[str, list]:
+    """Append the radar's solo-friendliness filter. NULL solo_viability fails the >=
+    (SQL three-valued logic) — exactly the intended 'unknown is not solo-friendly'
+    reading; see RADAR_SOLO_FRIENDLY_MIN."""
+    return where + " AND solo_viability >= ?", params + [RADAR_SOLO_FRIENDLY_MIN]
+
 # Columns a client is allowed to sort on (prevents SQL injection via `sort`).
 SORTABLE = {
     "key",
@@ -425,6 +456,10 @@ def list_niches(
     ),
     min_total_players: float | None = Query(None, ge=0),
     min_total_owners: float | None = Query(None, ge=0),
+    # Explicit OPT-IN (default off): this list backs NicheFinder / CSV-adjacent flows too,
+    # so the radar's population rule must never filter it globally — the Radar board is
+    # the consumer that passes solo_only=1.
+    solo_only: bool = Query(False, description=_SOLO_ONLY_DESC + " Default off."),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> NicheList:
@@ -464,6 +499,8 @@ def list_niches(
     where, params = _build_filters(
         dimension, window, min_reviews, q, tiers_arg, min_total_players, min_total_owners
     )
+    if solo_only:
+        where, params = _apply_solo_only(where, params)
     total = analytics_db.scalar(f"SELECT COUNT(*) FROM mart_niche {where}", params)
     rows = _niche_query(where, params, sort, order, limit, offset)
     return NicheList(
@@ -490,6 +527,11 @@ _RADAR_BASE_COLS = [
     "dimension", "key", "tier", "n_games", "opportunity_v2", "saturation_yoy",
     "reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct",
     "reviews_24m_new_share", "demand_emerging",
+    # The population-rule input (see RADAR_SOLO_FRIENDLY_MIN): served on every card so the
+    # client can show the score that gated the population. A required v2 column (in
+    # _BASE_COLS), so no capability gate — a mart without it predates v2 scoring entirely
+    # and never reaches this SELECT (the demand24m gate 503s first).
+    "solo_viability",
 ]
 
 
@@ -516,6 +558,7 @@ def _radar_card(r: dict, sparklines: dict[tuple[str, str], list[RadarSparklinePo
         demand_trend_24m_pct=r["demand_trend_24m_pct"],
         reviews_24m_new_share=r.get("reviews_24m_new_share"),
         demand_emerging=bool(r.get("demand_emerging")),
+        solo_viability=r.get("solo_viability"),
         players_trend_7d_pct=r.get("players_trend_7d_pct"),
         sparkline=sparklines.get((r["dimension"], r["key"]), []),
     )
@@ -554,12 +597,17 @@ def radar_feed(
     dimension: str = Query("tag", pattern="^(tag|genre)$"),
     window: str = Query("24m", pattern="^(all|24m)$"),
     min_reviews: int = Query(50, ge=0, le=100000),
+    # Default ON — the radar page is solo-first (user directive, 2026-08-26): hero, movers
+    # AND emerging all obey the same population rule; the board's "Solo-friendly only"
+    # toggle passes solo_only=0 to reveal the full population.
+    solo_only: bool = Query(True, description=_SOLO_ONLY_DESC + " Default on."),
     limit: int = Query(6, ge=1, le=24),
 ) -> RadarFeed:
     """The Radar feed: the cut's biggest 24-month demand riser (hero) plus its biggest movers
     in either direction ('Moving niches'), plus the cut's EMERGING niches as their own group.
     Defaults mirror NicheFinder/mockup 3a's own caption — "last 24 months · micro + theme
-    tags" — dimension=tag, window=24m, min_reviews=50, tiers micro+theme.
+    tags" — dimension=tag, window=24m, min_reviews=50, tiers micro+theme; solo_only defaults
+    ON (see RADAR_SOLO_FRIENDLY_MIN — solo-friendly niches only, NULL = unknown = excluded).
 
     EMERGING (demand_emerging, see mart_niche.sql): young Steam tags crystallize around new
     games only — old ancestors never get re-voted into them — so their prior-window base is
@@ -584,6 +632,10 @@ def radar_feed(
 
     tiers_arg = "micro,theme" if dimension == "tag" else None
     where, params = _build_filters(dimension, window, min_reviews, None, tiers_arg, None, None)
+    if solo_only:
+        # Applied BEFORE any group splits off, so hero, movers and emerging all read the
+        # same population — a team-scale niche must not sneak in through any of the three.
+        where, params = _apply_solo_only(where, params)
     cols = ", ".join(_radar_cols())
 
     # Emerging niches first (their own group, before the WHERE narrows to rankable rows):

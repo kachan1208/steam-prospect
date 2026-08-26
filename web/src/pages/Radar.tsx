@@ -17,7 +17,7 @@ import {
   type TrendPoint,
 } from "../lib/api";
 import { fmtCompact, fmtInt, fmtSigned, fmtUsd } from "../lib/format";
-import { radarVerdict, soloBucket, type SoloBucket } from "../lib/radarVerdict";
+import { SOLO_FRIENDLY_MIN, radarVerdictTrace } from "../lib/radarVerdict";
 import { nicheDetailPath } from "./NicheDetail";
 
 /**
@@ -33,15 +33,23 @@ import { nicheDetailPath } from "./NicheDetail";
  *    trend; rows without one (older mart / no baseline) degrade to the verdict lib's
  *    structural rules — documented there, flagged "caution" in the UI. Rows flagged
  *    demand_emerging (young tags with no comparable base) plate in their own Emerging ring
- *    and never headline their %. The stats cut is PINNED (24m × 50+ reviews) and the
- *    solo-viability lens filters/restyles dots without ever moving a ring — see
- *    BOARD_WINDOW's and lib/radarVerdict.ts's docs.
+ *    and never headline their %. The stats cut is PINNED (24m × 50+ reviews) — see
+ *    BOARD_WINDOW's doc. Each blip click opens the VERDICT DOSSIER (RadarBoard.tsx): the
+ *    verdict-trace decomposition of why the niche got its ring, from the same evaluation
+ *    that placed the dot.
+ *
+ *    POPULATION (user directive, 2026-08-26): the whole radar page is SOLO-FIRST — the
+ *    board and the feed default to solo-friendly niches only (solo_viability >= 0.8,
+ *    filtered SERVER-side via the API's solo_only param; NULL = unknown = excluded). One
+ *    page-level "Solo-friendly only" toggle (default ON) drives both surfaces; turning it
+ *    off reveals the full population, where team-scale dots draw hollow (the lens). Solo
+ *    never moves a ring in either mode — see lib/radarVerdict.ts.
  *
  * 2. The original opportunity feed (mockup 3a): a hero "blueprint" plate on the cut's
  *    single biggest 24-month demand riser, then a grid of the cut's biggest movers in
  *    either direction, then the cut's EMERGING niches as their own mini-list (ranked by
  *    absolute volume — their % has no comparable base) — reflowed under an "Opportunity
- *    feed" section title.
+ *    feed" section title. Follows the same solo_only population rule as the board.
  *
  * THE DATA (read niches.py::radar_feed / _has_demand24m for the full story): the feed ranks
  * on demand_trend_24m_pct, a mart_niche column that is not in the published mart until the
@@ -80,13 +88,14 @@ const TOP_N_OPTIONS = [
   { v: 80, label: "80" },
   { v: 120, label: "120" },
 ];
-/** Solo-viability lens (see lib/radarVerdict.ts: a LENS, never a ring input). "unknown"
- * (null solo_viability) is its own honest bucket: shown under All only — a filter for
- * solo-friendly must not include niches nobody measured. */
-const SOLO_OPTIONS: { v: "all" | SoloBucket; label: string }[] = [
-  { v: "all", label: "All" },
-  { v: "solo", label: "Solo-friendly" },
-  { v: "team", label: "Team-scale" },
+/** The page-level population toggle (default ON — the radar is solo-first). ON asks the
+ * SERVER (solo_only) for solo-friendly niches only (solo_viability >= 0.8, unknown
+ * excluded); OFF reveals the full population, where the solo lens draws team-scale dots
+ * hollow. Replaced the old client-side All/Solo/Team lens chips: the population rule now
+ * lives server-side, and the board legend states it. */
+const SOLO_ONLY_OPTIONS: { v: "on" | "off"; label: string }[] = [
+  { v: "on", label: "On" },
+  { v: "off", label: "Off" },
 ];
 
 /** Minimal segmented control in the app's hairline-border language (square, no fills
@@ -140,18 +149,22 @@ function SegRow<V extends string | number>({
  * structural evidence, caution-flagged — there is no shorter-horizon fallback, because
  * the 90-day/12-month columns this trend replaced are gone from the mart.
  */
-function RadarBoardSection() {
+function RadarBoardSection({ soloOnly, onSoloOnly }: { soloOnly: boolean; onSoloOnly: (v: boolean) => void }) {
   const [topN, setTopN] = useState(80);
-  const [solo, setSolo] = useState<"all" | SoloBucket>("all");
 
   // The board population: the two cuts that make up the three sectors. Each query asks for
   // topN rows by opportunity_v2 so the merged top-N cap can never starve one dimension.
+  // solo_only is SERVER-side (the shared list endpoint's opt-in param — non-radar
+  // consumers stay unfiltered): filtering before the limit means a solo-only board always
+  // fills back up to N instead of thinning out.
+  const soloParam = soloOnly ? (1 as const) : undefined;
   const genreQ = useNiches({
     dimension: "genre",
     window: BOARD_WINDOW,
     min_reviews: BOARD_MIN_REVIEWS,
     sort: "opportunity_v2",
     order: "desc",
+    solo_only: soloParam,
     limit: topN,
     offset: 0,
   });
@@ -162,6 +175,7 @@ function RadarBoardSection() {
     sort: "opportunity_v2",
     order: "desc",
     tiers: "micro,theme",
+    solo_only: soloParam,
     limit: topN,
     offset: 0,
   });
@@ -175,6 +189,20 @@ function RadarBoardSection() {
       // ?? null: the field is absent (undefined) on marts that predate the demand columns.
       const demandTrendPct = row.demand_trend_24m_pct ?? null;
       const demandEmerging = row.demand_emerging === true;
+      // One evaluation produces BOTH the ring and the dossier trace (radarVerdictTrace —
+      // same booleans, same body), so the panel can never disagree with the dot position.
+      const { checks, ...verdict } = radarVerdictTrace({
+        demand_trend_24m_pct: demandTrendPct,
+        demand_emerging: demandEmerging,
+        saturation_yoy: row.saturation_yoy,
+        winner_concentration: row.winner_concentration,
+        opportunity_v2: row.opportunity_v2,
+        entrant_ratio: row.entrant_ratio,
+        solo_viability: row.solo_viability ?? null,
+        reviews_24m: row.reviews_24m ?? null,
+        reviews_prev_24m: row.reviews_prev_24m ?? null,
+        reviews_24m_new_share: row.reviews_24m_new_share ?? null,
+      });
       rows.push({
         dimension: row.dimension,
         key: row.key,
@@ -186,24 +214,17 @@ function RadarBoardSection() {
         demandTrendPct,
         demandEmerging,
         reviews24m: row.reviews_24m ?? null,
+        reviewsPrev24m: row.reviews_prev_24m ?? null,
         solo_viability: row.solo_viability ?? null,
-        verdict: radarVerdict({
-          demand_trend_24m_pct: demandTrendPct,
-          demand_emerging: demandEmerging,
-          saturation_yoy: row.saturation_yoy,
-          winner_concentration: row.winner_concentration,
-          opportunity_v2: row.opportunity_v2,
-        }),
+        verdict,
+        trace: checks,
       });
     };
     for (const r of genreQ.data?.items ?? []) push(r);
     for (const r of tagQ.data?.items ?? []) push(r);
-    // Solo lens BEFORE the top-N cap, so a solo-friendly board fills back up to N.
-    // "unknown" (null) shows under All only — never claimed for either bucket.
-    const seen = solo === "all" ? rows : rows.filter((b) => soloBucket(b.solo_viability) === solo);
-    seen.sort((a, b) => (b.opportunity_v2 ?? -1) - (a.opportunity_v2 ?? -1) || a.key.localeCompare(b.key));
-    return seen.slice(0, topN);
-  }, [genreQ.data, tagQ.data, topN, solo]);
+    rows.sort((a, b) => (b.opportunity_v2 ?? -1) - (a.opportunity_v2 ?? -1) || a.key.localeCompare(b.key));
+    return rows.slice(0, topN);
+  }, [genreQ.data, tagQ.data, topN]);
 
   const loading = genreQ.isLoading || tagQ.isLoading;
   const bothFailed = genreQ.isError && tagQ.isError;
@@ -216,11 +237,17 @@ function RadarBoardSection() {
         <div className="flex flex-col gap-1.5">
           <div className="kicker text-[10px] tracking-[.12em] text-brand">
             Verdict rings · last 24 months · genres + micro + theme tags
+            {soloOnly ? " · solo-friendly only" : ""}
           </div>
           <h2 className="text-[26px] text-ink-primary sm:text-[30px]">Niche radar</h2>
         </div>
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 sm:ml-auto">
-          <SegRow label="Solo-buildable" options={SOLO_OPTIONS} value={solo} onChange={setSolo} />
+          <SegRow
+            label="Solo-friendly only"
+            options={SOLO_ONLY_OPTIONS}
+            value={soloOnly ? "on" : "off"}
+            onChange={(v) => onSoloOnly(v === "on")}
+          />
           <SegRow label="Top" options={TOP_N_OPTIONS} value={topN} onChange={setTopN} />
         </div>
       </div>
@@ -231,7 +258,7 @@ function RadarBoardSection() {
           Failed to load the niche cuts{genreQ.error instanceof Error ? `: ${genreQ.error.message}` : "."}
         </div>
       )}
-      {!loading && !bothFailed && <RadarBoard blips={blips} />}
+      {!loading && !bothFailed && <RadarBoard blips={blips} soloOnly={soloOnly} />}
 
       {partialFail && (
         <p className="pt-3 text-[11px] text-ink-muted">
@@ -249,14 +276,23 @@ function RadarBoardSection() {
         volume instead · Crowded = releases up &gt;15% YoY against flat-to-down demand, or winner-take-most · Declining
         = demand down ≥30% per 24 months. Every dot rings on its own 24-month demand trend; niches without one (older
         data build, or no prior-window baseline) are placed on structural evidence and marked &ldquo;caution&rdquo; in
-        the tooltip. The solo lens filters and restyles dots (hollow = team-scale) — it never changes a ring.
+        the tooltip. Click a dot for its verdict dossier — the same checks that placed it, spelled out with the bars
+        they were judged against.{" "}
+        {soloOnly
+          ? `Population: solo-friendly niches only (solo viability ≥ ${SOLO_FRIENDLY_MIN}, filtered server-side; a niche with no solo reading is excluded — unknown is not a claim). Solo never changes a ring.`
+          : `Population: all niches — the solo lens restyles team-scale dots (hollow, solo viability < ${SOLO_FRIENDLY_MIN}) without ever changing a ring.`}
       </p>
     </section>
   );
 }
 
 export default function Radar() {
-  const feedQ = useRadarFeed({ limit: 6 });
+  // The page-level population toggle (default ON — the radar is solo-first, user
+  // directive 2026-08-26). ONE state drives BOTH surfaces: the board's two list queries
+  // and the opportunity feed below all pass the same server-side solo_only, so the page
+  // can never show a solo-only board over a full-population feed.
+  const [soloOnly, setSoloOnly] = useState(true);
+  const feedQ = useRadarFeed({ limit: 6, solo_only: soloOnly ? 1 : 0 });
   const apiError = feedQ.error instanceof ApiError ? feedQ.error : null;
   // 503 is the EXPECTED state for hours after every deploy that adds a mart column — the
   // nightly rebuild (21:00 UTC) is what materialises demand_trend_24m_pct. Not an error the
@@ -270,11 +306,14 @@ export default function Radar() {
   return (
     <div className="mx-auto flex max-w-[1180px] flex-col gap-[30px]">
       {/* The board is the page's hero; the original feed reflows below it. */}
-      <RadarBoardSection />
+      <RadarBoardSection soloOnly={soloOnly} onSoloOnly={setSoloOnly} />
 
       <div className="flex flex-wrap items-baseline gap-3">
         <h4 className="text-ink-primary">Opportunity feed</h4>
-        <span className="text-[11px] text-ink-muted">the cut&rsquo;s biggest 24-month demand riser + movers</span>
+        <span className="text-[11px] text-ink-muted">
+          the cut&rsquo;s biggest 24-month demand riser + movers
+          {soloOnly ? " · solo-friendly only" : ""}
+        </span>
       </div>
 
       {feedQ.isLoading && (
@@ -330,7 +369,9 @@ export default function Radar() {
 
           <div className="flex flex-wrap items-baseline gap-3">
             <h4 className="text-ink-primary">Moving niches</h4>
-            <span className="text-[11px] text-ink-muted">last 24 months vs prior 24 · buildable tags only</span>
+            <span className="text-[11px] text-ink-muted">
+              last 24 months vs prior 24 · buildable tags only{soloOnly ? " · solo-friendly only" : ""}
+            </span>
             <Link to="/niches" className="ml-auto text-[13px] text-brand transition-colors hover:text-brand-hover">
               Open Niche Finder →
             </Link>

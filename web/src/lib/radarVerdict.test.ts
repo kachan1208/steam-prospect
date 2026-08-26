@@ -6,6 +6,7 @@ import {
   DEMAND_DECLINE_PCT,
   DEMAND_ENTER_PCT,
   DEMAND_HOLD_PCT,
+  ENTRANT_RATIO_PAR,
   OPP_WATCH_SCORE,
   RING_ORDER,
   SAT_FLOOD_YOY,
@@ -15,7 +16,9 @@ import {
   hash01,
   hashString,
   radarVerdict,
+  radarVerdictTrace,
   soloBucket,
+  type RadarVerdictInput,
 } from "./radarVerdict";
 
 describe("radarVerdict — 24-month threshold pins", () => {
@@ -218,6 +221,124 @@ describe("radarVerdict — null-field degradation (no shorter-horizon fallback e
     const v = radarVerdict({ opportunity_v2: 95 });
     expect(v.ring).toBe("watch");
     expect(v.caution).toBe(true);
+  });
+});
+
+describe("radarVerdictTrace — the dossier decomposition", () => {
+  // The user's own reference example (Roguelike Deckbuilder): top solo-buildable, demand
+  // far past the enter bar, BUT supply flooding — so the verdict is WATCH, and the trace
+  // must show exactly which check failed, plus the two independent falsification tells
+  // (entrant economics near-fail concentration) that never move the ring.
+  const roguelikeDeckbuilder: RadarVerdictInput = {
+    demand_trend_24m_pct: 196,
+    reviews_24m: 604_000,
+    reviews_prev_24m: 204_700,
+    saturation_yoy: 0.409,
+    winner_concentration: 0.836,
+    entrant_ratio: 0.843,
+    opportunity_v2: 71.2,
+    solo_viability: 0.995,
+  };
+
+  it("decomposes the reference shape: watch because supply vetoes enter", () => {
+    const t = radarVerdictTrace(roguelikeDeckbuilder);
+    expect(t.ring).toBe("watch");
+    expect(t.caution).toBe(false);
+    expect(t.reason).toBe("demand surging, but supply flooding");
+    const by = Object.fromEntries(t.checks.map((c) => [c.id, c]));
+    expect(by.demand.pass).toBe(true); // +196% clears the ≥ +40% bar
+    expect(by.demand.value).toBe("+196.0% / 24m");
+    expect(by.demand.note).toContain("204.7K"); // the base rides along
+    expect(by.supply.pass).toBe(false); // +40.9% YoY > +15% — flooding
+    expect(by.supply.value).toBe("+40.9% releases YoY");
+    expect(by.concentration.pass).toBe(true); // 0.836 ≤ 0.85 …
+    expect(by.concentration.note).toContain("hair"); // … but only just
+    expect(by.entrants.pass).toBe(false); // 0.843 < 1.0 — entrants underearn
+    expect(by.entrants.note).toContain("16% below");
+    expect(by.solo.pass).toBe(true); // 0.995 ≥ 0.8
+  });
+
+  it("check order and required fields are stable", () => {
+    const t = radarVerdictTrace(roguelikeDeckbuilder);
+    expect(t.checks.map((c) => c.id)).toEqual(["demand", "supply", "concentration", "entrants", "solo"]);
+    for (const c of t.checks) {
+      expect(c.label).toBeTruthy();
+      expect(c.value).toBeTruthy();
+      expect(c.threshold).toBeTruthy();
+      expect(c.note).toBeTruthy();
+    }
+  });
+
+  it("the trace and the ring come from the same evaluation (radarVerdict IS the trace minus checks)", () => {
+    const inputs: RadarVerdictInput[] = [
+      roguelikeDeckbuilder,
+      {},
+      { demand_trend_24m_pct: 60, saturation_yoy: 0.05 },
+      { demand_trend_24m_pct: -80 },
+      { winner_concentration: 0.95 },
+      { demand_emerging: true, reviews_24m: 39_600 },
+    ];
+    for (const input of inputs) {
+      const t = radarVerdictTrace(input);
+      expect(radarVerdict(input)).toEqual({ ring: t.ring, caution: t.caution, reason: t.reason });
+    }
+  });
+
+  it("only demand/supply/concentration can decide; the tell and the lens are decides:false", () => {
+    const t = radarVerdictTrace(roguelikeDeckbuilder);
+    expect(Object.fromEntries(t.checks.map((c) => [c.id, c.decides]))).toEqual({
+      demand: true,
+      supply: true,
+      concentration: true,
+      entrants: false,
+      solo: false,
+    });
+  });
+
+  it("entrant_ratio and solo_viability never move the ring (behavioral pin, not just a flag)", () => {
+    const base: RadarVerdictInput = { demand_trend_24m_pct: 60, saturation_yoy: 0.05 };
+    for (const entrant_ratio of [null, 0.2, ENTRANT_RATIO_PAR, 2]) {
+      for (const solo_viability of [null, 0, SOLO_FRIENDLY_MIN, 1]) {
+        const t = radarVerdictTrace({ ...base, entrant_ratio, solo_viability });
+        expect(t.ring).toBe("enter");
+        expect(t.caution).toBe(false);
+      }
+    }
+  });
+
+  it("unknown fields trace as pass:null with 'unknown' values — never a fabricated claim", () => {
+    const t = radarVerdictTrace({});
+    expect(t.checks).toHaveLength(5);
+    for (const c of t.checks) {
+      expect(c.pass).toBeNull();
+      expect(c.value).toBe("unknown");
+    }
+  });
+
+  it("emerging gets its own trace shape: volume + new-game share + solo, no %-checks", () => {
+    const t = radarVerdictTrace({
+      demand_emerging: true,
+      demand_trend_24m_pct: 4850, // must NOT surface as a %-check — no comparable base
+      reviews_24m: 39_600,
+      reviews_24m_new_share: 0.94,
+      solo_viability: 0.94,
+    });
+    expect(t.ring).toBe("emerging");
+    expect(t.checks.map((c) => c.id)).toEqual(["volume", "new_share", "solo"]);
+    expect(t.checks[0].value).toContain("39.6K");
+    expect(t.checks[1].value).toContain("94%");
+    for (const c of t.checks) {
+      expect(c.value).not.toContain("4850");
+      expect(c.note).not.toContain("4850");
+    }
+  });
+
+  it("the sharpened watch reason only fires when demand clears the enter bar into flooding supply", () => {
+    // Below the enter bar the old reasons survive untouched.
+    expect(radarVerdictTrace({ demand_trend_24m_pct: 20, saturation_yoy: 0.05 }).reason).toBe("demand holding");
+    expect(radarVerdictTrace({ demand_trend_24m_pct: -20 }).reason).toBe("demand softening");
+    // At/above the bar with calm supply it is enter, not the sharpened watch.
+    expect(radarVerdictTrace({ demand_trend_24m_pct: 60, saturation_yoy: 0.05 }).ring).toBe("enter");
   });
 });
 
