@@ -98,20 +98,19 @@ WHERE g.total_reviews >= mr.min_reviews
         OR (g.release_valid AND g.release_date >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH)
       );
 
--- DEMAND OVER 12 MONTHS — the metric the Radar surfaces ring and rank on. Nothing else in
+-- DEMAND OVER 24 MONTHS — the metric the Radar surfaces ring and rank on. Nothing else in
 -- the marts carries a demand trend: players_trend_7d_pct is a 7-day window, and
 -- saturation_yoy counts RELEASES (pipeline), not demand.
 --
--- WHY 12-MONTH WINDOWS (2026-08, replacing the original 90-day windows outright): the 90d
--- trend was quarter-over-quarter — it caught release spikes, sale weeks and seasonality,
--- which is the wrong signal for "what should I build": a game started today ships 1-3
--- years out, so the demand question is structural, not momentum. Last 12 complete months
--- vs the 12 before them — the two halves of the same 24-month span the mart's own 24m
--- population cut covers — is a year-over-year read: each window holds one full seasonal
--- cycle (seasonality cancels instead of aliasing) and a single launch spike is diluted
--- across 12 months.
+-- WHY 24-MONTH WINDOWS (2026-08-26, user-directed, replacing the 12-month windows — which
+-- had themselves replaced the original 90-day windows): the Radar's pinned membership cut
+-- is already 24m x min50 ("the market a new entrant faces"), so the demand trend now
+-- speaks the same horizon — last 24 complete months vs the 24 before them. The structural
+-- argument that killed the 90d windows only strengthens: a game started today ships 1-3
+-- years out, each window now holds two full seasonal cycles (seasonality cancels instead
+-- of aliasing), and a single launch spike is diluted across 24 months.
 --
--- SOURCE (2026-08-23, kept from the 90d version): stg_review_histogram (Steam's own
+-- SOURCE (2026-08-23, kept from the 90d/12m versions): stg_review_histogram (Steam's own
 -- per-month review totals), NOT stg_review. The first 90d cut counted the sampled reviews
 -- table and asserted the bias "largely cancels in a ratio". Measured, it does the
 -- opposite: the keeper collects NEW reviews near-completely while a big game's historical
@@ -127,7 +126,7 @@ WHERE g.total_reviews >= mr.min_reviews
 -- fiction.
 --
 -- Windows are whole months anchored on the last GLOBALLY complete month (max period - 1):
--- now = (anchor-12 .. anchor], prev = (anchor-24 .. anchor-12] — 12 calendar months each.
+-- now = (anchor-24 .. anchor], prev = (anchor-48 .. anchor-24] — 24 calendar months each.
 -- A global anchor, not per-game: anchoring on each game's own last month would date a dead
 -- game's "current" trend to whenever it died. Known softness: histograms are refreshed in
 -- bulk (most fetched ~monthly), so the anchor month is truncated at fetch date for most
@@ -140,15 +139,30 @@ WHERE g.total_reviews >= mr.min_reviews
 --     review inflow — grouping by the floor made a display toggle change a niche's trend
 --     and, through the Radar board's client-side verdicts, its ring. Collapsing the
 --     floors loses nothing real: the histogram only covers >=50-review games anyway.
---   win (NEW with the 12m windows; the 90d CTE joined per win): the win='24m' population
---     holds only games RELEASED in the last @RECENT_MONTHS@ months, so every member
---     released inside the last 12 months mechanically CANNOT have inflow in the
---     prior-12m window (it did not exist yet). A per-win join would structurally inflate
---     — or NULL out — every trend on that cut, and that cut is exactly the one the Radar
---     board pins. Demand is a property of the NICHE, so it is computed once over the
---     full membership (the (win='all', min_reviews=0) superset) and stamped on every cut.
-DROP TABLE IF EXISTS _niche_demand12m;
-CREATE TEMP TABLE _niche_demand12m AS
+--   win (since the 12m windows; the 90d CTE joined per win — with 24m windows the case
+--     is absolute): the win='24m' population holds only games RELEASED in the last
+--     @RECENT_MONTHS@ months, so NO member can have inflow in the prior-24m window (it
+--     did not exist yet). A per-win join would NULL out every trend on that cut, and
+--     that cut is exactly the one the Radar board pins. Demand is a property of the
+--     NICHE, so it is computed once over the full membership (the (win='all',
+--     min_reviews=0) superset) and stamped on every cut.
+--
+-- EMERGING (2026-08-26, user-directed): young Steam tags crystallize around NEW games
+-- only — 'Organizing' appears, its new games get the tag, but the genre's ancestors
+-- (Unpacking, A Little to the Left) never get re-voted into it — so the tag's prior
+-- window is near zero BY CONSTRUCTION and a raw +4,775% trend is a property of the
+-- label's age, not of demand. Two tells, either one flags the niche:
+--   demand_emerging = reviews_prev_24m < @DEMAND_MIN_BASE@            (no comparable base)
+--                  OR reviews_24m_new_share >= @DEMAND_NEW_MASS_SHARE@ (the review mass IS
+--                     the newest games, even when a stray old title lifts the prev window)
+-- reviews_24m_new_share = the fraction of reviews_24m contributed by member games
+-- released within the last @RECENT_MONTHS@ months (same release predicate as the
+-- win='24m' population cut; NULL/invalid release dates count as NOT new; NULL share when
+-- the niche had no window inflow at all). demand_trend_24m_pct stays COMPUTED AND SERVED
+-- for emerging niches — the raw data stays honest; not headlining a non-representative %
+-- is a presentation/verdict concern for the clients (radar feed ranking, web verdicts).
+DROP TABLE IF EXISTS _niche_demand24m;
+CREATE TEMP TABLE _niche_demand24m AS
 WITH anchor AS (
     SELECT date_trunc('month', MAX(period_month)) - INTERVAL 1 MONTH AS m
     FROM stg_review_histogram
@@ -156,12 +170,12 @@ WITH anchor AS (
 v AS (
     SELECT h.appid,
         SUM(h.n_reviews) FILTER (
-            WHERE h.period_month >  (SELECT m FROM anchor) - INTERVAL 12 MONTH
+            WHERE h.period_month >  (SELECT m FROM anchor) - INTERVAL 24 MONTH
               AND h.period_month <= (SELECT m FROM anchor)
         ) AS r_now,
         SUM(h.n_reviews) FILTER (
-            WHERE h.period_month >  (SELECT m FROM anchor) - INTERVAL 24 MONTH
-              AND h.period_month <= (SELECT m FROM anchor) - INTERVAL 12 MONTH
+            WHERE h.period_month >  (SELECT m FROM anchor) - INTERVAL 48 MONTH
+              AND h.period_month <= (SELECT m FROM anchor) - INTERVAL 24 MONTH
         ) AS r_prev
     FROM stg_review_histogram h
     GROUP BY h.appid
@@ -171,13 +185,34 @@ v AS (
 -- the niche's full scored membership.
 members AS (
     SELECT DISTINCT dimension, key, appid FROM _niche_pop
+),
+agg AS (
+    SELECT p.dimension, p.key,
+           SUM(COALESCE(v.r_now, 0))  AS reviews_24m,
+           SUM(COALESCE(v.r_prev, 0)) AS reviews_prev_24m,
+           -- Share of the now-window inflow from games released in the last
+           -- @RECENT_MONTHS@ months (the win='24m' cut's own release predicate, so
+           -- NULL/invalid release dates count as NOT new). NULL when there is no inflow
+           -- to take a share of.
+           CASE WHEN SUM(COALESCE(v.r_now, 0)) = 0 THEN NULL
+                ELSE COALESCE(SUM(COALESCE(v.r_now, 0)) FILTER (
+                         WHERE g.release_valid
+                           AND g.release_date >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH
+                     ), 0) * 1.0 / SUM(COALESCE(v.r_now, 0))
+           END AS new_share
+    FROM members p
+    LEFT JOIN v ON v.appid = p.appid
+    LEFT JOIN stg_game g ON g.appid = p.appid
+    GROUP BY 1, 2
 )
-SELECT p.dimension, p.key,
-       SUM(COALESCE(v.r_now, 0))  AS reviews_12m,
-       SUM(COALESCE(v.r_prev, 0)) AS reviews_prev_12m
-FROM members p
-LEFT JOIN v ON v.appid = p.appid
-GROUP BY 1, 2;
+SELECT dimension, key, reviews_24m, reviews_prev_24m,
+       round(new_share, 4) AS reviews_24m_new_share,
+       -- Never NULL: the NULL-share case (zero inflow) always has a sub-floor prev base
+       -- too small to rank on anyway, and COALESCE keeps the boolean honest when the
+       -- share is NULL with a large prev base (a dead niche is not "emerging").
+       (reviews_prev_24m < @DEMAND_MIN_BASE@
+        OR COALESCE(new_share >= @DEMAND_NEW_MASS_SHARE@, FALSE)) AS demand_emerging
+FROM agg;
 
 CREATE TABLE mart_niche AS
 WITH membership AS (
@@ -340,21 +375,25 @@ SELECT
     nl.lifetime_n_games,
     nl.lifetime_survival_12m,
     nl.lifetime_median_dead_months,
-    d.reviews_12m,
-    d.reviews_prev_12m,
+    d.reviews_24m,
+    d.reviews_prev_24m,
     -- NULL, not 0, when the prior window is empty: "no baseline to compare against" and
     -- "no change" are different answers, and a niche whose first reviews all landed
-    -- inside the last 12 months would otherwise read as flat instead of brand new.
-    CASE WHEN COALESCE(d.reviews_prev_12m, 0) = 0 THEN NULL
-         ELSE round(100.0 * (d.reviews_12m - d.reviews_prev_12m) / d.reviews_prev_12m, 1)
-    END AS demand_trend_12m_pct
+    -- inside the last 24 months would otherwise read as flat instead of brand new.
+    CASE WHEN COALESCE(d.reviews_prev_24m, 0) = 0 THEN NULL
+         ELSE round(100.0 * (d.reviews_24m - d.reviews_prev_24m) / d.reviews_prev_24m, 1)
+    END AS demand_trend_24m_pct,
+    -- Emerging pair (see _niche_demand24m's EMERGING header). The trend above stays
+    -- computed for emerging niches — clients decide not to headline it.
+    d.reviews_24m_new_share,
+    d.demand_emerging
 FROM gated g
 LEFT JOIN tag_tier tt ON g.dimension = 'tag' AND tt.tag = g.key
 LEFT JOIN _niche_players_now np ON np.dimension = g.dimension AND np.key = g.key
 LEFT JOIN _niche_lifetime nl ON nl.dimension = g.dimension AND nl.key = g.key
--- Cut-independent on purpose (see _niche_demand12m's header): every (win, min_reviews)
+-- Cut-independent on purpose (see _niche_demand24m's header): every (win, min_reviews)
 -- cut of a (dimension, key) carries the SAME demand numbers.
-LEFT JOIN _niche_demand12m d
+LEFT JOIN _niche_demand24m d
        ON d.dimension = g.dimension AND d.key = g.key;
 
 CREATE TABLE mart_niche_top AS

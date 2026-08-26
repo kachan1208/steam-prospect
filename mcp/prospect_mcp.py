@@ -195,16 +195,18 @@ _HAS_NICHE_P90 = bool(
     )
 )
 
-# 12-month demand trend per niche (reviews_12m / reviews_prev_12m / demand_trend_12m_pct):
-# the niche's review-histogram inflow over the last 12 complete months vs the 12 before
-# them — the year-over-year demand read the Radar surfaces ring on. Cut-independent in
-# the mart (one value per (dimension, key), identical on every window/floor cut). These
-# REPLACED the earlier 90-day demand columns outright, so a mart carrying only those old
-# columns probes False here and the fields are simply omitted.
-_HAS_DEMAND12M = bool(
+# 24-month demand trend per niche (reviews_24m / reviews_prev_24m / demand_trend_24m_pct,
+# plus the emerging pair reviews_24m_new_share / demand_emerging — one ETL build, one
+# probe): the niche's review-histogram inflow over the last 24 complete months vs the 24
+# before them — the structural demand read the Radar surfaces ring on, matching the
+# radar's own pinned 24m membership cut. Cut-independent in the mart (one value per
+# (dimension, key), identical on every window/floor cut). These REPLACED the earlier
+# 12-month columns outright (which had replaced the 90-day ones), so a mart carrying only
+# those old columns probes False here and the fields are simply omitted.
+_HAS_DEMAND24M = bool(
     query(
         "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_niche' AND column_name = 'demand_trend_12m_pct'"
+        "WHERE table_name = 'mart_niche' AND column_name = 'demand_trend_24m_pct'"
     )
 )
 
@@ -630,17 +632,17 @@ _NICHE_SORTABLE = {
     "total_players_now", "players_trend_7d_pct", "players_coverage",
     "median_players_now", "players_top5_share",
     "lifetime_survival_12m", "lifetime_median_dead_months",
-    "reviews_12m", "reviews_prev_12m", "demand_trend_12m_pct",
+    "reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct",
 }
 # The subset of _NICHE_SORTABLE that only exists on marts with the players columns
 # (sorting/filtering on them needs _HAS_PLAYERS; everything else works on older marts).
 _NICHE_PLAYERS_COLS = {"total_players_now", "players_trend_7d_pct", "players_coverage"}
 _NICHE_PLAYERS_DIST_COLS = {"median_players_now", "players_top5_share"}
 _NICHE_LIFETIME_COLS = {"lifetime_survival_12m", "lifetime_median_dead_months"}
-_NICHE_DEMAND12M_COLS = {"reviews_12m", "reviews_prev_12m", "demand_trend_12m_pct"}
-_DEMAND12M_MISSING = (
-    "This mart predates the 12-month demand columns (reviews_12m / reviews_prev_12m / "
-    "demand_trend_12m_pct, an older ETL build). Re-run the ETL (`task etl` in the main "
+_NICHE_DEMAND24M_COLS = {"reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct"}
+_DEMAND24M_MISSING = (
+    "This mart predates the 24-month demand columns (reviews_24m / reviews_prev_24m / "
+    "demand_trend_24m_pct, an older ETL build). Re-run the ETL (`task etl` in the main "
     "prospect checkout) and retry."
 )
 _NICHE_TIERS = {"micro", "umbrella", "theme", "meta"}
@@ -765,14 +767,21 @@ def find_niches(
       launch, don't plan year-two updates). Catalog-wide baseline: lifetime_curve().
 
     DEMAND TREND (structural; one value per key, identical across cuts; absent on marts
-    that predate the 12-month demand columns):
-      - demand_trend_12m_pct: the niche's review inflow (Steam's own monthly review
-        histogram — true counts, games with 50+ reviews) over the last 12 complete
-        months vs the 12 before them, in percent — year over year. Sort by it for
-        "which niches are structurally growing" — a launch spike or a sale week cannot
-        move it the way it moved the old 90-day trend. reviews_12m / reviews_prev_12m
-        are the raw window sums. NULL trend = no prior-window baseline (a genuinely new
-        niche), never "flat".
+    that predate the 24-month demand columns):
+      - demand_trend_24m_pct: the niche's review inflow (Steam's own monthly review
+        histogram — true counts, games with 50+ reviews) over the last 24 complete
+        months vs the 24 before them, in percent — the same 24m horizon as the radar's
+        default window. Sort by it for "which niches are structurally growing" — a
+        launch spike or a sale week cannot move it the way it moved the old 90-day
+        trend. reviews_24m / reviews_prev_24m are the raw window sums. NULL trend = no
+        prior-window baseline (a genuinely new niche), never "flat".
+      FALSIFICATION RULE — demand_emerging: young Steam tags crystallize around new
+        games only (old genre ancestors never get re-voted into them), so their
+        prior-window base is near zero BY CONSTRUCTION and a huge trend % there is the
+        label's age, not demand growth. When demand_emerging is true (prev base below
+        1000 reviews, OR >= 80% of reviews_24m from games released in the last 24
+        months — reviews_24m_new_share), do NOT quote the trend %; judge the niche by
+        its absolute reviews_24m instead.
 
     EXACT MATERIALISATION: only the precomputed cuts exist — window in {"all","24m"} x
     min_reviews in {50,100} (must stay in sync with MIN_REVIEWS_LEVELS in
@@ -795,8 +804,8 @@ def find_niches(
         return {"error": _PLAYERS_MISSING}
     if not _HAS_LIFETIME and sort in _NICHE_LIFETIME_COLS:
         return {"error": _LIFETIME_MISSING}
-    if not _HAS_DEMAND12M and sort in _NICHE_DEMAND12M_COLS:
-        return {"error": _DEMAND12M_MISSING}
+    if not _HAS_DEMAND24M and sort in _NICHE_DEMAND24M_COLS:
+        return {"error": _DEMAND24M_MISSING}
     if min_reviews == 0 and not _HAS_NO_FLOOR_CUT:
         return {"error": _NO_FLOOR_MISSING}
     if include_tiers is not None:
@@ -843,8 +852,9 @@ def find_niches(
         else ""
     )
     demand_cols = (
-        ",\n                   reviews_12m, reviews_prev_12m, demand_trend_12m_pct"
-        if _HAS_DEMAND12M
+        ",\n                   reviews_24m, reviews_prev_24m, demand_trend_24m_pct"
+        ",\n                   reviews_24m_new_share, demand_emerging"
+        if _HAS_DEMAND24M
         else ""
     )
     try:
@@ -916,12 +926,15 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
         game; never read it without lifetime_survival_12m). None = fewer than 5 covered
         games or a mart built before the lifetime ETL. Catalog-wide baseline:
         lifetime_curve().
-      - 12-month demand trend on the variants rows (same value on every cut, like
-        entrant_ratio): reviews_12m / reviews_prev_12m (the niche's review-histogram
-        inflow, last 12 complete months vs the 12 before) and demand_trend_12m_pct
-        (the year-over-year percent between them). None on the trend = no prior-window
-        baseline (a genuinely new niche), never "flat"; all three absent on marts that
-        predate the 12-month demand columns.
+      - 24-month demand trend on the variants rows (same value on every cut, like
+        entrant_ratio): reviews_24m / reviews_prev_24m (the niche's review-histogram
+        inflow, last 24 complete months vs the 24 before) and demand_trend_24m_pct
+        (the percent between them). None on the trend = no prior-window baseline (a
+        genuinely new niche), never "flat". reviews_24m_new_share / demand_emerging
+        flag young tags whose prior base is near zero by construction — when
+        demand_emerging is true, do not quote the trend %; use absolute reviews_24m
+        (see find_niches). All five absent on marts that predate the 24-month demand
+        columns.
     Returns {"error": ...} if dimension/key doesn't match any niche (call find_niches to
     get exact valid keys — spelling and case must match precisely), or asking you to
     re-run the ETL if the analytics DB predates the v2 columns.
@@ -946,8 +959,9 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
         else ""
     )
     demand_cols = (
-        ",\n                   reviews_12m, reviews_prev_12m, demand_trend_12m_pct"
-        if _HAS_DEMAND12M
+        ",\n                   reviews_24m, reviews_prev_24m, demand_trend_24m_pct"
+        ",\n                   reviews_24m_new_share, demand_emerging"
+        if _HAS_DEMAND24M
         else ""
     )
     try:

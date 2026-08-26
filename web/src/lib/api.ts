@@ -102,9 +102,9 @@ export type SortKey =
   | "players_coverage"
   | "lifetime_survival_12m"
   | "lifetime_median_dead_months"
-  | "reviews_12m"
-  | "reviews_prev_12m"
-  | "demand_trend_12m_pct";
+  | "reviews_24m"
+  | "reviews_prev_24m"
+  | "demand_trend_24m_pct";
 
 export type NicheTier = "micro" | "theme" | "umbrella" | "meta";
 export const NICHE_TIERS: NicheTier[] = ["micro", "theme", "umbrella", "meta"];
@@ -181,13 +181,20 @@ export interface NicheRow {
   lifetime_n_games?: number | null;
   lifetime_survival_12m?: number | null;
   lifetime_median_dead_months?: number | null;
-  // 12-month demand (review-histogram windows: last 12 complete months vs the prior 12;
+  // 24-month demand (review-histogram windows: last 24 complete months vs the prior 24;
   // cut-independent — one value per (dimension, key), identical on every window/floor
-  // cut) — replaced the 90-day columns outright; absent on marts that predate them. On
-  // LIST rows so the Radar board rings every blip on its own trend.
-  reviews_12m?: number | null;
-  reviews_prev_12m?: number | null;
-  demand_trend_12m_pct?: number | null; // null = no prior-window baseline
+  // cut) — replaced the 12-month columns outright (which had replaced the 90-day ones);
+  // absent on marts that predate them. On LIST rows so the Radar board rings every blip
+  // on its own trend.
+  reviews_24m?: number | null;
+  reviews_prev_24m?: number | null;
+  demand_trend_24m_pct?: number | null; // null = no prior-window baseline
+  // Emerging pair (ships with the 24m columns): young tags crystallize around new games
+  // only, so their prior window is near zero BY CONSTRUCTION — the raw trend % above is
+  // NOT representative when demand_emerging is true (render EMERGING + absolute volume
+  // instead; see lib/radarVerdict.ts). The trend itself stays served un-suppressed.
+  reviews_24m_new_share?: number | null; // share of reviews_24m from games released in the last 24 months
+  demand_emerging?: boolean | null;
 }
 
 export interface NicheList {
@@ -452,9 +459,9 @@ export function useNicheDistribution(
 }
 
 // ---- Radar feed (the opportunity-feed home, mockup 3a) ---------------------------------
-// Ranks on demand_trend_12m_pct — a mart_niche column that is NOT in the mart until the
+// Ranks on demand_trend_24m_pct — a mart_niche column that is NOT in the mart until the
 // nightly rebuild after its deploy materialises it. The endpoint 503s until then (see
-// api/app/routers/niches.py::_has_demand12m); Radar.tsx must degrade to an honest "not
+// api/app/routers/niches.py::_has_demand24m); Radar.tsx must degrade to an honest "not
 // available yet" message on that response, never a spinner or an empty grid.
 
 export interface RadarSparklinePoint {
@@ -462,13 +469,15 @@ export interface RadarSparklinePoint {
   players: number;
 }
 
-/** One niche in the feed — the hero pick and every "Moving niches" grid card share this
- * shape (the hero repeats as the grid's first card, same as the mockup). reviews_12m /
- * reviews_prev_12m are Steam's own per-month review totals (review_histogram — true
- * counts, not the recency-biased sample the first cut used), summed over two adjacent
- * 12-calendar-month windows anchored on the last complete month; demand_trend_12m_pct is
- * the ratio between them. Guaranteed non-null here — the API excludes rows with no
- * prior-12-month baseline rather than rendering them as an unchanged (0%) mover. */
+/** One niche in the feed — the hero pick, every "Moving niches" grid card and every
+ * `emerging` card share this shape (the hero repeats as the grid's first card, same as
+ * the mockup). reviews_24m / reviews_prev_24m are Steam's own per-month review totals
+ * (review_histogram — true counts, not the recency-biased sample the first cut used),
+ * summed over two adjacent 24-calendar-month windows anchored on the last complete month;
+ * demand_trend_24m_pct is the ratio between them. Non-null on hero/mover cards (the API
+ * excludes rows with no prior-24-month baseline from the % ranking rather than rendering
+ * them as an unchanged 0% mover), but may be null on `emerging` cards — a zero prior base
+ * is exactly what makes a niche emerging. */
 export interface RadarNicheCard {
   dimension: string;
   key: string;
@@ -477,18 +486,24 @@ export interface RadarNicheCard {
   p90_rev: number | null;
   opportunity_v2: number | null;
   saturation_yoy: number | null;
-  reviews_12m: number;
-  reviews_prev_12m: number;
-  demand_trend_12m_pct: number;
+  reviews_24m: number;
+  reviews_prev_24m: number;
+  demand_trend_24m_pct: number | null;
+  /** Emerging pair — see NicheRow: when demand_emerging is true the trend % above is not
+   * representative (young label, no comparable base) and must never be the headline;
+   * reviews_24m is the meaningful number for those cards. */
+  reviews_24m_new_share: number | null;
+  demand_emerging: boolean;
   players_trend_7d_pct: number | null;
   sparkline: RadarSparklinePoint[];
 }
 
-/** The hero pick (the cut's biggest 12-month riser) plus its yearly demand-vs-pipeline trend
+/** The hero pick (the cut's biggest 24-month riser) plus its yearly demand-vs-pipeline trend
  * (mart_niche_trend) — the same real series NicheDetail's "Demand vs. pipeline, by year"
  * panel charts (§4b), reused here for the hero's chart column: no mart carries niche review
  * velocity or releases at the mockup's monthly granularity, so this is the honest
- * real-data substitute rather than an invented curve. */
+ * real-data substitute rather than an invented curve. Never an emerging niche (the API
+ * excludes them from the % ranking), so its demand_trend_24m_pct is always non-null. */
 export interface RadarHero extends RadarNicheCard {
   trend: TrendPoint[];
 }
@@ -499,9 +514,13 @@ export interface RadarFeed {
   min_reviews: number;
   hero: RadarHero;
   /** Includes the hero as movers[0] (mirrors the mockup), then the cut's other biggest
-   * 12-month movers ranked by |demand_trend_12m_pct| — "Moving niches", not "Rising niches":
-   * both risers and decliners appear here. */
+   * 24-month movers ranked by |demand_trend_24m_pct| — "Moving niches", not "Rising niches":
+   * both risers and decliners appear here. Never contains an emerging niche. */
   movers: RadarNicheCard[];
+  /** The cut's emerging niches (demand_emerging), ranked by reviews_24m DESC — their own
+   * group because a young tag's trend % is a property of the label's age, not demand.
+   * Rendered as EMERGING with the absolute volume, never as % movers. */
+  emerging: RadarNicheCard[];
 }
 
 export interface RadarFeedParams {
@@ -511,7 +530,7 @@ export interface RadarFeedParams {
   limit?: number;
 }
 
-/** 503 = the mart predates demand_trend_12m_pct — the state production is genuinely in for
+/** 503 = the mart predates demand_trend_24m_pct — the state production is genuinely in for
  * hours after every deploy that adds a mart column, so it is not retried into a spinner. */
 export function useRadarFeed(params: RadarFeedParams = {}) {
   return useQuery({

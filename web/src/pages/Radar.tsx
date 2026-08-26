@@ -16,7 +16,7 @@ import {
   type RadarSparklinePoint,
   type TrendPoint,
 } from "../lib/api";
-import { fmtInt, fmtSigned, fmtUsd } from "../lib/format";
+import { fmtCompact, fmtInt, fmtSigned, fmtUsd } from "../lib/format";
 import { radarVerdict, soloBucket, type SoloBucket } from "../lib/radarVerdict";
 import { nicheDetailPath } from "./NicheDetail";
 
@@ -27,19 +27,24 @@ import { nicheDetailPath } from "./NicheDetail";
  *    as a dot in (sector = Genres / Micro-genres / Themes, ring = client-side verdict from
  *    lib/radarVerdict.ts). Fed by the /api/niches LIST endpoint (two cuts: dimension=genre
  *    and dimension=tag tiers=micro,theme), NOT the radar feed — the feed caps at 24 movers.
- *    NicheRow carries demand_trend_12m_pct (last 12 complete months vs the prior 12 — the
- *    structural read that replaced the spike-prone 90-day trend) on every row, so each blip
- *    rings on its own trend; rows without one (older mart / no baseline) degrade to the
- *    verdict lib's structural rules — documented there, flagged "caution" in the UI. The
- *    stats cut is PINNED (24m × 50+ reviews) and the solo-viability lens filters/restyles
- *    dots without ever moving a ring — see BOARD_WINDOW's and lib/radarVerdict.ts's docs.
+ *    NicheRow carries demand_trend_24m_pct (last 24 complete months vs the prior 24 — the
+ *    same horizon as the board's own pinned 24m cut; it replaced the 12m windows, which had
+ *    replaced the spike-prone 90-day trend) on every row, so each blip rings on its own
+ *    trend; rows without one (older mart / no baseline) degrade to the verdict lib's
+ *    structural rules — documented there, flagged "caution" in the UI. Rows flagged
+ *    demand_emerging (young tags with no comparable base) plate in their own Emerging ring
+ *    and never headline their %. The stats cut is PINNED (24m × 50+ reviews) and the
+ *    solo-viability lens filters/restyles dots without ever moving a ring — see
+ *    BOARD_WINDOW's and lib/radarVerdict.ts's docs.
  *
  * 2. The original opportunity feed (mockup 3a): a hero "blueprint" plate on the cut's
- *    single biggest 12-month demand riser, then a grid of the cut's biggest movers in
- *    either direction — unchanged, reflowed under an "Opportunity feed" section title.
+ *    single biggest 24-month demand riser, then a grid of the cut's biggest movers in
+ *    either direction, then the cut's EMERGING niches as their own mini-list (ranked by
+ *    absolute volume — their % has no comparable base) — reflowed under an "Opportunity
+ *    feed" section title.
  *
- * THE DATA (read niches.py::radar_feed / _has_demand12m for the full story): the feed ranks
- * on demand_trend_12m_pct, a mart_niche column that is not in the published mart until the
+ * THE DATA (read niches.py::radar_feed / _has_demand24m for the full story): the feed ranks
+ * on demand_trend_24m_pct, a mart_niche column that is not in the published mart until the
  * nightly rebuild after its deploy. The API 503s until then, and this page
  * degrades to an honest "not available yet" message rather than a spinner or an empty grid
  * (see MartPending below). Every number rendered here is real: no series is invented to fill
@@ -127,13 +132,13 @@ function SegRow<V extends string | number>({
  * RadarBoard itself. Control state is local — this page has no URL-param convention to
  * reuse (the feed below it is unparameterized too).
  *
- * GET /api/niches carries demand_trend_12m_pct on every row (cut-independent in the mart
+ * GET /api/niches carries demand_trend_24m_pct on every row (cut-independent in the mart
  * — neither a stats-floor nor a window change can move a niche's trend), so every blip
- * rings on its OWN 12-month trend. The old best-effort join against the radar feed's 24
+ * rings on its OWN 24-month trend. The old best-effort join against the radar feed's 24
  * top movers is gone with the reason it existed. Rows still without a trend (mart
  * predates the column, or no prior-window baseline) degrade in radarVerdict() to
  * structural evidence, caution-flagged — there is no shorter-horizon fallback, because
- * the 90-day columns this trend replaced are gone from the mart.
+ * the 90-day/12-month columns this trend replaced are gone from the mart.
  */
 function RadarBoardSection() {
   const [topN, setTopN] = useState(80);
@@ -168,7 +173,8 @@ function RadarBoardSection() {
         row.dimension === "genre" ? "genre" : row.tier === "micro" ? "micro" : row.tier === "theme" ? "theme" : null;
       if (!sector) return; // tag tiers outside micro/theme have no sector on this board
       // ?? null: the field is absent (undefined) on marts that predate the demand columns.
-      const demandTrendPct = row.demand_trend_12m_pct ?? null;
+      const demandTrendPct = row.demand_trend_24m_pct ?? null;
+      const demandEmerging = row.demand_emerging === true;
       rows.push({
         dimension: row.dimension,
         key: row.key,
@@ -178,9 +184,12 @@ function RadarBoardSection() {
         p90_rev: row.p90_rev ?? null,
         opportunity_v2: row.opportunity_v2,
         demandTrendPct,
+        demandEmerging,
+        reviews24m: row.reviews_24m ?? null,
         solo_viability: row.solo_viability ?? null,
         verdict: radarVerdict({
-          demand_trend_12m_pct: demandTrendPct,
+          demand_trend_24m_pct: demandTrendPct,
+          demand_emerging: demandEmerging,
           saturation_yoy: row.saturation_yoy,
           winner_concentration: row.winner_concentration,
           opportunity_v2: row.opportunity_v2,
@@ -231,14 +240,16 @@ function RadarBoardSection() {
       )}
       <p className="pt-4 text-[11px] text-ink-muted">
         Stats cut: last 24 months, niches with 50+ review games — pinned, so a display toggle can never move a verdict
-        (the mart precomputes each cut as its own population). Demand trend: review inflow over the last 12 months vs
-        the prior 12 — a year-over-year read that a release spike or a sale week cannot move. Ring verdicts are computed
-        client-side (lib/radarVerdict.ts): Enter now = demand up ≥20% year over year without
-        a flooding pipeline · Watch = demand holding or softening, or score-only evidence · Crowded = releases up
-        &gt;15% YoY against flat-to-down demand, or winner-take-most · Declining = demand down ≥15% year over
-        year. Every dot rings on its own 12-month demand trend; niches without one (older data build, or no
-        prior-window baseline) are placed on structural evidence and marked &ldquo;caution&rdquo; in the tooltip. The
-        solo lens filters and restyles dots (hollow = team-scale) — it never changes a ring.
+        (the mart precomputes each cut as its own population). Demand trend: review inflow over the last 24 months vs
+        the prior 24 — the same horizon as the cut itself, a structural read that a release spike or a sale week cannot
+        move. Ring verdicts are computed client-side (lib/radarVerdict.ts): Enter now = demand up ≥40% per 24 months
+        (~20%/yr) without a flooding pipeline · Watch = demand holding or softening, or score-only evidence · Emerging =
+        a young tag (near-zero prior base by construction, or ≥80% of its reviews from games released in the last 24
+        months) — its trend % is not representative, so the dot draws a dashed halo and is judged by absolute review
+        volume instead · Crowded = releases up &gt;15% YoY against flat-to-down demand, or winner-take-most · Declining
+        = demand down ≥30% per 24 months. Every dot rings on its own 24-month demand trend; niches without one (older
+        data build, or no prior-window baseline) are placed on structural evidence and marked &ldquo;caution&rdquo; in
+        the tooltip. The solo lens filters and restyles dots (hollow = team-scale) — it never changes a ring.
       </p>
     </section>
   );
@@ -248,12 +259,12 @@ export default function Radar() {
   const feedQ = useRadarFeed({ limit: 6 });
   const apiError = feedQ.error instanceof ApiError ? feedQ.error : null;
   // 503 is the EXPECTED state for hours after every deploy that adds a mart column — the
-  // nightly rebuild (21:00 UTC) is what materialises demand_trend_12m_pct. Not an error the
+  // nightly rebuild (21:00 UTC) is what materialises demand_trend_24m_pct. Not an error the
   // user caused, and not a spinner: a stated wait, same convention as NicheCombined's
   // martPending / LaunchTiming's 503 handling.
   const martPending = apiError?.status === 503;
-  // 404 = the cut has zero niches with a 12-month baseline yet (every prior-12m window was
-  // empty) — a real, if unlikely, answer distinct from "not built yet".
+  // 404 = the cut has zero niches with a rankable 24-month baseline yet (every prior-24m
+  // window was empty) — a real, if unlikely, answer distinct from "not built yet".
   const noBaseline = apiError?.status === 404;
 
   return (
@@ -263,7 +274,7 @@ export default function Radar() {
 
       <div className="flex flex-wrap items-baseline gap-3">
         <h4 className="text-ink-primary">Opportunity feed</h4>
-        <span className="text-[11px] text-ink-muted">the cut&rsquo;s biggest 12-month demand riser + movers</span>
+        <span className="text-[11px] text-ink-muted">the cut&rsquo;s biggest 24-month demand riser + movers</span>
       </div>
 
       {feedQ.isLoading && (
@@ -275,7 +286,7 @@ export default function Radar() {
           <i className="bp-corner" />
           <h2 className="text-ink-primary">The opportunity feed isn’t available yet</h2>
           <p className="max-w-md text-sm text-ink-secondary">
-            Radar ranks niches on a 12-month demand trend that just landed in the marts. It appears after the next
+            Radar ranks niches on a 24-month demand trend that just landed in the marts. It appears after the next
             nightly rebuild (21:00 UTC) — nothing below is estimated or guessed in the meantime.
           </p>
           <div className="flex items-center gap-2">
@@ -301,8 +312,8 @@ export default function Radar() {
         <div className="blueprint relative border-ink-primary/25 px-6 py-10 text-center">
           <i className="bp-corner" />
           <p className="text-sm text-ink-secondary">
-            No niches in this cut have a 12-month trend yet — too few reviews landed in the prior 12-month window
-            for any of them.
+            No niches in this cut have a rankable 24-month trend yet — too few reviews landed in the prior 24-month
+            window for any of them.
           </p>
         </div>
       )}
@@ -319,7 +330,7 @@ export default function Radar() {
 
           <div className="flex flex-wrap items-baseline gap-3">
             <h4 className="text-ink-primary">Moving niches</h4>
-            <span className="text-[11px] text-ink-muted">last 12 months vs prior 12 · buildable tags only</span>
+            <span className="text-[11px] text-ink-muted">last 24 months vs prior 24 · buildable tags only</span>
             <Link to="/niches" className="ml-auto text-[13px] text-brand transition-colors hover:text-brand-hover">
               Open Niche Finder →
             </Link>
@@ -330,6 +341,26 @@ export default function Radar() {
               <NicheCard key={`${m.dimension}:${m.key}`} card={m} />
             ))}
           </div>
+
+          {/* Emerging niches — a visibly separate group, NEVER mixed into the % movers:
+              young tags crystallize around new games only, so their prior window is near
+              zero by construction and a raw trend % there is the label's age, not demand.
+              Ranked by absolute 24-month review volume (the server orders them). */}
+          {feedQ.data.emerging.length > 0 && (
+            <>
+              <div className="flex flex-wrap items-baseline gap-3">
+                <h4 className="text-ink-primary">Emerging niches</h4>
+                <span className="text-[11px] text-ink-muted">
+                  new labels — no comparable base · ranked by review volume, not trend %
+                </span>
+              </div>
+              <div className="grid grid-cols-1 gap-[22px] sm:grid-cols-2 lg:grid-cols-3">
+                {feedQ.data.emerging.map((e) => (
+                  <EmergingCard key={`${e.dimension}:${e.key}`} card={e} />
+                ))}
+              </div>
+            </>
+          )}
         </>
       )}
     </div>
@@ -337,13 +368,16 @@ export default function Radar() {
 }
 
 function HeroPlate({ hero }: { hero: RadarHero }) {
-  const up = hero.demand_trend_12m_pct >= 0;
+  // The hero is never an emerging niche (the API excludes them from the % ranking), so
+  // its trend is always present — ?? 0 only satisfies the shared nullable card type.
+  const heroTrendPct = hero.demand_trend_24m_pct ?? 0;
+  const up = heroTrendPct >= 0;
   const pipelineClause =
     hero.saturation_yoy == null ? "" : hero.saturation_yoy < 0 ? " while its release pipeline shrinks" : " while its release pipeline grows";
   const satClause = hero.saturation_yoy != null ? ` against a ${fmtSigned(hero.saturation_yoy, 0)} saturation YoY` : "";
   const bodyTitle =
     "Review inflow: Steam's own per-month review totals (review histogram; games with 50+ reviews, ~98% of review " +
-    "volume), summed over the last 12 complete months vs the 12 before them. A year-over-year read — a launch " +
+    "volume), summed over the last 24 complete months vs the 24 before them. A structural read — a launch " +
     "spike or a sale week cannot move it — that lags reality by up to a month (histograms refresh ~monthly).";
 
   return (
@@ -356,8 +390,8 @@ function HeroPlate({ hero }: { hero: RadarHero }) {
           {pipelineClause}.
         </h2>
         <p className="max-w-[520px] text-sm text-ink-secondary" title={bodyTitle}>
-          Review inflow {up ? "rose" : "fell"} {Math.abs(hero.demand_trend_12m_pct).toFixed(1)}% — last 12 months vs
-          the prior 12{satClause}. {fmtInt(hero.n_games)} scored games
+          Review inflow {up ? "rose" : "fell"} {Math.abs(heroTrendPct).toFixed(1)}% — last 24 months vs
+          the prior 24{satClause}. {fmtInt(hero.n_games)} scored games
           {hero.p90_rev != null ? `, P90 revenue ${fmtUsd(hero.p90_rev)}` : ""}.
         </p>
         <div className="mt-auto flex gap-2.5 pt-3.5">
@@ -384,9 +418,9 @@ function HeroPlate({ hero }: { hero: RadarHero }) {
             className={clsx("tabular", up ? "text-brand" : "text-ink-primary/55")}
             style={{ fontFamily: CONDENSED, fontWeight: 600, fontSize: 40 }}
           >
-            {verdictLabel(hero.demand_trend_12m_pct)}
+            {verdictLabel(heroTrendPct)}
           </span>
-          <span className="text-[11px] text-ink-muted">demand / last 12 months vs prior 12</span>
+          <span className="text-[11px] text-ink-muted">demand / last 24 months vs prior 24</span>
         </div>
         <HeroChart trend={hero.trend} />
       </div>
@@ -397,7 +431,7 @@ function HeroPlate({ hero }: { hero: RadarHero }) {
 /**
  * The hero chart column. Mockup 3a shows a smooth ~13-point (roughly monthly) two-series
  * curve, but no mart materialises niche review velocity or releases at that granularity —
- * demand_trend_12m_pct itself is only two aggregate 12-month windows, not a series. This
+ * demand_trend_24m_pct itself is only two aggregate 24-month windows, not a series. This
  * reuses the same real, yearly mart_niche_trend series NicheDetail's "Demand vs. pipeline,
  * by year" panel already charts for the identical gap (§4b — "same two-series language as
  * hero", per the handoff) rather than inventing a monthly shape.
@@ -470,11 +504,14 @@ function HeroChart({ trend }: { trend: TrendPoint[] }) {
 }
 
 /** One "Moving niches" grid card. Verdict/kicker tone follows the SAME up/down rule
- * everywhere: accent-300 when the 12-month trend is up, paper (ink-primary/55) when it's
+ * everywhere: accent-300 when the 24-month trend is up, paper (ink-primary/55) when it's
  * down — never red/green, per the foundation. The opp v2 score bolds accent-300
- * independently, at the same >=70 "strong" threshold NicheFinder's table already uses. */
+ * independently, at the same >=70 "strong" threshold NicheFinder's table already uses.
+ * Movers are never emerging (the API splits those out), so the trend is present — ?? 0
+ * only satisfies the shared nullable card type. */
 function NicheCard({ card }: { card: RadarNicheCard }) {
-  const up = card.demand_trend_12m_pct >= 0;
+  const trendPct = card.demand_trend_24m_pct ?? 0;
+  const up = trendPct >= 0;
   const tone = up ? "text-brand" : "text-ink-primary/55";
   const strongOpp = card.opportunity_v2 != null && card.opportunity_v2 >= 70;
 
@@ -490,7 +527,7 @@ function NicheCard({ card }: { card: RadarNicheCard }) {
           {card.tier ?? "niche"} · {fmtInt(card.n_games)} games
         </span>
         <span className={clsx("tabular ml-auto", tone)} style={{ fontFamily: CONDENSED, fontWeight: 600, fontSize: 20 }}>
-          {verdictLabel(card.demand_trend_12m_pct)}
+          {verdictLabel(trendPct)}
         </span>
       </div>
       <div className="text-ink-primary" style={{ fontFamily: CONDENSED, fontWeight: 600, fontSize: 20 }}>
@@ -509,6 +546,46 @@ function NicheCard({ card }: { card: RadarNicheCard }) {
             {Math.abs(card.players_trend_7d_pct).toFixed(1)}%
           </>
         )}
+      </div>
+    </Link>
+  );
+}
+
+/** One "Emerging niches" card. NEVER headlines a trend % — a young tag's prior window is
+ * near zero by construction, so its % is the label's age, not demand. The headline number
+ * is absolute 24-month review volume; the dashed border echoes the board's dashed
+ * emerging halo (Industry constraints hold: radius 0, mono-steel, no red/green). */
+function EmergingCard({ card }: { card: RadarNicheCard }) {
+  const newSharePct = card.reviews_24m_new_share != null ? Math.round(card.reviews_24m_new_share * 100) : null;
+  return (
+    <Link
+      to={nicheDetailPath(card.dimension, card.key)}
+      onClick={() => trackEvent("niche_open")}
+      className="relative flex flex-col gap-2 border border-dashed border-ink-primary/35 px-5 py-[18px] transition-colors hover:bg-ink-primary/[0.04]"
+      title={
+        "Emerging: this tag is young — Steam voters apply new labels to new games only, so its prior " +
+        "24-month window is near zero by construction and a trend % would not be representative. " +
+        "Judge it by absolute review volume."
+      }
+    >
+      <div className="flex items-baseline">
+        <span className="kicker text-[11px] text-ink-primary/70">
+          EMERGING · {card.tier ?? "niche"} · {fmtInt(card.n_games)} games
+        </span>
+        <span
+          className="tabular ml-auto text-ink-primary/70"
+          style={{ fontFamily: CONDENSED, fontWeight: 600, fontSize: 20 }}
+        >
+          {fmtCompact(card.reviews_24m)}
+        </span>
+      </div>
+      <div className="text-ink-primary" style={{ fontFamily: CONDENSED, fontWeight: 600, fontSize: 20 }}>
+        {card.key}
+      </div>
+      <Sparkline points={card.sparkline} up={false} />
+      <div className="text-[11px] text-ink-muted">
+        {fmtInt(card.reviews_24m)} reviews / 24m — new label, no comparable base
+        {newSharePct != null ? ` · ${newSharePct}% from games released in the last 24m` : ""}
       </div>
     </Link>
   );

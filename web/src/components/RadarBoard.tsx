@@ -30,7 +30,11 @@ import { nicheDetailPath } from "../pages/NicheDetail";
  * A second, orthogonal encoding carries the solo-viability LENS: team-scale niches
  * (solo_viability < SOLO_FRIENDLY_MIN) draw hollow (ring-colored stroke, transparent
  * fill), solo-friendly and unknown draw filled; the dot legend and tooltip spell it out.
- * Deliberately a lens, not a ring — see lib/radarVerdict.ts.
+ * Deliberately a lens, not a ring — see lib/radarVerdict.ts. A third mark flags EMERGING
+ * niches (demand_emerging — young tags with no comparable demand base): a dashed halo
+ * around the dot, a NEW + absolute-volume legend glyph instead of a trend %, and a
+ * tooltip that never prints the non-representative % — still mono-steel, radius 0,
+ * no red/green.
  *
  * LAYOUT IS DETERMINISTIC: every jitter comes from hash01(dimension:key), never
  * Math.random, so a niche holds its position across renders, visits and machines. A small
@@ -61,10 +65,17 @@ export interface RadarBoardBlip {
   n_games: number;
   p90_rev: number | null;
   opportunity_v2: number | null;
-  /** Percent units; the 12-month demand trend (last 12 complete months vs the prior 12 —
-   * see mart_niche.sql's _niche_demand12m). null = this niche has no trend (the mart
+  /** Percent units; the 24-month demand trend (last 24 complete months vs the prior 24 —
+   * see mart_niche.sql's _niche_demand24m). null = this niche has no trend (the mart
    * predates the column, or the niche had no prior-window baseline). */
   demandTrendPct: number | null;
+  /** The mart's young-tag flag (see lib/radarVerdict.ts): when true the trend % is not
+   * representative — the blip plates in the Emerging ring, draws a dashed halo, and the
+   * tooltip/legend show absolute volume instead of the %. */
+  demandEmerging: boolean;
+  /** Absolute review inflow over the last 24 months — the number an emerging niche is
+   * judged by (its % has no comparable base). null on marts without the demand columns. */
+  reviews24m: number | null;
   /** 0..1 share of the cut's scored games playable single-player; null = unknown (mart
    * predates the column). A LENS only — drawn as dot style (hollow = team-scale), never
    * fed into the verdict; see lib/radarVerdict.ts. */
@@ -77,9 +88,10 @@ export interface RadarBoardBlip {
 const SIZE = 640;
 const C = SIZE / 2;
 const R = 284; // outer ring radius; the margin hosts the sector labels
-/** Ring outer edges as fractions of R, inner -> outer. The inner (strongest) ring is
+/** Ring outer edges as fractions of R, inner -> outer (index-aligned with RING_ORDER,
+ * which grew an Emerging band between Watch and Crowded). The inner (strongest) ring is
  * deliberately the widest band per unit of its label's importance, like the reference. */
-const RING_OUTER = [0.34, 0.58, 0.8, 1] as const;
+const RING_OUTER = [0.3, 0.52, 0.68, 0.85, 1] as const;
 const SECTOR_SPAN = (2 * Math.PI) / SECTOR_ORDER.length;
 /** Sector i spans [sectorStart(i), sectorStart(i) + SECTOR_SPAN); 0 starts straight up. */
 function sectorStart(i: number): number {
@@ -198,6 +210,7 @@ export function layoutBlips(blips: RadarBoardBlip[]): PlacedBlip[] {
 const RING_FILL: Record<RadarRing, string> = {
   enter: "var(--verdict-up)",
   watch: MONO.paper75,
+  emerging: MONO.paper65,
   crowded: MONO.paper50,
   declining: MONO.paper35,
 };
@@ -214,9 +227,26 @@ function MoveGlyph({ trendPct }: { trendPct: number | null }) {
     <span
       className="ml-auto shrink-0 pl-2 text-[11px] tabular"
       style={{ color: up ? "var(--verdict-up)" : "var(--verdict-flat)" }}
-      title={`12-month demand trend ${up ? "+" : "−"}${Math.abs(trendPct).toFixed(1)}% (last 12 months vs prior 12)`}
+      title={`24-month demand trend ${up ? "+" : "−"}${Math.abs(trendPct).toFixed(1)}% (last 24 months vs prior 24)`}
     >
       {up ? "▲" : "▼"} {Math.abs(trendPct).toFixed(0)}%
+    </span>
+  );
+}
+
+/** Legend glyph for an emerging niche — the trend % must NEVER headline a young tag (its
+ * base is near zero by construction), so the row carries the absolute volume instead. */
+function EmergingGlyph({ reviews24m }: { reviews24m: number | null }) {
+  return (
+    <span
+      className="kicker ml-auto shrink-0 pl-2 text-[10px] tracking-[.08em] text-ink-muted"
+      title={
+        "Emerging — a young tag: its prior 24-month window is near zero by construction, " +
+        "so the trend % is not representative. Judged by absolute review volume instead" +
+        (reviews24m != null ? ` (${fmtInt(reviews24m)} reviews / 24m).` : ".")
+      }
+    >
+      NEW{reviews24m != null ? ` · ${fmtInt(reviews24m)}` : ""}
     </span>
   );
 }
@@ -336,6 +366,22 @@ export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
           <g aria-hidden>
             {placed.map((b) => (
               <g key={b.id}>
+                {/* Emerging halo — a dashed ring-colored circle around the dot (Industry
+                    constraints: mono-steel, no hue). Orthogonal to the solo lens' hollow/
+                    filled encoding, so an emerging team-scale dot keeps both marks. */}
+                {b.demandEmerging && (
+                  <circle
+                    cx={b.x}
+                    cy={b.y}
+                    r={b.r + 3}
+                    fill="none"
+                    stroke={RING_FILL[b.verdict.ring]}
+                    strokeWidth={1}
+                    strokeDasharray="2.5 2.5"
+                    opacity={hoverId !== null && hoverId !== b.id ? 0.35 : 1}
+                    pointerEvents="none"
+                  />
+                )}
                 <circle
                   cx={b.x}
                   cy={b.y}
@@ -357,7 +403,7 @@ export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
                   }}
                 />
                 {hoverId === b.id && (
-                  <circle cx={b.x} cy={b.y} r={b.r + 2.5} fill="none" stroke="var(--text-primary)" strokeWidth={1} pointerEvents="none" />
+                  <circle cx={b.x} cy={b.y} r={b.r + (b.demandEmerging ? 5 : 2.5)} fill="none" stroke="var(--text-primary)" strokeWidth={1} pointerEvents="none" />
                 )}
               </g>
             ))}
@@ -378,6 +424,13 @@ export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
               <circle cx="5" cy="5" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
             </svg>
             team-scale (&lt; {SOLO_FRIENDLY_MIN})
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden className="shrink-0">
+              <circle cx="6" cy="6" r="2.5" fill="currentColor" />
+              <circle cx="6" cy="6" r="5" fill="none" stroke="currentColor" strokeWidth="1" strokeDasharray="2 2" />
+            </svg>
+            emerging (young tag — no comparable base)
           </span>
           <span>dot area = P90 revenue · ring = verdict (solo never moves a dot between rings)</span>
         </div>
@@ -400,7 +453,18 @@ export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
                   value: `${RING_LABEL[hovered.verdict.ring]}${hovered.verdict.caution ? " · caution" : ""}`,
                   color: RING_FILL[hovered.verdict.ring],
                 },
-                { label: "Demand 12m", value: fmtTrendPct(hovered.demandTrendPct) },
+                // An emerging niche never shows its trend % — a young tag's base is near
+                // zero by construction, so the honest numbers are the label's youth and
+                // its absolute volume.
+                ...(hovered.demandEmerging
+                  ? [
+                      { label: "Demand 24m", value: "new market — no comparable base" },
+                      {
+                        label: "Reviews 24m",
+                        value: hovered.reviews24m != null ? fmtInt(hovered.reviews24m) : "—",
+                      },
+                    ]
+                  : [{ label: "Demand 24m", value: fmtTrendPct(hovered.demandTrendPct) }]),
                 { label: "P90 revenue", value: fmtUsd(hovered.p90_rev) },
                 { label: "Games", value: fmtInt(hovered.n_games) },
                 { label: "Opp v2", value: hovered.opportunity_v2 != null ? hovered.opportunity_v2.toFixed(1) : "—" },
@@ -447,7 +511,11 @@ export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
                       <span className="shrink-0 text-[10px] text-ink-muted" title={SECTOR_LABEL[b.sector]}>
                         {SECTOR_SHORT[b.sector]}
                       </span>
-                      <MoveGlyph trendPct={b.demandTrendPct} />
+                      {b.demandEmerging ? (
+                        <EmergingGlyph reviews24m={b.reviews24m} />
+                      ) : (
+                        <MoveGlyph trendPct={b.demandTrendPct} />
+                      )}
                     </Link>
                   ))}
                 </div>
