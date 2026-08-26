@@ -86,6 +86,21 @@ def _build(path: Path, *, with_players_monthly: bool) -> None:
         """)
         con.executemany(f"INSERT INTO mart_niche VALUES ({', '.join(['?'] * 14)})", ROWS)
 
+        # The LIST endpoint (`GET /api/niches`) SELECTs every _BASE_COLS entry plus every
+        # capability-gated column whose probe answers yes; the radar feed only reads the 14
+        # above. Pad the rest as typed NULLs (n_recent defaulted — NicheRow requires it) so
+        # this fixture also exercises the list endpoint's demand columns, derived from the
+        # router's own list to stay in sync. players_coverage rides along because the
+        # narrow table already trips _has_players via total_players_now.
+        narrow = {
+            "dimension", "key", "win", "min_reviews", "n_games", "tier", "opportunity_v2",
+            "saturation_yoy", "p90_rev", "total_players_now", "players_trend_7d_pct",
+            "reviews_90d", "reviews_prev_90d", "demand_trend_90d_pct",
+        }
+        for col in [c for c in [*niches._BASE_COLS, "players_coverage"] if c not in narrow]:
+            typ = "INTEGER DEFAULT 0" if col == "n_recent" else "DOUBLE"
+            con.execute(f"ALTER TABLE mart_niche ADD COLUMN {col} {typ}")
+
         con.execute(
             "CREATE TABLE mart_niche_trend (dimension VARCHAR, key VARCHAR, year INTEGER, "
             "n_releases INTEGER, n_scored INTEGER, median_rev DOUBLE, p90_rev DOUBLE)"
@@ -189,6 +204,14 @@ def test_radar_gated_off_does_not_affect_the_niches_list(client):
     r = client.get("/api/niches", params={"dimension": "genre", "window": "all", "min_reviews": 10})
     assert r.status_code == 503
     assert "v2 columns" in r.json()["detail"]
+
+
+def test_list_demand_sort_503_on_mart_that_predates_demand90(client):
+    # Sorting the LIST by a demand column on a pre-demand mart must hit the explicit gate
+    # (same convention as the lifetime/p90 sorts), never a BinderException 500.
+    r = client.get("/api/niches", params={"sort": "demand_trend_90d_pct"})
+    assert r.status_code == 503
+    assert "90-day demand" in r.json()["detail"]
 
 
 # =========================================================================================
@@ -298,3 +321,38 @@ def test_radar_echoes_the_requested_cut(radar_client):
     body = r.json()
     assert body["window"] == "24m"
     assert body["min_reviews"] == 50
+
+
+# =========================================================================================
+# The LIST endpoint's demand columns (2026-08-26): GET /api/niches carries reviews_90d /
+# reviews_prev_90d / demand_trend_90d_pct when the mart does, so the Radar board can ring
+# EVERY blip on its own trend instead of joining the feed's 24 top movers.
+# =========================================================================================
+
+
+def test_list_niches_carries_demand90(radar_client):
+    r = radar_client.get("/api/niches", params={"dimension": "tag", "window": "24m", "min_reviews": 50})
+    assert r.status_code == 200
+    rows = {i["key"]: i for i in r.json()["items"]}
+    assert rows["Colony Sim"]["demand_trend_90d_pct"] == 24.0
+    assert rows["Colony Sim"]["reviews_90d"] == 620
+    assert rows["Colony Sim"]["reviews_prev_90d"] == 500
+    # NULL baseline stays NULL on the list — "no baseline to compare against" must not
+    # collapse into "flat" (the same rule the mart and the feed already follow).
+    assert rows["No Baseline Tag"]["demand_trend_90d_pct"] is None
+    assert rows["No Baseline Tag"]["reviews_prev_90d"] == 0
+
+
+def test_list_niches_sorts_by_demand_trend_nulls_last(radar_client):
+    r = radar_client.get(
+        "/api/niches",
+        params={"dimension": "tag", "window": "24m", "min_reviews": 50, "sort": "demand_trend_90d_pct"},
+    )
+    assert r.status_code == 200
+    keys = [i["key"] for i in r.json()["items"]]
+    # Default tiers=micro,theme excludes the umbrella "Open World" (+50) — the biggest
+    # trend must not smuggle a container tag in. NULL trend sorts last, not as 0.
+    assert keys == [
+        "Colony Sim", "Boomer Shooter", "Fishing", "Base Building",
+        "Souls-like", "Deckbuilder", "No Baseline Tag",
+    ]

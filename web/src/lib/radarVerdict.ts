@@ -25,9 +25,10 @@
  *
  * FIELD UNITS (verified against the mart, not assumed):
  *   - demand_trend_90d_pct is PERCENT units (+15 means +15%), from mart_niche's
- *     90-day review-histogram windows. It is NOT in NicheRow / GET /api/niches —
- *     it only rides the /api/niches/radar feed cards — so the board passes it in
- *     when a feed join found one and this lib degrades when it is null/undefined.
+ *     90-day review-histogram windows. Since 2026-08-26 it rides every NicheRow /
+ *     GET /api/niches row (floor-independent in the mart), so the board passes each
+ *     niche's own value; this lib degrades when it is null/undefined (mart predates
+ *     the column, or no prior-window baseline).
  *   - saturation_yoy is a SIGNED FRACTION centred on 0 — (n_recent_year -
  *     n_prior_year) / n_prior_year in etl/marts/mart_niche.sql — so "release
  *     pipeline grew more than 15% YoY" is saturation_yoy > 0.15, the same cut a
@@ -48,6 +49,15 @@
  *
  * These thresholds are a starting point, kept as named constants so tuning is a
  * one-line diff with the tests updated alongside.
+ *
+ * SOLO VIABILITY IS A LENS, NOT A RING — deliberately. mart_niche.solo_viability is the
+ * share of the cut's scored games playable single-player (catalog norm ~0.9; below ~0.8
+ * leans multiplayer/team-scale — the same reading the MCP guidance uses). It never feeds
+ * radarVerdict(): a ring answers "is this market worth entering", which holds regardless
+ * of team size, while solo-buildability is a property of the READER, not the market.
+ * Folding it into the verdict would move dots between rings when the market itself did
+ * not change. The board instead encodes it orthogonally — a filter chip plus dot style
+ * (hollow = team-scale) — via soloBucket() below.
  */
 
 // ---- thresholds -------------------------------------------------------------------------
@@ -79,7 +89,7 @@ export const RING_LABEL: Record<RadarRing, string> = {
 };
 
 export interface RadarVerdictInput {
-  /** Percent units (+15 = +15%). Not in NicheRow — joined in from the radar feed. */
+  /** Percent units (+15 = +15%). On every NicheRow since 2026-08-26 (see module doc). */
   demand_trend_90d_pct?: number | null;
   /** Signed fraction centred on 0 (see module doc). */
   saturation_yoy?: number | null;
@@ -143,6 +153,25 @@ export function radarVerdict(input: RadarVerdictInput): RadarVerdict {
     return { ring: "watch", caution: true, reason: "high v2 score, no demand trend" };
   }
   return { ring: "watch", caution: true, reason: "no strong signal" };
+}
+
+// ---- solo-viability lens (NOT part of the verdict — see module doc) ---------------------
+
+/** solo_viability at or above which a niche counts as solo-buildable. The catalog norm is
+ * ~0.9; below 0.8 the MCP guidance flags meaningful multiplayer/team-scale dependence. */
+export const SOLO_FRIENDLY_MIN = 0.8;
+
+export type SoloBucket = "solo" | "team" | "unknown";
+
+/**
+ * Classify a niche's solo_viability into the board's lens buckets. "unknown" is its own
+ * honest bucket (mart predates the column, or the cut wasn't scored) — it is included
+ * under the "All" filter only, never counted as solo-friendly or team-scale.
+ */
+export function soloBucket(soloViability: number | null | undefined): SoloBucket {
+  const v = num(soloViability);
+  if (v === null) return "unknown";
+  return v >= SOLO_FRIENDLY_MIN ? "solo" : "team";
 }
 
 // ---- deterministic layout helpers -------------------------------------------------------

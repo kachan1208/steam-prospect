@@ -17,7 +17,7 @@ import {
   type TrendPoint,
 } from "../lib/api";
 import { fmtInt, fmtSigned, fmtUsd } from "../lib/format";
-import { radarVerdict } from "../lib/radarVerdict";
+import { radarVerdict, soloBucket, type SoloBucket } from "../lib/radarVerdict";
 import { nicheDetailPath } from "./NicheDetail";
 
 /**
@@ -27,9 +27,11 @@ import { nicheDetailPath } from "./NicheDetail";
  *    as a dot in (sector = Genres / Micro-genres / Themes, ring = client-side verdict from
  *    lib/radarVerdict.ts). Fed by the /api/niches LIST endpoint (two cuts: dimension=genre
  *    and dimension=tag tiers=micro,theme), NOT the radar feed — the feed caps at 24 movers.
- *    NicheRow carries no demand_trend_90d_pct (only the feed cards do), so the feed's top
- *    movers are joined in as best-effort trend evidence and every other niche degrades to
- *    the verdict lib's structural rules — documented there, flagged "caution" in the UI.
+ *    Since 2026-08-26 NicheRow carries demand_trend_90d_pct on every row, so each blip
+ *    rings on its own trend; rows without one (older mart / no baseline) degrade to the
+ *    verdict lib's structural rules — documented there, flagged "caution" in the UI. The
+ *    stats cut is PINNED (24m × 50+ reviews) and the solo-viability lens filters/restyles
+ *    dots without ever moving a ring — see BOARD_WINDOW's and lib/radarVerdict.ts's docs.
  *
  * 2. The original opportunity feed (mockup 3a): a hero "blueprint" plate on the cut's
  *    single biggest 90-day demand riser, then a grid of the cut's biggest movers in either
@@ -54,31 +56,46 @@ function verdictLabel(v: number, digits = 1): string {
 
 // ---- the board --------------------------------------------------------------------------
 
-/** The mart materializes exactly these review floors (see NicheFinder's own note). */
-const MIN_REVIEWS_OPTIONS = [
-  { v: 0, label: "No floor" },
-  { v: 50, label: "50+" },
-  { v: 100, label: "100+" },
-];
+/**
+ * THE BOARD'S STATS CUT IS PINNED — deliberately not a control. mart_niche precomputes its
+ * aggregates per (window, min_reviews) POPULATION: a review-floor toggle doesn't filter the
+ * display, it swaps in a different population with different medians, different
+ * saturation_yoy — and therefore, through radarVerdict(), a different RING for the same
+ * niche. A verdict that moves when a display chip is clicked is not a verdict, so the board
+ * always reads one cut and says so in its footnote. (NicheFinder keeps the floor chips —
+ * there they are honest population controls over a table, not inputs to a verdict.)
+ */
+const BOARD_WINDOW = "24m";
+const BOARD_MIN_REVIEWS = 50;
+
 /** Blip cap so the board stays readable; "top N by opportunity_v2" across all sectors. */
 const TOP_N_OPTIONS = [
   { v: 40, label: "40" },
   { v: 80, label: "80" },
   { v: 120, label: "120" },
 ];
+/** Solo-viability lens (see lib/radarVerdict.ts: a LENS, never a ring input). "unknown"
+ * (null solo_viability) is its own honest bucket: shown under All only — a filter for
+ * solo-friendly must not include niches nobody measured. */
+const SOLO_OPTIONS: { v: "all" | SoloBucket; label: string }[] = [
+  { v: "all", label: "All" },
+  { v: "solo", label: "Solo-friendly" },
+  { v: "team", label: "Team-scale" },
+];
 
 /** Minimal segmented control in the app's hairline-border language (square, no fills
- * except the active brand chip) — same shape NicheFinder draws locally. */
-function SegRow({
+ * except the active brand chip) — same shape NicheFinder draws locally. Generic over the
+ * option value so numeric (Top N) and string (solo lens) rows share one control. */
+function SegRow<V extends string | number>({
   label,
   options,
   value,
   onChange,
 }: {
   label: string;
-  options: { v: number; label: string }[];
-  value: number;
-  onChange: (v: number) => void;
+  options: { v: V; label: string }[];
+  value: V;
+  onChange: (v: V) => void;
 }) {
   return (
     <div className="flex items-center gap-2">
@@ -104,20 +121,28 @@ function SegRow({
 }
 
 /**
- * The radial board plate: filters, data assembly (list cuts + best-effort trend join),
- * verdicts, and the RadarBoard itself. Filter state is local — this page has no URL-param
- * convention to reuse (the feed below it is unparameterized too).
+ * The radial board plate: the pinned stats cut (BOARD_WINDOW × BOARD_MIN_REVIEWS — see
+ * that constant's doc), display-only controls (top-N cap, solo lens), verdicts, and the
+ * RadarBoard itself. Control state is local — this page has no URL-param convention to
+ * reuse (the feed below it is unparameterized too).
+ *
+ * Since 2026-08-26 GET /api/niches carries demand_trend_90d_pct on every row (floor-
+ * independent in the mart — a stats-floor change can no longer move a niche's trend), so
+ * every blip rings on its OWN 90-day trend. The old best-effort join against the radar
+ * feed's 24 top movers is gone with the reason it existed. Rows still without a trend
+ * (mart predates the column, or no prior-window baseline) degrade in radarVerdict() to
+ * structural evidence, caution-flagged.
  */
 function RadarBoardSection() {
-  const [minReviews, setMinReviews] = useState(50);
   const [topN, setTopN] = useState(80);
+  const [solo, setSolo] = useState<"all" | SoloBucket>("all");
 
   // The board population: the two cuts that make up the three sectors. Each query asks for
   // topN rows by opportunity_v2 so the merged top-N cap can never starve one dimension.
   const genreQ = useNiches({
     dimension: "genre",
-    window: "24m",
-    min_reviews: minReviews,
+    window: BOARD_WINDOW,
+    min_reviews: BOARD_MIN_REVIEWS,
     sort: "opportunity_v2",
     order: "desc",
     limit: topN,
@@ -125,8 +150,8 @@ function RadarBoardSection() {
   });
   const tagQ = useNiches({
     dimension: "tag",
-    window: "24m",
-    min_reviews: minReviews,
+    window: BOARD_WINDOW,
+    min_reviews: BOARD_MIN_REVIEWS,
     sort: "opportunity_v2",
     order: "desc",
     tiers: "micro,theme",
@@ -134,28 +159,14 @@ function RadarBoardSection() {
     offset: 0,
   });
 
-  // Best-effort 90-day demand trend: GET /api/niches (NicheRow) does NOT carry
-  // demand_trend_90d_pct — only the radar feed's cards do, and that endpoint caps at 24
-  // movers per dimension. Join what it knows; everything else degrades in radarVerdict()
-  // (structural evidence only, caution-flagged). A feed 503/404 (mart not rebuilt yet)
-  // simply means no trends join — the board still renders.
-  const tagTrendQ = useRadarFeed({ dimension: "tag", min_reviews: minReviews, limit: 24 });
-  const genreTrendQ = useRadarFeed({ dimension: "genre", min_reviews: minReviews, limit: 24 });
-  const trendByNiche = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const feed of [tagTrendQ.data, genreTrendQ.data]) {
-      for (const c of feed?.movers ?? []) m.set(`${c.dimension}:${c.key}`, c.demand_trend_90d_pct);
-    }
-    return m;
-  }, [tagTrendQ.data, genreTrendQ.data]);
-
   const blips = useMemo<RadarBoardBlip[]>(() => {
     const rows: RadarBoardBlip[] = [];
     const push = (row: NicheRow) => {
       const sector: RadarSector | null =
         row.dimension === "genre" ? "genre" : row.tier === "micro" ? "micro" : row.tier === "theme" ? "theme" : null;
       if (!sector) return; // tag tiers outside micro/theme have no sector on this board
-      const demandTrendPct = trendByNiche.get(`${row.dimension}:${row.key}`) ?? null;
+      // ?? null: the field is absent (undefined) on marts that predate the demand columns.
+      const demandTrendPct = row.demand_trend_90d_pct ?? null;
       rows.push({
         dimension: row.dimension,
         key: row.key,
@@ -165,6 +176,7 @@ function RadarBoardSection() {
         p90_rev: row.p90_rev ?? null,
         opportunity_v2: row.opportunity_v2,
         demandTrendPct,
+        solo_viability: row.solo_viability ?? null,
         verdict: radarVerdict({
           demand_trend_90d_pct: demandTrendPct,
           saturation_yoy: row.saturation_yoy,
@@ -175,9 +187,12 @@ function RadarBoardSection() {
     };
     for (const r of genreQ.data?.items ?? []) push(r);
     for (const r of tagQ.data?.items ?? []) push(r);
-    rows.sort((a, b) => (b.opportunity_v2 ?? -1) - (a.opportunity_v2 ?? -1) || a.key.localeCompare(b.key));
-    return rows.slice(0, topN);
-  }, [genreQ.data, tagQ.data, trendByNiche, topN]);
+    // Solo lens BEFORE the top-N cap, so a solo-friendly board fills back up to N.
+    // "unknown" (null) shows under All only — never claimed for either bucket.
+    const seen = solo === "all" ? rows : rows.filter((b) => soloBucket(b.solo_viability) === solo);
+    seen.sort((a, b) => (b.opportunity_v2 ?? -1) - (a.opportunity_v2 ?? -1) || a.key.localeCompare(b.key));
+    return seen.slice(0, topN);
+  }, [genreQ.data, tagQ.data, topN, solo]);
 
   const loading = genreQ.isLoading || tagQ.isLoading;
   const bothFailed = genreQ.isError && tagQ.isError;
@@ -194,7 +209,7 @@ function RadarBoardSection() {
           <h2 className="text-[26px] text-ink-primary sm:text-[30px]">Niche radar</h2>
         </div>
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 sm:ml-auto">
-          <SegRow label="Min reviews" options={MIN_REVIEWS_OPTIONS} value={minReviews} onChange={setMinReviews} />
+          <SegRow label="Solo-buildable" options={SOLO_OPTIONS} value={solo} onChange={setSolo} />
           <SegRow label="Top" options={TOP_N_OPTIONS} value={topN} onChange={setTopN} />
         </div>
       </div>
@@ -213,11 +228,13 @@ function RadarBoardSection() {
         </p>
       )}
       <p className="pt-4 text-[11px] text-ink-muted">
-        Ring verdicts are computed client-side (lib/radarVerdict.ts): Enter now = demand up ≥15% over 90 days without a
-        flooding pipeline · Watch = demand holding, or score-only evidence · Crowded = releases up &gt;15% YoY against
-        flat demand, or winner-take-most · Declining = demand down ≥15%. The 90-day demand trend rides only the radar
-        feed&rsquo;s top movers; niches without one are placed on structural evidence and marked &ldquo;caution&rdquo; in
-        the tooltip. Dot area tracks P90 revenue.
+        Stats cut: last 24 months, niches with 50+ review games — pinned, so a display toggle can never move a verdict
+        (the mart precomputes each cut as its own population). Ring verdicts are computed client-side
+        (lib/radarVerdict.ts): Enter now = demand up ≥15% over 90 days without a flooding pipeline · Watch = demand
+        holding, or score-only evidence · Crowded = releases up &gt;15% YoY against flat demand, or winner-take-most ·
+        Declining = demand down ≥15%. Every dot rings on its own 90-day demand trend; niches without one (older data
+        build, or no prior-window baseline) are placed on structural evidence and marked &ldquo;caution&rdquo; in the
+        tooltip. The solo lens filters and restyles dots (hollow = team-scale) — it never changes a ring.
       </p>
     </section>
   );

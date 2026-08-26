@@ -9,6 +9,9 @@ e777cb2) and upgraded for everything the marts have grown since:
 - Absolute size: total_owners / total_rev / total_reviews / market_size.
 - Live players: total_players_now / players_trend_7d_pct / players_coverage on every
   row, plus the per-niche daily series (mart_niche_players) in the detail response.
+- 90-day demand: reviews_90d / reviews_prev_90d / demand_trend_90d_pct on every LIST
+  row (capability-gated like p90_rev; floor-independent in the mart since 2026-08-26),
+  so the Radar board rings every blip on its own trend, not just the feed's top movers.
 - Review themes: mart_niche_themes' pooled praise/complaint aspects in the detail.
 
 Defaults mirror the MCP tool: window=24m (the market a new entrant faces),
@@ -76,9 +79,14 @@ SORTABLE = {
     "median_players_now", "players_top5_share",
     "lifetime_survival_12m", "lifetime_median_dead_months",
     "p90_rev",
+    "reviews_90d", "reviews_prev_90d", "demand_trend_90d_pct",
 }
 _PLAYERS_COLS = ["total_players_now", "players_trend_7d_pct", "players_coverage"]
 _LIFETIME_COLS = ["lifetime_n_games", "lifetime_survival_12m", "lifetime_median_dead_months"]
+# 90-day demand (floor-independent since 2026-08-26: identical on every min_reviews cut of
+# a niche — see etl/marts/mart_niche.sql's _niche_demand90). On LIST rows so the Radar
+# board can ring every blip on its own trend instead of joining the feed's top movers.
+_DEMAND90_COLS = ["reviews_90d", "reviews_prev_90d", "demand_trend_90d_pct"]
 
 # Ordered base column list (single source of truth for SELECT + CSV header); the players
 # columns are appended when the mart carries them.
@@ -321,6 +329,8 @@ def _cols() -> list[str]:
         cols.extend(["median_players_now", "players_top5_share"])
     if _has_lifetime():
         cols.extend(_LIFETIME_COLS)
+    if _has_demand90():
+        cols.extend(_DEMAND90_COLS)
     return cols
 
 
@@ -424,6 +434,11 @@ def list_niches(
         raise HTTPException(
             status_code=503,
             detail="mart_niche predates the p90_rev column — rebuild the marts (task etl).",
+        )
+    if sort in _DEMAND90_COLS and not _has_demand90():
+        raise HTTPException(
+            status_code=503,
+            detail="mart_niche predates the 90-day demand columns — rebuild the marts (task etl).",
         )
     if min_reviews == 0 and not _has_no_floor_cut():
         raise HTTPException(
