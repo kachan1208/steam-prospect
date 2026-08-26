@@ -132,9 +132,10 @@ export function PriceHistoryChart({ appid, priceInitial }: { appid: number; pric
             // Anchored at $0 — price deltas (a -50% sale) only read honestly against zero.
             domain={[0, (max: number) => Math.ceil(max * 1.1)]}
             tick={{ fontSize: 10 }}
-            // fmtUsd renders sub-$10 values with cents ("$0.00" beside "$44" on one
-            // axis); ticks are round dollars, so drop the decimals at the zero anchor.
-            tickFormatter={(v: number) => (v === 0 ? "$0" : fmtUsd(v))}
+            // fmtUsd renders sub-$10 values with cents, so one axis mixed "$33 · $18 ·
+            // $9.00 · $0.00". Whole-dollar ticks print bare ("$9"); the rare fractional
+            // tick keeps its cents rather than get rounded onto a gridline it isn't at.
+            tickFormatter={(v: number) => (Number.isInteger(v) ? `$${v}` : `$${v.toFixed(2)}`)}
             tickLine={false}
             axisLine={false}
             width={40}

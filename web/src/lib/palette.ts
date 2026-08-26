@@ -31,8 +31,9 @@ import type { Theme } from "./theme";
 export const MONO = {
   /** Up / positive / primary series. */
   primary: "var(--accent-300)",
-  /** Two/three-series overlays (CompareTrendsChart): decreasing recession by rank. */
+  /** Multi-series overlays (CompareTrendsChart): decreasing recession by rank. */
   paper75: "color-mix(in srgb, var(--text-primary) 75%, transparent)",
+  paper65: "color-mix(in srgb, var(--text-primary) 65%, transparent)",
   paper55: "color-mix(in srgb, var(--text-primary) 55%, transparent)", // == --text-muted
   /** Down / negative / "the downside" — competition, complaint, D/C/Q's Competition bar. */
   paper50: "color-mix(in srgb, var(--text-primary) 50%, transparent)",

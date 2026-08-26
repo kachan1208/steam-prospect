@@ -669,24 +669,28 @@ export default function NicheCombined() {
                   ? `${(offset + 1).toLocaleString()}–${Math.min(offset + PAGE, data.n_games).toLocaleString()} of ${data.n_games.toLocaleString()}`
                   : "0 results"}
               </span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  disabled={offset === 0}
-                  onClick={() => setOffset((o) => Math.max(0, o - PAGE))}
-                  className="border border-chartborder bg-surface px-3 py-1 font-medium text-ink-secondary transition-colors hover:text-ink-primary disabled:pointer-events-none disabled:opacity-40"
-                >
-                  Prev
-                </button>
-                <button
-                  type="button"
-                  disabled={offset + PAGE >= data.n_games}
-                  onClick={() => setOffset((o) => o + PAGE)}
-                  className="border border-chartborder bg-surface px-3 py-1 font-medium text-ink-secondary transition-colors hover:text-ink-primary disabled:pointer-events-none disabled:opacity-40"
-                >
-                  Next
-                </button>
-              </div>
+              {/* Only when there's actually a second page — a permanently disabled
+                  Prev/Next pair on a one-page result is dead-control noise. */}
+              {(offset > 0 || data.n_games > PAGE) && (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={offset === 0}
+                    onClick={() => setOffset((o) => Math.max(0, o - PAGE))}
+                    className="border border-chartborder bg-surface px-3 py-1 font-medium text-ink-secondary transition-colors hover:text-ink-primary disabled:pointer-events-none disabled:opacity-40"
+                  >
+                    Prev
+                  </button>
+                  <button
+                    type="button"
+                    disabled={offset + PAGE >= data.n_games}
+                    onClick={() => setOffset((o) => o + PAGE)}
+                    className="border border-chartborder bg-surface px-3 py-1 font-medium text-ink-secondary transition-colors hover:text-ink-primary disabled:pointer-events-none disabled:opacity-40"
+                  >
+                    Next
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </>

@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { request, type ReviewTimelinePoint } from "../../lib/api";
-import { fmtCompact, fmtPct } from "../../lib/format";
+import { fmtAxisCompact, fmtCompact, fmtPct } from "../../lib/format";
 import { markerMonths } from "../../lib/notable";
 import { CSS_VAR } from "../../lib/palette";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
@@ -162,7 +162,7 @@ export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimeline
             />
             <YAxis
               tick={{ fontSize: 10 }}
-              tickFormatter={(v: number) => fmtCompact(v)}
+              tickFormatter={(v: number) => fmtAxisCompact(v)}
               tickLine={false}
               axisLine={false}
               width={40}

@@ -139,7 +139,9 @@ export function NotableCoverageCard({ press }: { press: GamePress }) {
       action={
         tone ? (
           <span
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-chartborder bg-page px-2.5 py-1 text-[11px]"
+            // Square corners — blueprint grammar has radius 0 on tags/chips (the 2px dot
+            // inside stays a circle; dots aren't chips).
+            className="inline-flex shrink-0 items-center gap-1.5 border border-chartborder bg-page px-2.5 py-1 text-[11px]"
             title={`${fmtInt(press.n_pos_articles)} positive · ${fmtInt(press.n_neg_articles)} negative${
               press.n_neutral_articles ? ` · ${fmtInt(press.n_neutral_articles)} neutral` : ""
             } of ${fmtInt(press.n_scored_articles)} scored — VADER on headlines/summaries`}

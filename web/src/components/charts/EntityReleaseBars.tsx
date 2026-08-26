@@ -1,7 +1,7 @@
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import type { EntityGameRow } from "../../lib/api";
-import { fmtUsd } from "../../lib/format";
+import { fmtAxisUsd, fmtUsd } from "../../lib/format";
 import { CSS_VAR } from "../../lib/palette";
 import { TooltipPanel } from "./TooltipPanel";
 
@@ -43,14 +43,20 @@ export function EntityReleaseBars({
           tickLine={false}
           axisLine={{ stroke: "var(--baseline)" }}
           interval={data.length > 24 ? "preserveStartEnd" : 0}
+          // One bar per RELEASE, labeled by year — several releases share a year, so
+          // consecutive repeats print once ("2025 · · 2026", not "2025 2025 2025"),
+          // which is also what keeps the axis legible at phone widths.
           tickFormatter={(key: string) => {
-            const g = data.find((d) => d.key === key);
-            return g?.release_year != null ? String(g.release_year) : key;
+            const i = data.findIndex((d) => d.key === key);
+            const year = i >= 0 ? data[i].release_year : null;
+            if (year == null) return String(key);
+            const prev = i > 0 ? data[i - 1].release_year : null;
+            return year === prev ? "" : String(year);
           }}
         />
         <YAxis
           tick={{ fontSize: 10 }}
-          tickFormatter={(v: number) => fmtUsd(v)}
+          tickFormatter={(v: number) => fmtAxisUsd(v)}
           tickLine={false}
           axisLine={false}
           width={56}

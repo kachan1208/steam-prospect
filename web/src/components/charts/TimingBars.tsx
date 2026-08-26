@@ -71,7 +71,11 @@ export function TimingBars({
           tick={{ fontSize: 10 }}
           tickLine={false}
           axisLine={{ stroke: "var(--baseline)" }}
-          interval={data.length > 14 ? 1 : 0}
+          // minTickGap instead of a forced interval-0: 12 month labels fit at desktop
+          // widths but run together as "JanFebMar…" on a 390px phone — let recharts
+          // thin to every other month when the slots get tighter than one label.
+          interval={data.length > 14 ? 1 : "preserveStartEnd"}
+          minTickGap={4}
         />
         <YAxis
           yAxisId="left"

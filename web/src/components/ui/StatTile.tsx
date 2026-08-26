@@ -65,7 +65,10 @@ export function StatTile({
         )}
       </div>
       <div
-        className={clsx("mt-1 text-[28px] font-semibold leading-none text-ink-primary", valueClassName)}
+        // The default ink color only applies when the caller doesn't pass its own —
+        // stacking both leaves the winner to stylesheet order, which silently ate
+        // valueClassName colors like text-brand while letting others through.
+        className={clsx("mt-1 text-[28px] font-semibold leading-none", valueClassName || "text-ink-primary")}
         style={{ fontFamily: '"Barlow Condensed", "Barlow", system-ui, sans-serif' }}
       >
         {value}

@@ -1,7 +1,7 @@
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import type { TrendPoint } from "../../lib/api";
-import { fmtCompact, fmtUsd } from "../../lib/format";
+import { fmtAxisCompact, fmtAxisUsd, fmtCompact, fmtUsd } from "../../lib/format";
 import { CSS_VAR } from "../../lib/palette";
 import { TooltipPanel } from "./TooltipPanel";
 
@@ -33,7 +33,7 @@ export function SaturationTrend({ points }: { points: TrendPoint[] }) {
             <XAxis dataKey="year" tick={{ fontSize: 10 }} tickLine={false} axisLine={{ stroke: "var(--baseline)" }} />
             <YAxis
               tick={{ fontSize: 10 }}
-              tickFormatter={(v: number) => fmtCompact(v)}
+              tickFormatter={(v: number) => fmtAxisCompact(v)}
               tickLine={false}
               axisLine={false}
               width={32}
@@ -67,7 +67,7 @@ export function SaturationTrend({ points }: { points: TrendPoint[] }) {
             <XAxis dataKey="year" tick={{ fontSize: 10 }} tickLine={false} axisLine={{ stroke: "var(--baseline)" }} />
             <YAxis
               tick={{ fontSize: 10 }}
-              tickFormatter={(v: number) => fmtUsd(v)}
+              tickFormatter={(v: number) => fmtAxisUsd(v)}
               tickLine={false}
               axisLine={false}
               width={44}

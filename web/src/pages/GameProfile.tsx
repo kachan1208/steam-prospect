@@ -36,7 +36,7 @@ import {
 } from "../lib/api";
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
-import { fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName } from "../lib/format";
+import { fmtAxisCompact, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName } from "../lib/format";
 import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { markerMonths } from "../lib/notable";
 import { CSS_VAR, MONO} from "../lib/palette";
@@ -342,7 +342,7 @@ function ReviewVelocityBars({
           />
           <YAxis
             tick={{ fontSize: 10 }}
-            tickFormatter={(v: number) => fmtCompact(v)}
+            tickFormatter={(v: number) => fmtAxisCompact(v)}
             tickLine={false}
             axisLine={false}
             width={40}

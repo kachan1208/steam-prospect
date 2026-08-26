@@ -35,7 +35,7 @@ import {
   type TrendPoint,
   type Window,
 } from "../lib/api";
-import { fmtCompact, fmtInt, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtSigned, fmtUsd, titleCase } from "../lib/format";
+import { fmtAxisCompact, fmtCompact, fmtInt, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtSigned, fmtUsd, titleCase } from "../lib/format";
 import { heatDomain, heatStyle } from "../lib/heat";
 import { CSS_VAR } from "../lib/palette";
 import { useDetailView } from "../lib/viewMode";
@@ -253,7 +253,7 @@ function PlayersSeriesChart({ points }: { points: NichePlayersPoint[] }) {
         />
         <YAxis
           tick={{ fontSize: 10 }}
-          tickFormatter={(v: number) => fmtCompact(v)}
+          tickFormatter={(v: number) => fmtAxisCompact(v)}
           tickLine={false}
           axisLine={false}
           width={44}
@@ -1014,12 +1014,14 @@ export default function NicheDetail() {
                   <StatTile
                     help="Last 7 days vs the 7 before, counting only games measured in BOTH windows — growing data coverage can't fake an audience trend."
                     label="7-day trend"
+                    // Trend verdict → mono steel (up = accent, down recedes to muted ink;
+                    // "never red/green"), matching every other ▲/▼ verdict in the app.
                     valueClassName={
                       players?.players_trend_7d_pct == null
                         ? undefined
                         : players.players_trend_7d_pct >= 0
-                          ? "text-verdict-good"
-                          : "text-verdict-serious"
+                          ? "text-brand"
+                          : "text-ink-muted"
                     }
                     value={
                       players?.players_trend_7d_pct != null
@@ -1056,7 +1058,7 @@ export default function NicheDetail() {
                         />
                         <YAxis
                           tick={{ fontSize: 10 }}
-                          tickFormatter={(v: number) => fmtCompact(v)}
+                          tickFormatter={(v: number) => fmtAxisCompact(v)}
                           tickLine={false}
                           axisLine={false}
                           width={44}
@@ -1317,12 +1319,15 @@ export default function NicheDetail() {
                         {detail.themes.map((t) => (
                           <tr key={t.aspect} className="border-b border-chartborder/60 last:border-0">
                             <td className="px-2 py-1.5 font-medium text-ink-primary">{t.aspect}</td>
-                            <td className="tabular px-2 py-1.5 text-verdict-good">{fmtPct(t.praise_share)}</td>
-                            <td className="tabular px-2 py-1.5 text-verdict-serious">{fmtPct(t.complaint_share)}</td>
+                            {/* Aspect sentiment is mono steel per the handoff (4c: "positive
+                                accent-300, negative paper 50%") — red/green stays reserved
+                                for real error/status states, not data verdicts. */}
+                            <td className="tabular px-2 py-1.5 text-brand">{fmtPct(t.praise_share)}</td>
+                            <td className="tabular px-2 py-1.5 text-ink-muted">{fmtPct(t.complaint_share)}</td>
                             <td
                               className={clsx(
                                 "tabular px-2 py-1.5",
-                                (t.praise_delta_vs_catalog ?? 0) >= 0 ? "text-verdict-good" : "text-verdict-serious",
+                                (t.praise_delta_vs_catalog ?? 0) >= 0 ? "text-brand" : "text-ink-muted",
                               )}
                               title="Praise share vs the all-catalog baseline for this aspect"
                             >

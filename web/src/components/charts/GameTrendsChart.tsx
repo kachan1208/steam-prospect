@@ -12,7 +12,7 @@ import {
 } from "recharts";
 
 import { request } from "../../lib/api";
-import { fmtCompact } from "../../lib/format";
+import { fmtAxisCompact, fmtCompact } from "../../lib/format";
 import { markerMonths } from "../../lib/notable";
 import { CSS_VAR } from "../../lib/palette";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
@@ -239,7 +239,7 @@ export function GameTrendsChart({
               <YAxis
                 yAxisId="reviews"
                 tick={{ fontSize: 10 }}
-                tickFormatter={(v: number) => fmtCompact(v)}
+                tickFormatter={(v: number) => fmtAxisCompact(v)}
                 tickLine={false}
                 axisLine={false}
                 width={40}
@@ -249,7 +249,7 @@ export function GameTrendsChart({
                 yAxisId="ccu"
                 orientation="right"
                 tick={{ fontSize: 10 }}
-                tickFormatter={(v: number) => fmtCompact(v)}
+                tickFormatter={(v: number) => fmtAxisCompact(v)}
                 tickLine={false}
                 axisLine={false}
                 width={40}
