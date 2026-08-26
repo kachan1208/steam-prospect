@@ -1064,6 +1064,35 @@ export function useGameEvents(appid: number | null) {
   });
 }
 
+// ---- game price history (daily US snapshots via the Steam catalog diff) -----------------
+export interface PricePoint {
+  captured_on: string; // 'YYYY-MM-DD'
+  final_cents: number | null; // null when the storefront lists no price (e.g. free)
+  original_cents: number | null; // pre-discount price; null when not discounted
+  discount_pct: number;
+  is_free: boolean;
+  country: string; // 'US' — the only market collected today
+}
+
+/** Daily price snapshots (signals.db, collection live since 2026-08-24 — a days-deep
+ * series that grows by one point per day). Errors resolve to [] on the same contract as
+ * useGameEvents: the panel renders its honest "tracking just started" state either way. */
+export function useGamePriceHistory(appid: number | null) {
+  return useQuery({
+    queryKey: ["game-price-history", appid],
+    queryFn: async () => {
+      try {
+        const r = await request<{ appid: number; items: PricePoint[] }>(`/games/${appid}/price-history`);
+        return r.items;
+      } catch {
+        return [] as PricePoint[];
+      }
+    },
+    enabled: appid !== null,
+    staleTime: 5 * 60_000,
+  });
+}
+
 // ---- game teardown (Phase 3 — "Why it works") -------------------------------------------
 export interface ReviewAspect {
   aspect: string;

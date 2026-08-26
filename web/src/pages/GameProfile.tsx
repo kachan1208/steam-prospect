@@ -10,6 +10,7 @@ import { LanguageSplitChart } from "../components/charts/LanguageSplitChart";
 import { LaunchShapeBars } from "../components/charts/LaunchShapeBars";
 import { PressBySourceChart } from "../components/charts/PressBySourceChart";
 import { PressTimelineChart } from "../components/charts/PressTimelineChart";
+import { PriceHistoryChart } from "../components/charts/PriceHistoryChart";
 import { ReviewsTimelineChart } from "../components/charts/ReviewsTimelineChart";
 import { TooltipPanel, type TooltipRow } from "../components/charts/TooltipPanel";
 import { GameTrendsChart } from "../components/charts/GameTrendsChart";
@@ -702,18 +703,12 @@ export default function GameProfile() {
               columns inside that third — wrapped at ~25 characters. Unreadable prose loses
               to mockup fidelity; both panels now get the main column's full measure. */}
           <div className="grid grid-cols-1 gap-[22px]">
-            {/* Price history has no backing data: the API has no price-history field, and
-                game_snapshots holds ~1 row per game — there is nothing honest to plot, so
-                this states that plainly rather than fabricating a series (§4c calls the
-                mockup's step line "illustrative"; ours stays an admitted gap instead). */}
+            {/* Price history went live 2026-08-24 (GET /api/games/{appid}/price-history ←
+                signals.db daily US snapshots), so this is a real series now — days deep and
+                growing daily. PriceHistoryChart owns the honest thin-data states (dots for
+                1-2 points, step line at 3+, F2P / no-snapshots messaging). */}
             <BlueprintPanel title="Price history">
-              <div className="flex h-full min-h-[80px] flex-col items-center justify-center gap-1.5 py-4 text-center text-xs text-ink-muted">
-                <span className="font-medium text-ink-secondary">Not collected yet</span>
-                <span>
-                  Prospect captures roughly one snapshot per game today, not a series over time. Launch price was{" "}
-                  {fmtPrice(profile.price_initial)}.
-                </span>
-              </div>
+              <PriceHistoryChart appid={appid} priceInitial={profile.price_initial} />
             </BlueprintPanel>
 
             {/* AspectDivergingBars is "What players say about each aspect" — the full
