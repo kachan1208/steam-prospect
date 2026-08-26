@@ -101,7 +101,10 @@ export type SortKey =
   | "players_trend_7d_pct"
   | "players_coverage"
   | "lifetime_survival_12m"
-  | "lifetime_median_dead_months";
+  | "lifetime_median_dead_months"
+  | "reviews_12m"
+  | "reviews_prev_12m"
+  | "demand_trend_12m_pct";
 
 export type NicheTier = "micro" | "theme" | "umbrella" | "meta";
 export const NICHE_TIERS: NicheTier[] = ["micro", "theme", "umbrella", "meta"];
@@ -178,12 +181,13 @@ export interface NicheRow {
   lifetime_n_games?: number | null;
   lifetime_survival_12m?: number | null;
   lifetime_median_dead_months?: number | null;
-  // 90-day demand (review-histogram windows; floor-independent — identical on every
-  // min_reviews cut of a niche) — absent on marts that predate 2026-08-21. On LIST rows
-  // since 2026-08-26 so the Radar board rings every blip on its own trend.
-  reviews_90d?: number | null;
-  reviews_prev_90d?: number | null;
-  demand_trend_90d_pct?: number | null; // null = no prior-window baseline
+  // 12-month demand (review-histogram windows: last 12 complete months vs the prior 12;
+  // cut-independent — one value per (dimension, key), identical on every window/floor
+  // cut) — replaced the 90-day columns outright; absent on marts that predate them. On
+  // LIST rows so the Radar board rings every blip on its own trend.
+  reviews_12m?: number | null;
+  reviews_prev_12m?: number | null;
+  demand_trend_12m_pct?: number | null; // null = no prior-window baseline
 }
 
 export interface NicheList {
@@ -448,10 +452,10 @@ export function useNicheDistribution(
 }
 
 // ---- Radar feed (the opportunity-feed home, mockup 3a) ---------------------------------
-// Ranks on demand_trend_90d_pct — a column that landed in mart_niche on 2026-08-21 (PR #69)
-// and is NOT in the mart until the next nightly rebuild materialises it. The endpoint 503s
-// until then (see api/app/routers/niches.py::_has_demand90); Radar.tsx must degrade to an
-// honest "not available yet" message on that response, never a spinner or an empty grid.
+// Ranks on demand_trend_12m_pct — a mart_niche column that is NOT in the mart until the
+// nightly rebuild after its deploy materialises it. The endpoint 503s until then (see
+// api/app/routers/niches.py::_has_demand12m); Radar.tsx must degrade to an honest "not
+// available yet" message on that response, never a spinner or an empty grid.
 
 export interface RadarSparklinePoint {
   month: string; // 'YYYY-MM-DD' (month start)
@@ -459,11 +463,12 @@ export interface RadarSparklinePoint {
 }
 
 /** One niche in the feed — the hero pick and every "Moving niches" grid card share this
- * shape (the hero repeats as the grid's first card, same as the mockup). reviews_90d /
- * reviews_prev_90d are counts from a recency-biased review SAMPLE (not Steam's true totals);
- * demand_trend_90d_pct is the ratio between them and IS directionally sound, but never label
- * the raw counts as Steam's absolute numbers. Guaranteed non-null here — the API excludes
- * rows with no 90-day baseline rather than rendering them as an unchanged (0%) mover. */
+ * shape (the hero repeats as the grid's first card, same as the mockup). reviews_12m /
+ * reviews_prev_12m are Steam's own per-month review totals (review_histogram — true
+ * counts, not the recency-biased sample the first cut used), summed over two adjacent
+ * 12-calendar-month windows anchored on the last complete month; demand_trend_12m_pct is
+ * the ratio between them. Guaranteed non-null here — the API excludes rows with no
+ * prior-12-month baseline rather than rendering them as an unchanged (0%) mover. */
 export interface RadarNicheCard {
   dimension: string;
   key: string;
@@ -472,14 +477,14 @@ export interface RadarNicheCard {
   p90_rev: number | null;
   opportunity_v2: number | null;
   saturation_yoy: number | null;
-  reviews_90d: number;
-  reviews_prev_90d: number;
-  demand_trend_90d_pct: number;
+  reviews_12m: number;
+  reviews_prev_12m: number;
+  demand_trend_12m_pct: number;
   players_trend_7d_pct: number | null;
   sparkline: RadarSparklinePoint[];
 }
 
-/** The hero pick (the cut's biggest 90-day riser) plus its yearly demand-vs-pipeline trend
+/** The hero pick (the cut's biggest 12-month riser) plus its yearly demand-vs-pipeline trend
  * (mart_niche_trend) — the same real series NicheDetail's "Demand vs. pipeline, by year"
  * panel charts (§4b), reused here for the hero's chart column: no mart carries niche review
  * velocity or releases at the mockup's monthly granularity, so this is the honest
@@ -494,7 +499,7 @@ export interface RadarFeed {
   min_reviews: number;
   hero: RadarHero;
   /** Includes the hero as movers[0] (mirrors the mockup), then the cut's other biggest
-   * 90-day movers ranked by |demand_trend_90d_pct| — "Moving niches", not "Rising niches":
+   * 12-month movers ranked by |demand_trend_12m_pct| — "Moving niches", not "Rising niches":
    * both risers and decliners appear here. */
   movers: RadarNicheCard[];
 }
@@ -506,7 +511,7 @@ export interface RadarFeedParams {
   limit?: number;
 }
 
-/** 503 = the mart predates demand_trend_90d_pct — the state production is genuinely in for
+/** 503 = the mart predates demand_trend_12m_pct — the state production is genuinely in for
  * hours after every deploy that adds a mart column, so it is not retried into a spinner. */
 export function useRadarFeed(params: RadarFeedParams = {}) {
   return useQuery({

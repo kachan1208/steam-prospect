@@ -9,9 +9,10 @@ e777cb2) and upgraded for everything the marts have grown since:
 - Absolute size: total_owners / total_rev / total_reviews / market_size.
 - Live players: total_players_now / players_trend_7d_pct / players_coverage on every
   row, plus the per-niche daily series (mart_niche_players) in the detail response.
-- 90-day demand: reviews_90d / reviews_prev_90d / demand_trend_90d_pct on every LIST
-  row (capability-gated like p90_rev; floor-independent in the mart since 2026-08-26),
-  so the Radar board rings every blip on its own trend, not just the feed's top movers.
+- 12-month demand: reviews_12m / reviews_prev_12m / demand_trend_12m_pct on every LIST
+  row (capability-gated like p90_rev; cut-independent in the mart — one value per
+  (dimension, key), stamped on every window/floor cut), so the Radar board rings every
+  blip on its own trend, not just the feed's top movers.
 - Review themes: mart_niche_themes' pooled praise/complaint aspects in the detail.
 
 Defaults mirror the MCP tool: window=24m (the market a new entrant faces),
@@ -79,14 +80,14 @@ SORTABLE = {
     "median_players_now", "players_top5_share",
     "lifetime_survival_12m", "lifetime_median_dead_months",
     "p90_rev",
-    "reviews_90d", "reviews_prev_90d", "demand_trend_90d_pct",
+    "reviews_12m", "reviews_prev_12m", "demand_trend_12m_pct",
 }
 _PLAYERS_COLS = ["total_players_now", "players_trend_7d_pct", "players_coverage"]
 _LIFETIME_COLS = ["lifetime_n_games", "lifetime_survival_12m", "lifetime_median_dead_months"]
-# 90-day demand (floor-independent since 2026-08-26: identical on every min_reviews cut of
-# a niche — see etl/marts/mart_niche.sql's _niche_demand90). On LIST rows so the Radar
-# board can ring every blip on its own trend instead of joining the feed's top movers.
-_DEMAND90_COLS = ["reviews_90d", "reviews_prev_90d", "demand_trend_90d_pct"]
+# 12-month demand (cut-independent: identical on every window/floor cut of a niche — see
+# etl/marts/mart_niche.sql's _niche_demand12m). On LIST rows so the Radar board can ring
+# every blip on its own trend instead of joining the feed's top movers.
+_DEMAND12M_COLS = ["reviews_12m", "reviews_prev_12m", "demand_trend_12m_pct"]
 
 # Ordered base column list (single source of truth for SELECT + CSV header); the players
 # columns are appended when the mart carries them.
@@ -168,14 +169,18 @@ def _has_p90_trend() -> bool:
 
 
 @lru_cache(maxsize=1)
-def _has_demand90() -> bool:
-    """reviews_90d / reviews_prev_90d / demand_trend_90d_pct landed 2026-08-21 (PR #69) — the
-    whole ranking metric behind the Radar feed (mockup 3a). Gated exactly like _has_p90/
-    _has_players: an information_schema probe, cached per process (the DB is swapped and the
-    app restarted on each nightly rebuild, so a per-process answer can't go stale)."""
+def _has_demand12m() -> bool:
+    """reviews_12m / reviews_prev_12m / demand_trend_12m_pct — the whole ranking metric
+    behind the Radar feed and the board's verdict rings. They REPLACED the 90-day demand
+    columns outright (2026-08: quarter-over-quarter caught release spikes; last-12-months
+    vs prior-12 reads structural growth, which is what "what should I build" needs), so a
+    mart carrying only the old 90d columns still answers False here and degrades the same
+    way a pre-demand mart does. Gated exactly like _has_p90/_has_players: an
+    information_schema probe, cached per process (the DB is swapped and the app restarted
+    on each nightly rebuild, so a per-process answer can't go stale)."""
     rows = analytics_db.query(
         "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_niche' AND column_name = 'demand_trend_90d_pct'"
+        "WHERE table_name = 'mart_niche' AND column_name = 'demand_trend_12m_pct'"
     )
     return bool(rows)
 
@@ -329,8 +334,8 @@ def _cols() -> list[str]:
         cols.extend(["median_players_now", "players_top5_share"])
     if _has_lifetime():
         cols.extend(_LIFETIME_COLS)
-    if _has_demand90():
-        cols.extend(_DEMAND90_COLS)
+    if _has_demand12m():
+        cols.extend(_DEMAND12M_COLS)
     return cols
 
 
@@ -435,10 +440,10 @@ def list_niches(
             status_code=503,
             detail="mart_niche predates the p90_rev column — rebuild the marts (task etl).",
         )
-    if sort in _DEMAND90_COLS and not _has_demand90():
+    if sort in _DEMAND12M_COLS and not _has_demand12m():
         raise HTTPException(
             status_code=503,
-            detail="mart_niche predates the 90-day demand columns — rebuild the marts (task etl).",
+            detail="mart_niche predates the 12-month demand columns — rebuild the marts (task etl).",
         )
     if min_reviews == 0 and not _has_no_floor_cut():
         raise HTTPException(
@@ -473,7 +478,7 @@ def list_niches(
 # that contract.
 _RADAR_BASE_COLS = [
     "dimension", "key", "tier", "n_games", "opportunity_v2", "saturation_yoy",
-    "reviews_90d", "reviews_prev_90d", "demand_trend_90d_pct",
+    "reviews_12m", "reviews_prev_12m", "demand_trend_12m_pct",
 ]
 
 
@@ -495,9 +500,9 @@ def _radar_card(r: dict, sparklines: dict[tuple[str, str], list[RadarSparklinePo
         p90_rev=r.get("p90_rev"),
         opportunity_v2=r.get("opportunity_v2"),
         saturation_yoy=r.get("saturation_yoy"),
-        reviews_90d=int(r["reviews_90d"] or 0),
-        reviews_prev_90d=int(r["reviews_prev_90d"] or 0),
-        demand_trend_90d_pct=r["demand_trend_90d_pct"],
+        reviews_12m=int(r["reviews_12m"] or 0),
+        reviews_prev_12m=int(r["reviews_prev_12m"] or 0),
+        demand_trend_12m_pct=r["demand_trend_12m_pct"],
         players_trend_7d_pct=r.get("players_trend_7d_pct"),
         sparkline=sparklines.get((r["dimension"], r["key"]), []),
     )
@@ -538,43 +543,44 @@ def radar_feed(
     min_reviews: int = Query(50, ge=0, le=100000),
     limit: int = Query(6, ge=1, le=24),
 ) -> RadarFeed:
-    """The Radar feed: the cut's biggest 90-day demand riser (hero) plus its biggest movers in
-    either direction ('Moving niches'). Defaults mirror NicheFinder/mockup 3a's own caption —
-    "last 24 months · micro + theme tags" — dimension=tag, window=24m, min_reviews=50, tiers
+    """The Radar feed: the cut's biggest 12-month demand riser (hero) plus its biggest movers
+    in either direction ('Moving niches'). Defaults mirror NicheFinder/mockup 3a's own caption
+    — "last 24 months · micro + theme tags" — dimension=tag, window=24m, min_reviews=50, tiers
     micro+theme.
 
-    503 when the mart predates demand_trend_90d_pct (see _has_demand90 — the state production
+    503 when the mart predates demand_trend_12m_pct (see _has_demand12m — the state production
     is genuinely in for hours after every deploy that adds a mart column, and always the FIRST
     state a fresh deploy of this endpoint sees, since the API ships before the nightly rebuild
     that materialises it). The client is expected to degrade honestly on that response, not
     retry it into a spinner.
     """
-    if not _has_demand90():
+    if not _has_demand12m():
         raise HTTPException(
             status_code=503,
             detail=(
-                "mart_niche predates the 90-day demand trend columns (reviews_90d / "
-                "reviews_prev_90d / demand_trend_90d_pct) — rebuild the marts (task etl)."
+                "mart_niche predates the 12-month demand trend columns (reviews_12m / "
+                "reviews_prev_12m / demand_trend_12m_pct) — rebuild the marts (task etl)."
             ),
         )
 
     tiers_arg = "micro,theme" if dimension == "tag" else None
     where, params = _build_filters(dimension, window, min_reviews, None, tiers_arg, None, None)
-    # NULL demand_trend_90d_pct means "no baseline to compare against" (the prior 90d window
-    # had zero reviews), not "flat" — a brand-new niche must never surface here as an unchanged
-    # mover, so rows without a real trend value are excluded rather than sorted to the bottom.
-    where += " AND demand_trend_90d_pct IS NOT NULL"
+    # NULL demand_trend_12m_pct means "no baseline to compare against" (the prior 12-month
+    # window had zero reviews), not "flat" — a brand-new niche must never surface here as an
+    # unchanged mover, so rows without a real trend value are excluded rather than sorted to
+    # the bottom.
+    where += " AND demand_trend_12m_pct IS NOT NULL"
 
     cols = ", ".join(_radar_cols())
     hero_rows = analytics_db.query(
         f"SELECT {cols} FROM mart_niche {where} "
-        "ORDER BY demand_trend_90d_pct DESC, n_games DESC LIMIT 1",
+        "ORDER BY demand_trend_12m_pct DESC, n_games DESC LIMIT 1",
         params,
     )
     if not hero_rows:
         raise HTTPException(
             status_code=404,
-            detail="No niches have a 90-day demand trend in this cut yet — too few reviews in the prior 90-day window.",
+            detail="No niches have a 12-month demand trend in this cut yet — too few reviews in the prior 12-month window.",
         )
     hero_row = hero_rows[0]
 
@@ -583,7 +589,7 @@ def radar_feed(
     if extra > 0:
         mover_rows = analytics_db.query(
             f"SELECT {cols} FROM mart_niche {where} AND key != ? "
-            "ORDER BY ABS(demand_trend_90d_pct) DESC, n_games DESC LIMIT ?",
+            "ORDER BY ABS(demand_trend_12m_pct) DESC, n_games DESC LIMIT ?",
             params + [hero_row["key"], extra],
         )
 

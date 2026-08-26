@@ -61,8 +61,9 @@ export interface RadarBoardBlip {
   n_games: number;
   p90_rev: number | null;
   opportunity_v2: number | null;
-  /** Percent units; null = this niche has no 90-day demand trend (the mart predates the
-   * column, or the niche had no prior-window baseline — see mart_niche.sql). */
+  /** Percent units; the 12-month demand trend (last 12 complete months vs the prior 12 —
+   * see mart_niche.sql's _niche_demand12m). null = this niche has no trend (the mart
+   * predates the column, or the niche had no prior-window baseline). */
   demandTrendPct: number | null;
   /** 0..1 share of the cut's scored games playable single-player; null = unknown (mart
    * predates the column). A LENS only — drawn as dot style (hollow = team-scale), never
@@ -213,7 +214,7 @@ function MoveGlyph({ trendPct }: { trendPct: number | null }) {
     <span
       className="ml-auto shrink-0 pl-2 text-[11px] tabular"
       style={{ color: up ? "var(--verdict-up)" : "var(--verdict-flat)" }}
-      title={`90-day demand trend ${up ? "+" : "−"}${Math.abs(trendPct).toFixed(1)}%`}
+      title={`12-month demand trend ${up ? "+" : "−"}${Math.abs(trendPct).toFixed(1)}% (last 12 months vs prior 12)`}
     >
       {up ? "▲" : "▼"} {Math.abs(trendPct).toFixed(0)}%
     </span>
@@ -399,7 +400,7 @@ export function RadarBoard({ blips }: { blips: RadarBoardBlip[] }) {
                   value: `${RING_LABEL[hovered.verdict.ring]}${hovered.verdict.caution ? " · caution" : ""}`,
                   color: RING_FILL[hovered.verdict.ring],
                 },
-                { label: "Demand 90d", value: fmtTrendPct(hovered.demandTrendPct) },
+                { label: "Demand 12m", value: fmtTrendPct(hovered.demandTrendPct) },
                 { label: "P90 revenue", value: fmtUsd(hovered.p90_rev) },
                 { label: "Games", value: fmtInt(hovered.n_games) },
                 { label: "Opp v2", value: hovered.opportunity_v2 != null ? hovered.opportunity_v2.toFixed(1) : "—" },

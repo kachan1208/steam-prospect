@@ -195,6 +195,19 @@ _HAS_NICHE_P90 = bool(
     )
 )
 
+# 12-month demand trend per niche (reviews_12m / reviews_prev_12m / demand_trend_12m_pct):
+# the niche's review-histogram inflow over the last 12 complete months vs the 12 before
+# them — the year-over-year demand read the Radar surfaces ring on. Cut-independent in
+# the mart (one value per (dimension, key), identical on every window/floor cut). These
+# REPLACED the earlier 90-day demand columns outright, so a mart carrying only those old
+# columns probes False here and the fields are simply omitted.
+_HAS_DEMAND12M = bool(
+    query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_niche' AND column_name = 'demand_trend_12m_pct'"
+    )
+)
+
 _PLAYERS_MISSING = (
     "this analytics DB predates the live-player (CCU) marts (mart_game_players_daily / "
     "mart_niche_players and the players_* columns on mart_game/mart_niche) — it was built "
@@ -617,12 +630,19 @@ _NICHE_SORTABLE = {
     "total_players_now", "players_trend_7d_pct", "players_coverage",
     "median_players_now", "players_top5_share",
     "lifetime_survival_12m", "lifetime_median_dead_months",
+    "reviews_12m", "reviews_prev_12m", "demand_trend_12m_pct",
 }
 # The subset of _NICHE_SORTABLE that only exists on marts with the players columns
 # (sorting/filtering on them needs _HAS_PLAYERS; everything else works on older marts).
 _NICHE_PLAYERS_COLS = {"total_players_now", "players_trend_7d_pct", "players_coverage"}
 _NICHE_PLAYERS_DIST_COLS = {"median_players_now", "players_top5_share"}
 _NICHE_LIFETIME_COLS = {"lifetime_survival_12m", "lifetime_median_dead_months"}
+_NICHE_DEMAND12M_COLS = {"reviews_12m", "reviews_prev_12m", "demand_trend_12m_pct"}
+_DEMAND12M_MISSING = (
+    "This mart predates the 12-month demand columns (reviews_12m / reviews_prev_12m / "
+    "demand_trend_12m_pct, an older ETL build). Re-run the ETL (`task etl` in the main "
+    "prospect checkout) and retry."
+)
 _NICHE_TIERS = {"micro", "umbrella", "theme", "meta"}
 # Default tier filter (tags only): buildable micro-genres + themes. Umbrella containers
 # (Open World, Sandbox, RPG...) and meta/reception tags (Great Soundtrack, Nostalgia...)
@@ -744,6 +764,16 @@ def find_niches(
       strong opportunity score there still means a SHORT revenue window (front-load the
       launch, don't plan year-two updates). Catalog-wide baseline: lifetime_curve().
 
+    DEMAND TREND (structural; one value per key, identical across cuts; absent on marts
+    that predate the 12-month demand columns):
+      - demand_trend_12m_pct: the niche's review inflow (Steam's own monthly review
+        histogram — true counts, games with 50+ reviews) over the last 12 complete
+        months vs the 12 before them, in percent — year over year. Sort by it for
+        "which niches are structurally growing" — a launch spike or a sale week cannot
+        move it the way it moved the old 90-day trend. reviews_12m / reviews_prev_12m
+        are the raw window sums. NULL trend = no prior-window baseline (a genuinely new
+        niche), never "flat".
+
     EXACT MATERIALISATION: only the precomputed cuts exist — window in {"all","24m"} x
     min_reviews in {50,100} (must stay in sync with MIN_REVIEWS_LEVELS in
     etl/build_marts.py; a value the ETL didn't materialise matches no rows and returns an
@@ -765,6 +795,8 @@ def find_niches(
         return {"error": _PLAYERS_MISSING}
     if not _HAS_LIFETIME and sort in _NICHE_LIFETIME_COLS:
         return {"error": _LIFETIME_MISSING}
+    if not _HAS_DEMAND12M and sort in _NICHE_DEMAND12M_COLS:
+        return {"error": _DEMAND12M_MISSING}
     if min_reviews == 0 and not _HAS_NO_FLOOR_CUT:
         return {"error": _NO_FLOOR_MISSING}
     if include_tiers is not None:
@@ -810,6 +842,11 @@ def find_niches(
         if _HAS_LIFETIME
         else ""
     )
+    demand_cols = (
+        ",\n                   reviews_12m, reviews_prev_12m, demand_trend_12m_pct"
+        if _HAS_DEMAND12M
+        else ""
+    )
     try:
         rows = query(
             f"""
@@ -818,7 +855,7 @@ def find_niches(
                    market_size, total_owners, total_rev, total_reviews,
                    median_rev, median_reviews, median_price, median_positive_ratio,
                    median_owners, recent_velocity, hit_rate_200k, hit_rate_500k,
-                   saturation_yoy, winner_concentration{pct_cols}{players_cols}{lifetime_cols}
+                   saturation_yoy, winner_concentration{pct_cols}{players_cols}{lifetime_cols}{demand_cols}
             FROM mart_niche
             WHERE {" AND ".join(where)}
             ORDER BY {sort} DESC NULLS LAST, n_games DESC
@@ -879,6 +916,12 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
         game; never read it without lifetime_survival_12m). None = fewer than 5 covered
         games or a mart built before the lifetime ETL. Catalog-wide baseline:
         lifetime_curve().
+      - 12-month demand trend on the variants rows (same value on every cut, like
+        entrant_ratio): reviews_12m / reviews_prev_12m (the niche's review-histogram
+        inflow, last 12 complete months vs the 12 before) and demand_trend_12m_pct
+        (the year-over-year percent between them). None on the trend = no prior-window
+        baseline (a genuinely new niche), never "flat"; all three absent on marts that
+        predate the 12-month demand columns.
     Returns {"error": ...} if dimension/key doesn't match any niche (call find_niches to
     get exact valid keys — spelling and case must match precisely), or asking you to
     re-run the ETL if the analytics DB predates the v2 columns.
@@ -902,6 +945,11 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
         if _HAS_LIFETIME
         else ""
     )
+    demand_cols = (
+        ",\n                   reviews_12m, reviews_prev_12m, demand_trend_12m_pct"
+        if _HAS_DEMAND12M
+        else ""
+    )
     try:
         variants = query(
             f"""
@@ -910,7 +958,7 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
                    competition, quality_gap, market_size, total_owners, total_rev,
                    total_reviews, median_rev, median_reviews, median_price,
                    median_positive_ratio, median_owners, recent_velocity, hit_rate_200k,
-                   hit_rate_500k, beatable_share, saturation_yoy, winner_concentration{pct_cols}{players_cols}{lifetime_cols}
+                   hit_rate_500k, beatable_share, saturation_yoy, winner_concentration{pct_cols}{players_cols}{lifetime_cols}{demand_cols}
             FROM mart_niche WHERE dimension = ? AND key = ? ORDER BY win, min_reviews
             """,
             [dimension, key],

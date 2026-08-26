@@ -695,9 +695,10 @@ export default function NicheDetail() {
               : undefined
           }
         />
-        {/* §4b specs "Demand / 90d" as a review-velocity trend, which no endpoint here serves
-            (the mart only carries a 7-day, same-panel PLAYERS trend) — used the real trend
-            instead of inventing a 90-day review-velocity number. */}
+        {/* §4b specs "Demand / 90d" as a review-velocity trend, which no endpoint serves at
+            that horizon (the mart's demand trend is demand_trend_12m_pct — a 12-month
+            structural read, deliberately not a 90-day one) — used the real 7-day, same-panel
+            PLAYERS trend instead of inventing a 90-day review-velocity number. */}
         <KpiCell
           label="Players / 7d"
           valueClassName={playersTrend != null && playersTrend >= 0 ? "text-brand" : undefined}

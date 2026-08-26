@@ -98,18 +98,27 @@ WHERE g.total_reviews >= mr.min_reviews
         OR (g.release_valid AND g.release_date >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH)
       );
 
--- DEMAND OVER 90 DAYS — the metric the Radar feed ranks on ("top movers by 90d demand
--- trend"). Nothing in the marts carried it: players_trend_7d_pct is a 7-day window, and
+-- DEMAND OVER 12 MONTHS — the metric the Radar surfaces ring and rank on. Nothing else in
+-- the marts carries a demand trend: players_trend_7d_pct is a 7-day window, and
 -- saturation_yoy counts RELEASES (pipeline), not demand.
 --
--- SOURCE CHANGED 2026-08-23: stg_review_histogram (Steam's own per-month review totals),
--- NOT stg_review. The first cut counted the sampled reviews table and asserted the bias
--- "largely cancels in a ratio". Measured, it does the opposite: the keeper collects NEW
--- reviews near-completely while a big game's historical tail stays capped by deepen-reviews,
--- so the recent window is full and the prior window is a sparse sample. Radar's entire top
--- row read +980%..+1530%; against the histogram, Rainbow Six (sampled ratio 16.0x) is FLAT
--- (~11K/mo both windows), NBA 2K26 (55x) is flat, EA FC 26 (354x) is a real but ~2.5x
--- riser. The bias is asymmetric BETWEEN the windows, so a ratio amplifies it.
+-- WHY 12-MONTH WINDOWS (2026-08, replacing the original 90-day windows outright): the 90d
+-- trend was quarter-over-quarter — it caught release spikes, sale weeks and seasonality,
+-- which is the wrong signal for "what should I build": a game started today ships 1-3
+-- years out, so the demand question is structural, not momentum. Last 12 complete months
+-- vs the 12 before them — the two halves of the same 24-month span the mart's own 24m
+-- population cut covers — is a year-over-year read: each window holds one full seasonal
+-- cycle (seasonality cancels instead of aliasing) and a single launch spike is diluted
+-- across 12 months.
+--
+-- SOURCE (2026-08-23, kept from the 90d version): stg_review_histogram (Steam's own
+-- per-month review totals), NOT stg_review. The first 90d cut counted the sampled reviews
+-- table and asserted the bias "largely cancels in a ratio". Measured, it does the
+-- opposite: the keeper collects NEW reviews near-completely while a big game's historical
+-- tail stays capped by deepen-reviews, so the recent window is full and the prior window
+-- is a sparse sample; Radar's entire top row read +980%..+1530% until the switch (Rainbow
+-- Six: 16.0x on the sample, FLAT on the histogram). The bias is asymmetric BETWEEN the
+-- windows, so a ratio amplifies it.
 --
 -- The histogram is uncapped truth for every game with >=50 total reviews — 42,103 games
 -- carrying 97.6% of all review volume. Games without one (the <50-review tail) contribute
@@ -118,26 +127,28 @@ WHERE g.total_reviews >= mr.min_reviews
 -- fiction.
 --
 -- Windows are whole months anchored on the last GLOBALLY complete month (max period - 1):
--- "90 days" = 3 calendar months, now = [anchor-2 .. anchor] vs prev = [anchor-5 .. anchor-3].
+-- now = (anchor-12 .. anchor], prev = (anchor-24 .. anchor-12] — 12 calendar months each.
 -- A global anchor, not per-game: anchoring on each game's own last month would date a dead
 -- game's "current" trend to whenever it died. Known softness: histograms are refreshed in
 -- bulk (most fetched ~monthly), so the anchor month is truncated at fetch date for most
 -- games — uniformly across every game and niche, which preserves ranking; the trend lags
 -- reality by up to a month until histogram refresh cadence improves.
 --
--- FLOOR-INDEPENDENT (2026-08-25): demand is the niche's overall review inflow in the
--- window — the SAME number on every min_reviews cut. The first cut grouped _niche_pop by
--- its full (dimension, key, win, min_reviews) grid, so raising the stats floor shrank
--- "demand" — a display toggle changed a niche's demand trend and, through the Radar
--- board's client-side verdicts, its ring. The `members` DISTINCT below collapses the
--- min_reviews grid (the min_reviews=0 population is the superset of every other floor),
--- and the final SELECT joins ON (dimension, key, win) alone, stamping identical
--- reviews_90d / reviews_prev_90d / demand_trend_90d_pct on every cut of a niche.
--- Honest caveat: stg_review_histogram only covers games with >= 50 total reviews, so
--- sub-50-review games contribute no inflow under ANY floor — collapsing the floors loses
--- nothing the per-floor grouping was actually adding.
-DROP TABLE IF EXISTS _niche_demand90;
-CREATE TEMP TABLE _niche_demand90 AS
+-- CUT-INDEPENDENT — ONE VALUE PER (dimension, key), stamped on every (win, min_reviews)
+-- row like entrant_ratio and the players columns. One reason per grid axis:
+--   min_reviews (kept from the 90d version, 2026-08-25): demand is the niche's overall
+--     review inflow — grouping by the floor made a display toggle change a niche's trend
+--     and, through the Radar board's client-side verdicts, its ring. Collapsing the
+--     floors loses nothing real: the histogram only covers >=50-review games anyway.
+--   win (NEW with the 12m windows; the 90d CTE joined per win): the win='24m' population
+--     holds only games RELEASED in the last @RECENT_MONTHS@ months, so every member
+--     released inside the last 12 months mechanically CANNOT have inflow in the
+--     prior-12m window (it did not exist yet). A per-win join would structurally inflate
+--     — or NULL out — every trend on that cut, and that cut is exactly the one the Radar
+--     board pins. Demand is a property of the NICHE, so it is computed once over the
+--     full membership (the (win='all', min_reviews=0) superset) and stamped on every cut.
+DROP TABLE IF EXISTS _niche_demand12m;
+CREATE TEMP TABLE _niche_demand12m AS
 WITH anchor AS (
     SELECT date_trunc('month', MAX(period_month)) - INTERVAL 1 MONTH AS m
     FROM stg_review_histogram
@@ -145,28 +156,28 @@ WITH anchor AS (
 v AS (
     SELECT h.appid,
         SUM(h.n_reviews) FILTER (
-            WHERE h.period_month >  (SELECT m FROM anchor) - INTERVAL 3 MONTH
+            WHERE h.period_month >  (SELECT m FROM anchor) - INTERVAL 12 MONTH
               AND h.period_month <= (SELECT m FROM anchor)
         ) AS r_now,
         SUM(h.n_reviews) FILTER (
-            WHERE h.period_month >  (SELECT m FROM anchor) - INTERVAL 6 MONTH
-              AND h.period_month <= (SELECT m FROM anchor) - INTERVAL 3 MONTH
+            WHERE h.period_month >  (SELECT m FROM anchor) - INTERVAL 24 MONTH
+              AND h.period_month <= (SELECT m FROM anchor) - INTERVAL 12 MONTH
         ) AS r_prev
     FROM stg_review_histogram h
     GROUP BY h.appid
 ),
--- Collapse the min_reviews grid: one membership row per (dimension, key, win, appid).
--- The min_reviews=0 population is the superset of every other floor, so this IS the
--- niche's full scored membership for the window.
+-- Collapse the whole cut grid: one membership row per (dimension, key, appid). The
+-- (win='all', min_reviews=0) population is the superset of every other cut, so this IS
+-- the niche's full scored membership.
 members AS (
-    SELECT DISTINCT dimension, key, win, appid FROM _niche_pop
+    SELECT DISTINCT dimension, key, appid FROM _niche_pop
 )
-SELECT p.dimension, p.key, p.win,
-       SUM(COALESCE(v.r_now, 0))  AS reviews_90d,
-       SUM(COALESCE(v.r_prev, 0)) AS reviews_prev_90d
+SELECT p.dimension, p.key,
+       SUM(COALESCE(v.r_now, 0))  AS reviews_12m,
+       SUM(COALESCE(v.r_prev, 0)) AS reviews_prev_12m
 FROM members p
 LEFT JOIN v ON v.appid = p.appid
-GROUP BY 1, 2, 3;
+GROUP BY 1, 2;
 
 CREATE TABLE mart_niche AS
 WITH membership AS (
@@ -329,22 +340,22 @@ SELECT
     nl.lifetime_n_games,
     nl.lifetime_survival_12m,
     nl.lifetime_median_dead_months,
-    d.reviews_90d,
-    d.reviews_prev_90d,
+    d.reviews_12m,
+    d.reviews_prev_12m,
     -- NULL, not 0, when the prior window is empty: "no baseline to compare against" and
-    -- "no change" are different answers, and a niche with its first reviews in the last
-    -- 90 days would otherwise read as flat instead of brand new.
-    CASE WHEN COALESCE(d.reviews_prev_90d, 0) = 0 THEN NULL
-         ELSE round(100.0 * (d.reviews_90d - d.reviews_prev_90d) / d.reviews_prev_90d, 1)
-    END AS demand_trend_90d_pct
+    -- "no change" are different answers, and a niche whose first reviews all landed
+    -- inside the last 12 months would otherwise read as flat instead of brand new.
+    CASE WHEN COALESCE(d.reviews_prev_12m, 0) = 0 THEN NULL
+         ELSE round(100.0 * (d.reviews_12m - d.reviews_prev_12m) / d.reviews_prev_12m, 1)
+    END AS demand_trend_12m_pct
 FROM gated g
 LEFT JOIN tag_tier tt ON g.dimension = 'tag' AND tt.tag = g.key
 LEFT JOIN _niche_players_now np ON np.dimension = g.dimension AND np.key = g.key
 LEFT JOIN _niche_lifetime nl ON nl.dimension = g.dimension AND nl.key = g.key
--- Floor-independent on purpose (see _niche_demand90's header): every min_reviews cut of a
--- (dimension, key, win) carries the SAME demand numbers.
-LEFT JOIN _niche_demand90 d
-       ON d.dimension = g.dimension AND d.key = g.key AND d.win = g.win;
+-- Cut-independent on purpose (see _niche_demand12m's header): every (win, min_reviews)
+-- cut of a (dimension, key) carries the SAME demand numbers.
+LEFT JOIN _niche_demand12m d
+       ON d.dimension = g.dimension AND d.key = g.key;
 
 CREATE TABLE mart_niche_top AS
 WITH membership AS (

@@ -122,9 +122,9 @@ def main() -> int:
 
     # ---- staging tables the two marts read (TEMP, exactly as create_staging() makes them)
     con.execute("CREATE TEMP TABLE stg_tag_membership(appid INTEGER, tag VARCHAR)")
-    # mart_niche.sql's 90-day demand window reads stg_review_histogram (Steam's true
-    # monthly counts — see the mart's SOURCE CHANGED note: the sampled stg_review inflated
-    # the trend ~10-350x per game). Shape mirrors create_timing_staging().
+    # mart_niche.sql's 12-month demand windows read stg_review_histogram (Steam's true
+    # monthly counts — see the mart's SOURCE note: the sampled stg_review inflated the
+    # trend ~10-350x per game). Shape mirrors create_timing_staging().
     con.execute(
         "CREATE TEMP TABLE stg_review_histogram("
         "appid INTEGER, period_month DATE, n_reviews BIGINT, n_positive BIGINT)"
@@ -176,18 +176,28 @@ def main() -> int:
         """
     )
 
-    # Three histogram rows per game, chosen to pin the window semantics on paper:
-    #   base month (the global max)  999 reviews -> anchor = base - 1, so 999 must be
-    #                                EXCLUDED (that month is truncated at fetch time)
-    #   base - 1 month                30 reviews -> inside now  [anchor-2 .. anchor]
-    #   base - 4 months               60 reviews -> inside prev [anchor-5 .. anchor-3]
-    # => per niche: reviews_90d = 30 * n_games, prev = 60 * n_games, trend = -50.0.
+    # Six histogram rows per game, chosen to pin every edge of the two 12-month windows on
+    # paper (anchor = base - 1 month, where base = the global max period month):
+    #   base month       999 reviews -> EXCLUDED (the truncated-at-fetch anchor+1 month)
+    #   base - 1          30 reviews -> inside now  (anchor-12 .. anchor], newest month
+    #   base - 12         60 reviews -> inside now, OLDEST now month (the boundary)
+    #   base - 13         45 reviews -> inside prev (anchor-24 .. anchor-12], newest month
+    #   base - 24         15 reviews -> inside prev, OLDEST prev month (the boundary)
+    #   base - 25        777 reviews -> EXCLUDED (older than the prev window)
+    # => per niche: reviews_12m = 90 * n, reviews_prev_12m = 60 * n, trend = +50.0,
+    #    where n = the (dimension, key) FULL membership count (see check 1b).
     con.execute("""INSERT INTO stg_review_histogram
         SELECT appid, date_trunc('month', CURRENT_DATE), 999, 500 FROM stg_game
         UNION ALL
         SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 1 MONTH, 30, 20 FROM stg_game
         UNION ALL
-        SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 4 MONTH, 60, 40 FROM stg_game""")
+        SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 12 MONTH, 60, 40 FROM stg_game
+        UNION ALL
+        SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 13 MONTH, 45, 30 FROM stg_game
+        UNION ALL
+        SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 24 MONTH, 15, 10 FROM stg_game
+        UNION ALL
+        SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 25 MONTH, 777, 500 FROM stg_game""")
 
     # ---- render + execute through the REAL renderer -----------------------------------
     params = bm.build_params()
@@ -217,56 +227,62 @@ def main() -> int:
     print("[ok] schema matches the contract exactly")
 
     # ---- 1b. demand windows read the histogram with the documented anchor -------------
-    # The fixture put 999 reviews in the anchor-excluded truncated month; if any of that
-    # leaks into reviews_90d the window arithmetic regressed. Since 2026-08-26 the demand
-    # columns are FLOOR-INDEPENDENT (see _niche_demand90's header in mart_niche.sql):
-    # every min_reviews cut of a (dimension, key, win) carries the same numbers, computed
-    # over the min_reviews=0 superset population — so the expected value is 30/60 per game
-    # of the (win, min_reviews=0) cut's n_games, on EVERY cut, and trend stays -50.0.
+    # The fixture put 999 reviews in the anchor-excluded truncated month and 777 in the
+    # month just past the prev window's far edge; if either leaks into a window the month
+    # arithmetic regressed. The 12m demand columns are CUT-INDEPENDENT (see
+    # _niche_demand12m's header in mart_niche.sql): every (win, min_reviews) cut of a
+    # (dimension, key) carries the same numbers, computed over the FULL membership — the
+    # (win='all', min_reviews=0) superset population — so the expected value is 90/60 per
+    # game of that cut's n_games, on EVERY cut, and trend is +50.0 everywhere.
     n_niche_rows = con.execute("SELECT COUNT(*) FROM mart_niche").fetchone()[0]
     joined = con.execute("""
         WITH n0 AS (
-            SELECT dimension, key, win, n_games FROM mart_niche WHERE min_reviews = 0
+            SELECT dimension, key, n_games FROM mart_niche
+            WHERE win = 'all' AND min_reviews = 0
         )
         SELECT COUNT(*),
                COUNT(*) FILTER (
-                   WHERE n.reviews_90d != 30 * n0.n_games
-                      OR n.reviews_prev_90d != 60 * n0.n_games
-                      OR n.demand_trend_90d_pct != -50.0
+                   WHERE n.reviews_12m != 90 * n0.n_games
+                      OR n.reviews_prev_12m != 60 * n0.n_games
+                      OR n.demand_trend_12m_pct != 50.0
                )
         FROM mart_niche n
-        JOIN n0 ON n0.dimension = n.dimension AND n0.key = n.key AND n0.win = n.win
+        JOIN n0 ON n0.dimension = n.dimension AND n0.key = n.key
     """).fetchone()
     # The JOIN itself is part of the check: every published cut must have a published
-    # min_reviews=0 sibling (its population is a superset), so nothing may drop out.
+    # (all, 0) sibling (its population is a superset of every cut), so nothing may drop out.
     assert joined[0] == n_niche_rows, (
-        f"{n_niche_rows - joined[0]} cut(s) have no published min_reviews=0 sibling"
+        f"{n_niche_rows - joined[0]} cut(s) have no published (win='all', min_reviews=0) sibling"
     )
     assert joined[1] == 0, f"{joined[1]} niche cut(s) have demand windows off the histogram fixture"
-    print("[ok] demand_90d: histogram-sourced, truncated month excluded, floor-0 population, trend = -50.0")
+    print("[ok] demand_12m: histogram-sourced, both window edges exact, full-membership population, trend = +50.0")
 
-    # ---- 1c. floor independence: the stats floor must never move demand ---------------
-    # This is the Radar-board regression this change exists to prevent: a min_reviews
-    # toggle used to shrink "demand" (a different population summed), which could flip a
-    # niche's client-side verdict ring. Demand is a property of (dimension, key, win).
+    # ---- 1c. cut independence: neither the floor NOR the window may move demand -------
+    # Two Radar-board regressions this pins down. Floor: a min_reviews toggle used to
+    # shrink "demand" (a different population summed), which could flip a niche's
+    # client-side verdict ring. Window: the win='24m' population holds only games
+    # released in the last 24 months, so every member released inside the last 12 has
+    # mechanically ZERO possible inflow in the prior-12m window — a per-win join would
+    # structurally inflate (or NULL out) the board's pinned 24m cut. Demand is a
+    # property of (dimension, key), full stop.
     multi_cut = con.execute("""
         SELECT COUNT(*) FROM (
-            SELECT dimension, key, win FROM mart_niche
-            GROUP BY 1, 2, 3 HAVING COUNT(*) > 1
+            SELECT dimension, key FROM mart_niche
+            GROUP BY 1, 2 HAVING COUNT(*) > 1
         )
     """).fetchone()[0]
-    assert multi_cut > 0, "fixture lost its teeth: no (dimension, key, win) spans several floors"
+    assert multi_cut > 0, "fixture lost its teeth: no (dimension, key) spans several cuts"
     varying = con.execute("""
-        SELECT dimension, key, win FROM mart_niche
-        GROUP BY 1, 2, 3
-        HAVING COUNT(DISTINCT COALESCE(reviews_90d, -1)) > 1
-            OR COUNT(DISTINCT COALESCE(reviews_prev_90d, -1)) > 1
-            OR COUNT(DISTINCT COALESCE(demand_trend_90d_pct, -1e18)) > 1
+        SELECT dimension, key FROM mart_niche
+        GROUP BY 1, 2
+        HAVING COUNT(DISTINCT COALESCE(reviews_12m, -1)) > 1
+            OR COUNT(DISTINCT COALESCE(reviews_prev_12m, -1)) > 1
+            OR COUNT(DISTINCT COALESCE(demand_trend_12m_pct, -1e18)) > 1
     """).fetchall()
     for row in varying[:10]:
-        print("            FLOOR-DEPENDENT DEMAND", row)
-    assert not varying, f"{len(varying)} (dimension, key, win) group(s) vary demand by min_reviews"
-    print(f"[ok] demand identical across review floors for every niche ({multi_cut} multi-floor groups checked)")
+        print("            CUT-DEPENDENT DEMAND", row)
+    assert not varying, f"{len(varying)} (dimension, key) group(s) vary demand by cut"
+    print(f"[ok] demand identical across every (win, min_reviews) cut for every niche ({multi_cut} multi-cut groups checked)")
 
     n_rows = con.execute("SELECT COUNT(*) FROM mart_niche_game").fetchone()[0]
     n_niche = con.execute("SELECT COUNT(*) FROM mart_niche").fetchone()[0]
