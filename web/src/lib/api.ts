@@ -213,6 +213,10 @@ export interface NicheListParams {
   q?: string;
   tiers?: string; // comma-joined NicheTier list (tags only)
   min_total_players?: number;
+  /** The radar's population rule, OPT-IN (server default off — this list backs
+   * NicheFinder too): 1 keeps only solo-friendly niches (solo_viability >= 0.8;
+   * NULL = unknown = excluded). Only the Radar board passes it. */
+  solo_only?: 0 | 1;
   limit: number;
   offset: number;
 }
@@ -494,6 +498,11 @@ export interface RadarNicheCard {
    * reviews_24m is the meaningful number for those cards. */
   reviews_24m_new_share: number | null;
   demand_emerging: boolean;
+  /** The radar population rule's input (the feed filters on solo_viability >= 0.8 unless
+   * solo_only=0) — on every card so the UI can show the score that gated the population.
+   * null = unknown (never counted solo-friendly); optional for one deploy cycle of
+   * API/web skew. */
+  solo_viability?: number | null;
   players_trend_7d_pct: number | null;
   sparkline: RadarSparklinePoint[];
 }
@@ -527,6 +536,9 @@ export interface RadarFeedParams {
   dimension?: Dimension;
   window?: Window;
   min_reviews?: number;
+  /** Server default is ON (the radar is solo-first): pass 0 to reveal the full
+   * population — the board's "Solo-friendly only" toggle drives this. */
+  solo_only?: 0 | 1;
   limit?: number;
 }
 
