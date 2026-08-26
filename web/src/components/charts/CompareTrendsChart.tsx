@@ -1,7 +1,7 @@
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { useGameTrendsWithComps, type GameTrendPoint } from "../../lib/api";
-import { fmtCompact } from "../../lib/format";
+import { fmtAxisCompact, fmtCompact } from "../../lib/format";
 import { MONO } from "../../lib/palette";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 
@@ -15,7 +15,7 @@ import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
  *
  * Color is MONO STEEL, not categorical — a deliberate deviation from this file's old
  * fixed --series-N slot order, and the one place in the chart layer where a genuinely
- * multi-entity overlay (up to 4 compared games) still goes mono rather than categorical.
+ * multi-entity overlay (up to COMPARE_CAP games) still goes mono rather than categorical.
  * This isn't a judgment call so much as a direct read of the design handoff's own
  * mockup (Prospect Mockups.dc.html, #4d "Compare"): its three-game overlay chart is
  * drawn with exactly `var(--color-accent-300)`, `rgba(242,242,243,.75)`,
@@ -24,9 +24,10 @@ import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
  * few enough, and consistently ordered enough (slot 1 is always the primary/pinned
  * game), that rank-by-recession communicates identity better than 4 arbitrary hues
  * would, and it keeps Compare visually consistent with every other mono chart on the
- * page rather than being the one categorical outlier. A 4th slot (paper 55%) isn't in
- * the mockup — the compare cap is 4, so it's interpolated between the two paper values
- * the mockup DOES show (75% and 35%) rather than invented from nothing.
+ * page rather than being the one categorical outlier. Slots past the mockup's three
+ * aren't in the handoff — the compare cap is 6, so the extra tones are interpolated in
+ * even steps between the two paper values the mockup DOES show (75% and 35%) rather
+ * than invented from nothing.
  *
  * Review velocity is the only series deep enough to compare across months today (CCU/
  * player snapshots are typically a single current month — see GameTrendsChart's caveat),
@@ -35,9 +36,12 @@ import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
  */
 
 // Mono steel ramp, rank order (1st = the pinned/primary game) — see module doc above.
-// Supports the compare cap of 4; extra slots repeat the most-receded tone rather than
-// invent a 5th, since the product never actually offers a 5th compare slot.
-const SERIES_VARS = [MONO.primary, MONO.paper75, MONO.paper55, MONO.paper35];
+// One distinct tone per COMPARE_CAP (6) slot: the ramp interpolates 10%-alpha steps
+// between the mockup's own paper values (75% and 35%). Before this the array held 4 and
+// wrapped with i % length, so a 5th compared game came out in the SAME accent as the
+// primary — two different games, one color. Defensive modulo stays for safety, but every
+// reachable slot now has its own tone.
+const SERIES_VARS = [MONO.primary, MONO.paper75, MONO.paper65, MONO.paper55, MONO.paper45, MONO.paper35];
 
 export function compareSeriesColor(i: number): string {
   return SERIES_VARS[i % SERIES_VARS.length];
@@ -61,7 +65,18 @@ function mergeSeries(byAppid: Map<number, GameTrendPoint[]>): MergedRow[] {
   });
 }
 
-export function CompareTrendsChart({ ids, names }: { ids: number[]; names: Map<number, string> }) {
+export function CompareTrendsChart({
+  ids,
+  names,
+  hideLegend = false,
+}: {
+  ids: number[];
+  names: Map<number, string>;
+  /** Suppress the built-in below-chart legend when the caller already renders its own
+   * (Compare.tsx puts the one legend inline with the panel title, per mockup 4d —
+   * without this the page showed the same legend twice). */
+  hideLegend?: boolean;
+}) {
   const primary = ids[0] ?? null;
   const comps = ids.slice(1);
   const trendsQ = useGameTrendsWithComps(primary, comps);
@@ -109,7 +124,7 @@ export function CompareTrendsChart({ ids, names }: { ids: number[]; names: Map<n
           />
           <YAxis
             tick={{ fontSize: 10 }}
-            tickFormatter={(v: number) => fmtCompact(v)}
+            tickFormatter={(v: number) => fmtAxisCompact(v)}
             tickLine={false}
             axisLine={false}
             width={40}
@@ -143,16 +158,18 @@ export function CompareTrendsChart({ ids, names }: { ids: number[]; names: Map<n
           ))}
         </LineChart>
       </ResponsiveContainer>
-      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-ink-muted">
-        {chartIds.map((id, i) => (
-          <span key={id} className="inline-flex items-center gap-1.5">
-            {/* 14x2px line-key swatch (design handoff: "Legend swatches 14×2px"), matching
-                the #4d mockup's own inline legend markup exactly. */}
-            <span className="h-0.5 w-3.5 shrink-0" style={{ backgroundColor: compareSeriesColor(i) }} />
-            {nameOf(id)}
-          </span>
-        ))}
-      </div>
+      {!hideLegend && (
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-ink-muted">
+          {chartIds.map((id, i) => (
+            <span key={id} className="inline-flex items-center gap-1.5">
+              {/* 14x2px line-key swatch (design handoff: "Legend swatches 14×2px"), matching
+                  the #4d mockup's own inline legend markup exactly. */}
+              <span className="h-0.5 w-3.5 shrink-0" style={{ backgroundColor: compareSeriesColor(i) }} />
+              {nameOf(id)}
+            </span>
+          ))}
+        </div>
+      )}
       <p className="mt-2 text-[11px] italic text-ink-muted">
         Monthly SAMPLED review velocity (the reviews table is a per-game sample, recency-biased for older/popular
         titles) — relative shape and momentum are comparable; absolute counts undercount older hits. Months before a

@@ -205,7 +205,9 @@ export default function EntityProfile() {
         />
         <StatTile
           label="Hit rate ≥ $200K"
-          valueClassName={(entity.hit_rate_200k ?? 0) >= 0.25 ? "text-verdict-good" : undefined}
+          // Metric verdict, not an error state — same mono-steel rule as
+          // positiveRatioClass (lib/heat.ts): strong reads accent-300, never green.
+          valueClassName={(entity.hit_rate_200k ?? 0) >= 0.25 ? "text-[color:var(--accent-300)]" : undefined}
           value={fmtPct(entity.hit_rate_200k, 0)}
           sub="Share of releases clearing $200K est."
         />

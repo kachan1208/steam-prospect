@@ -15,7 +15,7 @@ import {
 } from "recharts";
 
 import { request } from "../../lib/api";
-import { fmtCompact, fmtInt, fmtPrice, fmtUsd } from "../../lib/format";
+import { fmtAxisCompact, fmtAxisUsd, fmtCompact, fmtInt, fmtPrice, fmtUsd } from "../../lib/format";
 import { channelColor, CSS_VAR } from "../../lib/palette";
 import { BulletMeter } from "../ui/Meter";
 import { TooltipPanel } from "./TooltipPanel";
@@ -186,6 +186,9 @@ function GrowthPanels({
   color: string;
   formatter: (v: number) => string;
 }) {
+  // Axis ticks get the clip-safe variants (the 44px YAxis truncates "240.0K"/"$463.0M"
+  // from the LEFT); tooltips keep the caller's full-precision formatter.
+  const axisFormatter = formatter === fmtCompact ? fmtAxisCompact : formatter === fmtUsd ? fmtAxisUsd : formatter;
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
       <div>
@@ -196,7 +199,7 @@ function GrowthPanels({
             <XAxis {...XAXIS_PROPS} />
             <YAxis
               tick={{ fontSize: 10 }}
-              tickFormatter={(v: number) => formatter(v)}
+              tickFormatter={(v: number) => axisFormatter(v)}
               tickLine={false}
               axisLine={false}
               width={44}
@@ -241,7 +244,7 @@ function GrowthPanels({
             <XAxis {...XAXIS_PROPS} />
             <YAxis
               tick={{ fontSize: 10 }}
-              tickFormatter={(v: number) => formatter(v)}
+              tickFormatter={(v: number) => axisFormatter(v)}
               tickLine={false}
               axisLine={false}
               width={44}
@@ -434,7 +437,7 @@ function LivePlayersDrilldown({
                 <XAxis {...XAXIS_PROPS} dataKey="date" tickFormatter={(v: string) => v.slice(5)} />
                 <YAxis
                   tick={{ fontSize: 10 }}
-                  tickFormatter={(v: number) => fmtCompact(v)}
+                  tickFormatter={(v: number) => fmtAxisCompact(v)}
                   tickLine={false}
                   axisLine={false}
                   width={40}
@@ -468,7 +471,7 @@ function LivePlayersDrilldown({
                 <XAxis {...XAXIS_PROPS} />
                 <YAxis
                   tick={{ fontSize: 10 }}
-                  tickFormatter={(v: number) => fmtCompact(v)}
+                  tickFormatter={(v: number) => fmtAxisCompact(v)}
                   tickLine={false}
                   axisLine={false}
                   width={40}
@@ -554,7 +557,7 @@ function LivePlayersDrilldown({
               />
               <YAxis
                 tick={{ fontSize: 10 }}
-                tickFormatter={(v: number) => fmtCompact(v)}
+                tickFormatter={(v: number) => fmtAxisCompact(v)}
                 tickLine={false}
                 axisLine={false}
                 width={44}

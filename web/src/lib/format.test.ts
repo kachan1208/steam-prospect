@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  fmtAxisCompact,
+  fmtAxisUsd,
   fmtCompact,
   fmtInt,
   fmtMinutes,
@@ -53,6 +55,37 @@ describe("fmtCompact", () => {
   it("compacts to K at 10K+ and M at 1M+", () => {
     expect(fmtCompact(12_900)).toBe("12.9K");
     expect(fmtCompact(4_200_000)).toBe("4.2M");
+  });
+});
+
+describe("fmtAxisCompact", () => {
+  it("matches fmtCompact below 100K", () => {
+    expect(fmtAxisCompact(null)).toBe("—");
+    expect(fmtAxisCompact(1284)).toBe("1,284");
+    expect(fmtAxisCompact(12_900)).toBe("12.9K");
+    expect(fmtAxisCompact(4_200_000)).toBe("4.2M");
+  });
+
+  it("drops the decimal at three integer digits so ticks never outgrow a 40px YAxis", () => {
+    // fmtCompact(240_000) === "240.0K" — six glyphs, which recharts clipped to "40.0K".
+    expect(fmtAxisCompact(240_000)).toBe("240K");
+    expect(fmtAxisCompact(120_000)).toBe("120K");
+    expect(fmtAxisCompact(240_000_000)).toBe("240M");
+  });
+});
+
+describe("fmtAxisUsd", () => {
+  it("matches fmtUsd's units with round-dollar/zero anchors", () => {
+    expect(fmtAxisUsd(null)).toBe("—");
+    expect(fmtAxisUsd(0)).toBe("$0"); // fmtUsd(0) === "$0.00"
+    expect(fmtAxisUsd(1_500)).toBe("$1.5K");
+    expect(fmtAxisUsd(1_234_567_890)).toBe("$1.2B");
+    expect(fmtAxisUsd(-1_500)).toBe("-$1.5K");
+  });
+
+  it("drops the decimal at three integer digits", () => {
+    expect(fmtAxisUsd(463_000_000)).toBe("$463M"); // fmtUsd → "$463.0M", clipped on a 44px axis
+    expect(fmtAxisUsd(550_000)).toBe("$550K");
   });
 });
 

@@ -19,8 +19,9 @@ import { genreTintStyle } from "../lib/heat";
  *
  * Blueprint grammar: hairline frames with "+" corner marks, square corners, condensed
  * headings, mono-steel verdict language (accent-300 up / paper-muted down, never red-
- * green). The overlay chart is CompareTrendsChart as-is — components/charts/* is owned by
- * another agent, so only the panel it sits in is restyled here, not its strokes/fills.
+ * green). The overlay chart is CompareTrendsChart, already on the house chart tokens;
+ * this page renders the one legend inline with the panel title (mockup 4d) and passes
+ * hideLegend so the chart doesn't repeat it.
  */
 
 // Hairline alphas the mockup calls that don't already have a named Tailwind token
@@ -252,20 +253,20 @@ export default function Compare() {
                 ))}
               </div>
             </div>
-            {/* This row duplicates the legend CompareTrendsChart already renders below its
-                own chart (see that file — it isn't editable here). The mockup puts the ONLY
-                legend inline with the title, so that's the layout kept here; the second,
-                lower legend is the visible cost of composing around an uneditable chart
-                component. Fix belongs in CompareTrendsChart: accept a prop to suppress its
-                built-in legend when a caller (like this page) already renders one. */}
-            <CompareTrendsChart ids={ids} names={names} />
+            {/* hideLegend: the ONE legend lives inline with the title above (mockup 4d);
+                without it CompareTrendsChart repeats the same legend under the chart. */}
+            <CompareTrendsChart ids={ids} names={names} hideLegend />
           </Panel>
 
           <Panel>
             {anyLoading && <div className="p-6 text-sm text-ink-muted">Loading games…</div>}
             {!anyLoading && (
               <div className="overflow-x-auto">
-                <div style={{ minWidth: `${220 + ids.length * 150}px` }}>
+                {/* `relative` matters: the sr-only "(best in this row)" spans are absolutely
+                    positioned, and without a positioned ancestor INSIDE this scroll container
+                    they resolve against the .blueprint panel — landing past the page edge and
+                    giving the whole page a horizontal scrollbar at 390px. */}
+                <div className="relative" style={{ minWidth: `${220 + ids.length * 150}px` }}>
                   <div
                     className="grid items-end gap-3.5 border-b px-5 py-3.5"
                     style={{ gridTemplateColumns: `1.2fr repeat(${ids.length}, 1fr)`, borderColor: PANEL_BORDER }}

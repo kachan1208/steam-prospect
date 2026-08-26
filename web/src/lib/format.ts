@@ -30,6 +30,37 @@ export function fmtCompact(value: number | null | undefined): string {
   return value.toLocaleString("en-US", { maximumFractionDigits: 0 });
 }
 
+/**
+ * Axis-tick variant of fmtCompact. Same units, but the decimal is dropped once the number
+ * reaches three integer digits ("240K", not "240.0K"): chart YAxis columns are a fixed
+ * 36-44px and recharts CLIPS overflowing tick labels from the LEFT — "240.0K" shipped
+ * rendering as "40.0K", silently mislabeling every chart whose peak crossed 100K.
+ */
+export function fmtAxisCompact(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  const abs = Math.abs(value);
+  if (abs >= 100_000_000) return `${Math.round(value / 1_000_000)}M`;
+  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (abs >= 100_000) return `${Math.round(value / 1_000)}K`;
+  if (abs >= 10_000) return `${(value / 1_000).toFixed(1)}K`;
+  return value.toLocaleString("en-US", { maximumFractionDigits: 0 });
+}
+
+/** Axis-tick variant of fmtUsd — same clipping guard as fmtAxisCompact, plus "$0" instead
+ * of fmtUsd's "$0.00" at the zero anchor (axis ticks are round dollars, not prices). */
+export function fmtAxisUsd(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  const sign = value < 0 ? "-" : "";
+  const abs = Math.abs(value);
+  if (abs >= 100_000_000_000) return `${sign}$${Math.round(abs / 1_000_000_000)}B`;
+  if (abs >= 1_000_000_000) return `${sign}$${(abs / 1_000_000_000).toFixed(1)}B`;
+  if (abs >= 100_000_000) return `${sign}$${Math.round(abs / 1_000_000)}M`;
+  if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(1)}M`;
+  if (abs >= 100_000) return `${sign}$${Math.round(abs / 1_000)}K`;
+  if (abs >= 1_000) return `${sign}$${(abs / 1_000).toFixed(1)}K`;
+  return `${sign}$${Math.round(abs)}`;
+}
+
 export function fmtInt(value: number | null | undefined): string {
   if (value === null || value === undefined || Number.isNaN(value)) return "—";
   return Math.round(value).toLocaleString("en-US");

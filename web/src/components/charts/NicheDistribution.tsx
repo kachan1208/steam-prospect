@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type Keyboard
 import clsx from "clsx";
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, XAxis, YAxis } from "recharts";
 
-import { fmtCompact, fmtInt, fmtPct, fmtUsd } from "../../lib/format";
+import { fmtAxisCompact, fmtCompact, fmtInt, fmtPct, fmtUsd } from "../../lib/format";
 import { CSS_VAR } from "../../lib/palette";
 import { TooltipPanel } from "./TooltipPanel";
 
@@ -394,7 +394,7 @@ export function NicheDistribution({
                   <YAxis
                     width={Y_AXIS_WIDTH}
                     tick={{ fontSize: 10 }}
-                    tickFormatter={(v: number) => fmtCompact(v)}
+                    tickFormatter={(v: number) => fmtAxisCompact(v)}
                     tickLine={false}
                     axisLine={false}
                     allowDecimals={false}
