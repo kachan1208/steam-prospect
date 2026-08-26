@@ -222,9 +222,11 @@ WHERE len(tw.words) >= 2;
 -- requiring only one side to match is how franchise/title debris like "duty action" (a
 -- title-bigram fragment of "Call of Duty ... Action ...") would leak through on the word
 -- "action" alone — exactly the kind of noise this fix removes.
+-- stg_game_tags, NOT src.game_tags: HTML-entity phantom-twin tags fake niche demand
+-- trends (source fixed 2026-08-26; stale snapshots/regressions must not resurrect them).
 CREATE TEMP TABLE _concept_source AS
 SELECT DISTINCT lower(trim(tag)) AS phrase
-FROM src.game_tags
+FROM stg_game_tags
 WHERE tag NOT IN (SELECT tag FROM denylist_tag)
 UNION
 SELECT DISTINCT lower(trim(genre)) AS phrase
