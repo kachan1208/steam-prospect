@@ -1,13 +1,15 @@
 """GET /api/niches/radar — the Radar feed (mockup 3a), in BOTH mart states.
 
-demand_trend_90d_pct / reviews_90d / reviews_prev_90d landed in mart_niche on 2026-08-21
-(PR #69) — the entire ranking metric behind this feed. The API ships before the nightly
-rebuild that materialises those columns, so production runs the OLD mart FIRST, for hours:
+demand_trend_12m_pct / reviews_12m / reviews_prev_12m REPLACED the original 90-day demand
+columns (2026-08: quarter-over-quarter caught release spikes; last-12-months vs prior-12
+reads structural growth) — the entire ranking metric behind this feed. The API ships before
+the nightly rebuild that materialises those columns, so production runs the OLD mart FIRST,
+for hours:
 
   gated-off  conftest's shared fixture mart already predates these columns (it predates the
              whole v2/players/lifetime family), so it stands in for that state with zero setup
              — the same state a fresh deploy of this endpoint genuinely sees first.
-  gated-on   a purpose-built DuckDB carrying demand_trend_90d_pct + everything else the feed
+  gated-on   a purpose-built DuckDB carrying demand_trend_12m_pct + everything else the feed
              reads (p90_rev, players_trend_7d_pct, mart_niche_trend, mart_niche_players_monthly),
              swapped in per-test like test_niches_games_mart.py / test_games_aspect_reviews.py.
 
@@ -28,16 +30,16 @@ from app.config import settings
 from app.routers import niches
 
 # dimension, key, win, min_reviews, n_games, tier, opportunity_v2, saturation_yoy, p90_rev,
-# total_players_now, players_trend_7d_pct, reviews_90d, reviews_prev_90d, demand_trend_90d_pct.
+# total_players_now, players_trend_7d_pct, reviews_12m, reviews_prev_12m, demand_trend_12m_pct.
 #
 # All rows share (win='24m', min_reviews=50) — the radar endpoint's default cut (mirrors
 # NicheFinder's own default, and mockup 3a's own caption: "last 24 months · micro + theme
-# tags"). Ranked by demand_trend_90d_pct DESC, "Colony Sim" (+24%) is the single biggest
-# riser -> the hero. Ranked by |demand_trend_90d_pct| DESC, the "Moving niches" order is:
+# tags"). Ranked by demand_trend_12m_pct DESC, "Colony Sim" (+24%) is the single biggest
+# riser -> the hero. Ranked by |demand_trend_12m_pct| DESC, the "Moving niches" order is:
 # Colony Sim (24), Deckbuilder (-16), Boomer Shooter (18)... — i.e. NOT monotonic with the
 # signed value, which is exactly the point: this is a feed of what's MOVING, not just rising.
 #   |24| Colony Sim, |18| Boomer Shooter, |16| Deckbuilder, |11| Fishing, |9| Base Building
-# "No Baseline Tag" has reviews_prev_90d = 0 -> demand_trend_90d_pct NULL in real ETL output
+# "No Baseline Tag" has reviews_prev_12m = 0 -> demand_trend_12m_pct NULL in real ETL output
 # (see mart_niche.sql); inserted here as an explicit NULL to prove the router excludes it
 # rather than treating NULL as 0/flat. "Open World" is tier='umbrella' with the single
 # biggest trend of all (+50%) — excluded because the feed is tags-only micro+theme
@@ -81,7 +83,7 @@ def _build(path: Path, *, with_players_monthly: bool) -> None:
                 dimension VARCHAR, key VARCHAR, win VARCHAR, min_reviews INTEGER, n_games INTEGER,
                 tier VARCHAR, opportunity_v2 DOUBLE, saturation_yoy DOUBLE, p90_rev DOUBLE,
                 total_players_now DOUBLE, players_trend_7d_pct DOUBLE,
-                reviews_90d BIGINT, reviews_prev_90d BIGINT, demand_trend_90d_pct DOUBLE
+                reviews_12m BIGINT, reviews_prev_12m BIGINT, demand_trend_12m_pct DOUBLE
             )
         """)
         con.executemany(f"INSERT INTO mart_niche VALUES ({', '.join(['?'] * 14)})", ROWS)
@@ -95,7 +97,7 @@ def _build(path: Path, *, with_players_monthly: bool) -> None:
         narrow = {
             "dimension", "key", "win", "min_reviews", "n_games", "tier", "opportunity_v2",
             "saturation_yoy", "p90_rev", "total_players_now", "players_trend_7d_pct",
-            "reviews_90d", "reviews_prev_90d", "demand_trend_90d_pct",
+            "reviews_12m", "reviews_prev_12m", "demand_trend_12m_pct",
         }
         for col in [c for c in [*niches._BASE_COLS, "players_coverage"] if c not in narrow]:
             typ = "INTEGER DEFAULT 0" if col == "n_recent" else "DOUBLE"
@@ -139,7 +141,7 @@ def mart_paths() -> dict[str, Path]:
 
 
 _GATES = (
-    niches._has_demand90,
+    niches._has_demand12m,
     niches._has_p90,
     niches._has_p90_trend,
     niches._has_players,
@@ -169,21 +171,21 @@ def _swapped(path: Path):
 
 @pytest.fixture
 def radar_client(client, mart_paths):
-    """The full gated-on mart (demand_trend_90d_pct + p90 + players + trend + sparklines)."""
+    """The full gated-on mart (demand_trend_12m_pct + p90 + players + trend + sparklines)."""
     with _swapped(mart_paths["full"]):
         yield client
 
 
 @pytest.fixture
 def radar_client_no_sparklines(client, mart_paths):
-    """Gated-on for demand_trend_90d_pct, but mart_niche_players_monthly doesn't exist —
+    """Gated-on for demand_trend_12m_pct, but mart_niche_players_monthly doesn't exist —
     proves the sparkline degrade (empty lists, not a 500) is independent of the main gate."""
     with _swapped(mart_paths["no_players_monthly"]):
         yield client
 
 
 # =========================================================================================
-# Gated-off: conftest's shared fixture mart predates demand_trend_90d_pct entirely — the
+# Gated-off: conftest's shared fixture mart predates demand_trend_12m_pct entirely — the
 # state production is genuinely in for hours after every deploy that adds a mart column.
 # =========================================================================================
 
@@ -192,7 +194,7 @@ def test_radar_503_on_mart_that_predates_demand_trend(client):
     r = client.get("/api/niches/radar")
     assert r.status_code == 503
     detail = r.json()["detail"]
-    assert "demand_trend_90d_pct" in detail
+    assert "demand_trend_12m_pct" in detail
     assert "rebuild the marts" in detail
 
 
@@ -206,12 +208,12 @@ def test_radar_gated_off_does_not_affect_the_niches_list(client):
     assert "v2 columns" in r.json()["detail"]
 
 
-def test_list_demand_sort_503_on_mart_that_predates_demand90(client):
+def test_list_demand_sort_503_on_mart_that_predates_demand12m(client):
     # Sorting the LIST by a demand column on a pre-demand mart must hit the explicit gate
     # (same convention as the lifetime/p90 sorts), never a BinderException 500.
-    r = client.get("/api/niches", params={"sort": "demand_trend_90d_pct"})
+    r = client.get("/api/niches", params={"sort": "demand_trend_12m_pct"})
     assert r.status_code == 503
-    assert "90-day demand" in r.json()["detail"]
+    assert "12-month demand" in r.json()["detail"]
 
 
 # =========================================================================================
@@ -225,14 +227,14 @@ def test_radar_hero_is_the_biggest_riser(radar_client):
     body = r.json()
     hero = body["hero"]
     assert hero["key"] == "Colony Sim"
-    assert hero["demand_trend_90d_pct"] == 24.0
+    assert hero["demand_trend_12m_pct"] == 24.0
     assert hero["n_games"] == 41
     assert hero["tier"] == "micro"
     assert hero["p90_rev"] == 612_000.0
     assert hero["opportunity_v2"] == 87.4
     assert hero["saturation_yoy"] == -0.12
-    assert hero["reviews_90d"] == 620
-    assert hero["reviews_prev_90d"] == 500
+    assert hero["reviews_12m"] == 620
+    assert hero["reviews_prev_12m"] == 500
 
 
 def test_radar_hero_carries_its_yearly_trend(radar_client):
@@ -251,16 +253,16 @@ def test_radar_movers_ranked_by_absolute_trend_hero_first(radar_client):
     r = radar_client.get("/api/niches/radar", params={"limit": 5})
     movers = r.json()["movers"]
     # Hero repeats as movers[0] (mirrors mockup 3a, whose hero niche is also grid card 1),
-    # then ranked by |demand_trend_90d_pct| DESC: 24, 18, 16, 11, 9.
+    # then ranked by |demand_trend_12m_pct| DESC: 24, 18, 16, 11, 9.
     assert [m["key"] for m in movers] == [
         "Colony Sim", "Boomer Shooter", "Deckbuilder", "Fishing", "Base Building",
     ]
-    assert [m["demand_trend_90d_pct"] for m in movers] == [24.0, 18.0, -16.0, 11.0, 9.0]
+    assert [m["demand_trend_12m_pct"] for m in movers] == [24.0, 18.0, -16.0, 11.0, 9.0]
     assert "Souls-like" not in [m["key"] for m in movers]
 
 
 def test_radar_excludes_null_baseline_niche(radar_client):
-    # "No Baseline Tag" has reviews_prev_90d = 0 -> demand_trend_90d_pct NULL. NULL means "no
+    # "No Baseline Tag" has reviews_prev_12m = 0 -> demand_trend_12m_pct NULL. NULL means "no
     # baseline to compare against", not "flat" — it must never surface as a 0%/unchanged mover.
     r = radar_client.get("/api/niches/radar", params={"limit": 24})
     keys = [m["key"] for m in r.json()["movers"]]
@@ -306,7 +308,7 @@ def test_radar_genre_dimension_no_tier_filter(radar_client):
     body = r.json()
     assert body["dimension"] == "genre"
     assert body["hero"]["key"] == "Roguelike"
-    assert body["hero"]["demand_trend_90d_pct"] == 13.6
+    assert body["hero"]["demand_trend_12m_pct"] == 13.6
 
 
 def test_radar_limit_one_returns_just_the_hero(radar_client):
@@ -324,29 +326,29 @@ def test_radar_echoes_the_requested_cut(radar_client):
 
 
 # =========================================================================================
-# The LIST endpoint's demand columns (2026-08-26): GET /api/niches carries reviews_90d /
-# reviews_prev_90d / demand_trend_90d_pct when the mart does, so the Radar board can ring
+# The LIST endpoint's demand columns: GET /api/niches carries reviews_12m /
+# reviews_prev_12m / demand_trend_12m_pct when the mart does, so the Radar board can ring
 # EVERY blip on its own trend instead of joining the feed's 24 top movers.
 # =========================================================================================
 
 
-def test_list_niches_carries_demand90(radar_client):
+def test_list_niches_carries_demand12m(radar_client):
     r = radar_client.get("/api/niches", params={"dimension": "tag", "window": "24m", "min_reviews": 50})
     assert r.status_code == 200
     rows = {i["key"]: i for i in r.json()["items"]}
-    assert rows["Colony Sim"]["demand_trend_90d_pct"] == 24.0
-    assert rows["Colony Sim"]["reviews_90d"] == 620
-    assert rows["Colony Sim"]["reviews_prev_90d"] == 500
+    assert rows["Colony Sim"]["demand_trend_12m_pct"] == 24.0
+    assert rows["Colony Sim"]["reviews_12m"] == 620
+    assert rows["Colony Sim"]["reviews_prev_12m"] == 500
     # NULL baseline stays NULL on the list — "no baseline to compare against" must not
     # collapse into "flat" (the same rule the mart and the feed already follow).
-    assert rows["No Baseline Tag"]["demand_trend_90d_pct"] is None
-    assert rows["No Baseline Tag"]["reviews_prev_90d"] == 0
+    assert rows["No Baseline Tag"]["demand_trend_12m_pct"] is None
+    assert rows["No Baseline Tag"]["reviews_prev_12m"] == 0
 
 
 def test_list_niches_sorts_by_demand_trend_nulls_last(radar_client):
     r = radar_client.get(
         "/api/niches",
-        params={"dimension": "tag", "window": "24m", "min_reviews": 50, "sort": "demand_trend_90d_pct"},
+        params={"dimension": "tag", "window": "24m", "min_reviews": 50, "sort": "demand_trend_12m_pct"},
     )
     assert r.status_code == 200
     keys = [i["key"] for i in r.json()["items"]]

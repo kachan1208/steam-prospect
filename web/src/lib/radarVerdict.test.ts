@@ -5,6 +5,7 @@ import {
   BLIP_R_MIN,
   DEMAND_DECLINE_PCT,
   DEMAND_ENTER_PCT,
+  DEMAND_HOLD_PCT,
   OPP_WATCH_SCORE,
   RING_ORDER,
   SAT_FLOOD_YOY,
@@ -17,75 +18,110 @@ import {
   soloBucket,
 } from "./radarVerdict";
 
+describe("radarVerdict — yearly threshold pins", () => {
+  // The bars are set for a YEAR-OVER-YEAR read (last 12 complete months vs the prior 12)
+  // and documented plainly in the module doc: +20%/yr = growth worth a multi-year build
+  // commitment; -15%/yr = persistent structural contraction; within -5% = measurement
+  // slack, still "holding". Pinned so a "quick retune" can't silently detach the numbers
+  // from their documented reasoning.
+  it("enter bar: +20% year over year", () => {
+    expect(DEMAND_ENTER_PCT).toBe(20);
+  });
+  it("declining bar: -15% year over year", () => {
+    expect(DEMAND_DECLINE_PCT).toBe(-15);
+  });
+  it("holding floor: -5% year over year", () => {
+    expect(DEMAND_HOLD_PCT).toBe(-5);
+  });
+});
+
 describe("radarVerdict — ring rules", () => {
-  it("enter: demand >= +15 with a calm pipeline", () => {
-    expect(radarVerdict({ demand_trend_90d_pct: 20, saturation_yoy: 0.05 }).ring).toBe("enter");
+  it("enter: demand >= +20 year over year with a calm pipeline", () => {
+    expect(radarVerdict({ demand_trend_12m_pct: 30, saturation_yoy: 0.05 }).ring).toBe("enter");
     // Boundary: exactly the threshold qualifies, exactly the flood cut still passes.
-    expect(radarVerdict({ demand_trend_90d_pct: DEMAND_ENTER_PCT, saturation_yoy: SAT_FLOOD_YOY }).ring).toBe("enter");
+    expect(radarVerdict({ demand_trend_12m_pct: DEMAND_ENTER_PCT, saturation_yoy: SAT_FLOOD_YOY }).ring).toBe("enter");
+    // Just under the bar is NOT enter.
+    expect(radarVerdict({ demand_trend_12m_pct: DEMAND_ENTER_PCT - 0.1, saturation_yoy: 0.05 }).ring).toBe("watch");
   });
 
   it("enter: unknown saturation does not veto rising demand (spec: null passes)", () => {
-    const v = radarVerdict({ demand_trend_90d_pct: 30, saturation_yoy: null });
+    const v = radarVerdict({ demand_trend_12m_pct: 30, saturation_yoy: null });
     expect(v.ring).toBe("enter");
     expect(v.caution).toBe(false);
   });
 
   it("not enter when supply floods: rising demand + flooding pipeline is watch, not enter", () => {
-    const v = radarVerdict({ demand_trend_90d_pct: 30, saturation_yoy: 0.4 });
+    const v = radarVerdict({ demand_trend_12m_pct: 30, saturation_yoy: 0.4 });
     expect(v.ring).toBe("watch");
   });
 
-  it("watch: flat-to-up demand below the enter bar", () => {
-    expect(radarVerdict({ demand_trend_90d_pct: 0 }).ring).toBe("watch");
-    expect(radarVerdict({ demand_trend_90d_pct: 14.9 }).ring).toBe("watch");
-    expect(radarVerdict({ demand_trend_90d_pct: 5, saturation_yoy: 0.05 }).caution).toBe(false);
+  it("watch: flat-to-up demand below the enter bar holds without caution", () => {
+    expect(radarVerdict({ demand_trend_12m_pct: 0 }).ring).toBe("watch");
+    expect(radarVerdict({ demand_trend_12m_pct: 19.9 }).ring).toBe("watch");
+    expect(radarVerdict({ demand_trend_12m_pct: 10, saturation_yoy: 0.05 }).caution).toBe(false);
+  });
+
+  it("watch: drift within the holding floor is 'demand holding', not a warning", () => {
+    // -5% year over year is within measurement slack — a stable market.
+    const v = radarVerdict({ demand_trend_12m_pct: DEMAND_HOLD_PCT });
+    expect(v.ring).toBe("watch");
+    expect(v.caution).toBe(false);
+    expect(v.reason).toBe("demand holding");
+  });
+
+  it("watch: the softening band (between decline and holding) is real evidence, no caution", () => {
+    // -10% year over year: mild but real yearly decline — watch, honestly labeled, and
+    // NOT caution-flagged (the evidence is solid; only the placement is intermediate).
+    const v = radarVerdict({ demand_trend_12m_pct: -10 });
+    expect(v.ring).toBe("watch");
+    expect(v.caution).toBe(false);
+    expect(v.reason).toBe("demand softening");
+    // Boundary: just above the decline cut still softens rather than declines.
+    expect(radarVerdict({ demand_trend_12m_pct: DEMAND_DECLINE_PCT + 0.1 }).ring).toBe("watch");
   });
 
   it("watch via opportunity_v2 carries the caution flag", () => {
-    const v = radarVerdict({ demand_trend_90d_pct: null, opportunity_v2: OPP_WATCH_SCORE });
+    const v = radarVerdict({ demand_trend_12m_pct: null, opportunity_v2: OPP_WATCH_SCORE });
     expect(v.ring).toBe("watch");
     expect(v.caution).toBe(true);
   });
 
   it("crowded: flooding pipeline with flat/negative demand", () => {
-    expect(radarVerdict({ demand_trend_90d_pct: -3, saturation_yoy: 0.3 }).ring).toBe("crowded");
-    expect(radarVerdict({ demand_trend_90d_pct: 0, saturation_yoy: 0.3 }).ring).toBe("crowded");
+    expect(radarVerdict({ demand_trend_12m_pct: -3, saturation_yoy: 0.3 }).ring).toBe("crowded");
+    expect(radarVerdict({ demand_trend_12m_pct: 0, saturation_yoy: 0.3 }).ring).toBe("crowded");
     // Boundary: exactly the flood cut is NOT flooding (rule is strict >).
-    expect(radarVerdict({ demand_trend_90d_pct: 0, saturation_yoy: SAT_FLOOD_YOY }).ring).toBe("watch");
+    expect(radarVerdict({ demand_trend_12m_pct: 0, saturation_yoy: SAT_FLOOD_YOY }).ring).toBe("watch");
   });
 
   it("crowded: winner-take-most regardless of trend fields", () => {
     expect(radarVerdict({ winner_concentration: 0.9 }).ring).toBe("crowded");
-    expect(radarVerdict({ demand_trend_90d_pct: 5, winner_concentration: 0.9 }).ring).toBe("crowded");
+    expect(radarVerdict({ demand_trend_12m_pct: 5, winner_concentration: 0.9 }).ring).toBe("crowded");
     // Boundary: rule is strict >.
     expect(radarVerdict({ winner_concentration: WC_WINNER_TAKE_MOST }).ring).not.toBe("crowded");
   });
 
-  it("declining: demand <= -15", () => {
-    expect(radarVerdict({ demand_trend_90d_pct: -15 }).ring).toBe("declining");
-    expect(radarVerdict({ demand_trend_90d_pct: DEMAND_DECLINE_PCT }).ring).toBe("declining");
-    // Mild decline is NOT declining — it parks in the watch catch-all, flagged caution.
-    const mild = radarVerdict({ demand_trend_90d_pct: -5 });
-    expect(mild.ring).toBe("watch");
-    expect(mild.caution).toBe(true);
+  it("declining: demand <= -15 year over year", () => {
+    expect(radarVerdict({ demand_trend_12m_pct: -15 }).ring).toBe("declining");
+    expect(radarVerdict({ demand_trend_12m_pct: DEMAND_DECLINE_PCT }).ring).toBe("declining");
+    expect(radarVerdict({ demand_trend_12m_pct: -40 }).ring).toBe("declining");
   });
 });
 
 describe("radarVerdict — precedence (exactly one ring)", () => {
   it("enter beats watch: qualifying demand never lands in watch", () => {
-    const v = radarVerdict({ demand_trend_90d_pct: 20, saturation_yoy: 0.1, opportunity_v2: 90 });
+    const v = radarVerdict({ demand_trend_12m_pct: 25, saturation_yoy: 0.1, opportunity_v2: 90 });
     expect(v.ring).toBe("enter");
   });
 
   it("enter beats crowded: rising demand with a calm pipeline wins over winner-take-most", () => {
     // Precedence rule 1 vs 3: enter is checked first, so a concentrated niche whose
     // demand is genuinely surging still plates as enter.
-    const v = radarVerdict({ demand_trend_90d_pct: 25, saturation_yoy: 0.05, winner_concentration: 0.95 });
+    const v = radarVerdict({ demand_trend_12m_pct: 25, saturation_yoy: 0.05, winner_concentration: 0.95 });
     expect(v.ring).toBe("enter");
   });
 
   it("declining beats crowded: flooding AND collapsing plates as declining (the outer, stronger warning)", () => {
-    const v = radarVerdict({ demand_trend_90d_pct: -30, saturation_yoy: 0.5, winner_concentration: 0.95 });
+    const v = radarVerdict({ demand_trend_12m_pct: -30, saturation_yoy: 0.5, winner_concentration: 0.95 });
     expect(v.ring).toBe("declining");
   });
 
@@ -94,22 +130,28 @@ describe("radarVerdict — precedence (exactly one ring)", () => {
     expect(v.ring).toBe("crowded");
   });
 
+  it("crowded beats the softening band: flooding into softening demand is crowding", () => {
+    const v = radarVerdict({ demand_trend_12m_pct: -10, saturation_yoy: 0.3 });
+    expect(v.ring).toBe("crowded");
+    expect(v.caution).toBe(false);
+  });
+
   it("every input lands in exactly one known ring", () => {
-    const demands = [null, -30, -15, -5, 0, 5, 15, 30];
+    const demands = [null, -40, DEMAND_DECLINE_PCT, -10, DEMAND_HOLD_PCT, -2, 0, 10, DEMAND_ENTER_PCT, 35];
     const sats = [null, -0.5, 0, SAT_FLOOD_YOY, 0.5];
     const wcs = [null, 0.5, WC_WINNER_TAKE_MOST, 0.95];
     const opps = [null, 30, OPP_WATCH_SCORE, 90];
-    for (const demand_trend_90d_pct of demands)
+    for (const demand_trend_12m_pct of demands)
       for (const saturation_yoy of sats)
         for (const winner_concentration of wcs)
           for (const opportunity_v2 of opps) {
-            const v = radarVerdict({ demand_trend_90d_pct, saturation_yoy, winner_concentration, opportunity_v2 });
+            const v = radarVerdict({ demand_trend_12m_pct, saturation_yoy, winner_concentration, opportunity_v2 });
             expect(RING_ORDER).toContain(v.ring);
           }
   });
 });
 
-describe("radarVerdict — null-field degradation", () => {
+describe("radarVerdict — null-field degradation (no shorter-horizon fallback exists)", () => {
   it("all fields unknown -> the watch catch-all, flagged caution", () => {
     const v = radarVerdict({});
     expect(v.ring).toBe("watch");
@@ -119,15 +161,15 @@ describe("radarVerdict — null-field degradation", () => {
   it("demand unknown: enter/declining are unreachable, crowding still reads from structure", () => {
     // Flooding pipeline + unknown demand -> crowded, flagged caution (spec: unknown
     // demand does not rescue a flooding niche).
-    const flooding = radarVerdict({ demand_trend_90d_pct: null, saturation_yoy: 0.4 });
+    const flooding = radarVerdict({ demand_trend_12m_pct: null, saturation_yoy: 0.4 });
     expect(flooding.ring).toBe("crowded");
     expect(flooding.caution).toBe(true);
     // Concentration alone still plates crowded.
-    expect(radarVerdict({ demand_trend_90d_pct: undefined, winner_concentration: 0.9 }).ring).toBe("crowded");
+    expect(radarVerdict({ demand_trend_12m_pct: undefined, winner_concentration: 0.9 }).ring).toBe("crowded");
   });
 
   it("treats NaN like null, never like a number", () => {
-    const v = radarVerdict({ demand_trend_90d_pct: Number.NaN, saturation_yoy: Number.NaN });
+    const v = radarVerdict({ demand_trend_12m_pct: Number.NaN, saturation_yoy: Number.NaN });
     expect(v.ring).toBe("watch");
     expect(v.caution).toBe(true);
   });
@@ -223,8 +265,8 @@ describe("soloBucket — the solo-viability lens", () => {
   it("is a lens, not a ring: the verdict input has no solo field to read", () => {
     // Pins the module-doc claim behaviorally: identical market evidence yields an
     // identical verdict — there is no solo channel that could differentiate them.
-    const a = radarVerdict({ demand_trend_90d_pct: 20, saturation_yoy: 0.05 });
-    const b = radarVerdict({ demand_trend_90d_pct: 20, saturation_yoy: 0.05 });
+    const a = radarVerdict({ demand_trend_12m_pct: 25, saturation_yoy: 0.05 });
+    const b = radarVerdict({ demand_trend_12m_pct: 25, saturation_yoy: 0.05 });
     expect(a).toEqual(b);
     expect(a.ring).toBe("enter");
   });

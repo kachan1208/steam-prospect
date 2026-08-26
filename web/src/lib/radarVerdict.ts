@@ -4,14 +4,15 @@
  * rule is unit-testable and the board component stays geometry-only.
  *
  * RINGS, inner -> outer (inner = strongest "build here" signal):
- *   enter     "Enter now"  — demand rising fast while supply is not flooding.
- *   watch     "Watch"      — demand flat-to-up, or a high v2 score without trend
- *                            evidence (caution). Also the CATCH-ALL: a niche with no
- *                            strong signal in either direction parks here rather than
- *                            being invented into a stronger ring.
+ *   enter     "Enter now"  — demand in structural growth while supply is not flooding.
+ *   watch     "Watch"      — demand holding (flat-to-up, or drifting only mildly), or a
+ *                            high v2 score without trend evidence (caution). Also the
+ *                            CATCH-ALL: a niche with no strong signal in either
+ *                            direction parks here rather than being invented into a
+ *                            stronger ring.
  *   crowded   "Crowded"    — supply flooding without demand keeping up, or a
  *                            winner-take-most revenue structure.
- *   declining "Declining"  — demand falling hard.
+ *   declining "Declining"  — demand in sustained structural decline.
  *
  * PRECEDENCE (first match wins; every niche gets exactly one ring):
  *   1. enter      — the strongest positive claim, checked first.
@@ -20,15 +21,21 @@
  *                   demand); "declining" is the outer, stronger warning, so it wins.
  *   3. crowded    — winner-take-most OR supply flooding with flat/negative/unknown
  *                   demand.
- *   4. watch      — demand >= 0 (but not enter), or opportunity_v2 evidence with a
- *                   caution flag, or the no-signal catch-all (also flagged caution).
+ *   4. watch      — demand holding or softening (but not enter/declining), or
+ *                   opportunity_v2 evidence with a caution flag, or the no-signal
+ *                   catch-all (also flagged caution).
  *
  * FIELD UNITS (verified against the mart, not assumed):
- *   - demand_trend_90d_pct is PERCENT units (+15 means +15%), from mart_niche's
- *     90-day review-histogram windows. Since 2026-08-26 it rides every NicheRow /
- *     GET /api/niches row (floor-independent in the mart), so the board passes each
- *     niche's own value; this lib degrades when it is null/undefined (mart predates
- *     the column, or no prior-window baseline).
+ *   - demand_trend_12m_pct is PERCENT units (+20 means +20%), from mart_niche's
+ *     12-month review-histogram windows: the niche's review inflow over the last 12
+ *     complete months vs the 12 before them — year over year. It REPLACED the old
+ *     90-day trend outright (quarter-over-quarter caught release spikes and sale
+ *     seasonality; the yearly windows read structural growth — what "what should I
+ *     build" actually needs). It rides every NicheRow / GET /api/niches row,
+ *     cut-independent in the mart (one value per niche, identical on every
+ *     window/floor cut), so the board passes each niche's own value; this lib degrades
+ *     when it is null/undefined (mart predates the column, or no prior-window
+ *     baseline).
  *   - saturation_yoy is a SIGNED FRACTION centred on 0 — (n_recent_year -
  *     n_prior_year) / n_prior_year in etl/marts/mart_niche.sql — so "release
  *     pipeline grew more than 15% YoY" is saturation_yoy > 0.15, the same cut a
@@ -41,14 +48,17 @@
  * DEGRADATION (any field may be null/undefined/NaN — treated identically as "unknown"):
  *   - demand unknown  -> enter/declining are unreachable (both are demand claims);
  *                        crowding can still be read from saturation/concentration;
- *                        otherwise the niche parks in watch with caution=true.
+ *                        otherwise the niche parks in watch with caution=true. There is
+ *                        NO fallback to any shorter-horizon trend — the 90d columns are
+ *                        gone from the mart, and a structural verdict faked from a
+ *                        quarterly spike would be worse than an honest "caution".
  *   - saturation unknown -> does not block enter (matches the spec: null passes);
  *                        the flooding arm of crowded is unreachable.
  *   - concentration unknown -> the winner-take-most arm of crowded is unreachable.
  *   - opportunity unknown -> the watch score arm is unreachable; catch-all still applies.
  *
- * These thresholds are a starting point, kept as named constants so tuning is a
- * one-line diff with the tests updated alongside.
+ * The demand thresholds are named constants with their derivations attached — tuning is
+ * a one-line diff with the tests updated alongside.
  *
  * SOLO VIABILITY IS A LENS, NOT A RING — deliberately. mart_niche.solo_viability is the
  * share of the cut's scored games playable single-player (catalog norm ~0.9; below ~0.8
@@ -61,11 +71,40 @@
  */
 
 // ---- thresholds -------------------------------------------------------------------------
+//
+// RECALIBRATED FOR THE YEARLY HORIZON (these are NOT the old 90-day numbers, even where
+// a value coincides). The old bars were ±15% on a quarter-over-quarter series — twitchy
+// by construction: sales, seasonality and a single launch routinely move it double
+// digits, so 15% was a low bar over a noisy signal. The 12m windows each hold one full
+// seasonal cycle (seasonality cancels instead of aliasing) and dilute any single launch
+// ~12x, so a year-over-year move is slow-twitch, real and persistent — the same percent
+// carries far more weight:
+//   enter      >= +20%/yr — a whole year of demand growth strong enough to plausibly
+//               still be there when a game started today ships (1-3 years out). A +15%
+//               quarterly blip is often one launch; +20% held across a full year is a
+//               market genuinely widening.
+//   declining  <= -15%/yr — a persistent yearly contraction, not a slow quarter. Kept
+//               at 15 because on a yearly read that magnitude already IS structural.
+//   holding    >= -5%/yr  — measurement slack: histogram truncation at the anchor month
+//               and coverage churn can move a yearly ratio a few points, so within -5%
+//               reads "holding", not drift.
+// The asymmetry (+20 to enter, -15 to warn) is deliberate: entering costs 1-3 years of
+// dev time, so the growth claim must clear a higher bar; the decline warning may fire
+// earlier because its cost — looking elsewhere — is low. Between -15% and -5% sits
+// "softening": real evidence of mild decline, not yet the "do not build here" ring, so
+// it holds watch WITHOUT a caution flag (the evidence is solid; only the placement is
+// intermediate).
 
-/** 90-day demand trend (percent) at or above which a niche can claim "enter". */
-export const DEMAND_ENTER_PCT = 15;
-/** 90-day demand trend (percent) at or below which a niche is "declining". */
+/** 12-month demand trend (percent, year over year) at or above which a niche can claim
+ * "enter": a full year of growth at a rate worth a multi-year build commitment. */
+export const DEMAND_ENTER_PCT = 20;
+/** 12-month demand trend (percent) at or below which a niche is "declining": a
+ * persistent year-over-year contraction. */
 export const DEMAND_DECLINE_PCT = -15;
+/** 12-month demand trend (percent) at or above which demand counts as "holding" —
+ * within measurement slack of flat on a yearly read. Below it (down to
+ * DEMAND_DECLINE_PCT) is "softening". */
+export const DEMAND_HOLD_PCT = -5;
 /** saturation_yoy (signed fraction) above which the release pipeline counts as
  * flooding — +0.15 == +15% more releases YoY == a 1.15x recent/prior ratio. */
 export const SAT_FLOOD_YOY = 0.15;
@@ -89,8 +128,8 @@ export const RING_LABEL: Record<RadarRing, string> = {
 };
 
 export interface RadarVerdictInput {
-  /** Percent units (+15 = +15%). On every NicheRow since 2026-08-26 (see module doc). */
-  demand_trend_90d_pct?: number | null;
+  /** Percent units, year over year (+20 = +20%); see module doc. */
+  demand_trend_12m_pct?: number | null;
   /** Signed fraction centred on 0 (see module doc). */
   saturation_yoy?: number | null;
   /** 0..1 share of niche revenue held by the top game(s). */
@@ -114,20 +153,21 @@ function num(v: number | null | undefined): number | null {
 }
 
 export function radarVerdict(input: RadarVerdictInput): RadarVerdict {
-  const demand = num(input.demand_trend_90d_pct);
+  const demand = num(input.demand_trend_12m_pct);
   const sat = num(input.saturation_yoy);
   const wc = num(input.winner_concentration);
   const opp = num(input.opportunity_v2);
 
-  // 1. enter — demand rising fast AND supply not flooding (unknown saturation passes:
-  //    the demand evidence is the claim; absence of a pipeline count doesn't veto it).
+  // 1. enter — demand in structural growth AND supply not flooding (unknown saturation
+  //    passes: the demand evidence is the claim; absence of a pipeline count doesn't
+  //    veto it).
   if (demand !== null && demand >= DEMAND_ENTER_PCT && (sat === null || sat <= SAT_FLOOD_YOY)) {
-    return { ring: "enter", caution: false, reason: "demand rising, supply not flooding" };
+    return { ring: "enter", caution: false, reason: "demand in structural growth, supply not flooding" };
   }
 
-  // 2. declining — a hard demand collapse, checked BEFORE crowded (see precedence doc).
+  // 2. declining — sustained demand decay, checked BEFORE crowded (see precedence doc).
   if (demand !== null && demand <= DEMAND_DECLINE_PCT) {
-    return { ring: "declining", caution: false, reason: "demand falling hard" };
+    return { ring: "declining", caution: false, reason: "demand in sustained decline" };
   }
 
   // 3. crowded — winner-take-most is a structural fact independent of trend...
@@ -140,14 +180,19 @@ export function radarVerdict(input: RadarVerdictInput): RadarVerdict {
     return {
       ring: "crowded",
       caution: demand === null,
-      reason: demand === null ? "supply flooding, demand unknown" : "supply flooding, demand flat",
+      reason: demand === null ? "supply flooding, demand unknown" : "supply flooding, demand not keeping up",
     };
   }
 
-  // 4. watch — flat-to-up demand is real evidence; a bare v2 score is not, so it carries
-  //    the caution flag; everything else parks here as the honest no-signal default.
-  if (demand !== null && demand >= 0) {
+  // 4. watch — a real demand reading (holding or merely softening) is solid evidence; a
+  //    bare v2 score is not, so it carries the caution flag; everything else parks here
+  //    as the honest no-signal default.
+  if (demand !== null && demand >= DEMAND_HOLD_PCT) {
     return { ring: "watch", caution: false, reason: "demand holding" };
+  }
+  if (demand !== null) {
+    // -15% < demand < -5%: mild year-over-year drift — watch, but honestly labeled.
+    return { ring: "watch", caution: false, reason: "demand softening" };
   }
   if (opp !== null && opp >= OPP_WATCH_SCORE) {
     return { ring: "watch", caution: true, reason: "high v2 score, no demand trend" };
