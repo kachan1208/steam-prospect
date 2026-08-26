@@ -77,8 +77,6 @@ except sqlite3.OperationalError:
     pass
 add("games_with_socials", q("SELECT count(DISTINCT appid) FROM game_socials"))
 add("games_with_x_handle", q("SELECT count(DISTINCT appid) FROM game_socials WHERE platform = 'x'"))
-for plat, n in s.execute("SELECT platform, count(*) FROM game_creator_mention GROUP BY platform"):
-    add("creator_mentions_total", n, f'{{platform="{plat}"}}')
 
 d = duckdb.connect(MART, read_only=True)
 dq = lambda sql: d.execute(sql).fetchone()[0]
@@ -86,7 +84,6 @@ for role in ("developer", "publisher"):
     add(f"{role}s_total", dq(f"SELECT count(*) FROM mart_entity WHERE role = '{role}'"))
 add("players_live_total", dq("SELECT COALESCE(SUM(live_players), 0) FROM mart_game"))
 add("games_ccu_measured", dq("SELECT count(*) FROM mart_game WHERE live_players IS NOT NULL"))
-add("twitch_viewers_total", dq("SELECT COALESCE(SUM(twitch_viewers), 0) FROM mart_game"))
 add("niches_scored", dq("SELECT count(DISTINCT key) FROM mart_niche"))
 # Additive mart columns — absent on older marts, skip rather than crash (same
 # degrade-cleanly stance as the API's capability gates).

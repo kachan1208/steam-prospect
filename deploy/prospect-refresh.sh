@@ -284,7 +284,10 @@ run_step "steam_scrape"     3600 "./run_full.sh"
 # (unreleased-cohort metadata) is a rotation, not a dependency of the steps below; fetching
 # it at 19:15 instead of ~22:30 costs nothing.
 run_step "review_refresh"   3600 "python3 -m steam_scraper.scraper --db steam_games.db review-summary --workers 16 --rate 12.0 --refresh-older-than-days 7 --limit 25000"
-run_step "review_histogram" 1800 "python3 -m steam_scraper.scraper --db steam_games.db review-histogram --min-reviews 50 --workers 16 --rate 10.0"
+# review_histogram MOVED to the 19:15 quiet-window cron (2026-08-26) — third mover after
+# tags_refresh/refresh_released: it lost the SQLite write race two nights running here.
+# Histograms are also what the Radar demand trend reads, so the quiet window doubles as the
+# fix for their staleness (the step only ever refreshed a sliver per night mid-contention).
 
 # ── Barrier: Lane B must finish BEFORE review_deepen so the two heavy concurrent-worker phases
 # never overlap (memory safety — see the Lane B note above). Lane B is already done by here.
