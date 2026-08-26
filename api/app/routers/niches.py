@@ -9,7 +9,7 @@ e777cb2) and upgraded for everything the marts have grown since:
 - Absolute size: total_owners / total_rev / total_reviews / market_size.
 - Live players: total_players_now / players_trend_7d_pct / players_coverage on every
   row, plus the per-niche daily series (mart_niche_players) in the detail response.
-- 12-month demand: reviews_12m / reviews_prev_12m / demand_trend_12m_pct on every LIST
+- 24-month demand: reviews_24m / reviews_prev_24m / demand_trend_24m_pct on every LIST
   row (capability-gated like p90_rev; cut-independent in the mart — one value per
   (dimension, key), stamped on every window/floor cut), so the Radar board rings every
   blip on its own trend, not just the feed's top movers.
@@ -80,14 +80,20 @@ SORTABLE = {
     "median_players_now", "players_top5_share",
     "lifetime_survival_12m", "lifetime_median_dead_months",
     "p90_rev",
-    "reviews_12m", "reviews_prev_12m", "demand_trend_12m_pct",
+    "reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct",
 }
 _PLAYERS_COLS = ["total_players_now", "players_trend_7d_pct", "players_coverage"]
 _LIFETIME_COLS = ["lifetime_n_games", "lifetime_survival_12m", "lifetime_median_dead_months"]
-# 12-month demand (cut-independent: identical on every window/floor cut of a niche — see
-# etl/marts/mart_niche.sql's _niche_demand12m). On LIST rows so the Radar board can ring
-# every blip on its own trend instead of joining the feed's top movers.
-_DEMAND12M_COLS = ["reviews_12m", "reviews_prev_12m", "demand_trend_12m_pct"]
+# 24-month demand (cut-independent: identical on every window/floor cut of a niche — see
+# etl/marts/mart_niche.sql's _niche_demand24m). On LIST rows so the Radar board can ring
+# every blip on its own trend instead of joining the feed's top movers. The emerging pair
+# (reviews_24m_new_share / demand_emerging — young tags whose prior window is near zero BY
+# CONSTRUCTION, so their raw trend % is not representative) ships in the same ETL build as
+# the 24m windows: one column family, one probe (_has_demand24m).
+_DEMAND24M_COLS = [
+    "reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct",
+    "reviews_24m_new_share", "demand_emerging",
+]
 
 # Ordered base column list (single source of truth for SELECT + CSV header); the players
 # columns are appended when the mart carries them.
@@ -169,18 +175,22 @@ def _has_p90_trend() -> bool:
 
 
 @lru_cache(maxsize=1)
-def _has_demand12m() -> bool:
-    """reviews_12m / reviews_prev_12m / demand_trend_12m_pct — the whole ranking metric
-    behind the Radar feed and the board's verdict rings. They REPLACED the 90-day demand
-    columns outright (2026-08: quarter-over-quarter caught release spikes; last-12-months
-    vs prior-12 reads structural growth, which is what "what should I build" needs), so a
-    mart carrying only the old 90d columns still answers False here and degrades the same
-    way a pre-demand mart does. Gated exactly like _has_p90/_has_players: an
+def _has_demand24m() -> bool:
+    """reviews_24m / reviews_prev_24m / demand_trend_24m_pct — the whole ranking metric
+    behind the Radar feed and the board's verdict rings. 24-month windows REPLACED the
+    12-month ones outright (2026-08-26, user-directed: the radar's pinned membership cut
+    is 24m x min50, so the whole radar now speaks 24 months), which had themselves
+    replaced the 90-day windows (quarter-over-quarter caught release spikes; a year-plus
+    window reads structural growth, which is what "what should I build" needs) — so a
+    mart carrying only the older 90d/12m columns still answers False here and degrades
+    the same way a pre-demand mart does. One probe covers the whole family: the emerging
+    columns (reviews_24m_new_share / demand_emerging) ship in the same ETL build as the
+    24m windows, never separately. Gated exactly like _has_p90/_has_players: an
     information_schema probe, cached per process (the DB is swapped and the app restarted
     on each nightly rebuild, so a per-process answer can't go stale)."""
     rows = analytics_db.query(
         "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_niche' AND column_name = 'demand_trend_12m_pct'"
+        "WHERE table_name = 'mart_niche' AND column_name = 'demand_trend_24m_pct'"
     )
     return bool(rows)
 
@@ -334,8 +344,8 @@ def _cols() -> list[str]:
         cols.extend(["median_players_now", "players_top5_share"])
     if _has_lifetime():
         cols.extend(_LIFETIME_COLS)
-    if _has_demand12m():
-        cols.extend(_DEMAND12M_COLS)
+    if _has_demand24m():
+        cols.extend(_DEMAND24M_COLS)
     return cols
 
 
@@ -440,10 +450,10 @@ def list_niches(
             status_code=503,
             detail="mart_niche predates the p90_rev column — rebuild the marts (task etl).",
         )
-    if sort in _DEMAND12M_COLS and not _has_demand12m():
+    if sort in _DEMAND24M_COLS and not _has_demand24m():
         raise HTTPException(
             status_code=503,
-            detail="mart_niche predates the 12-month demand columns — rebuild the marts (task etl).",
+            detail="mart_niche predates the 24-month demand columns — rebuild the marts (task etl).",
         )
     if min_reviews == 0 and not _has_no_floor_cut():
         raise HTTPException(
@@ -478,7 +488,8 @@ def list_niches(
 # that contract.
 _RADAR_BASE_COLS = [
     "dimension", "key", "tier", "n_games", "opportunity_v2", "saturation_yoy",
-    "reviews_12m", "reviews_prev_12m", "demand_trend_12m_pct",
+    "reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct",
+    "reviews_24m_new_share", "demand_emerging",
 ]
 
 
@@ -500,9 +511,11 @@ def _radar_card(r: dict, sparklines: dict[tuple[str, str], list[RadarSparklinePo
         p90_rev=r.get("p90_rev"),
         opportunity_v2=r.get("opportunity_v2"),
         saturation_yoy=r.get("saturation_yoy"),
-        reviews_12m=int(r["reviews_12m"] or 0),
-        reviews_prev_12m=int(r["reviews_prev_12m"] or 0),
-        demand_trend_12m_pct=r["demand_trend_12m_pct"],
+        reviews_24m=int(r["reviews_24m"] or 0),
+        reviews_prev_24m=int(r["reviews_prev_24m"] or 0),
+        demand_trend_24m_pct=r["demand_trend_24m_pct"],
+        reviews_24m_new_share=r.get("reviews_24m_new_share"),
+        demand_emerging=bool(r.get("demand_emerging")),
         players_trend_7d_pct=r.get("players_trend_7d_pct"),
         sparkline=sparklines.get((r["dimension"], r["key"]), []),
     )
@@ -543,44 +556,63 @@ def radar_feed(
     min_reviews: int = Query(50, ge=0, le=100000),
     limit: int = Query(6, ge=1, le=24),
 ) -> RadarFeed:
-    """The Radar feed: the cut's biggest 12-month demand riser (hero) plus its biggest movers
-    in either direction ('Moving niches'). Defaults mirror NicheFinder/mockup 3a's own caption
-    — "last 24 months · micro + theme tags" — dimension=tag, window=24m, min_reviews=50, tiers
-    micro+theme.
+    """The Radar feed: the cut's biggest 24-month demand riser (hero) plus its biggest movers
+    in either direction ('Moving niches'), plus the cut's EMERGING niches as their own group.
+    Defaults mirror NicheFinder/mockup 3a's own caption — "last 24 months · micro + theme
+    tags" — dimension=tag, window=24m, min_reviews=50, tiers micro+theme.
 
-    503 when the mart predates demand_trend_12m_pct (see _has_demand12m — the state production
+    EMERGING (demand_emerging, see mart_niche.sql): young Steam tags crystallize around new
+    games only — old ancestors never get re-voted into them — so their prior-window base is
+    near zero BY CONSTRUCTION and a raw +4,775% trend is noise, not demand growth. Those
+    niches are EXCLUDED from the trend-% ranking (hero and movers) and returned separately,
+    ranked by absolute 24-month review volume, where their real signal is.
+
+    503 when the mart predates demand_trend_24m_pct (see _has_demand24m — the state production
     is genuinely in for hours after every deploy that adds a mart column, and always the FIRST
     state a fresh deploy of this endpoint sees, since the API ships before the nightly rebuild
     that materialises it). The client is expected to degrade honestly on that response, not
     retry it into a spinner.
     """
-    if not _has_demand12m():
+    if not _has_demand24m():
         raise HTTPException(
             status_code=503,
             detail=(
-                "mart_niche predates the 12-month demand trend columns (reviews_12m / "
-                "reviews_prev_12m / demand_trend_12m_pct) — rebuild the marts (task etl)."
+                "mart_niche predates the 24-month demand trend columns (reviews_24m / "
+                "reviews_prev_24m / demand_trend_24m_pct) — rebuild the marts (task etl)."
             ),
         )
 
     tiers_arg = "micro,theme" if dimension == "tag" else None
     where, params = _build_filters(dimension, window, min_reviews, None, tiers_arg, None, None)
-    # NULL demand_trend_12m_pct means "no baseline to compare against" (the prior 12-month
+    cols = ", ".join(_radar_cols())
+
+    # Emerging niches first (their own group, before the WHERE narrows to rankable rows):
+    # no trend-not-null requirement — a NULL trend (zero prior-window baseline) is the
+    # canonical emerging case — and ranked by reviews_24m DESC because absolute volume is
+    # the only number that means anything for them.
+    emerging_rows = analytics_db.query(
+        f"SELECT {cols} FROM mart_niche {where} AND demand_emerging "
+        "ORDER BY reviews_24m DESC, n_games DESC LIMIT ?",
+        params + [limit],
+    )
+
+    # NULL demand_trend_24m_pct means "no baseline to compare against" (the prior 24-month
     # window had zero reviews), not "flat" — a brand-new niche must never surface here as an
     # unchanged mover, so rows without a real trend value are excluded rather than sorted to
-    # the bottom.
-    where += " AND demand_trend_12m_pct IS NOT NULL"
+    # the bottom. Emerging niches are excluded from the % ranking too: their base is near
+    # zero by construction, so their trend % is not representative (they surface in the
+    # `emerging` group above instead).
+    where += " AND demand_trend_24m_pct IS NOT NULL AND NOT demand_emerging"
 
-    cols = ", ".join(_radar_cols())
     hero_rows = analytics_db.query(
         f"SELECT {cols} FROM mart_niche {where} "
-        "ORDER BY demand_trend_12m_pct DESC, n_games DESC LIMIT 1",
+        "ORDER BY demand_trend_24m_pct DESC, n_games DESC LIMIT 1",
         params,
     )
     if not hero_rows:
         raise HTTPException(
             status_code=404,
-            detail="No niches have a 12-month demand trend in this cut yet — too few reviews in the prior 12-month window.",
+            detail="No niches have a rankable 24-month demand trend in this cut yet — too few reviews in the prior 24-month window.",
         )
     hero_row = hero_rows[0]
 
@@ -589,7 +621,7 @@ def radar_feed(
     if extra > 0:
         mover_rows = analytics_db.query(
             f"SELECT {cols} FROM mart_niche {where} AND key != ? "
-            "ORDER BY ABS(demand_trend_12m_pct) DESC, n_games DESC LIMIT ?",
+            "ORDER BY ABS(demand_trend_24m_pct) DESC, n_games DESC LIMIT ?",
             params + [hero_row["key"], extra],
         )
 
@@ -599,13 +631,19 @@ def radar_feed(
         [hero_row["dimension"], hero_row["key"]],
     )
 
-    keys = [(hero_row["dimension"], hero_row["key"])] + [(r["dimension"], r["key"]) for r in mover_rows]
+    keys = [(hero_row["dimension"], hero_row["key"])] + [
+        (r["dimension"], r["key"]) for r in mover_rows + emerging_rows
+    ]
     sparklines = _radar_sparklines(keys)
 
     hero = RadarHero(**_radar_card(hero_row, sparklines).model_dump(), trend=[TrendPoint(**t) for t in trend_rows])
     movers = [_radar_card(hero_row, sparklines)] + [_radar_card(r, sparklines) for r in mover_rows]
+    emerging = [_radar_card(r, sparklines) for r in emerging_rows]
 
-    return RadarFeed(dimension=dimension, window=window, min_reviews=min_reviews, hero=hero, movers=movers)
+    return RadarFeed(
+        dimension=dimension, window=window, min_reviews=min_reviews,
+        hero=hero, movers=movers, emerging=emerging,
+    )
 
 
 # =========================================================================================

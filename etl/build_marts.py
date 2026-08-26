@@ -39,6 +39,15 @@ MIN_NICHE_GAMES = 30              # a niche needs >= this many qualifying games 
 TAG_VOTE_FLOOR = 3                # a (game,tag) association needs >= this many community votes
 TAG_RANK_FLOOR = 20              # ...and be within the game's top-N tags
 RECENT_MONTHS = 24               # "recent" / 24m window length
+DEMAND_MIN_BASE = 1000           # emerging tell 1 (mart_niche demand_emerging): a niche whose
+                                 # reviews_prev_24m is below this has no comparable base — young
+                                 # tags crystallize around new games only (old genre ancestors
+                                 # never get re-voted into a new label), so their prior window is
+                                 # near zero BY CONSTRUCTION and the raw trend % is noise
+DEMAND_NEW_MASS_SHARE = 0.8      # emerging tell 2: >= this share of reviews_24m coming from games
+                                 # released within the last RECENT_MONTHS means the niche's review
+                                 # mass IS its newest games — same non-comparability, caught even
+                                 # when a stray old title lifts the prev window past the base floor
 THIN_REVIEWS_BAR = 50            # below this a game counts as "thin" (beatable) for quality_gap
 BEATABLE_RATIO_BAR = 0.80        # positive_ratio below this counts as beatable for quality_gap
 WINNER_TOP_PCT = 0.95            # winner_concentration = revenue share of the top 5% of titles
@@ -772,6 +781,8 @@ def build_params() -> dict[str, str]:
         "TAG_VOTE_FLOOR": TAG_VOTE_FLOOR,
         "TAG_RANK_FLOOR": TAG_RANK_FLOOR,
         "RECENT_MONTHS": RECENT_MONTHS,
+        "DEMAND_MIN_BASE": DEMAND_MIN_BASE,
+        "DEMAND_NEW_MASS_SHARE": DEMAND_NEW_MASS_SHARE,
         "THIN_REVIEWS_BAR": THIN_REVIEWS_BAR,
         "BEATABLE_RATIO_BAR": BEATABLE_RATIO_BAR,
         "WINNER_TOP_PCT": WINNER_TOP_PCT,

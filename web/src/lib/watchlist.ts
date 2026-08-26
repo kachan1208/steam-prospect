@@ -24,8 +24,8 @@ import type { Dimension } from "./api";
  *     score component) is NOT one of them: it's a normalized 0-1 score, not a %-over-time
  *     trend, so a rule like the mockup's illustrative "demand +20% over 90 days" isn't reproducible
  *     honestly — the nearest served equivalents are players_trend_7d_pct (short-term
- *     momentum, the closest in spirit to the mockup's horizon) and demand_trend_12m_pct
- *     (the Radar board's year-over-year structural read; not wired as an AlertMetric).
+ *     momentum, the closest in spirit to the mockup's horizon) and demand_trend_24m_pct
+ *     (the Radar board's 24-month structural read; not wired as an AlertMetric).
  */
 
 export type WatchlistKind = "niche" | "game";

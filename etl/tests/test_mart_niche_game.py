@@ -99,6 +99,13 @@ for i in range(200):
         tag_rows.append((appid, "Deckbuilding"))   # 40 games
     if i % 11 == 0:
         tag_rows.append((appid, "Sokoban"))        # 19 games -> below MIN_NICHE_GAMES
+    if i % 3 == 0 and i % 29 != 0 and i % 31 != 0:
+        # "Organizing": the young-tag shape (~62 games, ALL on the recent release branch —
+        # i%3==0 lands in months_ago(0..22), and the %29/%31 invalid-date shapes are kept
+        # out). Every review lands in reviews_24m_new_share's numerator -> share = 1.0 ->
+        # demand_emerging fires via the new-mass tell ALONE (its prev-window base, 60 per
+        # member game, is well above DEMAND_MIN_BASE) — see check 1d.
+        tag_rows.append((appid, "Organizing"))
 
     # --- genre membership ---
     genre_rows.append((appid, "Indie"))            # 200 games
@@ -122,7 +129,7 @@ def main() -> int:
 
     # ---- staging tables the two marts read (TEMP, exactly as create_staging() makes them)
     con.execute("CREATE TEMP TABLE stg_tag_membership(appid INTEGER, tag VARCHAR)")
-    # mart_niche.sql's 12-month demand windows read stg_review_histogram (Steam's true
+    # mart_niche.sql's 24-month demand windows read stg_review_histogram (Steam's true
     # monthly counts — see the mart's SOURCE note: the sampled stg_review inflated the
     # trend ~10-350x per game). Shape mirrors create_timing_staging().
     con.execute(
@@ -176,28 +183,28 @@ def main() -> int:
         """
     )
 
-    # Six histogram rows per game, chosen to pin every edge of the two 12-month windows on
+    # Six histogram rows per game, chosen to pin every edge of the two 24-month windows on
     # paper (anchor = base - 1 month, where base = the global max period month):
     #   base month       999 reviews -> EXCLUDED (the truncated-at-fetch anchor+1 month)
-    #   base - 1          30 reviews -> inside now  (anchor-12 .. anchor], newest month
-    #   base - 12         60 reviews -> inside now, OLDEST now month (the boundary)
-    #   base - 13         45 reviews -> inside prev (anchor-24 .. anchor-12], newest month
-    #   base - 24         15 reviews -> inside prev, OLDEST prev month (the boundary)
-    #   base - 25        777 reviews -> EXCLUDED (older than the prev window)
-    # => per niche: reviews_12m = 90 * n, reviews_prev_12m = 60 * n, trend = +50.0,
+    #   base - 1          30 reviews -> inside now  (anchor-24 .. anchor], newest month
+    #   base - 24         60 reviews -> inside now, OLDEST now month (the boundary)
+    #   base - 25         45 reviews -> inside prev (anchor-48 .. anchor-24], newest month
+    #   base - 48         15 reviews -> inside prev, OLDEST prev month (the boundary)
+    #   base - 49        777 reviews -> EXCLUDED (older than the prev window)
+    # => per niche: reviews_24m = 90 * n, reviews_prev_24m = 60 * n, trend = +50.0,
     #    where n = the (dimension, key) FULL membership count (see check 1b).
     con.execute("""INSERT INTO stg_review_histogram
         SELECT appid, date_trunc('month', CURRENT_DATE), 999, 500 FROM stg_game
         UNION ALL
         SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 1 MONTH, 30, 20 FROM stg_game
         UNION ALL
-        SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 12 MONTH, 60, 40 FROM stg_game
+        SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 24 MONTH, 60, 40 FROM stg_game
         UNION ALL
-        SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 13 MONTH, 45, 30 FROM stg_game
+        SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 25 MONTH, 45, 30 FROM stg_game
         UNION ALL
-        SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 24 MONTH, 15, 10 FROM stg_game
+        SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 48 MONTH, 15, 10 FROM stg_game
         UNION ALL
-        SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 25 MONTH, 777, 500 FROM stg_game""")
+        SELECT appid, date_trunc('month', CURRENT_DATE) - INTERVAL 49 MONTH, 777, 500 FROM stg_game""")
 
     # ---- render + execute through the REAL renderer -----------------------------------
     params = bm.build_params()
@@ -229,8 +236,8 @@ def main() -> int:
     # ---- 1b. demand windows read the histogram with the documented anchor -------------
     # The fixture put 999 reviews in the anchor-excluded truncated month and 777 in the
     # month just past the prev window's far edge; if either leaks into a window the month
-    # arithmetic regressed. The 12m demand columns are CUT-INDEPENDENT (see
-    # _niche_demand12m's header in mart_niche.sql): every (win, min_reviews) cut of a
+    # arithmetic regressed. The 24m demand columns are CUT-INDEPENDENT (see
+    # _niche_demand24m's header in mart_niche.sql): every (win, min_reviews) cut of a
     # (dimension, key) carries the same numbers, computed over the FULL membership — the
     # (win='all', min_reviews=0) superset population — so the expected value is 90/60 per
     # game of that cut's n_games, on EVERY cut, and trend is +50.0 everywhere.
@@ -242,9 +249,9 @@ def main() -> int:
         )
         SELECT COUNT(*),
                COUNT(*) FILTER (
-                   WHERE n.reviews_12m != 90 * n0.n_games
-                      OR n.reviews_prev_12m != 60 * n0.n_games
-                      OR n.demand_trend_12m_pct != 50.0
+                   WHERE n.reviews_24m != 90 * n0.n_games
+                      OR n.reviews_prev_24m != 60 * n0.n_games
+                      OR n.demand_trend_24m_pct != 50.0
                )
         FROM mart_niche n
         JOIN n0 ON n0.dimension = n.dimension AND n0.key = n.key
@@ -255,16 +262,15 @@ def main() -> int:
         f"{n_niche_rows - joined[0]} cut(s) have no published (win='all', min_reviews=0) sibling"
     )
     assert joined[1] == 0, f"{joined[1]} niche cut(s) have demand windows off the histogram fixture"
-    print("[ok] demand_12m: histogram-sourced, both window edges exact, full-membership population, trend = +50.0")
+    print("[ok] demand_24m: histogram-sourced, both window edges exact, full-membership population, trend = +50.0")
 
     # ---- 1c. cut independence: neither the floor NOR the window may move demand -------
     # Two Radar-board regressions this pins down. Floor: a min_reviews toggle used to
     # shrink "demand" (a different population summed), which could flip a niche's
     # client-side verdict ring. Window: the win='24m' population holds only games
-    # released in the last 24 months, so every member released inside the last 12 has
-    # mechanically ZERO possible inflow in the prior-12m window — a per-win join would
-    # structurally inflate (or NULL out) the board's pinned 24m cut. Demand is a
-    # property of (dimension, key), full stop.
+    # released in the last 24 months, so NO member can have inflow in the prior-24m
+    # window — a per-win join would NULL out the board's pinned 24m cut entirely.
+    # Demand is a property of (dimension, key), full stop.
     multi_cut = con.execute("""
         SELECT COUNT(*) FROM (
             SELECT dimension, key FROM mart_niche
@@ -275,14 +281,49 @@ def main() -> int:
     varying = con.execute("""
         SELECT dimension, key FROM mart_niche
         GROUP BY 1, 2
-        HAVING COUNT(DISTINCT COALESCE(reviews_12m, -1)) > 1
-            OR COUNT(DISTINCT COALESCE(reviews_prev_12m, -1)) > 1
-            OR COUNT(DISTINCT COALESCE(demand_trend_12m_pct, -1e18)) > 1
+        HAVING COUNT(DISTINCT COALESCE(reviews_24m, -1)) > 1
+            OR COUNT(DISTINCT COALESCE(reviews_prev_24m, -1)) > 1
+            OR COUNT(DISTINCT COALESCE(demand_trend_24m_pct, -1e18)) > 1
+            OR COUNT(DISTINCT COALESCE(reviews_24m_new_share, -1)) > 1
+            OR COUNT(DISTINCT COALESCE(CAST(demand_emerging AS INTEGER), -1)) > 1
     """).fetchall()
     for row in varying[:10]:
         print("            CUT-DEPENDENT DEMAND", row)
     assert not varying, f"{len(varying)} (dimension, key) group(s) vary demand by cut"
     print(f"[ok] demand identical across every (win, min_reviews) cut for every niche ({multi_cut} multi-cut groups checked)")
+
+    # ---- 1d. emerging pair: self-consistent, and both tells behave --------------------
+    # demand_emerging must be exactly the documented two-tell rule REPLAYED OVER THE
+    # MART'S OWN PUBLISHED COLUMNS (never NULL, share in [0,1]) — so a drive-by edit to
+    # the SQL can't quietly decouple the flag from the numbers it claims to summarise.
+    bad_emerging = con.execute(f"""
+        SELECT COUNT(*) FROM mart_niche
+        WHERE demand_emerging IS NULL
+           OR (reviews_24m_new_share IS NOT NULL
+               AND (reviews_24m_new_share < 0 OR reviews_24m_new_share > 1))
+           OR demand_emerging != (
+                  reviews_prev_24m < {bm.DEMAND_MIN_BASE}
+                  OR COALESCE(reviews_24m_new_share >= {bm.DEMAND_NEW_MASS_SHARE}, FALSE)
+              )
+    """).fetchone()[0]
+    assert bad_emerging == 0, f"{bad_emerging} row(s) break the demand_emerging two-tell rule"
+    # "Organizing" is the young-tag fixture: every member on the recent release branch, so
+    # the new-mass tell fires ALONE (share = 1.0) while its prev base clears the floor —
+    # proving the OR is real, not just the small-base clause. "Colony Sim" spans old and
+    # new releases (share ~0.63) with a big base: emerging must stay FALSE, and its trend
+    # must stay COMPUTED (the flag never suppresses the raw columns).
+    org = con.execute(f"""
+        SELECT demand_emerging, reviews_24m_new_share, reviews_prev_24m >= {bm.DEMAND_MIN_BASE}
+        FROM mart_niche WHERE dimension = 'tag' AND key = 'Organizing' LIMIT 1
+    """).fetchone()
+    assert org is not None, "'Organizing' (the emerging fixture tag) was not published"
+    assert org == (True, 1.0, True), f"Organizing emerging tell broke: {org}"
+    colony = con.execute("""
+        SELECT demand_emerging, demand_trend_24m_pct
+        FROM mart_niche WHERE dimension = 'tag' AND key = 'Colony Sim' LIMIT 1
+    """).fetchone()
+    assert colony == (False, 50.0), f"Colony Sim must be non-emerging with a computed trend: {colony}"
+    print("[ok] demand_emerging: two-tell rule replayed exactly; new-mass tell fires alone on 'Organizing'")
 
     n_rows = con.execute("SELECT COUNT(*) FROM mart_niche_game").fetchone()[0]
     n_niche = con.execute("SELECT COUNT(*) FROM mart_niche").fetchone()[0]
