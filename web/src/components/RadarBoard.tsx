@@ -27,20 +27,28 @@ import { nicheDetailPath } from "../pages/NicheDetail";
  *
  * ONE INSTRUMENT (2026-08-27 layout overhaul): plate and rail live in one frame and share
  * one selection model. The rail has two modes:
- *   - default: the ranked VERDICT LIST — every niche, grouped by ring, FULL counts. No
- *     silent caps (project rule): below lg the list flows with the page; from lg up it
- *     fills the plate's height and scrolls inside the rail (absolute-inset column), with
- *     the group headers carrying the true totals so nothing can quietly end at item #22.
+ *   - default: the ranked VERDICT LIST — every plotted niche, grouped by ring, FULL
+ *     counts — under the NICHE SEARCH input. The search's scope is the `pool` prop (the
+ *     WHOLE population of the cut + solo setting, not just the plotted Top-N — user
+ *     directive 2026-08-27): typing filters live (case-insensitive substring on the
+ *     niche key) across every pool row; matches beyond the plot cap appear with an
+ *     em-dash rank and still open a full dossier. Esc clears; ↑/↓ + Enter walk and open
+ *     matches. No silent caps (project rule): below lg the list flows with the page;
+ *     from lg up it fills the plate's height and scrolls inside the rail
+ *     (absolute-inset column), with the group headers carrying the true totals so
+ *     nothing can quietly end at item #22.
  *   - selection: the VERDICT DOSSIER — IN VIEW at every width (the dossier-viewport fix:
  *     a selection must never strand its answer below the fold). From lg (1024px) up the
- *     board and rail sit side-by-side (rail 300px at lg, 340px at xl; the plate shrinks
+ *     board and rail sit side-by-side (rail 360px at lg, 460px at xl; the plate shrinks
  *     first) and the dossier is the rail's selection pane, beside the plate. Below lg
  *     the layout stacks — an inline pane would open BELOW the board, forcing a scroll —
  *     so the dossier renders as an Industry-styled slide-over DRAWER from the right edge
  *     instead (DossierDrawer: backdrop, ✕/back/ESC close, focus-trapped). Both
- *     presentations render the same DossierBody, so they cannot drift.
- * Selection is CONTROLLED (selectedId/onSelect props): the page owns it so the signal
- * feed's cards can select a niche on the board through the same channel a dot click uses.
+ *     presentations render the same DossierBody, so they cannot drift. A selection from
+ *     search that is NOT plotted (beyond Top-N) still opens its dossier, with an honest
+ *     "beyond the Top N plot" note in the header instead of a rail rank.
+ * Selection is CONTROLLED (selectedId/onSelect props): the page owns it, and an id may
+ * name any pool niche — plotted dots additionally get the highlight ring on the plate.
  *
  * Everything is hand-rolled SVG — the CSP forbids external chart libs, and recharts has no
  * polar scatter anyway. All colors are CSS vars; the ring verdict is encoded by POSITION
@@ -149,6 +157,10 @@ export interface PlacedBlip extends RadarBoardBlip {
   y: number;
   r: number;
 }
+
+/** A rail/dossier entry: a plotted blip (with its rail rank), or a pool niche beyond the
+ * Top-N plot cap reachable only through search — n: null, no dot on the plate. */
+export type RailBlip = RadarBoardBlip & { id: string; n: number | null };
 
 /** Angular padding (radians) keeping a dot of radius r clear of the sector separators. */
 function angularPad(r: number, radius: number): number {
@@ -348,8 +360,12 @@ function CheckGlyph({ pass }: { pass: boolean | null }) {
  * are labeled "· context": they can talk you out of a niche, they never move its ring.
  * Below the trace: the raw context numbers and the deep-dive link (the dossier explains;
  * the detail page is where the full workup lives).
+ *
+ * Accepts any RailBlip: a niche selected through search that sits beyond the Top-N plot
+ * cap (n: null) gets the same full dossier — same trace, same bars — plus an honest
+ * header note that it has no dot on the board at this cap.
  */
-function DossierBody({ blip }: { blip: PlacedBlip }) {
+function DossierBody({ blip, plotCap }: { blip: RailBlip; plotCap: number }) {
   const v = blip.verdict;
   const context = [
     blip.reviews24m != null ? `reviews 24m ${fmtInt(blip.reviews24m)}` : null,
@@ -370,10 +386,18 @@ function DossierBody({ blip }: { blip: PlacedBlip }) {
           aria-hidden
         />
         <span className="kicker text-[11px] tracking-[.08em] text-ink-primary">
-          {blip.n}. {blip.key}
+          {blip.n != null ? `${blip.n}. ${blip.key}` : blip.key}
         </span>
         <span className="text-[11px] text-ink-muted">{SECTOR_LABEL[blip.sector]}</span>
       </div>
+      {/* The honest not-plotted note (search reaches past the plot cap): the niche is
+          real, the verdict is computed the same way — it just has no dot at this Top-N. */}
+      {blip.n == null && (
+        <p className="pt-1 text-[11px] text-ink-muted">
+          Beyond the Top {plotCap} plot — no dot on the board at this cap; the verdict below is judged by the same
+          checks.
+        </p>
+      )}
       <p className="border-b border-chartborder pb-2 pt-1 text-[12px] text-ink-secondary">
         <span className="font-semibold text-ink-primary">{RING_LABEL[v.ring]}</span>
         {v.caution ? " · caution" : ""} — {v.reason}
@@ -381,17 +405,20 @@ function DossierBody({ blip }: { blip: PlacedBlip }) {
 
       {blip.trace.map((c) => (
         <div key={c.id} className="border-b border-chartborder py-2">
-          {/* flex-wrap, no truncation: the bar clause drops to its own line in the
-              narrow rail rather than eating the check's name. */}
           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
             <CheckGlyph pass={c.pass} />
             <span className="sr-only">{c.pass === null ? "unknown" : c.pass ? "passes" : "fails"}</span>
             <span className="kicker text-[10px] tracking-[.08em] text-ink-muted">
               {c.decides ? c.label : `${c.label} · context`}
             </span>
+          </div>
+          {/* Value and the bar it was judged against share one line in the widened rail
+              (flex-wrap, no truncation: at narrow widths the bar clause drops to its own
+              line rather than eating the value). */}
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 pt-1">
+            <span className="tabular text-[12px] text-ink-primary">{c.value}</span>
             <span className="tabular ml-auto text-right text-[10px] text-ink-muted">bar {c.threshold}</span>
           </div>
-          <div className="tabular pt-1 text-[12px] text-ink-primary">{c.value}</div>
           <div className="pt-0.5 text-[11px] leading-snug text-ink-secondary">{c.note}</div>
         </div>
       ))}
@@ -412,7 +439,17 @@ function DossierBody({ blip }: { blip: PlacedBlip }) {
 
 /** The ≥lg presentation: the dossier as the rail's selection mode, scrolling inside the
  * instrument like the verdict list does. */
-function VerdictDossier({ blip, total, onBack }: { blip: PlacedBlip; total: number; onBack: () => void }) {
+function VerdictDossier({
+  blip,
+  plotCap,
+  total,
+  onBack,
+}: {
+  blip: RailBlip;
+  plotCap: number;
+  total: number;
+  onBack: () => void;
+}) {
   return (
     <section
       aria-label={`Verdict dossier: ${blip.key}`}
@@ -432,7 +469,7 @@ function VerdictDossier({ blip, total, onBack }: { blip: PlacedBlip; total: numb
 
       <div className="lg:relative lg:min-h-0 lg:flex-1">
         <div className="flex flex-col pt-2.5 lg:absolute lg:inset-0 lg:overflow-y-auto lg:pr-1">
-          <DossierBody blip={blip} />
+          <DossierBody blip={blip} plotCap={plotCap} />
         </div>
       </div>
     </section>
@@ -449,7 +486,17 @@ function VerdictDossier({ blip, total, onBack }: { blip: PlacedBlip; total: numb
  * same isDesktop switch that picks the rail pane), so the two presentations are
  * mutually exclusive by construction.
  */
-function DossierDrawer({ blip, total, onClose }: { blip: PlacedBlip; total: number; onClose: () => void }) {
+function DossierDrawer({
+  blip,
+  plotCap,
+  total,
+  onClose,
+}: {
+  blip: RailBlip;
+  plotCap: number;
+  total: number;
+  onClose: () => void;
+}) {
   const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -532,7 +579,7 @@ function DossierDrawer({ blip, total, onClose }: { blip: PlacedBlip; total: numb
           </button>
         </div>
         <div className="flex flex-col pt-2.5">
-          <DossierBody blip={blip} />
+          <DossierBody blip={blip} plotCap={plotCap} />
         </div>
       </div>
     </div>
@@ -565,32 +612,102 @@ function useIsDesktop(): boolean {
 
 export function RadarBoard({
   blips,
+  pool,
+  plotCap,
   soloOnly,
   selectedId,
   onSelect,
 }: {
+  /** What the plate plots: the pool's Top-N head by opportunity. */
   blips: RadarBoardBlip[];
+  /** The FULL population at this cut + solo setting (every dimension merged, opportunity
+   * order) — the rail search's scope. A superset of `blips`: search must reach every
+   * niche of the cut, never just the plotted dots (user directive 2026-08-27). */
+  pool: RadarBoardBlip[];
+  /** The Top-N plot cap — names the honest "beyond the Top N plot" dossier note for a
+   * search selection that has no dot. */
+  plotCap: number;
   soloOnly: boolean;
-  /** Controlled selection — "dimension:key", or null. Owned by the page so the signal
-   * feed's cards select through the same channel a dot click uses. */
+  /** Controlled selection — "dimension:key" of ANY pool niche, or null. Owned by the
+   * page; dots and rail rows (including search hits beyond the plot) share the channel. */
   selectedId: string | null;
   onSelect: (id: string | null) => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
+  // The rail's niche search. Local state deliberately: the query is a reading aid for
+  // the list (like hover), not page state a card elsewhere needs to drive.
+  const [query, setQuery] = useState("");
+  // Keyboard cursor over the filtered rows (↑/↓ + Enter); reset whenever the query text
+  // changes so the cursor can never point past a shrunken result set.
+  const [activeIdx, setActiveIdx] = useState(0);
   // Side-by-side (≥lg): dossier in the rail pane. Stacked (<lg): dossier as the drawer.
   const isDesktop = useIsDesktop();
 
   const placed = useMemo(() => layoutBlips(blips), [blips]);
+  const q = query.trim().toLowerCase();
+
+  /** The rail's row source. No query: the plotted list, rank order (the board's own
+   * reading). With a query: a live case-insensitive substring filter over the FULL pool —
+   * plotted rows keep their rank/coords, beyond-plot rows carry n: null. */
+  const railEntries = useMemo<RailBlip[]>(() => {
+    if (!q) return placed;
+    const plottedById = new Map<string, PlacedBlip>(placed.map((p) => [p.id, p]));
+    const rows: RailBlip[] = [];
+    for (const b of pool) {
+      if (!b.key.toLowerCase().includes(q)) continue;
+      const id = `${b.dimension}:${b.key}`;
+      rows.push(plottedById.get(id) ?? { ...b, id, n: null });
+    }
+    return rows;
+  }, [q, placed, pool]);
+
   const byRing = useMemo(() => {
-    const m = new Map<RadarRing, PlacedBlip[]>(RING_ORDER.map((r) => [r, []]));
-    for (const b of placed) m.get(b.verdict.ring)!.push(b);
+    const m = new Map<RadarRing, RailBlip[]>(RING_ORDER.map((r) => [r, []]));
+    for (const b of railEntries) m.get(b.verdict.ring)!.push(b);
+    // Within a ring group: plotted rows first in rank order, then beyond-plot search hits
+    // in pool (opportunity) order — sort is stable, so ties keep their source order.
+    for (const group of m.values()) group.sort((a, b) => (a.n ?? Infinity) - (b.n ?? Infinity));
     return m;
-  }, [placed]);
+  }, [railEntries]);
+  /** The visible rows flattened in render order — the ↑/↓/Enter walk order. */
+  const flatRows = useMemo(() => RING_ORDER.flatMap((r) => byRing.get(r)!), [byRing]);
+
   const hovered = hoverId === null ? null : (placed.find((b) => b.id === hoverId) ?? null);
-  // Selection survives population toggles only if the niche is still on the board.
-  const selected = selectedId === null ? null : (placed.find((b) => b.id === selectedId) ?? null);
+  // Selection resolves against the PLOTTED board first (dot highlight comes free), then
+  // the full pool — a search hit beyond the plot cap still opens its dossier. It survives
+  // population toggles only while the niche is still in the pool.
+  const selected = useMemo<RailBlip | null>(() => {
+    if (selectedId === null) return null;
+    const onBoard = placed.find((b) => b.id === selectedId);
+    if (onBoard) return onBoard;
+    const inPool = pool.find((b) => `${b.dimension}:${b.key}` === selectedId);
+    return inPool ? { ...inPool, id: selectedId, n: null } : null;
+  }, [selectedId, placed, pool]);
+
+  const onSearchKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Escape") {
+      // Esc clears the query (and only that — a second Esc has nothing left to clear).
+      if (query !== "") {
+        e.stopPropagation();
+        setQuery("");
+        setActiveIdx(0);
+      }
+      return;
+    }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (flatRows.length === 0) return;
+      const step = e.key === "ArrowDown" ? 1 : -1;
+      setActiveIdx((i) => Math.min(Math.max(i + step, 0), flatRows.length - 1));
+      return;
+    }
+    if (e.key === "Enter") {
+      const hit = flatRows[Math.min(activeIdx, flatRows.length - 1)];
+      if (hit) onSelect(hit.id);
+    }
+  };
 
   const moveTip = (e: React.MouseEvent) => {
     const rect = wrapRef.current?.getBoundingClientRect();
@@ -612,7 +729,9 @@ export function RadarBoard({
   return (
     <div className="flex flex-col gap-5 lg:flex-row lg:items-stretch">
       {/* The plate */}
-      <div ref={wrapRef} className="relative mx-auto w-full max-w-[600px] lg:mx-0 lg:min-w-0 lg:flex-1">
+      {/* max-w: 640 from lg (the widened rail eats the difference first — at 1024 the
+          plate settles near 500px; 640 = the SVG's native size, so it never upscales). */}
+      <div ref={wrapRef} className="relative mx-auto w-full max-w-[600px] lg:mx-0 lg:min-w-0 lg:max-w-[640px] lg:flex-1">
         <svg viewBox={`0 0 ${SIZE} ${SIZE}`} className="block h-auto w-full" role="img" aria-label="Radar board: niches plotted by verdict ring and sector">
           {/* Decor — hairline rings, separators, origin cross and labels. pointer-events
               none as a GROUP: only the blip dots may ever be click targets, so a click
@@ -849,21 +968,53 @@ export function RadarBoard({
           column — full counts in the group headers, so nothing is silently capped);
           below lg it flows with the page, uncapped, and the dossier renders as the
           slide-over DRAWER instead (an inline pane down there would open BELOW the board,
-          out of view — the exact complaint this layout fixes). */}
-      <div className="flex min-w-0 flex-col border-t border-chartborder pt-4 lg:w-[300px] lg:shrink-0 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0 xl:w-[340px] xl:pl-5">
+          out of view — the exact complaint this layout fixes). Widths (2026-08-27, "too
+          narrow"): 360px at lg, 460px at xl — the plate shrinks first; the dossier's
+          value+bar rows fit one line at both. */}
+      <div className="flex min-w-0 flex-col border-t border-chartborder pt-4 lg:w-[360px] lg:shrink-0 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0 xl:w-[460px] xl:pl-5">
         {selected && isDesktop ? (
-          <VerdictDossier blip={selected} total={placed.length} onBack={() => onSelect(null)} />
+          <VerdictDossier blip={selected} plotCap={plotCap} total={placed.length} onBack={() => onSelect(null)} />
         ) : (
           <>
+            {/* The niche search — scope is the FULL pool, stated right in the
+                placeholder so nobody has to guess it only reaches the plotted dots. */}
+            <input
+              type="text"
+              data-testid="radar-search"
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setActiveIdx(0);
+              }}
+              onKeyDown={onSearchKey}
+              placeholder={`Search all ${pool.length} niches…`}
+              aria-label={`Search all ${pool.length} niches in this cut`}
+              autoComplete="off"
+              spellCheck={false}
+              className="mb-2 w-full border border-ink-primary/30 bg-transparent px-2.5 py-1.5 text-[13px] text-ink-primary placeholder:text-ink-muted"
+            />
             <div className="flex items-baseline gap-2 border-b border-ink-primary/25 pb-2">
               <span className="kicker text-[11px] tracking-[.08em] text-ink-primary">Verdicts</span>
-              <span className="tabular text-[11px] text-ink-muted">{placed.length}</span>
-              <span className="ml-auto text-[10px] text-ink-muted">click a dot or row for its dossier</span>
+              <span className="tabular text-[11px] text-ink-muted">
+                {q ? `${railEntries.length} of ${pool.length} match` : placed.length}
+              </span>
+              <span className="ml-auto text-[10px] text-ink-muted">
+                {q ? "Esc clears · ↑↓ + Enter opens" : "click a dot or row for its dossier"}
+              </span>
             </div>
             <div className="lg:relative lg:min-h-0 lg:flex-1">
               <div data-testid="radar-rail-list" className="rail-scroll flex flex-col gap-4 pt-2 lg:absolute lg:inset-0 lg:overflow-y-auto lg:pb-8 lg:pr-2">
+                {/* The honest empty state: the search really looked at the whole pool. */}
+                {q && railEntries.length === 0 && (
+                  <div data-testid="radar-search-empty" className="pt-1.5 text-[12px] text-ink-muted">
+                    No niches match &ldquo;{query.trim()}&rdquo; — searched all {pool.length} niches in this cut.
+                  </div>
+                )}
                 {RING_ORDER.map((ring) => {
                   const entries = byRing.get(ring)!;
+                  // While searching, a ring with no matches is noise — drop the whole
+                  // group (the unfiltered list keeps its explicit "None in this cut.").
+                  if (q && entries.length === 0) return null;
                   return (
                     <div key={ring}>
                       <div className="flex items-baseline gap-2 border-b border-chartborder pb-1.5">
@@ -883,13 +1034,20 @@ export function RadarBoard({
                               onClick={() => onSelect(b.id)}
                               onMouseEnter={() => setHoverId(b.id)}
                               onMouseLeave={clearHover}
-                              title={`${b.key} — ${RING_LABEL[b.verdict.ring]}: ${b.verdict.reason}`}
+                              title={`${b.key} — ${RING_LABEL[b.verdict.ring]}: ${b.verdict.reason}${
+                                b.n == null ? ` (beyond the Top ${plotCap} plot — no dot on the board)` : ""
+                              }`}
                               className={clsx(
                                 "group/rl flex min-w-0 items-baseline gap-2 py-[3px] text-left text-[13px] transition-colors",
-                                hoverId === b.id && "bg-ink-primary/[0.06]",
+                                (hoverId === b.id || (q && flatRows[activeIdx]?.id === b.id)) &&
+                                  "bg-ink-primary/[0.06]",
                               )}
                             >
-                              <span className="tabular w-6 shrink-0 text-right text-[11px] text-ink-muted">{b.n}</span>
+                              {/* Beyond-plot search hits have no rail rank — an em dash,
+                                  never a fake number (the dossier carries the full note). */}
+                              <span className="tabular w-6 shrink-0 text-right text-[11px] text-ink-muted">
+                                {b.n ?? "—"}
+                              </span>
                               <span className="truncate text-ink-secondary transition-colors group-hover/rl:text-brand">{b.key}</span>
                               <span className="shrink-0 text-[10px] text-ink-muted" title={SECTOR_LABEL[b.sector]}>
                                 {SECTOR_SHORT[b.sector]}
@@ -925,7 +1083,7 @@ export function RadarBoard({
           below the board (see DossierDrawer). Same close channel as the rail's back
           button: onSelect(null). */}
       {selected && !isDesktop && (
-        <DossierDrawer blip={selected} total={placed.length} onClose={() => onSelect(null)} />
+        <DossierDrawer blip={selected} plotCap={plotCap} total={placed.length} onClose={() => onSelect(null)} />
       )}
     </div>
   );
