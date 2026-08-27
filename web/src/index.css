@@ -269,6 +269,20 @@ h1, h2, h3, h4, h5, h6 {
   scrollbar-color: var(--baseline) transparent;
 }
 
+/* The radar rail's verdict list (RadarBoard.tsx): at xl it scrolls INSIDE the
+ * instrument, and macOS overlay scrollbars stay invisible until touched — which made a
+ * clipped list read as "the list ends at #22" (the A1 silent cap). Keep its scrollbar
+ * permanently visible; the markup pairs this with a bottom fade. */
+.rail-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.rail-scroll::-webkit-scrollbar-thumb {
+  background: var(--baseline);
+}
+.rail-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 /* Consistent keyboard focus ring across interactive elements. */
 @layer base {
   *:focus-visible {

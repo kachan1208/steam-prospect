@@ -84,6 +84,11 @@ for i in range(200):
             est_rev_reviews=est_rev,
             self_published=bool(i % 4 == 0),
             is_singleplayer=bool(i % 7 != 0),
+            # Solo-evidence inputs (mart_niche's evidence trio). Both carry NULLs on
+            # deliberately different cycles so the NULL-honest AVG/median paths are
+            # exercised (NULL must be skipped, never counted as 0).
+            is_indie=(None if i % 19 == 0 else bool(i % 3 != 0)),
+            playtime_p50=(None if i % 13 == 0 else float(30 + (i % 40) * 17)),  # minutes
             review_count_source="steamspy",
         )
     )
@@ -147,20 +152,31 @@ def main() -> int:
             appid INTEGER, name VARCHAR, release_year INTEGER, release_date DATE,
             release_valid BOOLEAN, price_initial DOUBLE, positive_ratio DOUBLE,
             owners_mid DOUBLE, total_reviews BIGINT, est_rev_reviews DOUBLE,
-            self_published BOOLEAN, is_singleplayer BOOLEAN, review_count_source VARCHAR)
+            self_published BOOLEAN, is_singleplayer BOOLEAN, is_indie BOOLEAN,
+            review_count_source VARCHAR)
         """
     )
     con.executemany(
-        "INSERT INTO stg_game VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO stg_game VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [
             (
                 g["appid"], g["name"], g["release_year"], g["release_date"],
                 g["release_valid"], g["price_initial"], g["positive_ratio"],
                 g["owners_mid"], g["total_reviews"], g["est_rev_reviews"],
-                g["self_published"], g["is_singleplayer"], g["review_count_source"],
+                g["self_published"], g["is_singleplayer"], g["is_indie"],
+                g["review_count_source"],
             )
             for g in games
         ],
+    )
+
+    # mart_game stand-in: in the real run mart_game.sql builds BEFORE mart_niche.sql
+    # (MART_FILES order) and mart_niche LEFT JOINs it for playtime_p50 (the solo-evidence
+    # med_playtime_h input). Only the joined columns are needed here.
+    con.execute("CREATE TABLE mart_game(appid INTEGER, playtime_p50 DOUBLE)")
+    con.executemany(
+        "INSERT INTO mart_game VALUES (?, ?)",
+        [(g["appid"], g["playtime_p50"]) for g in games],
     )
 
     con.execute("CREATE TEMP TABLE tag_tier(tag VARCHAR, tier VARCHAR)")
@@ -324,6 +340,56 @@ def main() -> int:
     """).fetchone()
     assert colony == (False, 50.0), f"Colony Sim must be non-emerging with a computed trend: {colony}"
     print("[ok] demand_emerging: two-tell rule replayed exactly; new-mass tell fires alone on 'Organizing'")
+
+    # ---- 1e. solo-evidence trio: same population as the cut, NULL-honest, hours --------
+    # self_published_share / indie_share / med_playtime_h claim to describe the SAME
+    # per-cut population solo_viability is computed over. Replay them over mart_niche_game
+    # (the published membership — exactly that population, by the parity invariant below)
+    # joined back to the inputs, and compare per cut. Tolerance because the replay's
+    # aggregation order can differ; NULL-vs-value mismatches are exact.
+    bad_evidence = con.execute("""
+        WITH replay AS (
+            SELECT g.dimension, g.key, g.win, g.min_reviews,
+                   AVG(CAST(sg.self_published AS DOUBLE)) AS sp,
+                   AVG(CAST(sg.is_indie AS DOUBLE)) AS ind,
+                   round(median(mg.playtime_p50) / 60.0, 1) AS mph
+            FROM mart_niche_game g
+            JOIN stg_game sg ON sg.appid = g.appid
+            LEFT JOIN mart_game mg ON mg.appid = g.appid
+            GROUP BY 1, 2, 3, 4
+        )
+        SELECT COUNT(*) FROM mart_niche n
+        JOIN replay r ON r.dimension = n.dimension AND r.key = n.key
+                     AND r.win = n.win AND r.min_reviews = n.min_reviews
+        WHERE (n.self_published_share IS NULL) != (r.sp IS NULL)
+           OR ABS(COALESCE(n.self_published_share, 0) - COALESCE(r.sp, 0)) > 1e-9
+           OR (n.indie_share IS NULL) != (r.ind IS NULL)
+           OR ABS(COALESCE(n.indie_share, 0) - COALESCE(r.ind, 0)) > 1e-9
+           OR (n.med_playtime_h IS NULL) != (r.mph IS NULL)
+           OR ABS(COALESCE(n.med_playtime_h, 0) - COALESCE(r.mph, 0)) > 1e-9
+    """).fetchone()[0]
+    assert bad_evidence == 0, f"{bad_evidence} cut(s) have solo-evidence columns off their own membership"
+    # The alias contract: self_published_share is self_pub_share under the evidence name —
+    # one computation in the SQL, so the two columns must be bit-identical everywhere.
+    alias_drift = con.execute(
+        "SELECT COUNT(*) FROM mart_niche WHERE self_published_share IS DISTINCT FROM self_pub_share"
+    ).fetchone()[0]
+    assert alias_drift == 0, f"{alias_drift} row(s) drift between self_published_share and self_pub_share"
+    # NULL-honesty has teeth: the fixture carries NULL is_indie / playtime_p50 rows, and
+    # every published cut still aggregates over enough non-NULL members to publish a
+    # value — while the units check pins hours (round(min/60, 1)), not raw minutes.
+    ev = con.execute("""
+        SELECT COUNT(*),
+               COUNT(*) FILTER (WHERE indie_share IS NULL OR med_playtime_h IS NULL),
+               MAX(med_playtime_h)
+        FROM mart_niche
+    """).fetchone()
+    assert ev[1] == 0, f"{ev[1]} cut(s) unexpectedly NULLed an evidence column (fixture has non-NULL members everywhere)"
+    max_minutes = 30 + 39 * 17  # the fixture's largest playtime_p50, in minutes
+    assert ev[2] is not None and ev[2] <= round(max_minutes / 60.0, 1), (
+        f"med_playtime_h {ev[2]} exceeds the fixture's max possible HOURS value — minutes leaked through"
+    )
+    print("[ok] solo-evidence trio: membership-replayed exactly, alias in lockstep, hours not minutes")
 
     n_rows = con.execute("SELECT COUNT(*) FROM mart_niche_game").fetchone()[0]
     n_niche = con.execute("SELECT COUNT(*) FROM mart_niche").fetchone()[0]

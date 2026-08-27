@@ -125,6 +125,14 @@ _DEMAND24M_COLS = [
     "reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct",
     "reviews_24m_new_share", "demand_emerging",
 ]
+# Solo-lens EVIDENCE trio (2026-08-27): solo_viability is the niche's SINGLEPLAYER SHARE —
+# a no-netcode proxy, not a production-scope measure — so the radar renders the member
+# profile behind it instead of asserting a bare 0.98: self_published_share (AVG
+# self_published), indie_share (AVG is_indie), med_playtime_h (median of member games'
+# playtime_p50, hours, 1 decimal). Same per-cut population as solo_viability by
+# construction (etl/marts/mart_niche.sql's agg CTE). One column family, one probe
+# (_has_solo_evidence) — the three always ship in the same ETL build.
+_SOLO_EVIDENCE_COLS = ["self_published_share", "indie_share", "med_playtime_h"]
 
 # Ordered base column list (single source of truth for SELECT + CSV header); the players
 # columns are appended when the mart carries them.
@@ -222,6 +230,19 @@ def _has_demand24m() -> bool:
     rows = analytics_db.query(
         "SELECT 1 FROM information_schema.columns "
         "WHERE table_name = 'mart_niche' AND column_name = 'demand_trend_24m_pct'"
+    )
+    return bool(rows)
+
+
+@lru_cache(maxsize=1)
+def _has_solo_evidence() -> bool:
+    """The solo-evidence trio (see _SOLO_EVIDENCE_COLS) — landed after the 24m demand
+    columns, so it gets its own gate. The mart on the server predates these columns for
+    hours after every deploy that adds them: rows then carry null and the UI omits the
+    evidence line — degrade, never a BinderException 500."""
+    rows = analytics_db.query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_niche' AND column_name = 'med_playtime_h'"
     )
     return bool(rows)
 
@@ -377,6 +398,8 @@ def _cols() -> list[str]:
         cols.extend(_LIFETIME_COLS)
     if _has_demand24m():
         cols.extend(_DEMAND24M_COLS)
+    if _has_solo_evidence():
+        cols.extend(_SOLO_EVIDENCE_COLS)
     return cols
 
 
@@ -541,6 +564,8 @@ def _radar_cols() -> list[str]:
         cols.append("p90_rev")
     if _has_players():
         cols.append("players_trend_7d_pct")
+    if _has_solo_evidence():
+        cols.extend(_SOLO_EVIDENCE_COLS)
     return cols
 
 
@@ -559,6 +584,10 @@ def _radar_card(r: dict, sparklines: dict[tuple[str, str], list[RadarSparklinePo
         reviews_24m_new_share=r.get("reviews_24m_new_share"),
         demand_emerging=bool(r.get("demand_emerging")),
         solo_viability=r.get("solo_viability"),
+        # Solo-evidence trio (see _SOLO_EVIDENCE_COLS) — None on marts that predate it.
+        self_published_share=r.get("self_published_share"),
+        indie_share=r.get("indie_share"),
+        med_playtime_h=r.get("med_playtime_h"),
         players_trend_7d_pct=r.get("players_trend_7d_pct"),
         sparkline=sparklines.get((r["dimension"], r["key"]), []),
     )

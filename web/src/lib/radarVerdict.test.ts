@@ -11,6 +11,7 @@ import {
   RING_ORDER,
   SAT_FLOOD_YOY,
   SOLO_FRIENDLY_MIN,
+  SOLO_HEAVY_CONTENT_H,
   WC_WINNER_TAKE_MOST,
   blipRadius,
   hash01,
@@ -130,9 +131,35 @@ describe("radarVerdict — emerging pre-empts every percentage-based verdict", (
   });
 
   it("the canonical young tag — null trend (no baseline) + emerging — plates emerging, not watch", () => {
-    const v = radarVerdict({ demand_trend_24m_pct: null, demand_emerging: true, opportunity_v2: 90 });
+    const v = radarVerdict({
+      demand_trend_24m_pct: null,
+      demand_emerging: true,
+      opportunity_v2: 90,
+      reviews_24m_new_share: 0.94,
+    });
     expect(v.ring).toBe("emerging");
-    expect(v.reason).toBe("young market — no comparable demand base");
+    expect(v.reason).toBe("young label — no comparable demand base");
+  });
+
+  it("the two tells get their own copy: young label vs a base too small for a % read", () => {
+    // Tell 2 (new-game mass >= EMERGING_NEW_MASS_SHARE): a genuinely young label.
+    const young = radarVerdictTrace({ demand_emerging: true, reviews_24m_new_share: 0.94 });
+    expect(young.reason).toBe("young label — no comparable demand base");
+    expect(young.checks.find((c) => c.id === "volume")!.note).toContain("young label");
+    expect(young.checks.find((c) => c.id === "new_share")!.note).toContain("young-label tell");
+    // Tell 1 alone (low prior base, LOW new share): a small stable niche — the copy must
+    // NOT claim it is new; its base is just too small for a % read.
+    const small = radarVerdictTrace({ demand_emerging: true, reviews_24m_new_share: 0.2 });
+    expect(small.ring).toBe("emerging"); // the % stays suppressed either way
+    expect(small.reason).toBe("base too small for a % read");
+    expect(small.checks.find((c) => c.id === "volume")!.note).not.toContain("young");
+    expect(small.checks.find((c) => c.id === "new_share")!.note).toContain("not a new label");
+    // Unknown new share cannot justify a "new" claim either.
+    expect(radarVerdict({ demand_emerging: true }).reason).toBe("base too small for a % read");
+    // The boundary belongs to the young-label side (the mart's >= comparison).
+    expect(radarVerdict({ demand_emerging: true, reviews_24m_new_share: 0.8 }).reason).toBe(
+      "young label — no comparable demand base",
+    );
   });
 
   it("false/null/undefined emerging changes nothing (older marts degrade exactly as before)", () => {
@@ -339,6 +366,76 @@ describe("radarVerdictTrace — the dossier decomposition", () => {
     expect(radarVerdictTrace({ demand_trend_24m_pct: -20 }).reason).toBe("demand softening");
     // At/above the bar with calm supply it is enter, not the sharpened watch.
     expect(radarVerdictTrace({ demand_trend_24m_pct: 60, saturation_yoy: 0.05 }).ring).toBe("enter");
+  });
+});
+
+describe("radarVerdictTrace — the solo row's member evidence", () => {
+  // The motivating case verbatim: "how is Souls-like solo buildable?" — 0.98 is the
+  // SINGLEPLAYER SHARE (a no-netcode proxy), and the honest answer shows the member
+  // profile next to it: 50% self-published, 71% indie, median 5.7h of content.
+  const soulsLike: RadarVerdictInput = {
+    demand_trend_24m_pct: -4,
+    solo_viability: 0.98,
+    self_published_share: 0.5,
+    indie_share: 0.71,
+    med_playtime_h: 5.7,
+  };
+
+  function soloRow(input: RadarVerdictInput) {
+    return radarVerdictTrace(input).checks.find((c) => c.id === "solo")!;
+  }
+
+  it("renders the evidence inline in the exact dossier format", () => {
+    const row = soloRow(soulsLike);
+    expect(row.label).toBe("Solo evidence");
+    expect(row.value).toBe("0.98 singleplayer · 50% self-pub · 71% indie · median 5.7h content");
+    expect(row.threshold).toBe(`≥ ${SOLO_FRIENDLY_MIN} singleplayer share`);
+    // The pass bar stays on the singleplayer share alone, exactly as before.
+    expect(row.pass).toBe(true);
+    expect(row.decides).toBe(false);
+  });
+
+  it("omits missing evidence clauses instead of inventing them (older mart -> nulls)", () => {
+    expect(soloRow({ solo_viability: 0.98 }).value).toBe("0.98 singleplayer");
+    expect(soloRow({ solo_viability: 0.98, indie_share: 0.71 }).value).toBe("0.98 singleplayer · 71% indie");
+    // Share unknown but evidence present: the share slot stays an honest "unknown".
+    expect(soloRow({ med_playtime_h: 5.7 }).value).toBe("unknown · median 5.7h content");
+    expect(soloRow({ med_playtime_h: 5.7 }).pass).toBeNull();
+  });
+
+  it("adds the NEUTRAL heavy-content caution above SOLO_HEAVY_CONTENT_H hours — note only", () => {
+    expect(SOLO_HEAVY_CONTENT_H).toBe(20);
+    const heavy = soloRow({ ...soulsLike, med_playtime_h: 24.3 });
+    expect(heavy.note).toContain("heavy content scope for a solo build");
+    expect(heavy.pass).toBe(true); // never a pass/fail change...
+    const light = soloRow(soulsLike);
+    expect(light.note).not.toContain("heavy content scope");
+    // ...and exactly at the bar it stays silent (strictly above fires it).
+    expect(soloRow({ ...soulsLike, med_playtime_h: SOLO_HEAVY_CONTENT_H }).note).not.toContain("heavy content scope");
+  });
+
+  it("evidence never moves the ring or the caution flag (display-only, like the whole row)", () => {
+    const base: RadarVerdictInput = { demand_trend_24m_pct: 60, saturation_yoy: 0.05 };
+    const withEvidence: RadarVerdictInput = {
+      ...base,
+      self_published_share: 0.1,
+      indie_share: 0.1,
+      med_playtime_h: 500,
+    };
+    expect(radarVerdict(withEvidence)).toEqual(radarVerdict(base));
+  });
+
+  it("the emerging trace's solo row carries the same evidence shape", () => {
+    const t = radarVerdictTrace({
+      demand_emerging: true,
+      reviews_24m: 39_600,
+      solo_viability: 0.94,
+      self_published_share: 0.63,
+      indie_share: 0.81,
+      med_playtime_h: 2.8,
+    });
+    const solo = t.checks.find((c) => c.id === "solo")!;
+    expect(solo.value).toBe("0.94 singleplayer · 63% self-pub · 81% indie · median 2.8h content");
   });
 });
 

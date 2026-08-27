@@ -22,43 +22,51 @@ import { nicheDetailPath } from "../pages/NicheDetail";
 /**
  * RadarBoard — the radial "tech-radar" plate (Zalando/solidgate visual language, Industry
  * blueprint dialect): concentric hairline verdict rings, three angular sectors (Genres /
- * Micro-genres / Themes), one dot per niche, and a numbered legend grouped by ring.
+ * Micro-genres / Themes), one dot per niche, and a RIGHT RAIL that is the board's single
+ * reading pane.
+ *
+ * ONE INSTRUMENT (2026-08-27 layout overhaul): plate and rail live in one frame and share
+ * one selection model. The rail has two modes:
+ *   - default: the ranked VERDICT LIST — every niche, grouped by ring, FULL counts. No
+ *     silent caps (project rule): below xl the list flows with the page; at xl it fills
+ *     the plate's height and scrolls inside the rail (absolute-inset column), with the
+ *     group headers carrying the true totals so nothing can quietly end at item #22.
+ *   - selection: the VERDICT DOSSIER, anchored in the rail (not floating below the
+ *     plate), with a "back to all verdicts" affordance.
+ * Selection is CONTROLLED (selectedId/onSelect props): the page owns it so the signal
+ * feed's cards can select a niche on the board through the same channel a dot click uses.
  *
  * Everything is hand-rolled SVG — the CSP forbids external chart libs, and recharts has no
  * polar scatter anyway. All colors are CSS vars; the ring verdict is encoded by POSITION
- * (which annulus) and spelled in the legend/tooltip, never by hue alone — dots follow the
+ * (which annulus) and spelled in the rail/tooltip, never by hue alone — dots follow the
  * app's mono-steel vocabulary (enter = --verdict-up accent, then receding paper alphas).
- * A second, orthogonal encoding carries the solo-viability LENS: team-scale niches
- * (solo_viability < SOLO_FRIENDLY_MIN) draw hollow (ring-colored stroke, transparent
- * fill), solo-friendly and unknown draw filled; the dot legend and tooltip spell it out.
- * Deliberately a lens, not a ring — see lib/radarVerdict.ts. A third mark flags EMERGING
- * niches (demand_emerging — young tags with no comparable demand base): a dashed halo
- * around the dot, a NEW + absolute-volume legend glyph instead of a trend %, and a
- * tooltip that never prints the non-representative % — still mono-steel, radius 0,
- * no red/green.
+ * A second, orthogonal encoding carries the solo LENS: team-scale niches (singleplayer
+ * share `solo_viability` < SOLO_FRIENDLY_MIN) draw hollow (ring-colored stroke,
+ * transparent fill), solo-friendly and unknown draw filled; the dot legend and tooltip
+ * spell it out. Deliberately a lens, not a ring — see lib/radarVerdict.ts. A third mark
+ * flags EMERGING niches (demand_emerging): a dashed halo, a NEW + absolute-volume glyph
+ * instead of a trend %, and a tooltip that never prints the non-representative %.
  *
  * POPULATION (`soloOnly` prop): the board's default population is solo-friendly niches
  * only — filtered SERVER-side (the API's solo_only param, same 0.8 bar as
- * SOLO_FRIENDLY_MIN; NULL solo_viability = unknown = excluded, because the population is
- * an explicit positive claim). With soloOnly the hollow/filled encoding is redundant (all
- * dots are solo-friendly by construction), so the dot legend states the population rule
- * instead of drawing lens samples; with the toggle off the full population returns and
- * the lens samples come back with it.
- *
- * THE DOSSIER: clicking a dot no longer navigates — it opens the VerdictDossier panel
- * under the plate, which decomposes WHY the niche got its ring: the verdict-trace rows
- * from lib/radarVerdict.ts's radarVerdictTrace (the same evaluation that placed the dot,
- * so the explanation can never disagree with the position), pass/fail in neutral steel
- * glyphs (never red/green), plus the raw context numbers and the deep-dive link. The
- * legend entries stay plain <Link>s — the keyboard-reachable route to the detail page.
+ * SOLO_FRIENDLY_MIN; NULL solo_viability = unknown = excluded). With soloOnly the
+ * hollow/filled encoding is redundant, so the dot legend states the population rule
+ * instead of drawing lens samples.
  *
  * LAYOUT IS DETERMINISTIC: every jitter comes from hash01(dimension:key), never
- * Math.random, so a niche holds its position across renders, visits and machines. A small
- * fixed-pass collision relax nudges overlapping same-cell dots apart — also deterministic
- * (stable input order, pure arithmetic).
+ * Math.random, so a niche holds its position across renders, visits and machines.
+ * Density handling (2026-08-27, after dots merged into blobs in the micro sector's
+ * outer bands): when a (sector, ring) cell's dots would claim more than CELL_FILL_MAX of
+ * its area, every radius in that cell scales down together (sqrt of the overflow, floored
+ * at BLIP_R_DENSE_MIN) — pure arithmetic over the cell's own population, so still
+ * deterministic — and the pairwise collision relax runs RELAX_PASSES fixed passes.
  *
- * Keyboard access: the SVG dots are mouse conveniences (aria-hidden); every niche's REAL
- * link is its legend entry, a plain <Link> — so the board never traps 80 tab stops.
+ * CLICK TARGETS: only the blip dots are interactive inside the SVG — the hairline rings,
+ * separators and labels sit in a pointer-events:none group so a scripted or misaimed
+ * click on the decor can never look like a dead dot (and the legend's sample circles are
+ * plain aria-hidden glyphs, not targets). Keyboard access: the SVG dots are mouse
+ * conveniences (aria-hidden); every niche's keyboard route is its rail row (a real
+ * button), and navigation lives on the dossier's deep-dive link.
  */
 
 export type RadarSector = "genre" | "micro" | "theme";
@@ -69,7 +77,7 @@ const SECTOR_LABEL: Record<RadarSector, string> = {
   micro: "Micro-genres",
   theme: "Themes",
 };
-/** One-letter sector marker for legend rows (a "Roguelike" tag and a "Roguelike" genre
+/** One-letter sector marker for rail rows (a "Roguelike" tag and a "Roguelike" genre
  * can both be on the board — the letter disambiguates without a second grouping level). */
 const SECTOR_SHORT: Record<RadarSector, string> = { genre: "G", micro: "M", theme: "T" };
 
@@ -87,20 +95,20 @@ export interface RadarBoardBlip {
   demandTrendPct: number | null;
   /** The mart's young-tag flag (see lib/radarVerdict.ts): when true the trend % is not
    * representative — the blip plates in the Emerging ring, draws a dashed halo, and the
-   * tooltip/legend show absolute volume instead of the %. */
+   * tooltip/rail show absolute volume instead of the %. */
   demandEmerging: boolean;
   /** Absolute review inflow over the last 24 months — the number an emerging niche is
    * judged by (its % has no comparable base). null on marts without the demand columns. */
   reviews24m: number | null;
   /** Prior-window review inflow — the dossier's demand-base context. */
   reviewsPrev24m: number | null;
-  /** 0..1 share of the cut's scored games playable single-player; null = unknown (mart
-   * predates the column). A LENS only — drawn as dot style (hollow = team-scale), never
-   * fed into the verdict; see lib/radarVerdict.ts. */
+  /** 0..1 SINGLEPLAYER SHARE of the cut's scored games (a no-netcode proxy, not a
+   * production-scope measure); null = unknown (mart predates the column). A LENS only —
+   * drawn as dot style (hollow = team-scale), never fed into the verdict. */
   solo_viability: number | null;
   verdict: RadarVerdict;
   /** The verdict's decomposition (radarVerdictTrace's checks — produced by the SAME
-   * evaluation as `verdict`); rendered by the dossier when the dot is clicked. */
+   * evaluation as `verdict`); rendered by the rail dossier when the dot is selected. */
   trace: VerdictCheck[];
 }
 
@@ -119,9 +127,17 @@ function sectorStart(i: number): number {
   return -Math.PI / 2 + i * SECTOR_SPAN;
 }
 
+/** Max share of a (sector, ring) cell's area its dots may claim before every dot in the
+ * cell shrinks together — the deterministic anti-blob rule (see module doc). */
+export const CELL_FILL_MAX = 0.22;
+/** The floor density scaling can never cross — dots stay visible and hittable. */
+export const BLIP_R_DENSE_MIN = 2.5;
+/** Fixed pairwise-relax passes (was 3 — not enough for the dense micro-genre bands). */
+const RELAX_PASSES = 8;
+
 export interface PlacedBlip extends RadarBoardBlip {
   id: string;
-  /** 1-based legend number (ring order, then sector order, then opportunity desc). */
+  /** 1-based rail number (ring order, then sector order, then opportunity desc). */
   n: number;
   x: number;
   y: number;
@@ -164,7 +180,8 @@ function clampToCell(b: PlacedBlip): void {
 
 /**
  * Deterministic placement: hash-jittered polar position inside the (sector, ring) cell,
- * then a cheap fixed-pass pairwise relax to reduce overlap. Exported for tests.
+ * density-scaled radii (see module doc), then a fixed-pass pairwise relax to reduce
+ * overlap. Exported for tests.
  */
 export function layoutBlips(blips: RadarBoardBlip[]): PlacedBlip[] {
   const maxP90 = blips.reduce<number>((m, b) => Math.max(m, b.p90_rev ?? 0), 0);
@@ -178,9 +195,29 @@ export function layoutBlips(blips: RadarBoardBlip[]): PlacedBlip[] {
     return a.key.localeCompare(b.key);
   });
 
+  // Density pass: sum each (sector, ring) cell's dot area against the cell's own annulus
+  // area; an over-full cell scales EVERY resident radius by the same sqrt factor (area
+  // tracks the overflow), floored at BLIP_R_DENSE_MIN. Deterministic — pure arithmetic
+  // over the stable cell population, no randomness, no iteration-order dependence.
+  const baseR = ordered.map((blip) => blipRadius(blip.p90_rev, maxP90));
+  const dotArea = new Map<string, number>();
+  for (let i = 0; i < ordered.length; i++) {
+    const cell = `${RING_ORDER.indexOf(ordered[i].verdict.ring)}|${SECTOR_ORDER.indexOf(ordered[i].sector)}`;
+    dotArea.set(cell, (dotArea.get(cell) ?? 0) + Math.PI * baseR[i] * baseR[i]);
+  }
+  const cellScale = new Map<string, number>();
+  for (const [cell, area] of dotArea) {
+    const ringIdx = Number(cell.split("|")[0]);
+    const rOut = RING_OUTER[ringIdx] * R;
+    const rIn = ringIdx === 0 ? 0 : RING_OUTER[ringIdx - 1] * R;
+    const cellArea = (SECTOR_SPAN / 2) * (rOut * rOut - rIn * rIn);
+    cellScale.set(cell, area > 0 ? Math.min(1, Math.sqrt((CELL_FILL_MAX * cellArea) / area)) : 1);
+  }
+
   const placed: PlacedBlip[] = ordered.map((blip, i) => {
     const id = `${blip.dimension}:${blip.key}`;
-    const r = blipRadius(blip.p90_rev, maxP90);
+    const cell = `${RING_ORDER.indexOf(blip.verdict.ring)}|${SECTOR_ORDER.indexOf(blip.sector)}`;
+    const r = Math.max(BLIP_R_DENSE_MIN, baseR[i] * (cellScale.get(cell) ?? 1));
     const ringIdx = RING_ORDER.indexOf(blip.verdict.ring);
     const sectorIdx = SECTOR_ORDER.indexOf(blip.sector);
     const { rIn, rOut } = cellBounds(ringIdx, r);
@@ -192,10 +229,10 @@ export function layoutBlips(blips: RadarBoardBlip[]): PlacedBlip[] {
     return { ...blip, id, n: i + 1, r, x: C + radius * Math.cos(a), y: C + radius * Math.sin(a) };
   });
 
-  // Collision relax: 3 passes, push overlapping pairs apart along their delta, then
-  // re-clamp into the cell. Deterministic (stable order, no randomness); coincident
+  // Collision relax: RELAX_PASSES passes, push overlapping pairs apart along their delta,
+  // then re-clamp into the cell. Deterministic (stable order, no randomness); coincident
   // centers split along a hash-derived direction.
-  for (let pass = 0; pass < 3; pass++) {
+  for (let pass = 0; pass < RELAX_PASSES; pass++) {
     for (let i = 0; i < placed.length; i++) {
       for (let j = i + 1; j < placed.length; j++) {
         const a = placed[i];
@@ -227,7 +264,7 @@ export function layoutBlips(blips: RadarBoardBlip[]): PlacedBlip[] {
 // ---- rendering --------------------------------------------------------------------------
 
 /** Mono-steel ring vocabulary: the strongest verdict carries the accent, the rest recede
- * in paper alphas. Never red/green; the ring POSITION and the legend carry the meaning. */
+ * in paper alphas. Never red/green; the ring POSITION and the rail carry the meaning. */
 const RING_FILL: Record<RadarRing, string> = {
   enter: "var(--verdict-up)",
   watch: MONO.paper75,
@@ -255,15 +292,16 @@ function MoveGlyph({ trendPct }: { trendPct: number | null }) {
   );
 }
 
-/** Legend glyph for an emerging niche — the trend % must NEVER headline a young tag (its
+/** Rail glyph for an emerging niche — the trend % must NEVER headline a young tag (its
  * base is near zero by construction), so the row carries the absolute volume instead. */
 function EmergingGlyph({ reviews24m }: { reviews24m: number | null }) {
   return (
     <span
       className="kicker ml-auto shrink-0 pl-2 text-[10px] tracking-[.08em] text-ink-muted"
       title={
-        "Emerging — a young tag: its prior 24-month window is near zero by construction, " +
-        "so the trend % is not representative. Judged by absolute review volume instead" +
+        "Emerging — no comparable demand base, so the trend % is not representative " +
+        "(the dossier says whether that's a young label or just a base too small for a " +
+        "% read). Judged by absolute review volume instead" +
         (reviews24m != null ? ` (${fmtInt(reviews24m)} reviews / 24m).` : ".")
       }
     >
@@ -295,16 +333,16 @@ function CheckGlyph({ pass }: { pass: boolean | null }) {
 }
 
 /**
- * The verdict dossier — the per-niche analysis panel a blip click opens. Decomposes WHY
- * the niche got its ring: one row per VerdictCheck from radarVerdictTrace (the SAME
- * evaluation that placed the dot — see lib/radarVerdict.ts), each with the niche's own
- * number, the bar it was judged against, pass/fail in neutral steel, and a one-clause
- * reading. decides:false rows (the entrant-economics falsification tell, the solo lens)
- * are labeled "· context": they can talk you out of a niche, they never move its ring.
+ * The verdict dossier — the rail's selection mode. Decomposes WHY the niche got its
+ * ring: one block per VerdictCheck from radarVerdictTrace (the SAME evaluation that
+ * placed the dot — see lib/radarVerdict.ts), each with the niche's own numbers, the bar
+ * it was judged against, pass/fail in neutral steel, and a one-clause reading.
+ * decides:false rows (the entrant-economics falsification tell, the solo lens) are
+ * labeled "· context": they can talk you out of a niche, they never move its ring.
  * Below the trace: the raw context numbers and the deep-dive link (the dossier explains;
  * the detail page is where the full workup lives).
  */
-function VerdictDossier({ blip, onClose }: { blip: PlacedBlip; onClose: () => void }) {
+function VerdictDossier({ blip, total, onBack }: { blip: PlacedBlip; total: number; onBack: () => void }) {
   const v = blip.verdict;
   const context = [
     blip.reviews24m != null ? `reviews 24m ${fmtInt(blip.reviews24m)}` : null,
@@ -320,70 +358,85 @@ function VerdictDossier({ blip, onClose }: { blip: PlacedBlip; onClose: () => vo
     <section
       aria-label={`Verdict dossier: ${blip.key}`}
       data-testid="verdict-dossier"
-      className="relative mt-4 border border-ink-primary/25"
+      className="flex min-w-0 flex-col xl:min-h-0 xl:flex-1"
     >
-      <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1 border-b border-chartborder px-4 py-2.5">
-        <span
-          className="inline-block h-2 w-2 shrink-0 self-center"
-          style={{ backgroundColor: RING_FILL[v.ring] }}
-          aria-hidden
-        />
-        <span className="kicker text-[11px] tracking-[.08em] text-ink-primary">
-          {blip.n}. {blip.key}
-        </span>
-        <span className="text-[11px] text-ink-muted">{SECTOR_LABEL[blip.sector]}</span>
-        <span className="text-[12px] text-ink-secondary sm:ml-auto">
-          <span className="font-semibold text-ink-primary">{RING_LABEL[v.ring]}</span>
-          {v.caution ? " · caution" : ""} — {v.reason}
-        </span>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close dossier"
-          className="ml-auto self-center border border-ink-primary/35 px-1.5 py-0.5 text-[10px] leading-none text-ink-primary transition-colors hover:bg-ink-primary/[0.08] sm:ml-2"
-        >
-          ✕
-        </button>
-      </div>
+      <button
+        type="button"
+        onClick={onBack}
+        aria-label="Back to all verdicts"
+        className="flex w-full items-center gap-2 border-b border-ink-primary/25 pb-2 text-left text-ink-primary transition-colors hover:text-brand"
+      >
+        <span aria-hidden className="text-[12px] leading-none">←</span>
+        <span className="kicker text-[11px] tracking-[.08em]">All verdicts</span>
+        <span className="tabular text-[11px] text-ink-muted">{total}</span>
+      </button>
 
-      <div className="flex flex-col">
-        {blip.trace.map((c) => (
-          <div
-            key={c.id}
-            className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 border-b border-chartborder px-4 py-2 last:border-b-0"
-          >
-            <span className="self-center">
-              <CheckGlyph pass={c.pass} />
+      <div className="xl:relative xl:min-h-0 xl:flex-1">
+        <div className="flex flex-col pt-2.5 xl:absolute xl:inset-0 xl:overflow-y-auto xl:pr-1">
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            <span
+              className="inline-block h-2 w-2 shrink-0 self-center"
+              style={{ backgroundColor: RING_FILL[v.ring] }}
+              aria-hidden
+            />
+            <span className="kicker text-[11px] tracking-[.08em] text-ink-primary">
+              {blip.n}. {blip.key}
             </span>
-            <span className="sr-only">{c.pass === null ? "unknown" : c.pass ? "passes" : "fails"}</span>
-            <span className="kicker w-[168px] shrink-0 text-[10px] tracking-[.08em] text-ink-muted">
-              {c.decides ? c.label : `${c.label} · context`}
-            </span>
-            <span className="tabular w-[168px] shrink-0 text-[12px] text-ink-primary">{c.value}</span>
-            <span className="tabular w-[210px] shrink-0 text-[11px] text-ink-muted">bar {c.threshold}</span>
-            <span className="min-w-0 flex-1 basis-[220px] text-[11px] text-ink-secondary">{c.note}</span>
+            <span className="text-[11px] text-ink-muted">{SECTOR_LABEL[blip.sector]}</span>
           </div>
-        ))}
-      </div>
+          <p className="border-b border-chartborder pb-2 pt-1 text-[12px] text-ink-secondary">
+            <span className="font-semibold text-ink-primary">{RING_LABEL[v.ring]}</span>
+            {v.caution ? " · caution" : ""} — {v.reason}
+          </p>
 
-      <div className="flex flex-wrap items-center gap-3 border-t border-chartborder px-4 py-2.5">
-        <span className="tabular text-[11px] text-ink-muted">{context}</span>
-        <Link
-          to={nicheDetailPath(blip.dimension, blip.key)}
-          onClick={() => trackEvent("niche_open")}
-          className="ml-auto text-[13px] text-brand transition-colors hover:text-brand-hover"
-        >
-          Open deep dive →
-        </Link>
+          {blip.trace.map((c) => (
+            <div key={c.id} className="border-b border-chartborder py-2">
+              {/* flex-wrap, no truncation: the bar clause drops to its own line in the
+                  narrow rail rather than eating the check's name. */}
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                <CheckGlyph pass={c.pass} />
+                <span className="sr-only">{c.pass === null ? "unknown" : c.pass ? "passes" : "fails"}</span>
+                <span className="kicker text-[10px] tracking-[.08em] text-ink-muted">
+                  {c.decides ? c.label : `${c.label} · context`}
+                </span>
+                <span className="tabular ml-auto text-right text-[10px] text-ink-muted">bar {c.threshold}</span>
+              </div>
+              <div className="tabular pt-1 text-[12px] text-ink-primary">{c.value}</div>
+              <div className="pt-0.5 text-[11px] leading-snug text-ink-secondary">{c.note}</div>
+            </div>
+          ))}
+
+          <div className="flex flex-col gap-2 pb-1 pt-2.5">
+            <span className="tabular text-[11px] text-ink-muted">{context}</span>
+            <Link
+              to={nicheDetailPath(blip.dimension, blip.key)}
+              onClick={() => trackEvent("niche_open")}
+              className="text-[13px] text-brand transition-colors hover:text-brand-hover"
+            >
+              Open deep dive →
+            </Link>
+          </div>
+        </div>
       </div>
     </section>
   );
 }
 
-export function RadarBoard({ blips, soloOnly }: { blips: RadarBoardBlip[]; soloOnly: boolean }) {
+export function RadarBoard({
+  blips,
+  soloOnly,
+  selectedId,
+  onSelect,
+}: {
+  blips: RadarBoardBlip[];
+  soloOnly: boolean;
+  /** Controlled selection — "dimension:key", or null. Owned by the page so the signal
+   * feed's cards select through the same channel a dot click uses. */
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+}) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
 
   const placed = useMemo(() => layoutBlips(blips), [blips]);
@@ -414,90 +467,95 @@ export function RadarBoard({ blips, soloOnly }: { blips: RadarBoardBlip[]; soloO
   }
 
   return (
-    <div className="flex flex-col gap-6 xl:flex-row xl:items-start">
+    <div className="flex flex-col gap-5 xl:flex-row xl:items-stretch">
       {/* The plate */}
-      <div ref={wrapRef} className="relative mx-auto w-full max-w-[640px] xl:mx-0 xl:flex-1">
+      <div ref={wrapRef} className="relative mx-auto w-full max-w-[600px] xl:mx-0 xl:min-w-0 xl:flex-1">
         <svg viewBox={`0 0 ${SIZE} ${SIZE}`} className="block h-auto w-full" role="img" aria-label="Radar board: niches plotted by verdict ring and sector">
-          {/* Verdict rings — hairline circles, outermost on the baseline weight. */}
-          {RING_OUTER.map((f, i) => (
-            <circle
-              key={f}
-              cx={C}
-              cy={C}
-              r={f * R}
-              fill="none"
-              stroke={i === RING_OUTER.length - 1 ? "var(--baseline)" : "var(--gridline)"}
-              strokeWidth={1}
-            />
-          ))}
-          {/* Sector separators — hairline radii. */}
-          {SECTOR_ORDER.map((_, i) => {
-            const a = sectorStart(i);
-            return (
-              <line
-                key={i}
-                x1={C}
-                y1={C}
-                x2={C + R * Math.cos(a)}
-                y2={C + R * Math.sin(a)}
-                stroke="var(--gridline)"
+          {/* Decor — hairline rings, separators, origin cross and labels. pointer-events
+              none as a GROUP: only the blip dots may ever be click targets, so a click
+              landing on a hairline can never read as a dead dot (A4 hardening). */}
+          <g pointerEvents="none">
+            {/* Verdict rings — hairline circles, outermost on the baseline weight. */}
+            {RING_OUTER.map((f, i) => (
+              <circle
+                key={f}
+                cx={C}
+                cy={C}
+                r={f * R}
+                fill="none"
+                stroke={i === RING_OUTER.length - 1 ? "var(--baseline)" : "var(--gridline)"}
                 strokeWidth={1}
               />
-            );
-          })}
-          {/* Center registration cross — the blueprint sheet's origin mark. */}
-          <line x1={C - 7} y1={C} x2={C + 7} y2={C} stroke="var(--baseline)" strokeWidth={1} />
-          <line x1={C} y1={C - 7} x2={C} y2={C + 7} stroke="var(--baseline)" strokeWidth={1} />
+            ))}
+            {/* Sector separators — hairline radii. */}
+            {SECTOR_ORDER.map((_, i) => {
+              const a = sectorStart(i);
+              return (
+                <line
+                  key={i}
+                  x1={C}
+                  y1={C}
+                  x2={C + R * Math.cos(a)}
+                  y2={C + R * Math.sin(a)}
+                  stroke="var(--gridline)"
+                  strokeWidth={1}
+                />
+              );
+            })}
+            {/* Center registration cross — the blueprint sheet's origin mark. */}
+            <line x1={C - 7} y1={C} x2={C + 7} y2={C} stroke="var(--baseline)" strokeWidth={1} />
+            <line x1={C} y1={C - 7} x2={C} y2={C + 7} stroke="var(--baseline)" strokeWidth={1} />
 
-          {/* Ring names, stacked along the upward separator (a cell boundary, so they
-              never sit over a blip field); page-ground halo keeps them legible. */}
-          {RING_ORDER.map((ring, i) => {
-            const mid = ((i === 0 ? 0 : RING_OUTER[i - 1]) + RING_OUTER[i]) / 2;
-            return (
-              <text
-                key={ring}
-                x={C}
-                y={C - mid * R}
-                textAnchor="middle"
-                dominantBaseline="middle"
-                className="kicker"
-                style={{
-                  fontSize: 10,
-                  letterSpacing: "0.1em",
-                  fill: "var(--text-muted)",
-                  stroke: "var(--page-plane)",
-                  strokeWidth: 4,
-                  paintOrder: "stroke",
-                }}
-              >
-                {RING_LABEL[ring]}
-              </text>
-            );
-          })}
+            {/* Ring names, stacked along the upward separator (a cell boundary, so they
+                never sit over a blip field); page-ground halo keeps them legible. */}
+            {RING_ORDER.map((ring, i) => {
+              const mid = ((i === 0 ? 0 : RING_OUTER[i - 1]) + RING_OUTER[i]) / 2;
+              return (
+                <text
+                  key={ring}
+                  x={C}
+                  y={C - mid * R}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                  className="kicker"
+                  style={{
+                    fontSize: 10,
+                    letterSpacing: "0.1em",
+                    fill: "var(--text-muted)",
+                    stroke: "var(--page-plane)",
+                    strokeWidth: 4,
+                    paintOrder: "stroke",
+                  }}
+                >
+                  {RING_LABEL[ring]}
+                </text>
+              );
+            })}
 
-          {/* Sector names, outside the outer ring at each sector's mid angle. */}
-          {SECTOR_ORDER.map((sector, i) => {
-            const a = sectorStart(i) + SECTOR_SPAN / 2;
-            return (
-              <text
-                key={sector}
-                x={C + (R + 20) * Math.cos(a)}
-                y={C + (R + 20) * Math.sin(a)}
-                textAnchor="middle"
-                dominantBaseline="middle"
-                className="kicker"
-                style={{ fontSize: 11, letterSpacing: "0.12em", fill: "var(--text-secondary)" }}
-              >
-                {SECTOR_LABEL[sector]}
-              </text>
-            );
-          })}
+            {/* Sector names, outside the outer ring at each sector's mid angle. */}
+            {SECTOR_ORDER.map((sector, i) => {
+              const a = sectorStart(i) + SECTOR_SPAN / 2;
+              return (
+                <text
+                  key={sector}
+                  x={C + (R + 20) * Math.cos(a)}
+                  y={C + (R + 20) * Math.sin(a)}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                  className="kicker"
+                  style={{ fontSize: 11, letterSpacing: "0.12em", fill: "var(--text-secondary)" }}
+                >
+                  {SECTOR_LABEL[sector]}
+                </text>
+              );
+            })}
+          </g>
 
-          {/* Blips — dots only; the legend carries the accessible links. Solo lens as dot
-              STYLE: team-scale (solo_viability < SOLO_FRIENDLY_MIN) draws hollow — ring-
-              colored stroke over a `transparent` fill (transparent, not "none", so the
-              interior still hit-tests for hover/click); solo-friendly and unknown draw
-              filled as before. Ring POSITION is untouched — solo never moves a verdict. */}
+          {/* Blips — dots only; the rail carries the accessible buttons. Solo lens as dot
+              STYLE: team-scale (singleplayer share < SOLO_FRIENDLY_MIN) draws hollow —
+              ring-colored stroke over a `transparent` fill (transparent, not "none", so
+              the interior still hit-tests for hover/click); solo-friendly and unknown
+              draw filled. Ring POSITION is untouched — solo never moves a verdict. */}
           <g aria-hidden>
             {placed.map((b) => (
               <g key={b.id}>
@@ -533,10 +591,10 @@ export function RadarBoard({ blips, soloOnly }: { blips: RadarBoardBlip[]; soloO
                   }}
                   onMouseMove={moveTip}
                   onMouseLeave={clearHover}
-                  // A dot click opens the VERDICT DOSSIER (the analysis is the board's
-                  // first answer); navigation to the detail page lives on the legend
-                  // links and on the dossier's own deep-dive link.
-                  onClick={() => setSelectedId(b.id)}
+                  // A dot click opens the VERDICT DOSSIER in the rail (the analysis is
+                  // the board's first answer); navigation to the detail page lives on
+                  // the dossier's own deep-dive link.
+                  onClick={() => onSelect(b.id)}
                 />
                 {(hoverId === b.id || selectedId === b.id) && (
                   <circle cx={b.x} cy={b.y} r={b.r + (b.demandEmerging ? 5 : 2.5)} fill="none" stroke="var(--text-primary)" strokeWidth={1} pointerEvents="none" />
@@ -549,31 +607,31 @@ export function RadarBoard({ blips, soloOnly }: { blips: RadarBoardBlip[]; soloO
         {/* Dot-style legend. Under the default solo-only population the hollow/filled lens
             encoding is redundant (every dot is solo-friendly by construction), so the
             legend states the POPULATION RULE instead of drawing lens samples — the UI must
-            never imply team-scale niches might be hiding on the board. With the toggle off
-            the full population returns and the lens samples come back with it (honest
-            about the overlap: unknown draws filled like solo-friendly, and the sample says
-            so). */}
+            never imply team-scale niches might be hiding on the board. The metric is named
+            honestly: solo_viability IS the niche's singleplayer share (a no-netcode proxy,
+            not a production-scope measure — the dossier's solo row carries the member
+            evidence). The sample circles are plain aria-hidden glyphs, never click targets. */}
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-2 text-[11px] text-ink-muted">
           {soloOnly ? (
             <span className="inline-flex items-center gap-1.5">
-              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="shrink-0">
+              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="pointer-events-none shrink-0">
                 <circle cx="5" cy="5" r="4" fill="currentColor" />
               </svg>
               <span>
-                population: solo-friendly only · solo viability ≥ {SOLO_FRIENDLY_MIN} (server-filtered; unknown
+                population: solo-friendly only · singleplayer share ≥ {SOLO_FRIENDLY_MIN} (server-filtered; unknown
                 excluded)
               </span>
             </span>
           ) : (
             <>
               <span className="inline-flex items-center gap-1.5">
-                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="shrink-0">
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="pointer-events-none shrink-0">
                   <circle cx="5" cy="5" r="4" fill="currentColor" />
                 </svg>
-                solo-friendly (solo viability ≥ {SOLO_FRIENDLY_MIN}) or unknown
+                solo-friendly (singleplayer share ≥ {SOLO_FRIENDLY_MIN}) or unknown
               </span>
               <span className="inline-flex items-center gap-1.5">
-                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="shrink-0">
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="pointer-events-none shrink-0">
                   <circle cx="5" cy="5" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
                 </svg>
                 team-scale (&lt; {SOLO_FRIENDLY_MIN})
@@ -581,17 +639,14 @@ export function RadarBoard({ blips, soloOnly }: { blips: RadarBoardBlip[]; soloO
             </>
           )}
           <span className="inline-flex items-center gap-1.5">
-            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden className="shrink-0">
+            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden className="pointer-events-none shrink-0">
               <circle cx="6" cy="6" r="2.5" fill="currentColor" />
               <circle cx="6" cy="6" r="5" fill="none" stroke="currentColor" strokeWidth="1" strokeDasharray="2 2" />
             </svg>
-            emerging (young tag — no comparable base)
+            emerging (no comparable % base)
           </span>
           <span>dot area = P90 revenue · ring = verdict (solo never moves a dot between rings)</span>
         </div>
-
-        {/* The verdict dossier — the click-through analysis for the selected blip. */}
-        {selected && <VerdictDossier blip={selected} onClose={() => setSelectedId(null)} />}
 
         {/* Hover tooltip — HTML over the SVG, same TooltipPanel language as every chart. */}
         {hovered && tip && (
@@ -616,7 +671,10 @@ export function RadarBoard({ blips, soloOnly }: { blips: RadarBoardBlip[]; soloO
                 // its absolute volume.
                 ...(hovered.demandEmerging
                   ? [
-                      { label: "Demand 24m", value: "new market — no comparable base" },
+                      // Neutral on purpose — WHICH emerging tell fired (young label vs a
+                      // base too small for a % read) is the dossier's distinction; the
+                      // tooltip only carries the claim both tells share.
+                      { label: "Demand 24m", value: "emerging — no comparable % base" },
                       {
                         label: "Reviews 24m",
                         value: hovered.reviews24m != null ? fmtInt(hovered.reviews24m) : "—",
@@ -627,7 +685,7 @@ export function RadarBoard({ blips, soloOnly }: { blips: RadarBoardBlip[]; soloO
                 { label: "Games", value: fmtInt(hovered.n_games) },
                 { label: "Opp v2", value: hovered.opportunity_v2 != null ? hovered.opportunity_v2.toFixed(1) : "—" },
                 {
-                  label: "Solo viability",
+                  label: "Singleplayer share",
                   value: hovered.solo_viability != null ? hovered.solo_viability.toFixed(2) : "unknown",
                 },
               ]}
@@ -636,51 +694,79 @@ export function RadarBoard({ blips, soloOnly }: { blips: RadarBoardBlip[]; soloO
         )}
       </div>
 
-      {/* Legend — numbered, grouped by ring, every entry a real link. */}
-      <div className="flex flex-col gap-5 xl:w-[320px] xl:max-h-[640px] xl:shrink-0 xl:overflow-y-auto xl:pr-1">
-        {RING_ORDER.map((ring) => {
-          const entries = byRing.get(ring)!;
-          return (
-            <div key={ring}>
-              <div className="flex items-baseline gap-2 border-b border-chartborder pb-1.5">
-                <span className="inline-block h-2 w-2 shrink-0 self-center" style={{ backgroundColor: RING_FILL[ring] }} aria-hidden />
-                <span className="kicker text-[11px] text-ink-primary">{RING_LABEL[ring]}</span>
-                <span className="tabular text-[11px] text-ink-muted">{entries.length}</span>
-              </div>
-              {entries.length === 0 ? (
-                <div className="pt-1.5 text-[12px] text-ink-muted">None in this cut.</div>
-              ) : (
-                <div className="grid grid-cols-1 gap-x-6 pt-1 sm:grid-cols-2 xl:grid-cols-1">
-                  {entries.map((b) => (
-                    <Link
-                      key={b.id}
-                      to={nicheDetailPath(b.dimension, b.key)}
-                      onClick={() => trackEvent("niche_open")}
-                      onMouseEnter={() => setHoverId(b.id)}
-                      onMouseLeave={clearHover}
-                      title={`${b.key} — ${RING_LABEL[b.verdict.ring]}: ${b.verdict.reason}`}
-                      className={clsx(
-                        "group/rl flex min-w-0 items-baseline gap-2 py-[3px] text-[13px] transition-colors",
-                        hoverId === b.id && "bg-ink-primary/[0.06]",
-                      )}
-                    >
-                      <span className="tabular w-6 shrink-0 text-right text-[11px] text-ink-muted">{b.n}</span>
-                      <span className="truncate text-ink-secondary transition-colors group-hover/rl:text-brand">{b.key}</span>
-                      <span className="shrink-0 text-[10px] text-ink-muted" title={SECTOR_LABEL[b.sector]}>
-                        {SECTOR_SHORT[b.sector]}
-                      </span>
-                      {b.demandEmerging ? (
-                        <EmergingGlyph reviews24m={b.reviews24m} />
-                      ) : (
-                        <MoveGlyph trendPct={b.demandTrendPct} />
-                      )}
-                    </Link>
-                  ))}
-                </div>
-              )}
+      {/* THE RAIL — the board's single reading pane: the full ranked verdict list, or the
+          selected niche's dossier. At xl it matches the plate's height and scrolls inside
+          itself (absolute-inset column — full counts in the group headers, so nothing is
+          silently capped); below xl it flows with the page, uncapped. */}
+      <div className="flex min-w-0 flex-col border-t border-chartborder pt-4 xl:w-[340px] xl:shrink-0 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-0">
+        {selected ? (
+          <VerdictDossier blip={selected} total={placed.length} onBack={() => onSelect(null)} />
+        ) : (
+          <>
+            <div className="flex items-baseline gap-2 border-b border-ink-primary/25 pb-2">
+              <span className="kicker text-[11px] tracking-[.08em] text-ink-primary">Verdicts</span>
+              <span className="tabular text-[11px] text-ink-muted">{placed.length}</span>
+              <span className="ml-auto text-[10px] text-ink-muted">click a dot or row for its dossier</span>
             </div>
-          );
-        })}
+            <div className="xl:relative xl:min-h-0 xl:flex-1">
+              <div data-testid="radar-rail-list" className="rail-scroll flex flex-col gap-4 pt-2 xl:absolute xl:inset-0 xl:overflow-y-auto xl:pb-8 xl:pr-2">
+                {RING_ORDER.map((ring) => {
+                  const entries = byRing.get(ring)!;
+                  return (
+                    <div key={ring}>
+                      <div className="flex items-baseline gap-2 border-b border-chartborder pb-1.5">
+                        <span className="inline-block h-2 w-2 shrink-0 self-center" style={{ backgroundColor: RING_FILL[ring] }} aria-hidden />
+                        <span className="kicker text-[11px] text-ink-primary">{RING_LABEL[ring]}</span>
+                        <span className="tabular text-[11px] text-ink-muted">{entries.length}</span>
+                      </div>
+                      {entries.length === 0 ? (
+                        <div className="pt-1.5 text-[12px] text-ink-muted">None in this cut.</div>
+                      ) : (
+                        <div className="grid grid-cols-1 gap-x-6 pt-1 sm:grid-cols-2 xl:grid-cols-1">
+                          {entries.map((b) => (
+                            <button
+                              type="button"
+                              key={b.id}
+                              data-testid={`radar-row-${b.id}`}
+                              onClick={() => onSelect(b.id)}
+                              onMouseEnter={() => setHoverId(b.id)}
+                              onMouseLeave={clearHover}
+                              title={`${b.key} — ${RING_LABEL[b.verdict.ring]}: ${b.verdict.reason}`}
+                              className={clsx(
+                                "group/rl flex min-w-0 items-baseline gap-2 py-[3px] text-left text-[13px] transition-colors",
+                                hoverId === b.id && "bg-ink-primary/[0.06]",
+                              )}
+                            >
+                              <span className="tabular w-6 shrink-0 text-right text-[11px] text-ink-muted">{b.n}</span>
+                              <span className="truncate text-ink-secondary transition-colors group-hover/rl:text-brand">{b.key}</span>
+                              <span className="shrink-0 text-[10px] text-ink-muted" title={SECTOR_LABEL[b.sector]}>
+                                {SECTOR_SHORT[b.sector]}
+                              </span>
+                              {b.demandEmerging ? (
+                                <EmergingGlyph reviews24m={b.reviews24m} />
+                              ) : (
+                                <MoveGlyph trendPct={b.demandTrendPct} />
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {/* Scroll affordance (A1): macOS overlay scrollbars hide until touched, so
+                  without this fade a clipped rail reads as the list just ENDING — the
+                  exact silent cap this layout exists to remove. Paired with .rail-scroll's
+                  always-visible thin scrollbar (index.css). */}
+              <div
+                aria-hidden
+                className="pointer-events-none absolute inset-x-0 bottom-0 hidden h-8 xl:block"
+                style={{ background: "linear-gradient(to top, var(--page-plane), transparent)" }}
+              />
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

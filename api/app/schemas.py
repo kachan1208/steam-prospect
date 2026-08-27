@@ -537,6 +537,12 @@ class NicheRow(BaseModel):
     decline_gate: Optional[float] = None
     entrant_ratio: Optional[float] = None
     solo_viability: Optional[float] = None
+    # Solo-evidence trio (2026-08-27): the member profile behind solo_viability (which is
+    # the SINGLEPLAYER SHARE — a no-netcode proxy, not a production-scope measure). Same
+    # per-cut population as solo_viability; absent (None) on marts that predate it.
+    self_published_share: Optional[float] = None  # AVG(self_published) over the cut
+    indie_share: Optional[float] = None           # AVG(is_indie) over the cut
+    med_playtime_h: Optional[float] = None        # median member playtime_p50, hours, 1dp
     tier: Optional[str] = None
     # Live players (one value per key, stamped on all cuts; nightly point samples).
     total_players_now: Optional[float] = None
@@ -844,6 +850,12 @@ class RadarNicheCard(BaseModel):
     # solo_only=0) — served on every card so clients can show the score that gated the
     # population. None = unknown, which the filter treats as NOT solo-friendly.
     solo_viability: Optional[float] = None
+    # Solo-evidence trio (same family as NicheRow's): the member profile behind
+    # solo_viability, so clients can SHOW the evidence ("50% self-pub · 71% indie ·
+    # median 5.7h content") instead of asserting a bare share. None on older marts.
+    self_published_share: Optional[float] = None
+    indie_share: Optional[float] = None
+    med_playtime_h: Optional[float] = None
     # Live-player momentum (mart_niche, gated like p90_rev) — absent on older marts.
     players_trend_7d_pct: Optional[float] = None
     sparkline: list[RadarSparklinePoint] = Field(default_factory=list)

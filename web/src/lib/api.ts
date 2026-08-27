@@ -170,6 +170,13 @@ export interface NicheRow {
   decline_gate: number | null;
   entrant_ratio: number | null;
   solo_viability: number | null;
+  // Solo-evidence trio — the member profile behind solo_viability (the SINGLEPLAYER
+  // SHARE, a no-netcode proxy, not a production-scope measure). Same per-cut population
+  // as the share; absent (undefined) on marts that predate it — the UI then omits the
+  // evidence clauses from the dossier's solo row.
+  self_published_share?: number | null; // AVG(self_published) over the cut
+  indie_share?: number | null; // AVG(is_indie) over the cut
+  med_playtime_h?: number | null; // median member playtime_p50, hours, 1 decimal
   tier: string | null;
   // Live players — absent (undefined) on marts that predate the CCU marts.
   total_players_now?: number | null;
@@ -503,6 +510,11 @@ export interface RadarNicheCard {
    * null = unknown (never counted solo-friendly); optional for one deploy cycle of
    * API/web skew. */
   solo_viability?: number | null;
+  /** Solo-evidence trio (see NicheRow): the member profile behind solo_viability.
+   * Absent/null on marts that predate it — evidence clauses are then omitted. */
+  self_published_share?: number | null;
+  indie_share?: number | null;
+  med_playtime_h?: number | null;
   players_trend_7d_pct: number | null;
   sparkline: RadarSparklinePoint[];
 }
