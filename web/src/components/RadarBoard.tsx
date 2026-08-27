@@ -89,9 +89,27 @@ import { nicheDetailPath } from "../pages/NicheDetail";
  * CSS vars; the solo LENS stays orthogonal (team-scale dots draw hollow, singleplayer
  * share < SOLO_FRIENDLY_MIN); a caution verdict (weak/partial evidence) draws a dotted
  * ring. CLICK TARGETS: only the dots are interactive inside the SVG — axes, gridlines,
- * threshold hairlines and labels sit in a pointer-events:none group. Keyboard access:
- * the SVG dots are mouse conveniences (aria-hidden); every niche's keyboard route is its
- * rail row (a real button), and navigation lives on the dossier's deep-dive link.
+ * threshold hairlines and labels sit in a pointer-events:none group, and the region
+ * hover rects below carry NO click handler, so a click on empty quadrant space still
+ * reads as background, never as a dead dot. Keyboard access: the SVG dots are mouse
+ * conveniences (aria-hidden); every niche's keyboard route is its rail row (a real
+ * button), and navigation lives on the dossier's deep-dive link.
+ *
+ * REGION HOVER (2026-08-27, user directive: "can we add a side highlight when you hover
+ * on it? and highlight all the circles in it?"): the plate carries five invisible
+ * hover-only hit rects — the four quadrants the verdict bars tile the plot into, plus
+ * the EMERGING strip as a fifth region with the same contract. Hovering one lifts the
+ * region (a whisper-alpha wash in its semantic tone + a brightened corner label), pops
+ * every member dot to full opacity with a slight ring, and mutes every dot outside to
+ * the usual 0.35; rail rows of member niches take a left-edge tick in the region tone
+ * (the rail is never reordered or filtered — spec'd as a reading aid only). PERFORMANCE
+ * CONTRACT: membership is precomputed per layout (layoutXY assigns each dot its region),
+ * so a mousemove does no per-dot math — only region enter/leave flips state, and dots
+ * restyle through their existing CSS opacity transition. DOT hover takes precedence
+ * (tooltip + single-dot emphasis exactly as before) but keeps the hovered dot's OWN
+ * region washed — the pointer is physically inside that region, and dropping the wash
+ * would flicker while brushing across dots. Hover-only: mouse leave restores
+ * everything; click→dossier selection is untouched.
  */
 
 export type RadarSector = "genre" | "micro" | "theme";
@@ -181,10 +199,26 @@ export function yToPx(v: number): number {
   return PLOT.t + ((v - Y_DOMAIN[0]) / (Y_DOMAIN[1] - Y_DOMAIN[0])) * PLOT.h;
 }
 
+/** The plate's five HOVER REGIONS: the four quadrants the verdict bars tile the plot
+ * into, plus the EMERGING strip as a full peer (same hover contract). Ids echo the
+ * corner labels; "shrinking-open" covers the FLAT/SHRINKING · OPEN corner. */
+export type RadarRegion =
+  | "growing-open"
+  | "growing-flooding"
+  | "shrinking-open"
+  | "shrinking-flooding"
+  | "strip";
+
 export interface PlacedBlip extends RadarBoardBlip {
   id: string;
   /** 1-based rail number (ring-verdict order, then opportunity desc). */
   n: number;
+  /** Hover-region membership, precomputed at LAYOUT time from the DATA's side of the
+   * verdict bars (growing = demand ≥ the enter bar; flooding = saturation strictly
+   * above the flood bar — the verdict's own booleans), never the jittered/clamped
+   * pixel: a dot nudged across a hairline by coincident-dot jitter still lights with
+   * the quadrant its evidence puts it in. Strip residents belong to "strip". */
+  region: RadarRegion;
   x: number;
   y: number;
   r: number;
@@ -239,10 +273,33 @@ export function layoutXY(blips: RadarBoardBlip[]): XYLayout {
     const strip = blip.demandEmerging || blip.demandTrendPct === null || blip.saturationYoy === null;
     if (strip) {
       // Strip coords are assigned in the packing pass below.
-      return { ...blip, id, n: i + 1, x: 0, y: 0, r: STRIP_DOT_R_MIN, clampX: 0, clampY: 0, strip: true };
+      return {
+        ...blip,
+        id,
+        n: i + 1,
+        x: 0,
+        y: 0,
+        r: STRIP_DOT_R_MIN,
+        clampX: 0,
+        clampY: 0,
+        strip: true,
+        region: "strip" as const,
+      };
     }
     const xv = blip.demandTrendPct as number;
     const yv = (blip.saturationYoy as number) * 100;
+    // Region membership on the RAW fields against the verdict's own bars (>= to grow,
+    // strictly > to flood — the exact comparisons radarVerdictTrace runs), so the hover
+    // sets can never disagree with the quadrant geometry's meaning.
+    const growing = xv >= DEMAND_ENTER_PCT;
+    const flooding = (blip.saturationYoy as number) > SAT_FLOOD_YOY;
+    const region: RadarRegion = growing
+      ? flooding
+        ? "growing-flooding"
+        : "growing-open"
+      : flooding
+        ? "shrinking-flooding"
+        : "shrinking-open";
     const clampX = xv > X_DOMAIN[1] ? 1 : xv < X_DOMAIN[0] ? -1 : 0;
     const clampY = yv > Y_DOMAIN[1] ? 1 : yv < Y_DOMAIN[0] ? -1 : 0;
     const r = blipRadius(blip.p90_rev, maxP90);
@@ -254,7 +311,7 @@ export function layoutXY(blips: RadarBoardBlip[]): XYLayout {
     // BOTTOM edge; beyond-min pins at the top.
     const y =
       clampY === 1 ? PLOT_Y1 - r - 1 : clampY === -1 ? PLOT.t + r + 1 : clampNum(yToPx(yv), PLOT.t + r, PLOT_Y1 - r);
-    return { ...blip, id, n: i + 1, x, y, r, clampX, clampY, strip: false };
+    return { ...blip, id, n: i + 1, x, y, r, clampX, clampY, strip: false, region };
   });
 
   // Coincident-dot jitter: only when centers land in the same ~2px cell, offset by a
@@ -320,6 +377,31 @@ const RING_FILL: Record<RadarRing, string> = {
   emerging: "var(--verdict-emerging)",
   crowded: "var(--verdict-crowded)",
   declining: "var(--verdict-declining)",
+};
+
+/** REGION HOVER washes — whisper alphas, semantic tones (see the module doc's REGION
+ * HOVER section). The focus quadrant deepens its own enter green (it paints OVER the
+ * standing focus wash, so hover reads roughly twice the resting tint); the two MIXED
+ * quadrants (one good axis, one bad) take a neutral steel lift — neither hue would be
+ * honest there; the double-negative quadrant leans the caution amber (the crowded
+ * family: caution, never alarm-red); the strip lifts in its own emerging violet.
+ * color-mix over the theme tokens keeps light/dark in lockstep with index.css. */
+const REGION_WASH: Record<RadarRegion, string> = {
+  "growing-open": "color-mix(in srgb, var(--verdict-enter) 8%, transparent)",
+  "growing-flooding": "color-mix(in srgb, var(--text-primary) 5%, transparent)",
+  "shrinking-open": "color-mix(in srgb, var(--text-primary) 5%, transparent)",
+  "shrinking-flooding": "color-mix(in srgb, var(--verdict-crowded) 8%, transparent)",
+  strip: "color-mix(in srgb, var(--verdict-emerging) 9%, transparent)",
+};
+
+/** The rail rows' left-edge tick tone while their region is hovered — the same semantic
+ * families as the wash, at full token strength (the tick is 2px, it can afford it). */
+const REGION_TONE: Record<RadarRegion, string> = {
+  "growing-open": "var(--verdict-enter)",
+  "growing-flooding": "var(--text-secondary)",
+  "shrinking-open": "var(--text-secondary)",
+  "shrinking-flooding": "var(--verdict-crowded)",
+  strip: "var(--verdict-emerging)",
 };
 
 function fmtTrendPct(v: number | null): string {
@@ -736,6 +818,9 @@ export function RadarBoard({
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
+  // The hovered REGION (quadrant or strip) — set/cleared ONLY by the five hit rects'
+  // enter/leave, so a mousemove inside a region costs nothing. Hover-only, never sticky.
+  const [hoverRegion, setHoverRegion] = useState<RadarRegion | null>(null);
   const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
   // The rail's niche search. Local state deliberately: the query is a reading aid for
   // the list (like hover), not page state a card elsewhere needs to drive.
@@ -777,6 +862,19 @@ export function RadarBoard({
   const flatRows = useMemo(() => RING_ORDER.flatMap((r) => byRing.get(r)!), [byRing]);
 
   const hovered = hoverId === null ? null : (placed.find((b) => b.id === hoverId) ?? null);
+  /** The region the WASH / corner label / rail ticks light for. A hovered dot wins with
+   * its own region — the pointer is physically inside it, and entering the dot fires the
+   * hit rect's mouseleave, so without this the wash would flicker off while brushing
+   * across dots. Dot-level DIMMING still follows hoverId alone (dot hover precedence). */
+  const effectiveRegion: RadarRegion | null = hovered ? hovered.region : hoverRegion;
+  /** Region membership by id for the rail's left-edge ticks (plotted rows only — a
+   * beyond-board search hit has no dot, so no region and never a tick). */
+  const regionById = useMemo(() => new Map<string, RadarRegion>(placed.map((d) => [d.id, d.region])), [placed]);
+  /** Dot opacity under the two hover channels. DOT hover takes precedence (existing
+   * tooltip behavior: only the hovered dot stays full); otherwise a hovered region
+   * lifts its members and mutes everything outside; no hover leaves everyone full. */
+  const dotOpacity = (b: PlacedBlip): number =>
+    hoverId !== null ? (hoverId === b.id ? 1 : 0.35) : hoverRegion !== null ? (b.region === hoverRegion ? 1 : 0.35) : 1;
   // Selection resolves against the PLOTTED board first (dot highlight comes free), then
   // the full pool — a search hit beyond the board still opens its dossier. It survives
   // population toggles only while the niche is still in the pool.
@@ -834,6 +932,19 @@ export function RadarBoard({
   const anyClampMinY = placed.some((d) => d.clampY === -1);
   const xBarPx = xToPx(X_BAR);
   const yBarPx = yToPx(Y_BAR);
+  /** The five region hit rects (spec: 4 transparent quadrant rects + the strip rect —
+   * never per-dot math on mousemove). Bounds are the bar hairlines' own pixels, computed
+   * once per render; the rects sit UNDER the dots, so every dot keeps its own hover/click
+   * and moving onto a dot naturally hands precedence to it. */
+  const regionRects: { id: RadarRegion; x: number; y: number; w: number; h: number }[] = [
+    { id: "shrinking-open", x: PLOT.l, y: PLOT.t, w: xBarPx - PLOT.l, h: yBarPx - PLOT.t },
+    { id: "growing-open", x: xBarPx, y: PLOT.t, w: PLOT_X1 - xBarPx, h: yBarPx - PLOT.t },
+    { id: "shrinking-flooding", x: PLOT.l, y: yBarPx, w: xBarPx - PLOT.l, h: PLOT_Y1 - yBarPx },
+    { id: "growing-flooding", x: xBarPx, y: yBarPx, w: PLOT_X1 - xBarPx, h: PLOT_Y1 - yBarPx },
+    ...(layout.stripCount > 0
+      ? [{ id: "strip" as const, x: PLOT.l, y: layout.stripTop, w: PLOT.w, h: layout.stripH }]
+      : []),
+  ];
   const stripLabel = layout.stripHasNonEmerging
     ? "EMERGING / NO TREND BASE — not plottable · sized by 24m volume"
     : "EMERGING — no % base · sized by 24m volume";
@@ -855,8 +966,8 @@ export function RadarBoard({
         >
           {/* Decor — frame, zero lines, THE THRESHOLD HAIRLINES, ticks, axis titles and
               quadrant labels. pointer-events none as a GROUP: only the dots may ever be
-              click targets, so a click landing on a hairline can never read as a dead
-              dot. */}
+              CLICK targets (the region hit rects further down are hover-only), so a
+              click landing on a hairline can never read as a dead dot. */}
           <g pointerEvents="none" data-testid="xy-decor">
             {/* Plot frame. */}
             <rect x={PLOT.l} y={PLOT.t} width={PLOT.w} height={PLOT.h} fill="none" stroke="var(--baseline)" strokeWidth={1} />
@@ -917,17 +1028,44 @@ export function RadarBoard({
             {/* Quadrant readings — region names only; the DOT STYLE carries the final
                 verdict (a growing·open dot can still be Watch on a concentration veto).
                 Calmer-up orientation: the TOP-RIGHT corner is the focus zone, and its
-                label alone takes the enter hue. */}
-            <HaloText x={PLOT_X1 - 8} y={PLOT.t + 26} anchor="end" fill="var(--verdict-enter)">
+                label alone takes the enter hue. While a region is hovered its label
+                BRIGHTENS (region-hover contract): the neutral corners step muted →
+                primary, and the focus corner mixes its green toward primary — more
+                contrast on both themes without abandoning the hue. */}
+            <HaloText
+              x={PLOT_X1 - 8}
+              y={PLOT.t + 26}
+              anchor="end"
+              fill={
+                effectiveRegion === "growing-open"
+                  ? "color-mix(in srgb, var(--verdict-enter) 60%, var(--text-primary))"
+                  : "var(--verdict-enter)"
+              }
+            >
               GROWING · OPEN
             </HaloText>
-            <HaloText x={PLOT_X1 - 8} y={PLOT_Y1 - 10} anchor="end">
+            <HaloText
+              x={PLOT_X1 - 8}
+              y={PLOT_Y1 - 10}
+              anchor="end"
+              fill={effectiveRegion === "growing-flooding" ? "var(--text-primary)" : "var(--text-muted)"}
+            >
               GROWING · FLOODING
             </HaloText>
-            <HaloText x={PLOT.l + 8} y={PLOT_Y1 - 10} anchor="start">
+            <HaloText
+              x={PLOT.l + 8}
+              y={PLOT_Y1 - 10}
+              anchor="start"
+              fill={effectiveRegion === "shrinking-flooding" ? "var(--text-primary)" : "var(--text-muted)"}
+            >
               SHRINKING · FLOODING
             </HaloText>
-            <HaloText x={PLOT.l + 8} y={PLOT.t + 26} anchor="start">
+            <HaloText
+              x={PLOT.l + 8}
+              y={PLOT.t + 26}
+              anchor="start"
+              fill={effectiveRegion === "shrinking-open" ? "var(--text-primary)" : "var(--text-muted)"}
+            >
               FLAT/SHRINKING · OPEN
             </HaloText>
 
@@ -984,7 +1122,9 @@ export function RadarBoard({
               RELEASES YOY · % — CALMER ↑ · FLOODING ↓
             </HaloText>
 
-            {/* The no-XY strip frame + label (only when it has residents). */}
+            {/* The no-XY strip frame + label (only when it has residents). The strip is
+                the fifth hover region: while hovered its dashed frame and label lean the
+                emerging violet — the same lift contract as a quadrant's corner label. */}
             {layout.stripCount > 0 && (
               <>
                 <rect
@@ -994,15 +1134,48 @@ export function RadarBoard({
                   width={PLOT.w}
                   height={layout.stripH}
                   fill="none"
-                  stroke="var(--gridline)"
+                  stroke={
+                    effectiveRegion === "strip"
+                      ? "color-mix(in srgb, var(--verdict-emerging) 45%, transparent)"
+                      : "var(--gridline)"
+                  }
                   strokeWidth={1}
                   strokeDasharray="4 3"
                 />
-                <HaloText x={PLOT.l + STRIP_PAD} y={layout.stripTop + 12} anchor="start" size={8.5}>
+                <HaloText
+                  x={PLOT.l + STRIP_PAD}
+                  y={layout.stripTop + 12}
+                  anchor="start"
+                  size={8.5}
+                  fill={effectiveRegion === "strip" ? "var(--text-primary)" : "var(--text-muted)"}
+                >
                   {stripLabel}
                 </HaloText>
               </>
             )}
+          </g>
+
+          {/* REGION HOVER HIT RECTS — the quadrant/strip hit-testing (module doc, REGION
+              HOVER). Transparent fills (not "none": transparent still hit-tests) that
+              take the region's wash while it is lit; drawn OVER the decor so the wash
+              covers the whole region, UNDER the dots so every dot keeps its own hover
+              and click. Hover-only — deliberately no onClick (click-target hygiene: only
+              dots open dossiers), and no mousemove work at all. */}
+          <g data-testid="xy-regions">
+            {regionRects.map((r) => (
+              <rect
+                key={r.id}
+                data-testid={`radar-region-${r.id}`}
+                x={r.x}
+                y={r.y}
+                width={r.w}
+                height={r.h}
+                fill={effectiveRegion === r.id ? REGION_WASH[r.id] : "transparent"}
+                style={{ transition: "fill 120ms" }}
+                onMouseEnter={() => setHoverRegion(r.id)}
+                onMouseLeave={() => setHoverRegion(null)}
+              />
+            ))}
           </g>
 
           {/* Dots — plot + strip; the rail carries the accessible buttons. Solo lens as
@@ -1023,7 +1196,7 @@ export function RadarBoard({
                     stroke={RING_FILL[b.verdict.ring]}
                     strokeWidth={1}
                     strokeDasharray="2.5 2.5"
-                    opacity={hoverId !== null && hoverId !== b.id ? 0.35 : 1}
+                    opacity={dotOpacity(b)}
                     pointerEvents="none"
                   />
                 ) : (
@@ -1036,7 +1209,7 @@ export function RadarBoard({
                       stroke="var(--text-muted)"
                       strokeWidth={1}
                       strokeDasharray="1.5 2.5"
-                      opacity={hoverId !== null && hoverId !== b.id ? 0.35 : 1}
+                      opacity={dotOpacity(b)}
                       pointerEvents="none"
                     />
                   )
@@ -1049,7 +1222,7 @@ export function RadarBoard({
                   fill={soloBucket(b.solo_viability) === "team" ? "transparent" : RING_FILL[b.verdict.ring]}
                   stroke={soloBucket(b.solo_viability) === "team" ? RING_FILL[b.verdict.ring] : "var(--page-plane)"}
                   strokeWidth={soloBucket(b.solo_viability) === "team" ? 1.5 : 1}
-                  opacity={hoverId !== null && hoverId !== b.id ? 0.35 : 1}
+                  opacity={dotOpacity(b)}
                   style={{ cursor: "pointer", transition: "opacity 120ms" }}
                   onMouseEnter={(e) => {
                     setHoverId(b.id);
@@ -1063,6 +1236,22 @@ export function RadarBoard({
                   onClick={() => onSelect(b.id)}
                 />
                 <ClampChevron d={b} />
+                {/* Region-member emphasis: while a region is hovered (and no dot is —
+                    dot hover keeps its stronger single-dot ring below), every member
+                    dot takes a slight ring on top of its full opacity. Deliberately
+                    fainter than the hover/selection ring (thinner, secondary ink). */}
+                {hoverId === null && hoverRegion !== null && b.region === hoverRegion && (
+                  <circle
+                    data-testid={`radar-region-ring-${b.id}`}
+                    cx={b.x}
+                    cy={b.y}
+                    r={b.r + 2}
+                    fill="none"
+                    stroke="var(--text-secondary)"
+                    strokeWidth={0.75}
+                    pointerEvents="none"
+                  />
+                )}
                 {(hoverId === b.id || selectedId === b.id) && (
                   <circle
                     cx={b.x}
@@ -1260,17 +1449,27 @@ export function RadarBoard({
                         <div className="pt-1.5 text-[12px] text-ink-muted">None in this cut.</div>
                       ) : (
                         <div className="grid grid-cols-1 gap-x-6 pt-1 sm:grid-cols-2 lg:grid-cols-1">
-                          {entries.map((b) => (
+                          {entries.map((b) => {
+                            // Region-hover rail tick (a reading aid, never a reorder/
+                            // filter): while a region is lit, the rows whose DOTS live in
+                            // it take a 2px left-edge tick in the region tone. box-shadow,
+                            // not border — zero layout shift, pure paint. Beyond-board
+                            // search hits have no dot, so no region and never a tick.
+                            const rowRegion = regionById.get(b.id);
+                            const ticked = effectiveRegion !== null && rowRegion === effectiveRegion;
+                            return (
                             <button
                               type="button"
                               key={b.id}
                               data-testid={`radar-row-${b.id}`}
+                              data-region-tick={ticked ? effectiveRegion : undefined}
                               onClick={() => onSelect(b.id)}
                               onMouseEnter={() => setHoverId(b.id)}
                               onMouseLeave={clearHover}
                               title={`${b.key} — ${RING_LABEL[b.verdict.ring]}: ${b.verdict.reason}${
                                 b.n == null ? ` (beyond the Top ${plotCap} plot — no dot on the board)` : ""
                               }`}
+                              style={ticked ? { boxShadow: `inset 2px 0 0 ${REGION_TONE[effectiveRegion!]}` } : undefined}
                               className={clsx(
                                 "group/rl flex min-w-0 items-baseline gap-2 py-[3px] text-left text-[13px] transition-colors",
                                 (hoverId === b.id || (q && flatRows[activeIdx]?.id === b.id)) &&
@@ -1292,7 +1491,8 @@ export function RadarBoard({
                                 <MoveGlyph trendPct={b.demandTrendPct} />
                               )}
                             </button>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </div>

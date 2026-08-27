@@ -634,3 +634,133 @@ describe("RadarBoard — dossier stays in view at every width (drawer below lg)"
     expect(document.activeElement).toBe(last); // and back
   });
 });
+
+describe("RadarBoard — region hover (quadrants + the strip)", () => {
+  // One resident per region, spread far from every bar so membership is unambiguous.
+  // Verdicts vary on purpose (enter / watch / declining / emerging): region membership
+  // is the AXES' side of the bars, not the ring — the two must never be conflated.
+  const regionBlips = () => [
+    makeBlip("Open Grower", { demand_trend_24m_pct: 120, saturation_yoy: 0.05 }), // growing-open
+    makeBlip("Flooded Grower", { demand_trend_24m_pct: 120, saturation_yoy: 0.5 }), // growing-flooding
+    makeBlip("Flooded Shrinker", { demand_trend_24m_pct: -50, saturation_yoy: 0.5 }), // shrinking-flooding
+    makeBlip("Calm Shrinker", { demand_trend_24m_pct: -50, saturation_yoy: 0.05 }), // shrinking-open
+    makeBlip("Newborn", { demand_emerging: true, reviews_24m: 9_000, reviews_24m_new_share: 0.9 }), // strip
+  ];
+  const PLOT_KEYS = ["Open Grower", "Flooded Grower", "Flooded Shrinker", "Calm Shrinker"];
+  const dot = (key: string) => screen.getByTestId(`radar-blip-tag:${key}`);
+  const opacityOf = (key: string) => dot(key).getAttribute("opacity");
+  const ringOf = (key: string) => screen.queryByTestId(`radar-region-ring-tag:${key}`);
+
+  it("layoutXY precomputes each dot's region from the verdict's own bars (strip included)", () => {
+    const byKey = new Map(layoutXY(regionBlips()).dots.map((d) => [d.key, d.region]));
+    expect(byKey.get("Open Grower")).toBe("growing-open");
+    expect(byKey.get("Flooded Grower")).toBe("growing-flooding");
+    expect(byKey.get("Flooded Shrinker")).toBe("shrinking-flooding");
+    expect(byKey.get("Calm Shrinker")).toBe("shrinking-open");
+    expect(byKey.get("Newborn")).toBe("strip");
+  });
+
+  it("membership uses the verdict's exact comparisons: ≥ the enter bar grows, only STRICTLY above the flood bar floods", () => {
+    const edge = layoutXY([
+      makeBlip("On The Enter Bar", { demand_trend_24m_pct: 40, saturation_yoy: 0.15 }),
+      makeBlip("Hair Under Both", { demand_trend_24m_pct: 39.9, saturation_yoy: 0.151 }),
+    ]).dots;
+    const byKey = new Map(edge.map((d) => [d.key, d.region]));
+    // demand ≥ +40 passes the enter check; saturation exactly +0.15 is NOT flooding.
+    expect(byKey.get("On The Enter Bar")).toBe("growing-open");
+    expect(byKey.get("Hair Under Both")).toBe("shrinking-flooding");
+  });
+
+  it("hovering a quadrant emphasizes exactly its member dots, dims the rest, and lifts the wash", () => {
+    renderBoard(regionBlips(), true);
+    const region = screen.getByTestId("radar-region-growing-open");
+    expect(region.getAttribute("fill")).toBe("transparent"); // resting: pure hit rect
+
+    fireEvent.mouseEnter(region);
+    // Member pops (full opacity + the slight region ring)…
+    expect(opacityOf("Open Grower")).toBe("1");
+    expect(ringOf("Open Grower")).toBeTruthy();
+    // …every dot outside mutes, strip resident included, and none of them ring.
+    for (const key of ["Flooded Grower", "Flooded Shrinker", "Calm Shrinker", "Newborn"]) {
+      expect(opacityOf(key)).toBe("0.35");
+      expect(ringOf(key)).toBeNull();
+    }
+    // The region itself lifts: wash fill on, and only on the hovered rect.
+    expect(region.getAttribute("fill")).toMatch(/^color-mix/);
+    expect(screen.getByTestId("radar-region-shrinking-flooding").getAttribute("fill")).toBe("transparent");
+  });
+
+  it("the EMERGING strip is a fifth region with the same contract", () => {
+    renderBoard(regionBlips(), true);
+    fireEvent.mouseEnter(screen.getByTestId("radar-region-strip"));
+    expect(opacityOf("Newborn")).toBe("1");
+    expect(ringOf("Newborn")).toBeTruthy();
+    for (const key of PLOT_KEYS) {
+      expect(opacityOf(key)).toBe("0.35");
+      expect(ringOf(key)).toBeNull();
+    }
+    expect(screen.getByTestId("radar-region-strip").getAttribute("fill")).toMatch(/^color-mix/);
+  });
+
+  it("a board with no strip residents renders no strip hit rect (the quadrants keep theirs)", () => {
+    renderBoard(
+      regionBlips().filter((b) => !b.demandEmerging),
+      true,
+    );
+    expect(screen.queryByTestId("radar-region-strip")).toBeNull();
+    expect(screen.getByTestId("radar-region-growing-open")).toBeTruthy();
+  });
+
+  it("mouse leave restores every dot, ring and wash — hover-only, nothing sticks", () => {
+    renderBoard(regionBlips(), true);
+    const region = screen.getByTestId("radar-region-growing-open");
+    fireEvent.mouseEnter(region);
+    fireEvent.mouseLeave(region);
+    for (const key of [...PLOT_KEYS, "Newborn"]) {
+      expect(opacityOf(key)).toBe("1");
+      expect(ringOf(key)).toBeNull();
+    }
+    expect(region.getAttribute("fill")).toBe("transparent");
+    // And no dossier opened — the region rects are hover-only, never click targets.
+    fireEvent.click(region);
+    expect(screen.queryByTestId("verdict-dossier")).toBeNull();
+  });
+
+  it("dot hover takes precedence: the tooltip's single-dot emphasis wins, and the wash follows the dot's own region", () => {
+    renderBoard(regionBlips(), true);
+    fireEvent.mouseEnter(screen.getByTestId("radar-region-growing-open"));
+    fireEvent.mouseEnter(dot("Flooded Shrinker"));
+    // Existing dot-hover behavior, untouched: only the hovered dot stays full, EVEN the
+    // hovered region's member dims, and no region ring draws while a dot is hovered.
+    expect(opacityOf("Flooded Shrinker")).toBe("1");
+    expect(opacityOf("Open Grower")).toBe("0.35");
+    expect(ringOf("Open Grower")).toBeNull();
+    expect(ringOf("Flooded Shrinker")).toBeNull();
+    // The tooltip is the existing one.
+    expect(screen.getByText(/Flooded Shrinker — Micro-genres/)).toBeTruthy();
+    // The wash follows the DOT's region (the pointer is physically there now).
+    expect(screen.getByTestId("radar-region-shrinking-flooding").getAttribute("fill")).toMatch(/^color-mix/);
+    expect(screen.getByTestId("radar-region-growing-open").getAttribute("fill")).toBe("transparent");
+    // Leaving the dot hands emphasis back to the still-hovered region.
+    fireEvent.mouseLeave(dot("Flooded Shrinker"));
+    expect(opacityOf("Open Grower")).toBe("1");
+    expect(ringOf("Open Grower")).toBeTruthy();
+  });
+
+  it("rail rows of the hovered region take the left-edge tick — never reordered or filtered", () => {
+    renderBoard(regionBlips(), true);
+    const rowKeys = () =>
+      Array.from(screen.getByTestId("radar-rail-list").querySelectorAll("button[data-testid^='radar-row-']")).map(
+        (el) => el.getAttribute("data-testid"),
+      );
+    const before = rowKeys();
+    fireEvent.mouseEnter(screen.getByTestId("radar-region-growing-open"));
+    expect(screen.getByTestId("radar-row-tag:Open Grower").getAttribute("data-region-tick")).toBe("growing-open");
+    for (const key of ["Flooded Grower", "Flooded Shrinker", "Calm Shrinker", "Newborn"]) {
+      expect(screen.getByTestId(`radar-row-tag:${key}`).getAttribute("data-region-tick")).toBeNull();
+    }
+    expect(rowKeys()).toEqual(before); // same rows, same order — a reading aid only
+    fireEvent.mouseLeave(screen.getByTestId("radar-region-growing-open"));
+    expect(screen.getByTestId("radar-row-tag:Open Grower").getAttribute("data-region-tick")).toBeNull();
+  });
+});
