@@ -39,6 +39,12 @@ import {
  * 5. DETERMINISTIC, DENSITY-AWARE LAYOUT (A2). layoutBlips scales a crowded cell's radii
  *    down together (bounded below), never moves a dot out of its cell, and is exactly
  *    reproducible call-to-call.
+ *
+ * 6. NICHE SEARCH OVER THE FULL POOL (2026-08-27 directive). The rail search filters the
+ *    WHOLE population (`pool` prop), not just the plotted Top-N: a beyond-plot match
+ *    appears (dash rank), opens a full dossier with the honest "beyond the Top N plot"
+ *    note, a plotted match never carries that note, zero matches get an honest empty row
+ *    naming the searched population, and Esc clears back to the plotted list.
  */
 
 function makeBlip(key: string, input: RadarVerdictInput, over: Partial<RadarBoardBlip> = {}): RadarBoardBlip {
@@ -75,18 +81,41 @@ const REFERENCE: RadarVerdictInput = {
   solo_viability: 0.995,
 };
 
-/** Selection is controlled by the page — the harness stands in for it. */
-function Harness({ blips, soloOnly }: { blips: RadarBoardBlip[]; soloOnly: boolean }) {
+/** Selection is controlled by the page — the harness stands in for it. `pool` defaults
+ * to the plotted blips (the common case in these tests); the search suite passes a
+ * strictly larger pool to pin the beyond-plot behavior. */
+function Harness({
+  blips,
+  soloOnly,
+  pool,
+  plotCap,
+}: {
+  blips: RadarBoardBlip[];
+  soloOnly: boolean;
+  pool?: RadarBoardBlip[];
+  plotCap?: number;
+}) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   return (
     <MemoryRouter>
-      <RadarBoard blips={blips} soloOnly={soloOnly} selectedId={selectedId} onSelect={setSelectedId} />
+      <RadarBoard
+        blips={blips}
+        pool={pool ?? blips}
+        plotCap={plotCap ?? blips.length}
+        soloOnly={soloOnly}
+        selectedId={selectedId}
+        onSelect={setSelectedId}
+      />
     </MemoryRouter>
   );
 }
 
-function renderBoard(blips: RadarBoardBlip[], soloOnly: boolean) {
-  return render(<Harness blips={blips} soloOnly={soloOnly} />);
+function renderBoard(
+  blips: RadarBoardBlip[],
+  soloOnly: boolean,
+  extra: { pool?: RadarBoardBlip[]; plotCap?: number } = {},
+) {
+  return render(<Harness blips={blips} soloOnly={soloOnly} pool={extra.pool} plotCap={extra.plotCap} />);
 }
 
 afterEach(cleanup);
@@ -270,6 +299,94 @@ describe("RadarBoard — rail list has no silent caps (A1)", () => {
     const rail = screen.getByTestId("radar-rail-list");
     const watchHeader = Array.from(rail.querySelectorAll("span")).find((s) => s.textContent === "Watch");
     expect(watchHeader?.parentElement?.textContent).toContain("46");
+  });
+});
+
+describe("RadarBoard — niche search over the full pool", () => {
+  // Two plotted niches + one that only exists in the pool (beyond the Top-2 plot cap).
+  const plotted = [
+    makeBlip("Roguelike Deckbuilder", REFERENCE),
+    makeBlip("City Builder", { demand_trend_24m_pct: 10, opportunity_v2: 60 }),
+  ];
+  const beyond = makeBlip("Cozy Fishing", { demand_trend_24m_pct: 12, opportunity_v2: 9 });
+  const pool = [...plotted, beyond];
+  const setup = () => renderBoard(plotted, true, { pool, plotCap: 2 });
+  const search = () => screen.getByTestId("radar-search") as HTMLInputElement;
+  const type = (value: string) => fireEvent.change(search(), { target: { value } });
+
+  it("filters live over the FULL pool (case-insensitive substring), not just the plotted dots", () => {
+    setup();
+    // Default list = the plotted Top-N; the beyond-plot niche is not a row yet.
+    expect(screen.getByTestId("radar-row-tag:City Builder")).toBeTruthy();
+    expect(screen.queryByTestId("radar-row-tag:Cozy Fishing")).toBeNull();
+    // The scope is stated up front: the input names the whole pool.
+    expect(search().getAttribute("placeholder")).toContain("all 3 niches");
+
+    type("cOzY");
+    expect(screen.getByTestId("radar-row-tag:Cozy Fishing")).toBeTruthy();
+    expect(screen.queryByTestId("radar-row-tag:City Builder")).toBeNull();
+    expect(screen.queryByTestId("radar-row-tag:Roguelike Deckbuilder")).toBeNull();
+    // The header carries the honest match arithmetic over the searched population.
+    expect(screen.getByText("1 of 3 match")).toBeTruthy();
+    // No dot exists for it, so the row shows a dash rank, never a fake number.
+    expect(screen.getByTestId("radar-row-tag:Cozy Fishing").textContent).toContain("—");
+  });
+
+  it("selecting a beyond-plot search hit opens a full dossier with the honest not-plotted note", () => {
+    setup();
+    type("fishing");
+    fireEvent.click(screen.getByTestId("radar-row-tag:Cozy Fishing"));
+    const dossier = screen.getByTestId("verdict-dossier");
+    expect(dossier.textContent).toContain("Cozy Fishing");
+    expect(dossier.textContent).toContain("Beyond the Top 2 plot");
+    // Still a full dossier: trace rows and the deep-dive link are all there.
+    expect(dossier.textContent).toContain("bar");
+    expect(screen.getByRole("link", { name: /open deep dive/i })).toBeTruthy();
+  });
+
+  it("a plotted search hit opens its dossier withOUT the not-plotted note", () => {
+    setup();
+    type("roguelike");
+    fireEvent.click(screen.getByTestId("radar-row-tag:Roguelike Deckbuilder"));
+    const dossier = screen.getByTestId("verdict-dossier");
+    expect(dossier.textContent).toContain("Roguelike Deckbuilder");
+    expect(dossier.textContent).not.toContain("Beyond the Top");
+  });
+
+  it("zero matches render an honest empty row naming the searched population", () => {
+    setup();
+    type("zzz-not-a-niche");
+    const empty = screen.getByTestId("radar-search-empty");
+    expect(empty.textContent).toContain("No niches match");
+    expect(empty.textContent).toContain("searched all 3 niches");
+    // No ring group headers linger behind the empty state.
+    expect(screen.queryByTestId(/^radar-row-/)).toBeNull();
+  });
+
+  it("Escape clears the query and restores the plotted list", () => {
+    setup();
+    type("cozy");
+    expect(screen.getByTestId("radar-row-tag:Cozy Fishing")).toBeTruthy();
+    fireEvent.keyDown(search(), { key: "Escape" });
+    expect(search().value).toBe("");
+    expect(screen.queryByTestId("radar-row-tag:Cozy Fishing")).toBeNull();
+    expect(screen.getByTestId("radar-row-tag:City Builder")).toBeTruthy();
+  });
+
+  it("Enter opens the first match; arrow keys walk the result rows", () => {
+    setup();
+    type("fishing");
+    fireEvent.keyDown(search(), { key: "Enter" });
+    expect(screen.getByTestId("verdict-dossier").textContent).toContain("Cozy Fishing");
+    // Back to the list — the query survives the round trip.
+    fireEvent.click(screen.getByRole("button", { name: /back to all verdicts/i }));
+    expect(search().value).toBe("fishing");
+
+    // Both -builder niches match; ↓ moves the cursor to the second before Enter.
+    type("builder");
+    fireEvent.keyDown(search(), { key: "ArrowDown" });
+    fireEvent.keyDown(search(), { key: "Enter" });
+    expect(screen.getByTestId("verdict-dossier").textContent).toContain("City Builder");
   });
 });
 

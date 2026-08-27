@@ -469,102 +469,10 @@ export function useNicheDistribution(
   });
 }
 
-// ---- Radar feed (the opportunity-feed home, mockup 3a) ---------------------------------
-// Ranks on demand_trend_24m_pct — a mart_niche column that is NOT in the mart until the
-// nightly rebuild after its deploy materialises it. The endpoint 503s until then (see
-// api/app/routers/niches.py::_has_demand24m); Radar.tsx must degrade to an honest "not
-// available yet" message on that response, never a spinner or an empty grid.
-
-export interface RadarSparklinePoint {
-  month: string; // 'YYYY-MM-DD' (month start)
-  players: number;
-}
-
-/** One niche in the feed — the hero pick, every "Moving niches" grid card and every
- * `emerging` card share this shape (the hero repeats as the grid's first card, same as
- * the mockup). reviews_24m / reviews_prev_24m are Steam's own per-month review totals
- * (review_histogram — true counts, not the recency-biased sample the first cut used),
- * summed over two adjacent 24-calendar-month windows anchored on the last complete month;
- * demand_trend_24m_pct is the ratio between them. Non-null on hero/mover cards (the API
- * excludes rows with no prior-24-month baseline from the % ranking rather than rendering
- * them as an unchanged 0% mover), but may be null on `emerging` cards — a zero prior base
- * is exactly what makes a niche emerging. */
-export interface RadarNicheCard {
-  dimension: string;
-  key: string;
-  tier: string | null;
-  n_games: number;
-  p90_rev: number | null;
-  opportunity_v2: number | null;
-  saturation_yoy: number | null;
-  reviews_24m: number;
-  reviews_prev_24m: number;
-  demand_trend_24m_pct: number | null;
-  /** Emerging pair — see NicheRow: when demand_emerging is true the trend % above is not
-   * representative (young label, no comparable base) and must never be the headline;
-   * reviews_24m is the meaningful number for those cards. */
-  reviews_24m_new_share: number | null;
-  demand_emerging: boolean;
-  /** The radar population rule's input (the feed filters on solo_viability >= 0.8 unless
-   * solo_only=0) — on every card so the UI can show the score that gated the population.
-   * null = unknown (never counted solo-friendly); optional for one deploy cycle of
-   * API/web skew. */
-  solo_viability?: number | null;
-  /** Solo-evidence trio (see NicheRow): the member profile behind solo_viability.
-   * Absent/null on marts that predate it — evidence clauses are then omitted. */
-  self_published_share?: number | null;
-  indie_share?: number | null;
-  med_playtime_h?: number | null;
-  players_trend_7d_pct: number | null;
-  sparkline: RadarSparklinePoint[];
-}
-
-/** The hero pick (the cut's biggest 24-month riser) plus its yearly demand-vs-pipeline trend
- * (mart_niche_trend) — the same real series NicheDetail's "Demand vs. pipeline, by year"
- * panel charts (§4b), reused here for the hero's chart column: no mart carries niche review
- * velocity or releases at the mockup's monthly granularity, so this is the honest
- * real-data substitute rather than an invented curve. Never an emerging niche (the API
- * excludes them from the % ranking), so its demand_trend_24m_pct is always non-null. */
-export interface RadarHero extends RadarNicheCard {
-  trend: TrendPoint[];
-}
-
-export interface RadarFeed {
-  dimension: string;
-  window: string;
-  min_reviews: number;
-  hero: RadarHero;
-  /** Includes the hero as movers[0] (mirrors the mockup), then the cut's other biggest
-   * 24-month movers ranked by |demand_trend_24m_pct| — "Moving niches", not "Rising niches":
-   * both risers and decliners appear here. Never contains an emerging niche. */
-  movers: RadarNicheCard[];
-  /** The cut's emerging niches (demand_emerging), ranked by reviews_24m DESC — their own
-   * group because a young tag's trend % is a property of the label's age, not demand.
-   * Rendered as EMERGING with the absolute volume, never as % movers. */
-  emerging: RadarNicheCard[];
-}
-
-export interface RadarFeedParams {
-  dimension?: Dimension;
-  window?: Window;
-  min_reviews?: number;
-  /** Server default is ON (the radar is solo-first): pass 0 to reveal the full
-   * population — the board's "Solo-friendly only" toggle drives this. */
-  solo_only?: 0 | 1;
-  limit?: number;
-}
-
-/** 503 = the mart predates demand_trend_24m_pct — the state production is genuinely in for
- * hours after every deploy that adds a mart column, so it is not retried into a spinner. */
-export function useRadarFeed(params: RadarFeedParams = {}) {
-  return useQuery({
-    queryKey: ["radar-feed", params],
-    queryFn: () => request<RadarFeed>(`/niches/radar${qs(params)}`),
-    staleTime: 60_000,
-    retry: (failureCount, error) =>
-      !(error instanceof ApiError && (error.status === 503 || error.status === 404)) && failureCount < 2,
-  });
-}
+// NOTE: the Radar feed client (useRadarFeed + RadarFeed/RadarHero/RadarNicheCard/
+// RadarSparklinePoint) was removed 2026-08-27 with the signal-feed section — the board +
+// rail answer the same questions. The /api/niches/radar ENDPOINT still exists and serves
+// MCP/external consumers; only this web client stopped calling it.
 
 /** Build a download URL for the niches CSV export (GET, triggered via <a download>). */
 export function nicheExportCsvUrl(params: {
