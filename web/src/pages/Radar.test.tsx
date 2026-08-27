@@ -1,0 +1,145 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+
+import Radar from "./Radar";
+import { ThemeProvider } from "../lib/theme";
+
+/**
+ * The CLASS PICKER contract (2026-08-27 directive: "score Genres, Micro-genres and
+ * Themes separately — user has to pick what he wants to research"):
+ *
+ * 1. The board scores ONE class at a time — default Micro-genres — and the rail list +
+ *    counts follow the picker honestly (a themes count never leaks into a micro view).
+ * 2. The SEARCH deliberately ignores the picker: it spans the whole pool across all
+ *    classes, and selecting a cross-class hit switches the picker to that class first,
+ *    so the dossier always opens over the board that contains the niche.
+ */
+
+/** A minimal /api/niches row with everything Radar's pool builder reads. */
+function row(
+  dimension: "genre" | "tag",
+  key: string,
+  tier: string | null,
+  demand: number | null,
+  sat: number | null,
+  opp: number,
+) {
+  return {
+    dimension,
+    key,
+    tier,
+    window: "24m",
+    min_reviews: 50,
+    n_games: 80,
+    n_recent: 20,
+    p90_rev: 400_000,
+    opportunity_v2: opp,
+    demand_trend_24m_pct: demand,
+    demand_emerging: false,
+    saturation_yoy: sat,
+    winner_concentration: 0.5,
+    entrant_ratio: 1.1,
+    solo_viability: 0.9,
+    reviews_24m: 120_000,
+    reviews_prev_24m: 90_000,
+    reviews_24m_new_share: 0.3,
+  };
+}
+
+const GENRES = [row("genre", "Simulation", null, 60, 0.05, 70), row("genre", "Strategy", null, 10, 0.2, 55)];
+const TAGS = [
+  row("tag", "Roguelike Deckbuilder", "micro", 196, 0.409, 71),
+  row("tag", "City Builder", "micro", 12, 0.1, 60),
+  row("tag", "Fishing", "theme", 80, 0.05, 65),
+  row("tag", "Horror", "theme", -20, 0.3, 50),
+];
+
+function renderRadar() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  return render(
+    <QueryClientProvider client={client}>
+      <ThemeProvider>
+        <MemoryRouter initialEntries={["/radar"]}>
+          <Radar />
+        </MemoryRouter>
+      </ThemeProvider>
+    </QueryClientProvider>,
+  );
+}
+
+beforeEach(() => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const items = url.includes("dimension=genre") ? GENRES : url.includes("dimension=tag") ? TAGS : [];
+      return new Response(JSON.stringify({ items, total: items.length, limit: 500, offset: 0 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }),
+  );
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+describe("Radar — class picker", () => {
+  it("defaults to Micro-genres and scopes the board + rail to that class, honest counts", async () => {
+    renderRadar();
+    expect(await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder")).toBeTruthy();
+    expect(screen.getByTestId("radar-row-tag:City Builder")).toBeTruthy();
+    // No cross-class leakage into the rail list…
+    expect(screen.queryByTestId("radar-row-genre:Simulation")).toBeNull();
+    expect(screen.queryByTestId("radar-row-tag:Fishing")).toBeNull();
+    // …and the header count is the CLASS count, not the pool count.
+    expect(screen.getByText("Verdicts").parentElement?.textContent).toContain("2");
+    // The kicker names the active class.
+    expect(screen.getByText(/micro-genre tags/)).toBeTruthy();
+    // The search still states the whole pool (all six niches, every class).
+    expect((screen.getByTestId("radar-search") as HTMLInputElement).placeholder).toContain("all 6 niches");
+  });
+
+  it("switching the class re-scopes the board and recomputes the counts", async () => {
+    renderRadar();
+    await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder");
+
+    fireEvent.click(screen.getByRole("button", { name: "Themes" }));
+    expect(screen.getByTestId("radar-row-tag:Fishing")).toBeTruthy();
+    expect(screen.getByTestId("radar-row-tag:Horror")).toBeTruthy();
+    expect(screen.queryByTestId("radar-row-tag:Roguelike Deckbuilder")).toBeNull();
+    expect(screen.getByText(/theme tags/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Genres" }));
+    expect(screen.getByTestId("radar-row-genre:Simulation")).toBeTruthy();
+    expect(screen.getByTestId("radar-row-genre:Strategy")).toBeTruthy();
+    expect(screen.queryByTestId("radar-row-tag:Fishing")).toBeNull();
+  });
+
+  it("a cross-class search hit switches the picker to its class and opens its dossier", async () => {
+    renderRadar();
+    await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder");
+
+    // Search spans ALL classes while the board shows micro only.
+    fireEvent.change(screen.getByTestId("radar-search"), { target: { value: "simulation" } });
+    const hit = screen.getByTestId("radar-row-genre:Simulation");
+    expect(hit).toBeTruthy();
+
+    fireEvent.click(hit);
+    // The dossier opens — and because the picker switched to Genres first, Simulation
+    // is now PLOTTED (top of its class), so no beyond-plot note appears.
+    const dossier = screen.getByTestId("verdict-dossier");
+    expect(dossier.textContent).toContain("Simulation");
+    expect(dossier.textContent).not.toContain("Beyond the Top");
+
+    // Back + clear: the rail now lists the GENRE class — the picker really moved.
+    fireEvent.click(screen.getByRole("button", { name: /back to all verdicts/i }));
+    fireEvent.keyDown(screen.getByTestId("radar-search"), { key: "Escape" });
+    expect(screen.getByTestId("radar-row-genre:Strategy")).toBeTruthy();
+    expect(screen.queryByTestId("radar-row-tag:Roguelike Deckbuilder")).toBeNull();
+  });
+});

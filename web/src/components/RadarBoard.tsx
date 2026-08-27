@@ -3,11 +3,13 @@ import { Link } from "react-router-dom";
 import clsx from "clsx";
 
 import { trackEvent } from "../lib/analytics";
-import { fmtInt, fmtUsd } from "../lib/format";
+import { fmtInt, fmtSigned, fmtUsd } from "../lib/format";
 import { MONO } from "../lib/palette";
 import {
+  DEMAND_ENTER_PCT,
   RING_LABEL,
   RING_ORDER,
+  SAT_FLOOD_YOY,
   SOLO_FRIENDLY_MIN,
   blipRadius,
   hash01,
@@ -20,79 +22,79 @@ import { TooltipPanel } from "./charts/TooltipPanel";
 import { nicheDetailPath } from "../pages/NicheDetail";
 
 /**
- * RadarBoard — the radial "tech-radar" plate (Zalando/solidgate visual language, Industry
- * blueprint dialect): concentric hairline verdict rings, three angular sectors (Genres /
- * Micro-genres / Themes), one dot per niche, and a RIGHT RAIL that is the board's single
- * reading pane.
+ * RadarBoard — the XY QUADRANT plate (2026-08-27, user directive: "score them accordingly
+ * to our current criterias and make more like XY axis graph with 4 different parameters").
+ * The polar ring board this replaces encoded the verdict as an annulus; this board draws
+ * the verdict's own INPUTS as the axes, so a dot's position IS its evidence:
  *
- * ONE INSTRUMENT (2026-08-27 layout overhaul): plate and rail live in one frame and share
- * one selection model. The rail has two modes:
- *   - default: the ranked VERDICT LIST — every plotted niche, grouped by ring, FULL
- *     counts — under the NICHE SEARCH input. The search's scope is the `pool` prop (the
- *     WHOLE population of the cut + solo setting, not just the plotted Top-N — user
- *     directive 2026-08-27): typing filters live (case-insensitive substring on the
- *     niche key) across every pool row; matches beyond the plot cap appear with an
- *     em-dash rank and still open a full dossier. Esc clears; ↑/↓ + Enter walk and open
- *     matches. No silent caps (project rule): below lg the list flows with the page;
- *     from lg up it fills the plate's height and scrolls inside the rail
- *     (absolute-inset column), with the group headers carrying the true totals so
- *     nothing can quietly end at item #22.
- *   - selection: the VERDICT DOSSIER — IN VIEW at every width (the dossier-viewport fix:
- *     a selection must never strand its answer below the fold). From lg (1024px) up the
- *     board and rail sit side-by-side (rail 360px at lg, 460px at xl; the plate shrinks
- *     first) and the dossier is the rail's selection pane, beside the plate. Below lg
- *     the layout stacks — an inline pane would open BELOW the board, forcing a scroll —
- *     so the dossier renders as an Industry-styled slide-over DRAWER from the right edge
- *     instead (DossierDrawer: backdrop, ✕/back/ESC close, focus-trapped). Both
- *     presentations render the same DossierBody, so they cannot drift. A selection from
- *     search that is NOT plotted (beyond Top-N) still opens its dossier, with an honest
- *     "beyond the Top N plot" note in the header instead of a rail rank.
- * Selection is CONTROLLED (selectedId/onSelect props): the page owns it, and an id may
- * name any pool niche — plotted dots additionally get the highlight ring on the plate.
+ *   X — demand_trend_24m_pct (% per 24 months: review inflow, last 24 complete months vs
+ *       the prior 24). The decisive demand check.
+ *   Y — saturation_yoy (% releases YoY). The decisive supply/overcrowding check.
+ *   dot AREA — P90 revenue (sqrt scale, like every bubble on this site).
+ *   dot STYLE — the final VERDICT (radarVerdict — mono-steel fills, brightest = enter,
+ *       receding paper alphas; NEVER red/green). Style is the 4th channel deliberately:
+ *       a dot can sit in the enter quadrant and still be Watch (the concentration /
+ *       winner-take-most veto fires on evidence the axes don't draw), so position alone
+ *       must never be read as the recommendation — the fill carries the final word and
+ *       the dossier the full trace. opportunity_v2 stays in tooltip + dossier: a fifth
+ *       visual channel on a mono-steel board would fight the verdict styling.
  *
- * Everything is hand-rolled SVG — the CSP forbids external chart libs, and recharts has no
- * polar scatter anyway. All colors are CSS vars; the ring verdict is encoded by POSITION
- * (which annulus) and spelled in the rail/tooltip, never by hue alone — dots follow the
- * app's mono-steel vocabulary (enter = --verdict-up accent, then receding paper alphas).
- * A second, orthogonal encoding carries the solo LENS: team-scale niches (singleplayer
- * share `solo_viability` < SOLO_FRIENDLY_MIN) draw hollow (ring-colored stroke,
- * transparent fill), solo-friendly and unknown draw filled; the dot legend and tooltip
- * spell it out. Deliberately a lens, not a ring — see lib/radarVerdict.ts. A third mark
- * flags EMERGING niches (demand_emerging): a dashed halo, a NEW + absolute-volume glyph
- * instead of a trend %, and a tooltip that never prints the non-representative %.
+ * THE QUADRANT GEOMETRY IS THE VERDICT'S OWN THRESHOLDS: the vertical hairline sits at
+ * X = +40%/24m (DEMAND_ENTER_PCT — the enter bar) and the horizontal at Y = +15% YoY
+ * (SAT_FLOOD_YOY — the flood bar); zero lines draw fainter. So the "GROWING · OPEN"
+ * quadrant is literally the region where the demand check passes and the supply veto
+ * does not fire — the same booleans the dossier spells out.
  *
- * POPULATION (`soloOnly` prop): the board's default population is solo-friendly niches
- * only — filtered SERVER-side (the API's solo_only param, same 0.8 bar as
- * SOLO_FRIENDLY_MIN; NULL solo_viability = unknown = excluded). With soloOnly the
- * hollow/filled encoding is redundant, so the dot legend states the population rule
- * instead of drawing lens samples.
+ * HONESTY RULES OF THE PLATE:
+ *   - OUTLIERS CLAMP, VISIBLY: axes are linear over fixed labeled domains (X −100…+300,
+ *     Y −60…+120). A value beyond the domain pins its dot at the plot edge with an
+ *     outward chevron marker (and "≥ +300"-style edge tick labels); the tooltip and
+ *     dossier carry the true number. Never silently dropped, never fake-positioned.
+ *   - NO XY, NO DOT IN THE PLOT: an EMERGING niche has no trustworthy trend % (young
+ *     label — its prior window is near zero by construction), and a niche without a
+ *     trend or saturation reading has no honest coordinate at all. Those rows render in
+ *     a dashed STRIP under the plot (the dashed-halo language), sized by absolute
+ *     24-month review volume — the number an emerging niche is actually judged by.
+ *   - Overlap jitter is DETERMINISTIC (hash01 of the niche id, never Math.random), only
+ *     applied to coincident dots, and never moves a pinned dot off its clamp edge.
  *
- * LAYOUT IS DETERMINISTIC: every jitter comes from hash01(dimension:key), never
- * Math.random, so a niche holds its position across renders, visits and machines.
- * Density handling (2026-08-27, after dots merged into blobs in the micro sector's
- * outer bands): when a (sector, ring) cell's dots would claim more than CELL_FILL_MAX of
- * its area, every radius in that cell scales down together (sqrt of the overflow, floored
- * at BLIP_R_DENSE_MIN) — pure arithmetic over the cell's own population, so still
- * deterministic — and the pairwise collision relax runs RELAX_PASSES fixed passes.
+ * ONE INSTRUMENT (unchanged from the 2026-08-27 layout overhaul): plate and rail live in
+ * one frame and share one selection model. The rail has two modes:
+ *   - default: the ranked VERDICT LIST — every plotted niche, grouped by ring verdict,
+ *     FULL counts — under the NICHE SEARCH input. The search's scope is the `pool` prop
+ *     (the WHOLE population of the cut + solo setting across ALL classes, not just the
+ *     plotted Top-N): typing filters live (case-insensitive substring on the niche key);
+ *     matches beyond the plotted board appear with an em-dash rank and still open a full
+ *     dossier. Esc clears; ↑/↓ + Enter walk and open matches. No silent caps: below lg
+ *     the list flows with the page; from lg up it scrolls inside the rail with true
+ *     totals in the group headers.
+ *   - selection: the VERDICT DOSSIER — in view at every width. From lg (1024px) up the
+ *     board and rail sit side-by-side (rail 360px at lg, 460px at xl) and the dossier is
+ *     the rail's selection pane; below lg it renders as the slide-over DRAWER
+ *     (DossierDrawer: backdrop, ✕/back/ESC close, focus-trapped). Both presentations
+ *     render the same DossierBody. A selection that is NOT plotted still opens its
+ *     dossier, with an honest "beyond the Top N plot" note.
+ * Selection is CONTROLLED (selectedId/onSelect): the page owns it — and uses it to
+ * switch the class picker when a search hit belongs to another class.
  *
- * CLICK TARGETS: only the blip dots are interactive inside the SVG — the hairline rings,
- * separators and labels sit in a pointer-events:none group so a scripted or misaimed
- * click on the decor can never look like a dead dot (and the legend's sample circles are
- * plain aria-hidden glyphs, not targets). Keyboard access: the SVG dots are mouse
- * conveniences (aria-hidden); every niche's keyboard route is its rail row (a real
- * button), and navigation lives on the dossier's deep-dive link.
+ * Everything is hand-rolled SVG — the CSP forbids external chart libs. All colors are
+ * CSS vars; the solo LENS stays orthogonal (team-scale dots draw hollow, singleplayer
+ * share < SOLO_FRIENDLY_MIN); a caution verdict (weak/partial evidence) draws a dotted
+ * ring. CLICK TARGETS: only the dots are interactive inside the SVG — axes, gridlines,
+ * threshold hairlines and labels sit in a pointer-events:none group. Keyboard access:
+ * the SVG dots are mouse conveniences (aria-hidden); every niche's keyboard route is its
+ * rail row (a real button), and navigation lives on the dossier's deep-dive link.
  */
 
 export type RadarSector = "genre" | "micro" | "theme";
-export const SECTOR_ORDER: RadarSector[] = ["genre", "micro", "theme"];
 
 const SECTOR_LABEL: Record<RadarSector, string> = {
   genre: "Genres",
   micro: "Micro-genres",
   theme: "Themes",
 };
-/** One-letter sector marker for rail rows (a "Roguelike" tag and a "Roguelike" genre
- * can both be on the board — the letter disambiguates without a second grouping level). */
+/** One-letter class marker for rail rows — the search spans all classes, so a cross-class
+ * match needs its class named ("Roguelike" the tag vs "Roguelike" the genre). */
 const SECTOR_SHORT: Record<RadarSector, string> = { genre: "G", micro: "M", theme: "T" };
 
 export interface RadarBoardBlip {
@@ -105,14 +107,15 @@ export interface RadarBoardBlip {
   opportunity_v2: number | null;
   /** Percent units; the 24-month demand trend (last 24 complete months vs the prior 24 —
    * see mart_niche.sql's _niche_demand24m). null = this niche has no trend (the mart
-   * predates the column, or the niche had no prior-window baseline). */
+   * predates the column, or the niche had no prior-window baseline). THE X AXIS. */
   demandTrendPct: number | null;
+  /** Signed fraction, releases YoY (0.15 = +15%); null = unknown. THE Y AXIS. */
+  saturationYoy: number | null;
   /** The mart's young-tag flag (see lib/radarVerdict.ts): when true the trend % is not
-   * representative — the blip plates in the Emerging ring, draws a dashed halo, and the
-   * tooltip/rail show absolute volume instead of the %. */
+   * representative — the row renders in the no-%-base strip, never at a fake X. */
   demandEmerging: boolean;
   /** Absolute review inflow over the last 24 months — the number an emerging niche is
-   * judged by (its % has no comparable base). null on marts without the demand columns. */
+   * judged by (its % has no comparable base), and the strip's size scale. */
   reviews24m: number | null;
   /** Prior-window review inflow — the dossier's demand-base context. */
   reviewsPrev24m: number | null;
@@ -126,163 +129,175 @@ export interface RadarBoardBlip {
   trace: VerdictCheck[];
 }
 
-// ---- geometry ---------------------------------------------------------------------------
+// ---- XY geometry ------------------------------------------------------------------------
 
-const SIZE = 640;
-const C = SIZE / 2;
-const R = 284; // outer ring radius; the margin hosts the sector labels
-/** Ring outer edges as fractions of R, inner -> outer (index-aligned with RING_ORDER,
- * which grew an Emerging band between Watch and Crowded). The inner (strongest) ring is
- * deliberately the widest band per unit of its label's importance, like the reference. */
-const RING_OUTER = [0.3, 0.52, 0.68, 0.85, 1] as const;
-const SECTOR_SPAN = (2 * Math.PI) / SECTOR_ORDER.length;
-/** Sector i spans [sectorStart(i), sectorStart(i) + SECTOR_SPAN); 0 starts straight up. */
-function sectorStart(i: number): number {
-  return -Math.PI / 2 + i * SECTOR_SPAN;
+/** X domain, % per 24 months. −100 is the true floor (inflow cannot drop further); +300
+ * clips the young-tag long tail — beyond it a dot pins at the edge with a chevron. */
+export const X_DOMAIN: readonly [number, number] = [-100, 300];
+/** Y domain, % releases YoY. Chosen from the live distribution (p5 ≈ −23%, p95 ≈ +160%):
+ * the −30…+60 band where most niches live keeps most of the pixels; the ~5% beyond +120
+ * pin at the top edge rather than crushing the readable region. */
+export const Y_DOMAIN: readonly [number, number] = [-60, 120];
+/** The vertical quadrant line: the verdict's own demand bar (+40% / 24m to enter). */
+export const X_BAR = DEMAND_ENTER_PCT;
+/** The horizontal quadrant line: the verdict's own flood bar (+15% releases YoY). */
+export const Y_BAR = SAT_FLOOD_YOY * 100;
+
+const VB_W = 640;
+/** Plot rectangle inside the viewBox; margins host the tick labels and axis titles. */
+export const PLOT = { l: 46, t: 20, w: 578, h: 380 } as const;
+const PLOT_X1 = PLOT.l + PLOT.w;
+const PLOT_Y1 = PLOT.t + PLOT.h;
+const AXIS_H = 36; // bottom margin: tick labels + axis title
+const BASE_H = PLOT_Y1 + AXIS_H;
+
+const X_TICKS = [-100, 0, 100, 200, 300];
+const Y_TICKS = [-60, 0, 60, 120];
+
+// The no-XY strip (emerging / no-trend rows) under the axis.
+const STRIP_GAP = 8;
+const STRIP_LABEL_H = 18;
+const STRIP_ROW_H = 20;
+const STRIP_PAD = 10;
+const STRIP_DOT_R_MIN = 2.5;
+const STRIP_DOT_R_MAX = 7;
+
+/** Domain % -> px, unclamped (clamping is layoutXY's job, so it can flag it). */
+export function xToPx(v: number): number {
+  return PLOT.l + ((v - X_DOMAIN[0]) / (X_DOMAIN[1] - X_DOMAIN[0])) * PLOT.w;
 }
-
-/** Max share of a (sector, ring) cell's area its dots may claim before every dot in the
- * cell shrinks together — the deterministic anti-blob rule (see module doc). */
-export const CELL_FILL_MAX = 0.22;
-/** The floor density scaling can never cross — dots stay visible and hittable. */
-export const BLIP_R_DENSE_MIN = 2.5;
-/** Fixed pairwise-relax passes (was 3 — not enough for the dense micro-genre bands). */
-const RELAX_PASSES = 8;
+/** Domain % YoY -> px; +Y up (flooding at the top). */
+export function yToPx(v: number): number {
+  return PLOT.t + ((Y_DOMAIN[1] - v) / (Y_DOMAIN[1] - Y_DOMAIN[0])) * PLOT.h;
+}
 
 export interface PlacedBlip extends RadarBoardBlip {
   id: string;
-  /** 1-based rail number (ring order, then sector order, then opportunity desc). */
+  /** 1-based rail number (ring-verdict order, then opportunity desc). */
   n: number;
   x: number;
   y: number;
   r: number;
+  /** 0 = honest position; 1/−1 = the true value lies beyond the axis max/min — the dot
+   * is pinned at that plot edge and draws an outward chevron (tooltip has the truth). */
+  clampX: -1 | 0 | 1;
+  clampY: -1 | 0 | 1;
+  /** True = no honest XY coordinate (emerging, or trend/saturation missing): drawn in
+   * the dashed strip under the plot, sized by 24m review volume — never fake-positioned
+   * inside the quadrants. */
+  strip: boolean;
 }
 
 /** A rail/dossier entry: a plotted blip (with its rail rank), or a pool niche beyond the
- * Top-N plot cap reachable only through search — n: null, no dot on the plate. */
+ * plotted board reachable only through search — n: null, no dot on the plate. */
 export type RailBlip = RadarBoardBlip & { id: string; n: number | null };
 
-/** Angular padding (radians) keeping a dot of radius r clear of the sector separators. */
-function angularPad(r: number, radius: number): number {
-  return 0.06 + (r + 6) / Math.max(radius, 24);
+export interface XYLayout {
+  dots: PlacedBlip[];
+  stripCount: number;
+  /** True when the strip holds rows that are NOT the mart's emerging flag (a niche with
+   * no trend or no saturation reading) — the strip label must then not overclaim. */
+  stripHasNonEmerging: boolean;
+  stripTop: number;
+  stripH: number;
+  /** Total viewBox height — grows with the strip so nothing overlays the axis. */
+  vbH: number;
 }
 
-function cellBounds(ringIdx: number, r: number): { rIn: number; rOut: number } {
-  const rIn = (ringIdx === 0 ? 0 : RING_OUTER[ringIdx - 1] * R) + (ringIdx === 0 ? 18 : r + 4);
-  const rOut = RING_OUTER[ringIdx] * R - (r + 4);
-  return { rIn, rOut };
-}
-
-/** Clamp a point back into its (sector, ring) cell, in polar space. */
-function clampToCell(b: PlacedBlip): void {
-  const ringIdx = RING_ORDER.indexOf(b.verdict.ring);
-  const sectorIdx = SECTOR_ORDER.indexOf(b.sector);
-  const { rIn, rOut } = cellBounds(ringIdx, b.r);
-  const dx = b.x - C;
-  const dy = b.y - C;
-  const radius = Math.min(Math.max(Math.hypot(dx, dy), rIn), Math.max(rIn, rOut));
-  const a0 = sectorStart(sectorIdx);
-  const pad = angularPad(b.r, radius);
-  // Angle relative to the sector start, normalized to [0, 2π).
-  let d = (Math.atan2(dy, dx) - a0) % (2 * Math.PI);
-  if (d < 0) d += 2 * Math.PI;
-  // A nudge can push a dot across a separator; snap to the nearer sector edge first.
-  if (d > SECTOR_SPAN) d = d - SECTOR_SPAN < (2 * Math.PI - SECTOR_SPAN) / 2 ? SECTOR_SPAN : 0;
-  const lo = Math.min(pad, SECTOR_SPAN / 2);
-  const hi = Math.max(SECTOR_SPAN - pad, SECTOR_SPAN / 2);
-  d = Math.min(Math.max(d, lo), hi);
-  const a = a0 + d;
-  b.x = C + radius * Math.cos(a);
-  b.y = C + radius * Math.sin(a);
-}
+const clampNum = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
 
 /**
- * Deterministic placement: hash-jittered polar position inside the (sector, ring) cell,
- * density-scaled radii (see module doc), then a fixed-pass pairwise relax to reduce
- * overlap. Exported for tests.
+ * Deterministic XY placement. Pure function of the blips (hash01 jitter only), exported
+ * for tests: same input, same output — a niche holds its position across renders, visits
+ * and machines.
  */
-export function layoutBlips(blips: RadarBoardBlip[]): PlacedBlip[] {
+export function layoutXY(blips: RadarBoardBlip[]): XYLayout {
   const maxP90 = blips.reduce<number>((m, b) => Math.max(m, b.p90_rev ?? 0), 0);
   const ordered = [...blips].sort((a, b) => {
     const ring = RING_ORDER.indexOf(a.verdict.ring) - RING_ORDER.indexOf(b.verdict.ring);
     if (ring !== 0) return ring;
-    const sector = SECTOR_ORDER.indexOf(a.sector) - SECTOR_ORDER.indexOf(b.sector);
-    if (sector !== 0) return sector;
     const opp = (b.opportunity_v2 ?? -1) - (a.opportunity_v2 ?? -1);
     if (opp !== 0) return opp;
     return a.key.localeCompare(b.key);
   });
 
-  // Density pass: sum each (sector, ring) cell's dot area against the cell's own annulus
-  // area; an over-full cell scales EVERY resident radius by the same sqrt factor (area
-  // tracks the overflow), floored at BLIP_R_DENSE_MIN. Deterministic — pure arithmetic
-  // over the stable cell population, no randomness, no iteration-order dependence.
-  const baseR = ordered.map((blip) => blipRadius(blip.p90_rev, maxP90));
-  const dotArea = new Map<string, number>();
-  for (let i = 0; i < ordered.length; i++) {
-    const cell = `${RING_ORDER.indexOf(ordered[i].verdict.ring)}|${SECTOR_ORDER.indexOf(ordered[i].sector)}`;
-    dotArea.set(cell, (dotArea.get(cell) ?? 0) + Math.PI * baseR[i] * baseR[i]);
-  }
-  const cellScale = new Map<string, number>();
-  for (const [cell, area] of dotArea) {
-    const ringIdx = Number(cell.split("|")[0]);
-    const rOut = RING_OUTER[ringIdx] * R;
-    const rIn = ringIdx === 0 ? 0 : RING_OUTER[ringIdx - 1] * R;
-    const cellArea = (SECTOR_SPAN / 2) * (rOut * rOut - rIn * rIn);
-    cellScale.set(cell, area > 0 ? Math.min(1, Math.sqrt((CELL_FILL_MAX * cellArea) / area)) : 1);
-  }
-
-  const placed: PlacedBlip[] = ordered.map((blip, i) => {
+  const dots: PlacedBlip[] = ordered.map((blip, i) => {
     const id = `${blip.dimension}:${blip.key}`;
-    const cell = `${RING_ORDER.indexOf(blip.verdict.ring)}|${SECTOR_ORDER.indexOf(blip.sector)}`;
-    const r = Math.max(BLIP_R_DENSE_MIN, baseR[i] * (cellScale.get(cell) ?? 1));
-    const ringIdx = RING_ORDER.indexOf(blip.verdict.ring);
-    const sectorIdx = SECTOR_ORDER.indexOf(blip.sector);
-    const { rIn, rOut } = cellBounds(ringIdx, r);
-    const radius = rOut > rIn ? rIn + hash01(`${id}|r`) * (rOut - rIn) : (rIn + rOut) / 2;
-    const a0 = sectorStart(sectorIdx);
-    const pad = angularPad(r, radius);
-    const span = Math.max(SECTOR_SPAN - 2 * pad, 0);
-    const a = span > 0 ? a0 + pad + hash01(`${id}|a`) * span : a0 + SECTOR_SPAN / 2;
-    return { ...blip, id, n: i + 1, r, x: C + radius * Math.cos(a), y: C + radius * Math.sin(a) };
+    // No honest coordinate -> the strip. Emerging first (its % EXISTS but is not
+    // representative — plotting it would be worse than missing data), then any row a
+    // linear axis simply has no number for.
+    const strip = blip.demandEmerging || blip.demandTrendPct === null || blip.saturationYoy === null;
+    if (strip) {
+      // Strip coords are assigned in the packing pass below.
+      return { ...blip, id, n: i + 1, x: 0, y: 0, r: STRIP_DOT_R_MIN, clampX: 0, clampY: 0, strip: true };
+    }
+    const xv = blip.demandTrendPct as number;
+    const yv = (blip.saturationYoy as number) * 100;
+    const clampX = xv > X_DOMAIN[1] ? 1 : xv < X_DOMAIN[0] ? -1 : 0;
+    const clampY = yv > Y_DOMAIN[1] ? 1 : yv < Y_DOMAIN[0] ? -1 : 0;
+    const r = blipRadius(blip.p90_rev, maxP90);
+    // Pinned dots sit ON their edge (touching it from inside); honest dots inset by r so
+    // the circle never spills out of the frame.
+    const x =
+      clampX === 1 ? PLOT_X1 - r - 1 : clampX === -1 ? PLOT.l + r + 1 : clampNum(xToPx(xv), PLOT.l + r, PLOT_X1 - r);
+    const y =
+      clampY === 1 ? PLOT.t + r + 1 : clampY === -1 ? PLOT_Y1 - r - 1 : clampNum(yToPx(yv), PLOT.t + r, PLOT_Y1 - r);
+    return { ...blip, id, n: i + 1, x, y, r, clampX, clampY, strip: false };
   });
 
-  // Collision relax: RELAX_PASSES passes, push overlapping pairs apart along their delta,
-  // then re-clamp into the cell. Deterministic (stable order, no randomness); coincident
-  // centers split along a hash-derived direction.
-  for (let pass = 0; pass < RELAX_PASSES; pass++) {
-    for (let i = 0; i < placed.length; i++) {
-      for (let j = i + 1; j < placed.length; j++) {
-        const a = placed[i];
-        const b = placed[j];
-        const minDist = a.r + b.r + 2;
-        let dx = b.x - a.x;
-        let dy = b.y - a.y;
-        let dist = Math.hypot(dx, dy);
-        if (dist >= minDist) continue;
-        if (dist < 1e-6) {
-          const ang = hash01(`${a.id}|${b.id}`) * 2 * Math.PI;
-          dx = Math.cos(ang);
-          dy = Math.sin(ang);
-          dist = 1;
-        }
-        const push = (minDist - dist) / 2 / dist;
-        a.x -= dx * push;
-        a.y -= dy * push;
-        b.x += dx * push;
-        b.y += dy * push;
-        clampToCell(a);
-        clampToCell(b);
-      }
-    }
+  // Coincident-dot jitter: only when centers land in the same ~2px cell, offset by a
+  // hash-derived angle (deterministic), growing with the pile index — and NEVER along a
+  // pinned axis (a clamp edge is a claim; jitter must not soften it).
+  const seen = new Map<string, number>();
+  for (const d of dots) {
+    if (d.strip) continue;
+    const cell = `${Math.round(d.x / 2)}|${Math.round(d.y / 2)}`;
+    const k = seen.get(cell) ?? 0;
+    seen.set(cell, k + 1);
+    if (k === 0) continue;
+    const ang = hash01(`${d.id}|jitter`) * 2 * Math.PI;
+    const dist = 3 + 2.5 * k;
+    if (d.clampX === 0) d.x = clampNum(d.x + Math.cos(ang) * dist, PLOT.l + d.r, PLOT_X1 - d.r);
+    if (d.clampY === 0) d.y = clampNum(d.y + Math.sin(ang) * dist, PLOT.t + d.r, PLOT_Y1 - d.r);
   }
-  return placed;
+
+  // Strip packing: volume desc (the strip's own honest ranking), left-to-right rows.
+  const stripDots = dots.filter((d) => d.strip);
+  stripDots.sort((a, b) => (b.reviews24m ?? -1) - (a.reviews24m ?? -1) || a.key.localeCompare(b.key));
+  const maxVol = stripDots.reduce<number>((m, d) => Math.max(m, d.reviews24m ?? 0), 0);
+  const stripTop = BASE_H + STRIP_GAP;
+  let cursor = PLOT.l + STRIP_PAD;
+  let row = 0;
+  for (const d of stripDots) {
+    d.r =
+      maxVol > 0 && d.reviews24m != null
+        ? STRIP_DOT_R_MIN + Math.sqrt(d.reviews24m / maxVol) * (STRIP_DOT_R_MAX - STRIP_DOT_R_MIN)
+        : STRIP_DOT_R_MIN;
+    if (cursor + 2 * d.r > PLOT_X1 - STRIP_PAD) {
+      row += 1;
+      cursor = PLOT.l + STRIP_PAD;
+    }
+    d.x = cursor + d.r;
+    d.y = stripTop + STRIP_LABEL_H + STRIP_ROW_H / 2 + row * STRIP_ROW_H;
+    cursor += 2 * d.r + 10;
+  }
+  const stripH = stripDots.length > 0 ? STRIP_LABEL_H + (row + 1) * STRIP_ROW_H + STRIP_PAD : 0;
+
+  return {
+    dots,
+    stripCount: stripDots.length,
+    stripHasNonEmerging: stripDots.some((d) => !d.demandEmerging),
+    stripTop,
+    stripH,
+    vbH: stripDots.length > 0 ? stripTop + stripH + 2 : BASE_H,
+  };
 }
 
 // ---- rendering --------------------------------------------------------------------------
 
-/** Mono-steel ring vocabulary: the strongest verdict carries the accent, the rest recede
- * in paper alphas. Never red/green; the ring POSITION and the rail carry the meaning. */
+/** Mono-steel verdict vocabulary (4th visual channel): the strongest verdict carries the
+ * accent, the rest recede in paper alphas. Never red/green; the fill + the rail carry the
+ * meaning — POSITION only ever claims what the axes measured. */
 const RING_FILL: Record<RadarRing, string> = {
   enter: "var(--verdict-up)",
   watch: MONO.paper75,
@@ -361,9 +376,9 @@ function CheckGlyph({ pass }: { pass: boolean | null }) {
  * Below the trace: the raw context numbers and the deep-dive link (the dossier explains;
  * the detail page is where the full workup lives).
  *
- * Accepts any RailBlip: a niche selected through search that sits beyond the Top-N plot
- * cap (n: null) gets the same full dossier — same trace, same bars — plus an honest
- * header note that it has no dot on the board at this cap.
+ * Accepts any RailBlip: a niche selected through search that isn't plotted (beyond the
+ * Top-N of its class) gets the same full dossier — same trace, same bars — plus an
+ * honest header note that it has no dot on the board at this cap.
  */
 function DossierBody({ blip, plotCap }: { blip: RailBlip; plotCap: number }) {
   const v = blip.verdict;
@@ -610,6 +625,66 @@ function useIsDesktop(): boolean {
   return useSyncExternalStore(subscribeDesktop, isDesktopNow, () => true);
 }
 
+/** Outward chevron on a pinned dot — the explicit "true value beyond this edge" marker.
+ * pointer-events none (the dot under it is the click target). */
+function ClampChevron({ d }: { d: PlacedBlip }) {
+  const marks: string[] = [];
+  if (d.clampX === 1) marks.push(`M ${d.x + d.r + 2} ${d.y - 3.5} L ${d.x + d.r + 5.5} ${d.y} L ${d.x + d.r + 2} ${d.y + 3.5}`);
+  if (d.clampX === -1) marks.push(`M ${d.x - d.r - 2} ${d.y - 3.5} L ${d.x - d.r - 5.5} ${d.y} L ${d.x - d.r - 2} ${d.y + 3.5}`);
+  if (d.clampY === 1) marks.push(`M ${d.x - 3.5} ${d.y - d.r - 2} L ${d.x} ${d.y - d.r - 5.5} L ${d.x + 3.5} ${d.y - d.r - 2}`);
+  if (d.clampY === -1) marks.push(`M ${d.x - 3.5} ${d.y + d.r + 2} L ${d.x} ${d.y + d.r + 5.5} L ${d.x + 3.5} ${d.y + d.r + 2}`);
+  if (marks.length === 0) return null;
+  return (
+    <path
+      data-testid={`radar-clamp-${d.id}`}
+      d={marks.join(" ")}
+      fill="none"
+      stroke="var(--text-muted)"
+      strokeWidth={1.2}
+      pointerEvents="none"
+    />
+  );
+}
+
+/** SVG text with a page-ground halo so labels stay legible over gridlines and dots. */
+function HaloText({
+  x,
+  y,
+  anchor,
+  size = 9,
+  fill = "var(--text-muted)",
+  transform,
+  children,
+}: {
+  x: number;
+  y: number;
+  anchor: "start" | "middle" | "end";
+  size?: number;
+  fill?: string;
+  transform?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <text
+      x={x}
+      y={y}
+      textAnchor={anchor}
+      className="kicker"
+      transform={transform}
+      style={{
+        fontSize: size,
+        letterSpacing: "0.1em",
+        fill,
+        stroke: "var(--page-plane)",
+        strokeWidth: 3.5,
+        paintOrder: "stroke",
+      }}
+    >
+      {children}
+    </text>
+  );
+}
+
 export function RadarBoard({
   blips,
   pool,
@@ -618,18 +693,18 @@ export function RadarBoard({
   selectedId,
   onSelect,
 }: {
-  /** What the plate plots: the pool's Top-N head by opportunity. */
+  /** What the plate plots: the active class's Top-N by opportunity (the page slices). */
   blips: RadarBoardBlip[];
-  /** The FULL population at this cut + solo setting (every dimension merged, opportunity
-   * order) — the rail search's scope. A superset of `blips`: search must reach every
-   * niche of the cut, never just the plotted dots (user directive 2026-08-27). */
+  /** The FULL population at this cut + solo setting, ALL classes merged, opportunity
+   * order — the rail search's scope. A superset of `blips`: search must reach every
+   * niche of the cut, never just the plotted class or its Top-N. */
   pool: RadarBoardBlip[];
   /** The Top-N plot cap — names the honest "beyond the Top N plot" dossier note for a
    * search selection that has no dot. */
   plotCap: number;
   soloOnly: boolean;
   /** Controlled selection — "dimension:key" of ANY pool niche, or null. Owned by the
-   * page; dots and rail rows (including search hits beyond the plot) share the channel. */
+   * page (which also switches the class picker when a search hit is cross-class). */
   selectedId: string | null;
   onSelect: (id: string | null) => void;
 }) {
@@ -645,12 +720,13 @@ export function RadarBoard({
   // Side-by-side (≥lg): dossier in the rail pane. Stacked (<lg): dossier as the drawer.
   const isDesktop = useIsDesktop();
 
-  const placed = useMemo(() => layoutBlips(blips), [blips]);
+  const layout = useMemo(() => layoutXY(blips), [blips]);
+  const placed = layout.dots;
   const q = query.trim().toLowerCase();
 
   /** The rail's row source. No query: the plotted list, rank order (the board's own
    * reading). With a query: a live case-insensitive substring filter over the FULL pool —
-   * plotted rows keep their rank/coords, beyond-plot rows carry n: null. */
+   * plotted rows keep their rank, beyond-board rows carry n: null. */
   const railEntries = useMemo<RailBlip[]>(() => {
     if (!q) return placed;
     const plottedById = new Map<string, PlacedBlip>(placed.map((p) => [p.id, p]));
@@ -666,8 +742,8 @@ export function RadarBoard({
   const byRing = useMemo(() => {
     const m = new Map<RadarRing, RailBlip[]>(RING_ORDER.map((r) => [r, []]));
     for (const b of railEntries) m.get(b.verdict.ring)!.push(b);
-    // Within a ring group: plotted rows first in rank order, then beyond-plot search hits
-    // in pool (opportunity) order — sort is stable, so ties keep their source order.
+    // Within a ring group: plotted rows first in rank order, then beyond-board search
+    // hits in pool (opportunity) order — sort is stable, so ties keep source order.
     for (const group of m.values()) group.sort((a, b) => (a.n ?? Infinity) - (b.n ?? Infinity));
     return m;
   }, [railEntries]);
@@ -676,7 +752,7 @@ export function RadarBoard({
 
   const hovered = hoverId === null ? null : (placed.find((b) => b.id === hoverId) ?? null);
   // Selection resolves against the PLOTTED board first (dot highlight comes free), then
-  // the full pool — a search hit beyond the plot cap still opens its dossier. It survives
+  // the full pool — a search hit beyond the board still opens its dossier. It survives
   // population toggles only while the niche is still in the pool.
   const selected = useMemo<RailBlip | null>(() => {
     if (selectedId === null) return null;
@@ -726,105 +802,171 @@ export function RadarBoard({
     );
   }
 
+  const anyClampMaxX = placed.some((d) => d.clampX === 1);
+  const anyClampMinX = placed.some((d) => d.clampX === -1);
+  const anyClampMaxY = placed.some((d) => d.clampY === 1);
+  const anyClampMinY = placed.some((d) => d.clampY === -1);
+  const xBarPx = xToPx(X_BAR);
+  const yBarPx = yToPx(Y_BAR);
+  const stripLabel = layout.stripHasNonEmerging
+    ? "EMERGING / NO TREND BASE — not plottable · sized by 24m volume"
+    : "EMERGING — no % base · sized by 24m volume";
+  /** The plate's rendered height in CSS px (viewBox scales with width) — the tooltip's
+   * bottom-flip band needs it, and the plate is no longer square. */
+  const plateHPx = ((wrapRef.current?.clientWidth ?? VB_W) * layout.vbH) / VB_W;
+
   return (
     <div className="flex flex-col gap-5 lg:flex-row lg:items-stretch">
-      {/* The plate */}
-      {/* max-w: 640 from lg (the widened rail eats the difference first — at 1024 the
-          plate settles near 500px; 640 = the SVG's native size, so it never upscales). */}
+      {/* The plate. max-w: 640 from lg (the widened rail eats the difference first — at
+          1024 the plate settles near 500px; 640 = the viewBox width, so it never
+          upscales). */}
       <div ref={wrapRef} className="relative mx-auto w-full max-w-[600px] lg:mx-0 lg:min-w-0 lg:max-w-[640px] lg:flex-1">
-        <svg viewBox={`0 0 ${SIZE} ${SIZE}`} className="block h-auto w-full" role="img" aria-label="Radar board: niches plotted by verdict ring and sector">
-          {/* Decor — hairline rings, separators, origin cross and labels. pointer-events
-              none as a GROUP: only the blip dots may ever be click targets, so a click
-              landing on a hairline can never read as a dead dot (A4 hardening). */}
-          <g pointerEvents="none">
-            {/* Verdict rings — hairline circles, outermost on the baseline weight. */}
-            {RING_OUTER.map((f, i) => (
-              <circle
-                key={f}
-                cx={C}
-                cy={C}
-                r={f * R}
-                fill="none"
-                stroke={i === RING_OUTER.length - 1 ? "var(--baseline)" : "var(--gridline)"}
-                strokeWidth={1}
-              />
+        <svg
+          viewBox={`0 0 ${VB_W} ${layout.vbH}`}
+          className="block h-auto w-full"
+          role="img"
+          aria-label="Radar board: niches plotted by 24-month demand trend (x) against release saturation YoY (y); dot area is P90 revenue and dot style is the verdict"
+        >
+          {/* Decor — frame, zero lines, THE THRESHOLD HAIRLINES, ticks, axis titles and
+              quadrant labels. pointer-events none as a GROUP: only the dots may ever be
+              click targets, so a click landing on a hairline can never read as a dead
+              dot. */}
+          <g pointerEvents="none" data-testid="xy-decor">
+            {/* Plot frame. */}
+            <rect x={PLOT.l} y={PLOT.t} width={PLOT.w} height={PLOT.h} fill="none" stroke="var(--baseline)" strokeWidth={1} />
+
+            {/* Zero lines — fainter than the verdict bars (gridline vs baseline). */}
+            <line x1={xToPx(0)} y1={PLOT.t} x2={xToPx(0)} y2={PLOT_Y1} stroke="var(--gridline)" strokeWidth={1} />
+            <line x1={PLOT.l} y1={yToPx(0)} x2={PLOT_X1} y2={yToPx(0)} stroke="var(--gridline)" strokeWidth={1} />
+
+            {/* THE QUADRANT LINES = THE VERDICT'S OWN THRESHOLDS (lib/radarVerdict.ts):
+                a dot right of the vertical bar passes the enter demand check; a dot
+                above the horizontal bar is in flood territory (supply veto). */}
+            <line
+              data-testid="xy-bar-demand"
+              x1={xBarPx}
+              y1={PLOT.t}
+              x2={xBarPx}
+              y2={PLOT_Y1}
+              stroke="var(--baseline)"
+              strokeWidth={1}
+              strokeDasharray="6 3"
+            />
+            <line
+              data-testid="xy-bar-flood"
+              x1={PLOT.l}
+              y1={yBarPx}
+              x2={PLOT_X1}
+              y2={yBarPx}
+              stroke="var(--baseline)"
+              strokeWidth={1}
+              strokeDasharray="6 3"
+            />
+            <HaloText x={xBarPx + 4} y={PLOT.t + 11} anchor="start" size={8.5} fill="var(--text-secondary)">
+              ENTER BAR +{X_BAR}% / 24M
+            </HaloText>
+            <HaloText x={PLOT.l + 5} y={yBarPx - 5} anchor="start" size={8.5} fill="var(--text-secondary)">
+              FLOOD BAR +{Y_BAR}% YOY
+            </HaloText>
+
+            {/* Quadrant readings — region names only; the DOT STYLE carries the final
+                verdict (a growing·open dot can still be Watch on a concentration veto). */}
+            <HaloText x={PLOT_X1 - 8} y={PLOT_Y1 - 10} anchor="end">
+              GROWING · OPEN
+            </HaloText>
+            <HaloText x={PLOT_X1 - 8} y={PLOT.t + 26} anchor="end">
+              GROWING · FLOODING
+            </HaloText>
+            <HaloText x={PLOT.l + 8} y={PLOT.t + 26} anchor="start">
+              SHRINKING · FLOODING
+            </HaloText>
+            <HaloText x={PLOT.l + 8} y={PLOT_Y1 - 10} anchor="start">
+              FLAT/SHRINKING · OPEN
+            </HaloText>
+
+            {/* X ticks + labels. Edge labels grow a ≥ / ≤ prefix when something clamps
+                there — the scale is telling you it ends before the data does. */}
+            {X_TICKS.map((t) => (
+              <g key={`xt${t}`}>
+                <line x1={xToPx(t)} y1={PLOT_Y1} x2={xToPx(t)} y2={PLOT_Y1 + 4} stroke="var(--baseline)" strokeWidth={1} />
+                <text
+                  x={xToPx(t)}
+                  y={PLOT_Y1 + 15}
+                  textAnchor="middle"
+                  className="tabular"
+                  style={{ fontSize: 10, fill: "var(--text-muted)" }}
+                >
+                  {t === X_DOMAIN[1] && anyClampMaxX
+                    ? `≥ +${t}`
+                    : t === X_DOMAIN[0] && anyClampMinX
+                      ? `≤ ${t}`
+                      : t > 0
+                        ? `+${t}`
+                        : `${t}`}
+                </text>
+              </g>
             ))}
-            {/* Sector separators — hairline radii. */}
-            {SECTOR_ORDER.map((_, i) => {
-              const a = sectorStart(i);
-              return (
-                <line
-                  key={i}
-                  x1={C}
-                  y1={C}
-                  x2={C + R * Math.cos(a)}
-                  y2={C + R * Math.sin(a)}
+            {/* Y ticks + labels. */}
+            {Y_TICKS.map((t) => (
+              <g key={`yt${t}`}>
+                <line x1={PLOT.l - 4} y1={yToPx(t)} x2={PLOT.l} y2={yToPx(t)} stroke="var(--baseline)" strokeWidth={1} />
+                <text
+                  x={PLOT.l - 7}
+                  y={yToPx(t) + 3}
+                  textAnchor="end"
+                  className="tabular"
+                  style={{ fontSize: 10, fill: "var(--text-muted)" }}
+                >
+                  {t === Y_DOMAIN[1] && anyClampMaxY
+                    ? `≥ +${t}`
+                    : t === Y_DOMAIN[0] && anyClampMinY
+                      ? `≤ ${t}`
+                      : t > 0
+                        ? `+${t}`
+                        : `${t}`}
+                </text>
+              </g>
+            ))}
+
+            {/* Axis titles, units spelled out. */}
+            <HaloText x={PLOT.l + PLOT.w / 2} y={PLOT_Y1 + 30} anchor="middle">
+              DEMAND TREND · % / 24M (LAST 24 VS PRIOR 24)
+            </HaloText>
+            <HaloText x={0} y={0} anchor="middle" transform={`translate(12 ${PLOT.t + PLOT.h / 2}) rotate(-90)`}>
+              RELEASES YOY · % (SATURATION)
+            </HaloText>
+
+            {/* The no-XY strip frame + label (only when it has residents). */}
+            {layout.stripCount > 0 && (
+              <>
+                <rect
+                  data-testid="xy-strip"
+                  x={PLOT.l}
+                  y={layout.stripTop}
+                  width={PLOT.w}
+                  height={layout.stripH}
+                  fill="none"
                   stroke="var(--gridline)"
                   strokeWidth={1}
+                  strokeDasharray="4 3"
                 />
-              );
-            })}
-            {/* Center registration cross — the blueprint sheet's origin mark. */}
-            <line x1={C - 7} y1={C} x2={C + 7} y2={C} stroke="var(--baseline)" strokeWidth={1} />
-            <line x1={C} y1={C - 7} x2={C} y2={C + 7} stroke="var(--baseline)" strokeWidth={1} />
-
-            {/* Ring names, stacked along the upward separator (a cell boundary, so they
-                never sit over a blip field); page-ground halo keeps them legible. */}
-            {RING_ORDER.map((ring, i) => {
-              const mid = ((i === 0 ? 0 : RING_OUTER[i - 1]) + RING_OUTER[i]) / 2;
-              return (
-                <text
-                  key={ring}
-                  x={C}
-                  y={C - mid * R}
-                  textAnchor="middle"
-                  dominantBaseline="middle"
-                  className="kicker"
-                  style={{
-                    fontSize: 10,
-                    letterSpacing: "0.1em",
-                    fill: "var(--text-muted)",
-                    stroke: "var(--page-plane)",
-                    strokeWidth: 4,
-                    paintOrder: "stroke",
-                  }}
-                >
-                  {RING_LABEL[ring]}
-                </text>
-              );
-            })}
-
-            {/* Sector names, outside the outer ring at each sector's mid angle. */}
-            {SECTOR_ORDER.map((sector, i) => {
-              const a = sectorStart(i) + SECTOR_SPAN / 2;
-              return (
-                <text
-                  key={sector}
-                  x={C + (R + 20) * Math.cos(a)}
-                  y={C + (R + 20) * Math.sin(a)}
-                  textAnchor="middle"
-                  dominantBaseline="middle"
-                  className="kicker"
-                  style={{ fontSize: 11, letterSpacing: "0.12em", fill: "var(--text-secondary)" }}
-                >
-                  {SECTOR_LABEL[sector]}
-                </text>
-              );
-            })}
+                <HaloText x={PLOT.l + STRIP_PAD} y={layout.stripTop + 12} anchor="start" size={8.5}>
+                  {stripLabel}
+                </HaloText>
+              </>
+            )}
           </g>
 
-          {/* Blips — dots only; the rail carries the accessible buttons. Solo lens as dot
-              STYLE: team-scale (singleplayer share < SOLO_FRIENDLY_MIN) draws hollow —
+          {/* Dots — plot + strip; the rail carries the accessible buttons. Solo lens as
+              dot STYLE: team-scale (singleplayer share < SOLO_FRIENDLY_MIN) draws hollow —
               ring-colored stroke over a `transparent` fill (transparent, not "none", so
-              the interior still hit-tests for hover/click); solo-friendly and unknown
-              draw filled. Ring POSITION is untouched — solo never moves a verdict. */}
+              the interior still hit-tests); solo-friendly and unknown draw filled. The
+              VERDICT is the fill vocabulary; a caution verdict adds a dotted ring;
+              emerging keeps its dashed halo (in the strip). */}
           <g aria-hidden>
             {placed.map((b) => (
               <g key={b.id}>
-                {/* Emerging halo — a dashed ring-colored circle around the dot (Industry
-                    constraints: mono-steel, no hue). Orthogonal to the solo lens' hollow/
-                    filled encoding, so an emerging team-scale dot keeps both marks. */}
-                {b.demandEmerging && (
+                {b.demandEmerging ? (
                   <circle
                     cx={b.x}
                     cy={b.y}
@@ -836,6 +978,20 @@ export function RadarBoard({
                     opacity={hoverId !== null && hoverId !== b.id ? 0.35 : 1}
                     pointerEvents="none"
                   />
+                ) : (
+                  b.verdict.caution && (
+                    <circle
+                      cx={b.x}
+                      cy={b.y}
+                      r={b.r + 2.5}
+                      fill="none"
+                      stroke="var(--text-muted)"
+                      strokeWidth={1}
+                      strokeDasharray="1.5 2.5"
+                      opacity={hoverId !== null && hoverId !== b.id ? 0.35 : 1}
+                      pointerEvents="none"
+                    />
+                  )
                 )}
                 <circle
                   data-testid={`radar-blip-${b.id}`}
@@ -858,8 +1014,17 @@ export function RadarBoard({
                   // the dossier's own deep-dive link.
                   onClick={() => onSelect(b.id)}
                 />
+                <ClampChevron d={b} />
                 {(hoverId === b.id || selectedId === b.id) && (
-                  <circle cx={b.x} cy={b.y} r={b.r + (b.demandEmerging ? 5 : 2.5)} fill="none" stroke="var(--text-primary)" strokeWidth={1} pointerEvents="none" />
+                  <circle
+                    cx={b.x}
+                    cy={b.y}
+                    r={b.r + (b.demandEmerging ? 5 : 2.5)}
+                    fill="none"
+                    stroke="var(--text-primary)"
+                    strokeWidth={1}
+                    pointerEvents="none"
+                  />
                 )}
               </g>
             ))}
@@ -907,22 +1072,24 @@ export function RadarBoard({
             </svg>
             emerging (no comparable % base)
           </span>
-          <span>dot area = P90 revenue · ring = verdict (solo never moves a dot between rings)</span>
+          <span>
+            dot area = P90 revenue · fill = verdict (position is evidence, fill is the call) · chevron at an edge =
+            beyond the axis scale, true % in the tooltip
+          </span>
         </div>
 
         {/* Hover tooltip — HTML over the SVG, same TooltipPanel language as every chart.
             Clamped to the plate: it flips to the LEFT of the cursor past the horizontal
             midline (keeps the right edge) and flips ABOVE the cursor in the bottom band
-            (the plate is square, so its rendered height is clientWidth; low dots used to
-            push the panel past the plate's bottom edge and clip). */}
+            (the plate's rendered height scales with its width via the viewBox). */}
         {hovered && tip && (
           <div
             className="pointer-events-none absolute z-10"
             style={{
               left: tip.x,
               top: tip.y,
-              transform: `translate(${tip.x > (wrapRef.current?.clientWidth ?? SIZE) / 2 ? "calc(-100% - 12px)" : "12px"}, ${
-                tip.y > (wrapRef.current?.clientWidth || SIZE) - 180 ? "calc(-100% - 12px)" : "12px"
+              transform: `translate(${tip.x > (wrapRef.current?.clientWidth ?? VB_W) / 2 ? "calc(-100% - 12px)" : "12px"}, ${
+                tip.y > plateHPx - 180 ? "calc(-100% - 12px)" : "12px"
               })`,
             }}
           >
@@ -939,16 +1106,25 @@ export function RadarBoard({
                 // its absolute volume.
                 ...(hovered.demandEmerging
                   ? [
-                      // Neutral on purpose — WHICH emerging tell fired (young label vs a
-                      // base too small for a % read) is the dossier's distinction; the
-                      // tooltip only carries the claim both tells share.
                       { label: "Demand 24m", value: "emerging — no comparable % base" },
                       {
                         label: "Reviews 24m",
                         value: hovered.reviews24m != null ? fmtInt(hovered.reviews24m) : "—",
                       },
                     ]
-                  : [{ label: "Demand 24m", value: fmtTrendPct(hovered.demandTrendPct) }]),
+                  : [
+                      {
+                        label: "Demand 24m",
+                        value: `${fmtTrendPct(hovered.demandTrendPct)}${hovered.clampX !== 0 ? " · beyond scale" : ""}`,
+                      },
+                    ]),
+                {
+                  label: "Releases YoY",
+                  value:
+                    hovered.saturationYoy != null
+                      ? `${fmtSigned(hovered.saturationYoy, 0)}${hovered.clampY !== 0 ? " · beyond scale" : ""}`
+                      : "unknown",
+                },
                 { label: "P90 revenue", value: fmtUsd(hovered.p90_rev) },
                 { label: "Games", value: fmtInt(hovered.n_games) },
                 { label: "Opp v2", value: hovered.opportunity_v2 != null ? hovered.opportunity_v2.toFixed(1) : "—" },
@@ -962,22 +1138,21 @@ export function RadarBoard({
         )}
       </div>
 
-      {/* THE RAIL — the board's single reading pane: the full ranked verdict list, or (at
-          ≥lg, where board and rail are side-by-side) the selected niche's dossier. From
-          lg up it matches the plate's height and scrolls inside itself (absolute-inset
-          column — full counts in the group headers, so nothing is silently capped);
-          below lg it flows with the page, uncapped, and the dossier renders as the
-          slide-over DRAWER instead (an inline pane down there would open BELOW the board,
-          out of view — the exact complaint this layout fixes). Widths (2026-08-27, "too
-          narrow"): 360px at lg, 460px at xl — the plate shrinks first; the dossier's
-          value+bar rows fit one line at both. */}
+      {/* THE RAIL — the board's single reading pane: the ranked verdict list under the
+          full-pool niche search, or (at ≥lg, side-by-side) the selected niche's dossier.
+          From lg up it matches the plate's height and scrolls inside itself
+          (absolute-inset column — full counts in the group headers, so nothing is
+          silently capped); below lg it flows with the page, uncapped, and the dossier
+          renders as the slide-over DRAWER instead. Widths: 360px at lg, 460px at xl —
+          the plate shrinks first; the dossier's value+bar rows fit one line at both. */}
       <div className="flex min-w-0 flex-col border-t border-chartborder pt-4 lg:w-[360px] lg:shrink-0 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0 xl:w-[460px] xl:pl-5">
         {selected && isDesktop ? (
           <VerdictDossier blip={selected} plotCap={plotCap} total={placed.length} onBack={() => onSelect(null)} />
         ) : (
           <>
-            {/* The niche search — scope is the FULL pool, stated right in the
-                placeholder so nobody has to guess it only reaches the plotted dots. */}
+            {/* The niche search — scope is the FULL pool across all classes, stated
+                right in the placeholder so nobody has to guess it only reaches the
+                plotted class. */}
             <input
               type="text"
               data-testid="radar-search"
@@ -1043,7 +1218,7 @@ export function RadarBoard({
                                   "bg-ink-primary/[0.06]",
                               )}
                             >
-                              {/* Beyond-plot search hits have no rail rank — an em dash,
+                              {/* Beyond-board search hits have no rail rank — an em dash,
                                   never a fake number (the dossier carries the full note). */}
                               <span className="tabular w-6 shrink-0 text-right text-[11px] text-ink-muted">
                                 {b.n ?? "—"}

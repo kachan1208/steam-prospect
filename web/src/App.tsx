@@ -22,18 +22,21 @@ import Docs from "./pages/Docs";
 import Terms from "./pages/Terms";
 import Privacy from "./pages/Privacy";
 
-// Six destinations plus one CTA, deliberately: Radar (the opportunity feed, new home —
-// mockup 3a), Niches (the finder came BACK in 2026-08 — the v2 growth-gated scores,
-// live-player columns and the deep-dive drawer made it chart-heavy again), Games
-// (teardown charts), Studios (developer/publisher track records — added by user request:
-// publisher scouting needs a discoverable entry point, not a link buried in game credits),
-// Timing (the seasonality heatmap), and Watchlist (saved niches/games + alert rules —
-// mockup 4f). Data log and Docs moved to the footer — a freshness receipt and reference
-// material aren't destinations you navigate to, and the footer already carries the
-// data-health readout next to them. "MCP" is the primary CTA, not a peer nav item.
-// Everything else the old nav carried — benchmarks, the estimator, marketing pitch lists —
-// is still fully answerable, but through the MCP against current.duckdb rather than a page
-// of its own.
+// Five destinations plus one CTA, deliberately: Radar (the index — the niche instrument),
+// Games (teardown charts), Studios (developer/publisher track records — added by user
+// request: publisher scouting needs a discoverable entry point, not a link buried in game
+// credits), Timing (the seasonality heatmap), and Watchlist (saved niches/games + alert
+// rules — mockup 4f). "Niches" LEFT the nav 2026-08-27 (user: "do we need list of niches
+// as separate tab then? … It seems odd" — the radar carries the niche population now,
+// with a full-pool search): the /niches route and NicheFinder page are fully intact,
+// reached through the radar header's "Open Niche Finder →" link and every in-page link —
+// a DEMOTION, not a removal, and deliberately reversible by re-adding the entry below.
+// Data log and Docs moved to the footer — a freshness receipt and reference material
+// aren't destinations you navigate to, and the footer already carries the data-health
+// readout next to them. "MCP" is the primary CTA, not a peer nav item. Everything else
+// the old nav carried — benchmarks, the estimator, marketing pitch lists — is still
+// fully answerable, but through the MCP against current.duckdb rather than a page of
+// its own.
 // 24x24 stroke icons, same family as the Logo mark. grid/calendar are the originals from
 // the sidebar era; building/pulse/eye are new for Studios/Radar/Watchlist.
 const ICONS: Record<string, ReactNode> = {
@@ -77,9 +80,8 @@ const ICONS: Record<string, ReactNode> = {
   ),
 };
 
-const NAV_ITEMS: { to: string; label: string }[] = [
+export const NAV_ITEMS: { to: string; label: string }[] = [
   { to: "/radar", label: "Radar" },
-  { to: "/niches", label: "Niches" },
   { to: "/games", label: "Games" },
   { to: "/studios", label: "Studios" },
   { to: "/timing", label: "Timing" },
@@ -108,14 +110,14 @@ function Header() {
         </Link>
 
         {/* Below sm the nav wraps to its own block under the logo (order-last + w-full);
-            no hamburger/drawer — six links wrap onto a second line at narrow widths rather
-            than overflowing (flex-wrap; four links fit one row, six need two on a phone).
+            no hamburger/drawer — the links wrap onto a second line at narrow widths rather
+            than overflowing (flex-wrap; four links fit one row, five may need two on a phone).
             Plain text links, no pill background — active carries the accent, inactive
             recedes to muted paper, matching the mockups' `.nav a` rule exactly (color
             only, never a fill). */}
         {/* Right-aligned, per the mockups: the wordmark holds the left edge and the links sit
             beside the MCP button. ml-auto does the pushing so the wrap behaviour below sm is
-            unchanged — six items still wrap rather than running off a 390px screen. */}
+            unchanged — the items still wrap rather than running off a 390px screen. */}
         <nav className="order-last flex w-full flex-wrap items-center gap-x-4 gap-y-1 pb-2.5 sm:order-none sm:ml-auto sm:w-auto sm:flex-nowrap sm:gap-x-5 sm:pb-0">
           {NAV_ITEMS.map((item) => (
             <NavLink

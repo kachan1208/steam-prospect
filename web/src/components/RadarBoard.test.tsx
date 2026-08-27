@@ -4,15 +4,15 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import {
-  BLIP_R_DENSE_MIN,
+  PLOT,
   RadarBoard,
-  layoutBlips,
-  type PlacedBlip,
+  layoutXY,
+  xToPx,
+  yToPx,
   type RadarBoardBlip,
 } from "./RadarBoard";
 import {
   SOLO_FRIENDLY_MIN,
-  blipRadius,
   radarVerdictTrace,
   type RadarVerdictInput,
 } from "../lib/radarVerdict";
@@ -31,14 +31,16 @@ import {
  *    the solo row's inline member evidence, and the deep-dive link.
  *
  * 3. CLICK-TARGET HYGIENE (A4). Only blip dots are interactive inside the SVG — the
- *    hairline rings/decor and the legend's sample circles must never open a dossier.
+ *    axes/threshold decor and the legend's sample circles must never open a dossier.
  *
  * 4. NO SILENT CAPS (A1). The rail renders EVERY entry of every ring group, and the group
  *    headers carry the full counts.
  *
- * 5. DETERMINISTIC, DENSITY-AWARE LAYOUT (A2). layoutBlips scales a crowded cell's radii
- *    down together (bounded below), never moves a dot out of its cell, and is exactly
- *    reproducible call-to-call.
+ * 5. THE XY QUADRANT PLATE (2026-08-27 directive). The quadrant lines sit at the
+ *    verdict's own thresholds (+40%/24m demand, +15% YoY flood), axes carry units,
+ *    beyond-domain values pin at the plot edge with an explicit chevron (never dropped,
+ *    never fake-positioned), and emerging / no-trend rows live in the dashed strip below
+ *    the plot. layoutXY is deterministic call-to-call, coincident-dot jitter included.
  *
  * 6. NICHE SEARCH OVER THE FULL POOL (2026-08-27 directive). The rail search filters the
  *    WHOLE population (`pool` prop), not just the plotted Top-N: a beyond-plot match
@@ -58,6 +60,7 @@ function makeBlip(key: string, input: RadarVerdictInput, over: Partial<RadarBoar
     p90_rev: 612_000,
     opportunity_v2: input.opportunity_v2 ?? 80,
     demandTrendPct: input.demand_trend_24m_pct ?? null,
+    saturationYoy: input.saturation_yoy ?? null,
     demandEmerging: input.demand_emerging === true,
     reviews24m: input.reviews_24m ?? null,
     reviewsPrev24m: input.reviews_prev_24m ?? null,
@@ -256,16 +259,14 @@ describe("RadarBoard — verdict dossier (rail selection mode)", () => {
 });
 
 describe("RadarBoard — click-target hygiene (A4)", () => {
-  it("clicking the decorative ring hairlines never opens a dossier", () => {
-    const { container } = renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
-    // The FIRST `svg circle` in the document is a verdict-ring hairline, not a blip —
-    // exactly what a naive scripted `click('svg circle')` hits.
-    const firstCircle = container.querySelector("svg circle")!;
-    expect(firstCircle.getAttribute("data-testid")).toBeNull();
-    fireEvent.click(firstCircle);
+  it("clicking the axis/threshold decor never opens a dossier", () => {
+    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    // The decor group (frame, zero lines, threshold bars, labels) is pointer-inert as a
+    // GROUP, so a misaimed or scripted click on a hairline can never read as a dead dot.
+    expect(screen.getByTestId("xy-decor").getAttribute("pointer-events")).toBe("none");
+    fireEvent.click(screen.getByTestId("xy-bar-demand"));
+    fireEvent.click(screen.getByTestId("xy-bar-flood"));
     expect(screen.queryByTestId("verdict-dossier")).toBeNull();
-    // The whole decor group is pointer-inert, so it cannot even intercept a dot click.
-    expect(firstCircle.closest("g")?.getAttribute("pointer-events")).toBe("none");
   });
 
   it("the legend sample circles are aria-hidden glyphs, not click targets", () => {
@@ -390,62 +391,142 @@ describe("RadarBoard — niche search over the full pool", () => {
   });
 });
 
-describe("layoutBlips — deterministic, density-aware placement (A2)", () => {
-  const dense = Array.from({ length: 60 }, (_, i) =>
-    makeBlip(`Dense ${String(i).padStart(2, "0")}`, { demand_trend_24m_pct: 10 }, { p90_rev: 900_000 }),
-  );
-
-  function maxBaseRadius(blips: RadarBoardBlip[]): number {
-    const maxP90 = blips.reduce<number>((m, b) => Math.max(m, b.p90_rev ?? 0), 0);
-    return Math.max(...blips.map((b) => blipRadius(b.p90_rev, maxP90)));
-  }
-
-  it("is exactly reproducible call-to-call (no hidden randomness)", () => {
-    const a = layoutBlips(dense);
-    const b = layoutBlips(dense);
-    expect(a.map(({ id, x, y, r }) => ({ id, x, y, r }))).toEqual(b.map(({ id, x, y, r }) => ({ id, x, y, r })));
+describe("RadarBoard — XY quadrant plate", () => {
+  it("draws the quadrant lines at the verdict's own thresholds, labeled, with axis units", () => {
+    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    // The vertical bar IS the enter demand bar; the horizontal IS the flood bar.
+    const demandBar = screen.getByTestId("xy-bar-demand");
+    expect(Number(demandBar.getAttribute("x1"))).toBeCloseTo(xToPx(40), 4);
+    const floodBar = screen.getByTestId("xy-bar-flood");
+    expect(Number(floodBar.getAttribute("y1"))).toBeCloseTo(yToPx(15), 4);
+    expect(screen.getByText(/ENTER BAR \+40% \/ 24M/)).toBeTruthy();
+    expect(screen.getByText(/FLOOD BAR \+15% YOY/)).toBeTruthy();
+    // Quadrant micro-labels name REGIONS, never the verdict (a growing-open dot can
+    // still be Watch on a concentration veto — the dot style owns the final word).
+    for (const label of ["GROWING · OPEN", "GROWING · FLOODING", "SHRINKING · FLOODING", "FLAT/SHRINKING · OPEN"]) {
+      expect(screen.getByText(label)).toBeTruthy();
+    }
+    // Axis titles carry the units.
+    expect(screen.getByText(/DEMAND TREND · % \/ 24M/)).toBeTruthy();
+    expect(screen.getByText(/RELEASES YOY · %/)).toBeTruthy();
   });
 
-  it("scales a crowded cell's radii down together, bounded below", () => {
-    const placed = layoutBlips(dense);
-    const base = maxBaseRadius(dense); // all dots share p90 -> identical base radius
-    for (const p of placed) {
-      expect(p.r).toBeLessThan(base); // 60 max-size dots cannot fit unshrunk
-      expect(p.r).toBeGreaterThanOrEqual(BLIP_R_DENSE_MIN);
-    }
-    // A sparse board keeps its full-size dots — scaling only bites under pressure.
-    const sparse = layoutBlips(dense.slice(0, 3));
-    for (const p of sparse) {
-      expect(p.r).toBeCloseTo(maxBaseRadius(dense.slice(0, 3)), 6);
-    }
+  it("pins a beyond-scale outlier at the plot edge with a chevron and a ≥ edge tick", () => {
+    renderBoard(
+      [
+        makeBlip("Runaway", { demand_trend_24m_pct: 900, saturation_yoy: 43, opportunity_v2: 50 }),
+        makeBlip("Roguelike Deckbuilder", REFERENCE),
+      ],
+      true,
+    );
+    // The outlier renders (never dropped) with the explicit beyond-scale marker…
+    expect(screen.getByTestId("radar-blip-tag:Runaway")).toBeTruthy();
+    expect(screen.getByTestId("radar-clamp-tag:Runaway")).toBeTruthy();
+    // …and the edge tick labels admit the scale ends before the data does.
+    expect(screen.getByText("≥ +300")).toBeTruthy();
+    expect(screen.getByText("≥ +120")).toBeTruthy();
+    // The in-domain dot carries no marker.
+    expect(screen.queryByTestId("radar-clamp-tag:Roguelike Deckbuilder")).toBeNull();
   });
 
-  it("never lets the relax push a dot outside its (sector, ring) cell", () => {
-    const placed = layoutBlips(dense);
-    const C = 320; // board center (SIZE / 2)
-    const R = 284;
-    // All fixtures are watch-ring (index 1 -> annulus 0.3..0.52 of R) in the micro
-    // sector (index 1 -> angle span [π/6, 5π/6) measured from straight-up start).
-    for (const p of placed as PlacedBlip[]) {
-      const radius = Math.hypot(p.x - C, p.y - C);
-      expect(radius).toBeGreaterThanOrEqual(0.3 * R - 1e-6);
-      expect(radius).toBeLessThanOrEqual(0.52 * R + 1e-6);
-      let angle = Math.atan2(p.y - C, p.x - C) - (-Math.PI / 2 + (2 * Math.PI) / 3);
-      angle = ((angle % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
-      expect(angle).toBeLessThanOrEqual((2 * Math.PI) / 3 + 1e-6);
-    }
+  it("renders emerging / no-trend rows in the dashed strip with an honest label", () => {
+    renderBoard(
+      [
+        makeBlip("Organizing", { demand_emerging: true, demand_trend_24m_pct: 4850, reviews_24m: 39_600, saturation_yoy: 0.2 }),
+        makeBlip("Quiet Niche", { saturation_yoy: 0.1, opportunity_v2: 40 }),
+        makeBlip("Roguelike Deckbuilder", REFERENCE),
+      ],
+      true,
+    );
+    expect(screen.getByTestId("xy-strip")).toBeTruthy();
+    // A no-trend (non-emerging) resident means the label must not claim they are all
+    // emerging labels.
+    expect(screen.getByText(/EMERGING \/ NO TREND BASE — not plottable · sized by 24m volume/)).toBeTruthy();
+    // Strip dots stay first-class: clickable into a dossier like any other.
+    fireEvent.click(screen.getByTestId("radar-blip-tag:Quiet Niche"));
+    expect(screen.getByTestId("verdict-dossier").textContent).toContain("Quiet Niche");
   });
 
-  it("keeps severe pile-ups out: no two dots sit closer than half their combined radii", () => {
-    const placed = layoutBlips(dense);
-    for (let i = 0; i < placed.length; i++) {
-      for (let j = i + 1; j < placed.length; j++) {
-        const a = placed[i];
-        const b = placed[j];
-        const dist = Math.hypot(a.x - b.x, a.y - b.y);
-        expect(dist).toBeGreaterThan((a.r + b.r) / 2);
+  it("labels the strip as EMERGING when every resident carries the mart's emerging flag", () => {
+    renderBoard(
+      [
+        makeBlip("Organizing", { demand_emerging: true, demand_trend_24m_pct: 4850, reviews_24m: 39_600, saturation_yoy: 0.2 }),
+        makeBlip("Roguelike Deckbuilder", REFERENCE),
+      ],
+      true,
+    );
+    expect(screen.getByText(/^EMERGING — no % base · sized by 24m volume$/)).toBeTruthy();
+  });
+});
+
+describe("layoutXY — deterministic, honest placement", () => {
+  const at = (key: string, demand: number, sat: number, over: Partial<RadarBoardBlip> = {}) =>
+    makeBlip(key, { demand_trend_24m_pct: demand, saturation_yoy: sat, opportunity_v2: 50 }, over);
+
+  it("positions in-domain dots at their true axis coordinates", () => {
+    const { dots } = layoutXY([at("A", 100, 0.3)]);
+    expect(dots[0].strip).toBe(false);
+    expect(dots[0].clampX).toBe(0);
+    expect(dots[0].clampY).toBe(0);
+    expect(dots[0].x).toBeCloseTo(xToPx(100), 4);
+    expect(dots[0].y).toBeCloseTo(yToPx(30), 4); // fraction 0.3 -> +30% YoY
+  });
+
+  it("clamps beyond-domain values to the plot edge and flags them — never drops them", () => {
+    const { dots } = layoutXY([at("Hot", 900, 43)]);
+    const d = dots[0];
+    expect(d.strip).toBe(false);
+    expect(d.clampX).toBe(1);
+    expect(d.clampY).toBe(1);
+    expect(d.x).toBeCloseTo(PLOT.l + PLOT.w - d.r - 1, 4);
+    expect(d.y).toBeCloseTo(PLOT.t + d.r + 1, 4);
+  });
+
+  it("sends emerging and no-XY rows to the strip below the plot — no fake quadrant position", () => {
+    const layout = layoutXY([
+      makeBlip("Young", { demand_emerging: true, demand_trend_24m_pct: 4850, reviews_24m: 10_000, saturation_yoy: 0.2 }),
+      makeBlip("No Trend", { saturation_yoy: 0.1 }),
+      makeBlip("No Sat", { demand_trend_24m_pct: 50 }),
+    ]);
+    expect(layout.stripCount).toBe(3);
+    expect(layout.stripHasNonEmerging).toBe(true);
+    for (const d of layout.dots) {
+      expect(d.strip).toBe(true);
+      expect(d.y).toBeGreaterThan(PLOT.t + PLOT.h); // below the plot box, inside the strip
+    }
+    // The viewBox grows for the strip instead of overlaying the axis.
+    expect(layout.vbH).toBeGreaterThan(PLOT.t + PLOT.h + 36);
+  });
+
+  it("is exactly reproducible call-to-call, coincident-dot jitter included", () => {
+    const rows = [at("A", 50, 0.1), at("B", 50, 0.1), at("C", 50, 0.1)];
+    const one = layoutXY(rows);
+    const two = layoutXY(rows);
+    expect(one.dots.map(({ id, x, y, r }) => ({ id, x, y, r }))).toEqual(
+      two.dots.map(({ id, x, y, r }) => ({ id, x, y, r })),
+    );
+    // Coincident dots separate deterministically and stay inside the plot.
+    for (let i = 0; i < one.dots.length; i++) {
+      for (let j = i + 1; j < one.dots.length; j++) {
+        const a = one.dots[i];
+        const b = one.dots[j];
+        expect(Math.hypot(a.x - b.x, a.y - b.y)).toBeGreaterThan(1);
       }
+      expect(one.dots[i].x).toBeGreaterThanOrEqual(PLOT.l);
+      expect(one.dots[i].x).toBeLessThanOrEqual(PLOT.l + PLOT.w);
+      expect(one.dots[i].y).toBeGreaterThanOrEqual(PLOT.t);
+      expect(one.dots[i].y).toBeLessThanOrEqual(PLOT.t + PLOT.h);
     }
+  });
+
+  it("never jitters a pinned dot off its clamp edge", () => {
+    const { dots } = layoutXY([at("P1", 900, 0.1), at("P2", 900, 0.1)]);
+    for (const d of dots) {
+      expect(d.clampX).toBe(1);
+      expect(d.x).toBeCloseTo(PLOT.l + PLOT.w - d.r - 1, 4); // still pinned
+    }
+    // Separated along the free (unpinned) axis instead.
+    expect(Math.abs(dots[0].y - dots[1].y)).toBeGreaterThan(1);
   });
 });
 

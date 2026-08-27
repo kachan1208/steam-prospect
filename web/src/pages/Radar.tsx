@@ -15,11 +15,21 @@ import { SOLO_FRIENDLY_MIN, radarVerdictTrace } from "../lib/radarVerdict";
  * re-statement of the top riser the list already leads with. The /api/niches/radar
  * endpoint itself is untouched (MCP and external consumers).
  *
- * THE INSTRUMENT (RadarBoardSection) — a single frame: the radial board plate on the
- * left, the RIGHT RAIL as its only reading pane (the ranked verdict list with the
- * full-population niche search on top, or the selected niche's verdict dossier —
- * RadarBoard.tsx owns that swap), and ONE toolbar row in the header carrying every
- * control (Solo-friendly toggle, Top N) plus the unobtrusive Niche Finder escape hatch.
+ * THE INSTRUMENT (RadarBoardSection) — a single frame: the XY quadrant plate on the left
+ * (RadarBoard.tsx — demand trend × release saturation, quadrant lines at the verdict's
+ * own thresholds), the RIGHT RAIL as its only reading pane (the ranked verdict list with
+ * the full-population niche search on top, or the selected niche's verdict dossier), and
+ * ONE toolbar row in the header carrying every control plus the Niche Finder escape
+ * hatch (that link matters more now: "Niches" left the top nav — see App.tsx).
+ *
+ * ONE CLASS AT A TIME (user directive, 2026-08-27: "score Genres, Micro-genres and
+ * Themes separately — user has to pick what he wants to research"): the CLASS PICKER
+ * (Genres · Micro-genres · Themes, default Micro-genres, deliberately no "All") scopes
+ * the board and the rail list to one class, so every dot on the plate is scored against
+ * its own kind. The SEARCH deliberately ignores the picker — it spans all classes, and
+ * picking a cross-class hit switches the picker to that class before selecting (see
+ * handleSelect).
+ *
  * Fed by the /api/niches LIST endpoint (two cuts: dimension=genre and dimension=tag
  * tiers=micro,theme). The stats cut is PINNED (24m × 50+ reviews) — see BOARD_WINDOW's
  * doc. The methodology paragraph is a collapsed-by-default <details> disclosure so the
@@ -56,13 +66,28 @@ const BOARD_MIN_REVIEWS = 50;
  * opportunity — the same rows every other surface can rank. */
 const POPULATION_LIMIT = 500;
 
-/** Blip cap so the board stays readable; "top N by opportunity_v2" across all sectors.
- * A display cap only: the rail search sees past it (see POPULATION_LIMIT). */
+/** Blip cap so the board stays readable; "top N by opportunity_v2" within the active
+ * class. A display cap only: the rail search sees past it (see POPULATION_LIMIT). */
 const TOP_N_OPTIONS = [
   { v: 40, label: "40" },
   { v: 80, label: "80" },
   { v: 120, label: "120" },
 ];
+
+/** The class picker — the board scores ONE class at a time (a genre's saturation and a
+ * micro-tag's saturation are not the same market claim, so they must not share a plot).
+ * Deliberately no "All": mixing classes is exactly what the directive retired. Default
+ * micro — the class the opportunity work targets. */
+const CLASS_OPTIONS: { v: RadarSector; label: string }[] = [
+  { v: "genre", label: "Genres" },
+  { v: "micro", label: "Micro-genres" },
+  { v: "theme", label: "Themes" },
+];
+const CLASS_KICKER: Record<RadarSector, string> = {
+  genre: "genres",
+  micro: "micro-genre tags",
+  theme: "theme tags",
+};
 /** The page-level population toggle (default ON — the radar is solo-first). ON asks the
  * SERVER (solo_only) for solo-friendly niches only (singleplayer share >= 0.8, unknown
  * excluded); OFF reveals the full population, where the solo lens draws team-scale dots
@@ -123,6 +148,8 @@ function RadarBoardSection({
   bothFailed,
   partialFail,
   errorMessage,
+  boardClass,
+  onBoardClass,
   soloOnly,
   onSoloOnly,
   topN,
@@ -137,6 +164,8 @@ function RadarBoardSection({
   bothFailed: boolean;
   partialFail: boolean;
   errorMessage: string | null;
+  boardClass: RadarSector;
+  onBoardClass: (v: RadarSector) => void;
   soloOnly: boolean;
   onSoloOnly: (v: boolean) => void;
   topN: number;
@@ -147,16 +176,18 @@ function RadarBoardSection({
   return (
     <section className="blueprint relative border-ink-primary/25 px-6 py-5 lg:px-[30px] lg:py-[24px]">
       <i className="bp-corner" />
-      {/* Header: identity left, THE toolbar right — every board control lives here. */}
+      {/* Header: identity left, THE toolbar right — every board control lives here; the
+          class picker leads (it is the "what am I researching" control). */}
       <div className="flex flex-wrap items-end gap-x-6 gap-y-3 pb-5">
         <div className="flex flex-col gap-1.5">
           <div className="kicker text-[10px] tracking-[.12em] text-brand">
-            Verdict rings · last 24 months · genres + micro + theme tags
+            Verdict quadrants · last 24 months · {CLASS_KICKER[boardClass]}
             {soloOnly ? " · solo-friendly only" : ""}
           </div>
           <h2 className="text-[26px] text-ink-primary sm:text-[30px]">Niche radar</h2>
         </div>
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 sm:ml-auto">
+          <SegRow label="Class" options={CLASS_OPTIONS} value={boardClass} onChange={onBoardClass} />
           <SegRow
             label="Solo-friendly only"
             options={SOLO_ONLY_OPTIONS}
@@ -204,22 +235,28 @@ function RadarBoardSection({
         </summary>
         <p className="pb-2 text-[11px] text-ink-muted">
           Stats cut: last 24 months, niches with 50+ review games — pinned, so a display toggle can never move a
-          verdict (the mart precomputes each cut as its own population). Demand trend: review inflow over the last 24
-          months vs the prior 24 — the same horizon as the cut itself, a structural read that a release spike or a sale
-          week cannot move. Ring verdicts are computed client-side (lib/radarVerdict.ts): Enter now = demand up ≥40%
-          per 24 months (~20%/yr) without a flooding pipeline · Watch = demand holding or softening, or score-only
-          evidence · Emerging = no comparable demand base — either a young label (≥80% of its reviews from games
-          released in the last 24 months) or a prior base too small for a % read; the dossier names which — so the dot
-          draws a dashed halo and is judged by absolute review volume instead · Crowded = releases up &gt;15% YoY
-          against flat-to-down demand, or
-          winner-take-most · Declining = demand down ≥30% per 24 months. Every dot rings on its own 24-month demand
-          trend; niches without one (older data build, or no prior-window baseline) are placed on structural evidence
-          and marked &ldquo;caution&rdquo; in the tooltip. Click a dot for its verdict dossier — the same checks that
-          placed it, spelled out with the bars they were judged against. The board plots the Top N by opportunity; the
-          rail&rsquo;s search covers the whole population of the cut, past the plot cap.{" "}
+          verdict (the mart precomputes each cut as its own population). The board scores ONE class at a time (the
+          picker): a genre and a micro-tag are different market claims, so they are never plotted against each other.
+          The axes are the verdict&rsquo;s own decisive inputs — X: demand trend, review inflow over the last 24
+          months vs the prior 24 (a structural read a release spike or a sale week cannot move) · Y: release
+          saturation YoY (the pipeline) — and the dashed quadrant lines are the verdict&rsquo;s own bars
+          (lib/radarVerdict.ts): the vertical at +40% / 24m (the enter bar), the horizontal at +15% releases YoY (the
+          flood bar). Dot area = P90 revenue; dot fill = the FINAL verdict — position is evidence, fill is the call: a
+          dot in the growing-open quadrant can still read Watch when winner-take-most concentration vetoes entry, and
+          the dossier spells out which check did it. Verdicts: Enter now = demand past the bar without a flooding
+          pipeline · Watch = demand holding or softening, or score-only evidence · Emerging = no comparable demand
+          base — either a young label (≥80% of its reviews from games released in the last 24 months) or a prior base
+          too small for a % read; no trustworthy trend % exists, so those rows sit in the dashed strip below the plot,
+          sized by absolute 24-month review volume, never at a fake position · Crowded = releases up &gt;15% YoY
+          against flat-to-down demand, or winner-take-most · Declining = demand down ≥30% per 24 months. Axes are
+          linear over labeled domains (X −100…+300% / 24m, Y −60…+120% YoY); a value beyond a domain pins its dot at
+          the plot edge with a chevron and the true number stays in the tooltip and dossier. Click a dot for its
+          verdict dossier — the same checks that placed it, spelled out with the bars they were judged against. The
+          board plots the class&rsquo;s Top N by opportunity; the rail&rsquo;s search covers the whole population of
+          the cut — all classes, past the plot cap.{" "}
           {soloOnly
-            ? `Population: solo-friendly niches only (singleplayer share ≥ ${SOLO_FRIENDLY_MIN}, filtered server-side; a niche with no solo reading is excluded — unknown is not a claim). Singleplayer share is a no-netcode proxy, not a production-scope measure — the dossier's solo row shows the member evidence behind it. Solo never changes a ring.`
-            : `Population: all niches — the solo lens restyles team-scale dots (hollow, singleplayer share < ${SOLO_FRIENDLY_MIN}) without ever changing a ring. Singleplayer share is a no-netcode proxy, not a production-scope measure — the dossier's solo row shows the member evidence behind it.`}
+            ? `Population: solo-friendly niches only (singleplayer share ≥ ${SOLO_FRIENDLY_MIN}, filtered server-side; a niche with no solo reading is excluded — unknown is not a claim). Singleplayer share is a no-netcode proxy, not a production-scope measure — the dossier's solo row shows the member evidence behind it. Solo never changes a verdict.`
+            : `Population: all niches — the solo lens restyles team-scale dots (hollow, singleplayer share < ${SOLO_FRIENDLY_MIN}) without ever changing a verdict. Singleplayer share is a no-netcode proxy, not a production-scope measure — the dossier's solo row shows the member evidence behind it.`}
         </p>
       </details>
     </section>
@@ -228,8 +265,10 @@ function RadarBoardSection({
 
 export default function Radar() {
   // ONE selection + ONE population toggle for the whole page: the board's two list
-  // queries and the rail all hang off this state. Top-N is a client-side display slice
-  // (see POPULATION_LIMIT), so only the solo toggle changes what is fetched.
+  // queries and the rail all hang off this state. Top-N and the class picker are
+  // client-side display slices (see POPULATION_LIMIT), so only the solo toggle changes
+  // what is fetched.
+  const [boardClass, setBoardClass] = useState<RadarSector>("micro");
   const [soloOnly, setSoloOnly] = useState(true);
   const [topN, setTopN] = useState(80);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -302,6 +341,7 @@ export default function Radar() {
         p90_rev: row.p90_rev ?? null,
         opportunity_v2: row.opportunity_v2,
         demandTrendPct,
+        saturationYoy: row.saturation_yoy,
         demandEmerging,
         reviews24m: row.reviews_24m ?? null,
         reviewsPrev24m: row.reviews_prev_24m ?? null,
@@ -316,7 +356,23 @@ export default function Radar() {
     return rows;
   }, [genreQ.data, tagQ.data]);
 
-  const blips = useMemo(() => pool.slice(0, topN), [pool, topN]);
+  /** The plotted board: the ACTIVE CLASS only (one class at a time — the directive),
+   * then its Top-N by opportunity. The pool stays all-class for the search. */
+  const blips = useMemo(
+    () => pool.filter((b) => b.sector === boardClass).slice(0, topN),
+    [pool, boardClass, topN],
+  );
+
+  /** The selection channel. A search hit can belong to another class (search spans all
+   * classes on purpose); selecting it switches the picker to that class FIRST, so the
+   * dossier opens over the board that actually contains the niche. */
+  const handleSelect = (id: string | null) => {
+    if (id !== null) {
+      const row = pool.find((b) => `${b.dimension}:${b.key}` === id);
+      if (row && row.sector !== boardClass) setBoardClass(row.sector);
+    }
+    setSelectedId(id);
+  };
 
   const loading = genreQ.isLoading || tagQ.isLoading;
   const bothFailed = genreQ.isError && tagQ.isError;
@@ -332,12 +388,14 @@ export default function Radar() {
         bothFailed={bothFailed}
         partialFail={partialFail}
         errorMessage={genreQ.error instanceof Error ? genreQ.error.message : null}
+        boardClass={boardClass}
+        onBoardClass={setBoardClass}
         soloOnly={soloOnly}
         onSoloOnly={setSoloOnly}
         topN={topN}
         onTopN={setTopN}
         selectedId={selectedId}
-        onSelect={setSelectedId}
+        onSelect={handleSelect}
       />
     </div>
   );
