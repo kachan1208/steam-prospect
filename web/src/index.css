@@ -61,6 +61,21 @@
   --verdict-up: #5980a6;
   --verdict-flat: color-mix(in srgb, #1d1f20 55%, transparent);
 
+  /* RADAR VERDICT HUES — an explicit 2026-08-27 AMENDMENT to the mono-steel rule (user:
+     "add some colors so it's easy to understand where to focus"). Functional color is
+     allowed on the radar board's verdict vocabulary, as REINFORCEMENT ONLY: position,
+     fill style and shape still carry every meaning without color. Enter (green) and the
+     crowded/declining warm family are separated by LIGHTNESS as well as hue so the
+     mapping survives the common color-vision deficiencies; alarm-red is deliberately
+     avoided — crowded/declining must read "caution", never "error". Gold was tested for
+     enter and rejected: it collides with the amber crowded family under deuteranopia. */
+  --verdict-enter: #3e8a4c;
+  --verdict-crowded: #a8742a;
+  --verdict-declining: #a4553f;
+  --verdict-emerging: #6f5bb5;
+  --verdict-enter-wash: color-mix(in srgb, #3e8a4c 6%, transparent);
+  --verdict-enter-wash-line: color-mix(in srgb, #3e8a4c 30%, transparent);
+
   /* elevation */
   --shadow-xs: 0 1px 2px rgba(16, 24, 40, 0.05);
   --shadow-sm: 0 1px 3px rgba(16, 24, 40, 0.08), 0 1px 2px rgba(16, 24, 40, 0.04);
@@ -135,6 +150,15 @@
 
   --verdict-up: #b5d9fd;
   --verdict-flat: color-mix(in srgb, #f2f2f3 55%, transparent);
+
+  /* Radar verdict hues on the steel ground (see the :root block's amendment note):
+     lighter, desaturated versions so the marks sit ON the ground instead of glowing. */
+  --verdict-enter: #8fce91;
+  --verdict-crowded: #c9944e;
+  --verdict-declining: #bd6f58;
+  --verdict-emerging: #a79ae0;
+  --verdict-enter-wash: color-mix(in srgb, #8fce91 7%, transparent);
+  --verdict-enter-wash-line: color-mix(in srgb, #8fce91 28%, transparent);
 
   --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);

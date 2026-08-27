@@ -406,9 +406,29 @@ describe("RadarBoard — XY quadrant plate", () => {
     for (const label of ["GROWING · OPEN", "GROWING · FLOODING", "SHRINKING · FLOODING", "FLAT/SHRINKING · OPEN"]) {
       expect(screen.getByText(label)).toBeTruthy();
     }
-    // Axis titles carry the units.
+    // Axis titles carry the units — and the Y title states the flipped direction.
     expect(screen.getByText(/DEMAND TREND · % \/ 24M/)).toBeTruthy();
-    expect(screen.getByText(/RELEASES YOY · %/)).toBeTruthy();
+    expect(screen.getByText(/RELEASES YOY · % — CALMER ↑ · FLOODING ↓/)).toBeTruthy();
+  });
+
+  it("runs calmer-up: the focus zone is the TOP-RIGHT quadrant, washed in the enter hue", () => {
+    // The scale itself: min saturation (calmest) maps to the TOP edge, max to the bottom.
+    expect(yToPx(-60)).toBeCloseTo(PLOT.t, 6);
+    expect(yToPx(120)).toBeCloseTo(PLOT.t + PLOT.h, 6);
+
+    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    // GROWING · OPEN sits top-right (right of the enter bar, above the flood bar)…
+    const focus = screen.getByText("GROWING · OPEN");
+    expect(Number(focus.getAttribute("x"))).toBeGreaterThan(xToPx(40));
+    expect(Number(focus.getAttribute("y"))).toBeLessThan(yToPx(15));
+    // …its counterpart GROWING · FLOODING sits below the flood bar…
+    expect(Number(screen.getByText("GROWING · FLOODING").getAttribute("y"))).toBeGreaterThan(yToPx(15));
+    // …and the low-alpha focus wash covers exactly that quadrant.
+    const wash = screen.getByTestId("xy-focus-wash");
+    expect(Number(wash.getAttribute("x"))).toBeCloseTo(xToPx(40), 4);
+    expect(Number(wash.getAttribute("y"))).toBeCloseTo(PLOT.t, 4);
+    expect(Number(wash.getAttribute("width"))).toBeCloseTo(PLOT.l + PLOT.w - xToPx(40), 4);
+    expect(Number(wash.getAttribute("height"))).toBeCloseTo(yToPx(15) - PLOT.t, 4);
   });
 
   it("pins a beyond-scale outlier at the plot edge with a chevron and a ≥ edge tick", () => {
@@ -479,7 +499,8 @@ describe("layoutXY — deterministic, honest placement", () => {
     expect(d.clampX).toBe(1);
     expect(d.clampY).toBe(1);
     expect(d.x).toBeCloseTo(PLOT.l + PLOT.w - d.r - 1, 4);
-    expect(d.y).toBeCloseTo(PLOT.t + d.r + 1, 4);
+    // Calmer-up: flooding beyond the scale pins at the BOTTOM edge.
+    expect(d.y).toBeCloseTo(PLOT.t + PLOT.h - d.r - 1, 4);
   });
 
   it("sends emerging and no-XY rows to the strip below the plot — no fake quadrant position", () => {

@@ -29,21 +29,29 @@ import { nicheDetailPath } from "../pages/NicheDetail";
  *
  *   X — demand_trend_24m_pct (% per 24 months: review inflow, last 24 complete months vs
  *       the prior 24). The decisive demand check.
- *   Y — saturation_yoy (% releases YoY). The decisive supply/overcrowding check.
+ *   Y — saturation_yoy (% releases YoY). The decisive supply/overcrowding check. The
+ *       axis runs CALMER-UP (2026-08-27 directive: "top right corner should tell about
+ *       the niches you have to choose"): fewer releases YoY toward the top, flooding
+ *       toward the bottom — the tick values simply descend upward, and the axis title
+ *       says so. The top-right quadrant is therefore the FOCUS ZONE (growing demand,
+ *       calm pipeline), reinforced by a low-alpha wash in the enter hue.
  *   dot AREA — P90 revenue (sqrt scale, like every bubble on this site).
- *   dot STYLE — the final VERDICT (radarVerdict — mono-steel fills, brightest = enter,
- *       receding paper alphas; NEVER red/green). Style is the 4th channel deliberately:
- *       a dot can sit in the enter quadrant and still be Watch (the concentration /
- *       winner-take-most veto fires on evidence the axes don't draw), so position alone
- *       must never be read as the recommendation — the fill carries the final word and
- *       the dossier the full trace. opportunity_v2 stays in tooltip + dossier: a fifth
- *       visual channel on a mono-steel board would fight the verdict styling.
+ *   dot STYLE — the final VERDICT. Fill hue + brightness carry it: enter green, watch
+ *       neutral steel, emerging violet, crowded amber, declining terracotta (the
+ *       2026-08-27 COLOR AMENDMENT to the old mono-steel rule — see index.css; hues are
+ *       REINFORCEMENT only, every meaning survives grayscale). Style is the 4th channel
+ *       deliberately: a dot can sit in the focus quadrant and still be Watch (the
+ *       concentration / winner-take-most veto fires on evidence the axes don't draw),
+ *       so position alone must never be read as the recommendation — the fill carries
+ *       the final word and the dossier the full trace. opportunity_v2 stays in tooltip
+ *       + dossier: a sixth visual channel would fight the verdict styling.
  *
  * THE QUADRANT GEOMETRY IS THE VERDICT'S OWN THRESHOLDS: the vertical hairline sits at
  * X = +40%/24m (DEMAND_ENTER_PCT — the enter bar) and the horizontal at Y = +15% YoY
- * (SAT_FLOOD_YOY — the flood bar); zero lines draw fainter. So the "GROWING · OPEN"
- * quadrant is literally the region where the demand check passes and the supply veto
- * does not fire — the same booleans the dossier spells out.
+ * (SAT_FLOOD_YOY — the flood bar, in the lower half now that calm points up); zero
+ * lines draw fainter. So the "GROWING · OPEN" quadrant is literally the region where
+ * the demand check passes and the supply veto does not fire — the same booleans the
+ * dossier spells out.
  *
  * HONESTY RULES OF THE PLATE:
  *   - OUTLIERS CLAMP, VISIBLY: axes are linear over fixed labeled domains (X −100…+300,
@@ -166,9 +174,11 @@ const STRIP_DOT_R_MAX = 7;
 export function xToPx(v: number): number {
   return PLOT.l + ((v - X_DOMAIN[0]) / (X_DOMAIN[1] - X_DOMAIN[0])) * PLOT.w;
 }
-/** Domain % YoY -> px; +Y up (flooding at the top). */
+/** Domain % YoY -> px; CALMER UP — low saturation at the top, flooding at the bottom
+ * (the 2026-08-27 orientation flip: the top-right corner is the focus zone). The tick
+ * VALUES are untouched; they simply descend upward, and the axis title says so. */
 export function yToPx(v: number): number {
-  return PLOT.t + ((Y_DOMAIN[1] - v) / (Y_DOMAIN[1] - Y_DOMAIN[0])) * PLOT.h;
+  return PLOT.t + ((v - Y_DOMAIN[0]) / (Y_DOMAIN[1] - Y_DOMAIN[0])) * PLOT.h;
 }
 
 export interface PlacedBlip extends RadarBoardBlip {
@@ -240,8 +250,10 @@ export function layoutXY(blips: RadarBoardBlip[]): XYLayout {
     // the circle never spills out of the frame.
     const x =
       clampX === 1 ? PLOT_X1 - r - 1 : clampX === -1 ? PLOT.l + r + 1 : clampNum(xToPx(xv), PLOT.l + r, PLOT_X1 - r);
+    // Calmer-up: beyond-max saturation (clampY = 1, flooding off the scale) pins at the
+    // BOTTOM edge; beyond-min pins at the top.
     const y =
-      clampY === 1 ? PLOT.t + r + 1 : clampY === -1 ? PLOT_Y1 - r - 1 : clampNum(yToPx(yv), PLOT.t + r, PLOT_Y1 - r);
+      clampY === 1 ? PLOT_Y1 - r - 1 : clampY === -1 ? PLOT.t + r + 1 : clampNum(yToPx(yv), PLOT.t + r, PLOT_Y1 - r);
     return { ...blip, id, n: i + 1, x, y, r, clampX, clampY, strip: false };
   });
 
@@ -295,15 +307,19 @@ export function layoutXY(blips: RadarBoardBlip[]): XYLayout {
 
 // ---- rendering --------------------------------------------------------------------------
 
-/** Mono-steel verdict vocabulary (4th visual channel): the strongest verdict carries the
- * accent, the rest recede in paper alphas. Never red/green; the fill + the rail carry the
- * meaning — POSITION only ever claims what the axes measured. */
+/** Verdict color vocabulary (4th visual channel) — the 2026-08-27 COLOR AMENDMENT to
+ * the old mono-steel "never red/green" rule (user: "add some colors so it's easy to
+ * understand where to focus"; hue tokens + rationale in index.css). Enter carries the
+ * positive green, watch stays neutral steel, emerging goes cool violet, and the
+ * crowded/declining warm family reads caution, never alarm. REINFORCEMENT ONLY: the
+ * quadrant position, fill style (hollow/halo/ring) and the rail wording carry every
+ * meaning without color — the board must survive grayscale. */
 const RING_FILL: Record<RadarRing, string> = {
-  enter: "var(--verdict-up)",
+  enter: "var(--verdict-enter)",
   watch: MONO.paper75,
-  emerging: MONO.paper65,
-  crowded: MONO.paper50,
-  declining: MONO.paper35,
+  emerging: "var(--verdict-emerging)",
+  crowded: "var(--verdict-crowded)",
+  declining: "var(--verdict-declining)",
 };
 
 function fmtTrendPct(v: number | null): string {
@@ -343,16 +359,24 @@ function EmergingGlyph({ reviews24m }: { reviews24m: number | null }) {
   );
 }
 
-/** Pass/fail glyph in the app's neutral steel vocabulary — NEVER red/green (Industry
- * constraint): pass = filled steel tile, fail = hollow outlined tile, unknown = muted
- * dash. The row also carries an sr-only outcome word, so the glyph is never the only
- * channel. */
+/** Pass/fail glyph. Shape carries the outcome (✓ filled tile / ✕ hollow tile / – muted
+ * dash — plus the row's sr-only word), and since the 2026-08-27 color amendment the
+ * tiles take a SUBTLE tint as reinforcement: pass leans the positive enter green, fail
+ * leans the caution amber — never alarm-red, and never the only channel. */
 function CheckGlyph({ pass }: { pass: boolean | null }) {
   const style =
     pass === true
-      ? { backgroundColor: "var(--text-primary)", color: "var(--page-plane)", border: "1px solid var(--text-primary)" }
+      ? {
+          backgroundColor: "color-mix(in srgb, var(--verdict-enter) 30%, transparent)",
+          color: "var(--text-primary)",
+          border: "1px solid var(--verdict-enter)",
+        }
       : pass === false
-        ? { color: "var(--text-primary)", border: "1px solid var(--baseline)" }
+        ? {
+            backgroundColor: "color-mix(in srgb, var(--verdict-crowded) 12%, transparent)",
+            color: "var(--verdict-crowded)",
+            border: "1px solid var(--verdict-crowded)",
+          }
         : { color: "var(--text-muted)", border: "1px solid var(--gridline)" };
   return (
     <span
@@ -626,13 +650,15 @@ function useIsDesktop(): boolean {
 }
 
 /** Outward chevron on a pinned dot — the explicit "true value beyond this edge" marker.
- * pointer-events none (the dot under it is the click target). */
+ * Calmer-up orientation: beyond-max saturation (clampY = 1) is pinned at the BOTTOM
+ * edge, so its chevron points down. pointer-events none (the dot under it is the click
+ * target). */
 function ClampChevron({ d }: { d: PlacedBlip }) {
   const marks: string[] = [];
   if (d.clampX === 1) marks.push(`M ${d.x + d.r + 2} ${d.y - 3.5} L ${d.x + d.r + 5.5} ${d.y} L ${d.x + d.r + 2} ${d.y + 3.5}`);
   if (d.clampX === -1) marks.push(`M ${d.x - d.r - 2} ${d.y - 3.5} L ${d.x - d.r - 5.5} ${d.y} L ${d.x - d.r - 2} ${d.y + 3.5}`);
-  if (d.clampY === 1) marks.push(`M ${d.x - 3.5} ${d.y - d.r - 2} L ${d.x} ${d.y - d.r - 5.5} L ${d.x + 3.5} ${d.y - d.r - 2}`);
-  if (d.clampY === -1) marks.push(`M ${d.x - 3.5} ${d.y + d.r + 2} L ${d.x} ${d.y + d.r + 5.5} L ${d.x + 3.5} ${d.y + d.r + 2}`);
+  if (d.clampY === 1) marks.push(`M ${d.x - 3.5} ${d.y + d.r + 2} L ${d.x} ${d.y + d.r + 5.5} L ${d.x + 3.5} ${d.y + d.r + 2}`);
+  if (d.clampY === -1) marks.push(`M ${d.x - 3.5} ${d.y - d.r - 2} L ${d.x} ${d.y - d.r - 5.5} L ${d.x + 3.5} ${d.y - d.r - 2}`);
   if (marks.length === 0) return null;
   return (
     <path
@@ -825,7 +851,7 @@ export function RadarBoard({
           viewBox={`0 0 ${VB_W} ${layout.vbH}`}
           className="block h-auto w-full"
           role="img"
-          aria-label="Radar board: niches plotted by 24-month demand trend (x) against release saturation YoY (y); dot area is P90 revenue and dot style is the verdict"
+          aria-label="Radar board: niches plotted by 24-month demand trend (x) against release saturation YoY (y, calmer at the top); dot area is P90 revenue and dot color/style is the verdict"
         >
           {/* Decor — frame, zero lines, THE THRESHOLD HAIRLINES, ticks, axis titles and
               quadrant labels. pointer-events none as a GROUP: only the dots may ever be
@@ -835,13 +861,30 @@ export function RadarBoard({
             {/* Plot frame. */}
             <rect x={PLOT.l} y={PLOT.t} width={PLOT.w} height={PLOT.h} fill="none" stroke="var(--baseline)" strokeWidth={1} />
 
+            {/* THE FOCUS WASH — a very low-alpha tint over the GROWING · OPEN quadrant
+                (demand past the enter bar, pipeline below the flood bar) with its own
+                hairline, drawing the eye to the "choose from here" region without
+                shouting. Reinforcement only: the quadrant is already defined by the two
+                bars. */}
+            <rect
+              data-testid="xy-focus-wash"
+              x={xBarPx}
+              y={PLOT.t}
+              width={PLOT_X1 - xBarPx}
+              height={yBarPx - PLOT.t}
+              fill="var(--verdict-enter-wash)"
+              stroke="var(--verdict-enter-wash-line)"
+              strokeWidth={1}
+            />
+
             {/* Zero lines — fainter than the verdict bars (gridline vs baseline). */}
             <line x1={xToPx(0)} y1={PLOT.t} x2={xToPx(0)} y2={PLOT_Y1} stroke="var(--gridline)" strokeWidth={1} />
             <line x1={PLOT.l} y1={yToPx(0)} x2={PLOT_X1} y2={yToPx(0)} stroke="var(--gridline)" strokeWidth={1} />
 
             {/* THE QUADRANT LINES = THE VERDICT'S OWN THRESHOLDS (lib/radarVerdict.ts):
                 a dot right of the vertical bar passes the enter demand check; a dot
-                above the horizontal bar is in flood territory (supply veto). */}
+                BELOW the horizontal bar is in flood territory (supply veto) — calmer-up
+                orientation. */}
             <line
               data-testid="xy-bar-demand"
               x1={xBarPx}
@@ -865,22 +908,26 @@ export function RadarBoard({
             <HaloText x={xBarPx + 4} y={PLOT.t + 11} anchor="start" size={8.5} fill="var(--text-secondary)">
               ENTER BAR +{X_BAR}% / 24M
             </HaloText>
-            <HaloText x={PLOT.l + 5} y={yBarPx - 5} anchor="start" size={8.5} fill="var(--text-secondary)">
-              FLOOD BAR +{Y_BAR}% YOY
+            {/* Flooding lives BELOW the bar now (calmer-up), so the bar's label sits on
+                the flooding side of its own line. */}
+            <HaloText x={PLOT.l + 5} y={yBarPx + 12} anchor="start" size={8.5} fill="var(--text-secondary)">
+              FLOOD BAR +{Y_BAR}% YOY — FLOODING BELOW
             </HaloText>
 
             {/* Quadrant readings — region names only; the DOT STYLE carries the final
-                verdict (a growing·open dot can still be Watch on a concentration veto). */}
-            <HaloText x={PLOT_X1 - 8} y={PLOT_Y1 - 10} anchor="end">
+                verdict (a growing·open dot can still be Watch on a concentration veto).
+                Calmer-up orientation: the TOP-RIGHT corner is the focus zone, and its
+                label alone takes the enter hue. */}
+            <HaloText x={PLOT_X1 - 8} y={PLOT.t + 26} anchor="end" fill="var(--verdict-enter)">
               GROWING · OPEN
             </HaloText>
-            <HaloText x={PLOT_X1 - 8} y={PLOT.t + 26} anchor="end">
+            <HaloText x={PLOT_X1 - 8} y={PLOT_Y1 - 10} anchor="end">
               GROWING · FLOODING
             </HaloText>
-            <HaloText x={PLOT.l + 8} y={PLOT.t + 26} anchor="start">
+            <HaloText x={PLOT.l + 8} y={PLOT_Y1 - 10} anchor="start">
               SHRINKING · FLOODING
             </HaloText>
-            <HaloText x={PLOT.l + 8} y={PLOT_Y1 - 10} anchor="start">
+            <HaloText x={PLOT.l + 8} y={PLOT.t + 26} anchor="start">
               FLAT/SHRINKING · OPEN
             </HaloText>
 
@@ -928,12 +975,13 @@ export function RadarBoard({
               </g>
             ))}
 
-            {/* Axis titles, units spelled out. */}
+            {/* Axis titles, units spelled out — the Y title makes the flipped direction
+                unmistakable (values descend upward; calm is up). */}
             <HaloText x={PLOT.l + PLOT.w / 2} y={PLOT_Y1 + 30} anchor="middle">
               DEMAND TREND · % / 24M (LAST 24 VS PRIOR 24)
             </HaloText>
             <HaloText x={0} y={0} anchor="middle" transform={`translate(12 ${PLOT.t + PLOT.h / 2}) rotate(-90)`}>
-              RELEASES YOY · % (SATURATION)
+              RELEASES YOY · % — CALMER ↑ · FLOODING ↓
             </HaloText>
 
             {/* The no-XY strip frame + label (only when it has residents). */}
@@ -1072,8 +1120,19 @@ export function RadarBoard({
             </svg>
             emerging (no comparable % base)
           </span>
+          {/* The verdict hue key (2026-08-27 color amendment) — every hue is doubled by
+              a word right here, so the mapping survives grayscale and any CVD. */}
+          <span data-testid="verdict-color-key" className="inline-flex flex-wrap items-center gap-x-3 gap-y-1">
+            {RING_ORDER.map((ring) => (
+              <span key={ring} className="inline-flex items-center gap-1.5">
+                <span className="inline-block h-2 w-2 shrink-0" style={{ backgroundColor: RING_FILL[ring] }} aria-hidden />
+                {RING_LABEL[ring]}
+              </span>
+            ))}
+          </span>
           <span>
-            dot area = P90 revenue · fill = verdict (position is evidence, fill is the call) · chevron at an edge =
+            dot area = P90 revenue · color = verdict (position is evidence, color is the call — reinforcement, never
+            the only channel) · calm is UP: the washed top-right quadrant is the focus zone · chevron at an edge =
             beyond the axis scale, true % in the tooltip
           </span>
         </div>
