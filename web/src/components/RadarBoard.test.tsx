@@ -331,3 +331,87 @@ describe("layoutBlips — deterministic, density-aware placement (A2)", () => {
     }
   });
 });
+
+describe("RadarBoard — dossier stays in view at every width (drawer below lg)", () => {
+  // The test setup's matchMedia shim evaluates (min-width: Npx) against
+  // window.innerWidth (jsdom default 1024 = the radar's lg threshold = desktop).
+  function setViewport(width: number) {
+    Object.defineProperty(window, "innerWidth", { value: width, configurable: true, writable: true });
+    window.dispatchEvent(new Event("resize"));
+  }
+
+  afterEach(() => setViewport(1024));
+
+  it("at ≥lg the dossier is the rail pane, not a modal drawer", () => {
+    setViewport(1024);
+    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    fireEvent.click(screen.getByTestId("radar-blip-tag:Roguelike Deckbuilder"));
+    expect(screen.getByTestId("verdict-dossier")).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("below lg a dot click opens the slide-over drawer with the same dossier content", () => {
+    setViewport(390);
+    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    fireEvent.click(screen.getByTestId("radar-blip-tag:Roguelike Deckbuilder"));
+    const drawer = screen.getByRole("dialog", { name: /verdict dossier: roguelike deckbuilder/i });
+    expect(drawer.getAttribute("aria-modal")).toBe("true");
+    // Same DossierBody as the rail pane — verdict sentence, a trace row, the deep dive.
+    expect(drawer.textContent).toContain("demand surging, but supply flooding");
+    expect(drawer.textContent).toContain("Solo evidence · context");
+    expect(screen.getByRole("link", { name: /open deep dive/i })).toBeTruthy();
+    // The rail list stays where it was (behind the backdrop) — the drawer replaces
+    // nothing, so closing lands the user exactly where they were.
+    expect(screen.getByTestId("radar-rail-list")).toBeTruthy();
+    // Focus moved into the drawer (trap entry point).
+    expect(drawer.contains(document.activeElement)).toBe(true);
+  });
+
+  it("the drawer closes on ✕, on the back affordance, on the backdrop and on Escape", () => {
+    setViewport(390);
+    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    const open = () => fireEvent.click(screen.getByTestId("radar-blip-tag:Roguelike Deckbuilder"));
+
+    open();
+    fireEvent.click(screen.getByRole("button", { name: /close dossier/i }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    open();
+    fireEvent.click(screen.getByRole("button", { name: /back to all verdicts/i }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    open();
+    fireEvent.click(screen.getByTestId("drawer-backdrop"));
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    open();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("the drawer locks the page scroll while open and releases it on close", () => {
+    setViewport(390);
+    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    fireEvent.click(screen.getByTestId("radar-blip-tag:Roguelike Deckbuilder"));
+    expect(document.body.style.overflow).toBe("hidden");
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(document.body.style.overflow).not.toBe("hidden");
+  });
+
+  it("Tab cycles inside the drawer (focus trap), never out of it", () => {
+    setViewport(390);
+    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    fireEvent.click(screen.getByTestId("radar-blip-tag:Roguelike Deckbuilder"));
+    const drawer = screen.getByRole("dialog");
+    const focusables = Array.from(
+      drawer.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'),
+    );
+    const last = focusables[focusables.length - 1];
+    last.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(drawer.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).toBe(focusables[0]); // wrapped to the first
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(last); // and back
+  });
+});

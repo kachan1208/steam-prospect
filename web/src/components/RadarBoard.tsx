@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link } from "react-router-dom";
 import clsx from "clsx";
 
@@ -28,11 +28,17 @@ import { nicheDetailPath } from "../pages/NicheDetail";
  * ONE INSTRUMENT (2026-08-27 layout overhaul): plate and rail live in one frame and share
  * one selection model. The rail has two modes:
  *   - default: the ranked VERDICT LIST — every niche, grouped by ring, FULL counts. No
- *     silent caps (project rule): below xl the list flows with the page; at xl it fills
- *     the plate's height and scrolls inside the rail (absolute-inset column), with the
- *     group headers carrying the true totals so nothing can quietly end at item #22.
- *   - selection: the VERDICT DOSSIER, anchored in the rail (not floating below the
- *     plate), with a "back to all verdicts" affordance.
+ *     silent caps (project rule): below lg the list flows with the page; from lg up it
+ *     fills the plate's height and scrolls inside the rail (absolute-inset column), with
+ *     the group headers carrying the true totals so nothing can quietly end at item #22.
+ *   - selection: the VERDICT DOSSIER — IN VIEW at every width (the dossier-viewport fix:
+ *     a selection must never strand its answer below the fold). From lg (1024px) up the
+ *     board and rail sit side-by-side (rail 300px at lg, 340px at xl; the plate shrinks
+ *     first) and the dossier is the rail's selection pane, beside the plate. Below lg
+ *     the layout stacks — an inline pane would open BELOW the board, forcing a scroll —
+ *     so the dossier renders as an Industry-styled slide-over DRAWER from the right edge
+ *     instead (DossierDrawer: backdrop, ✕/back/ESC close, focus-trapped). Both
+ *     presentations render the same DossierBody, so they cannot drift.
  * Selection is CONTROLLED (selectedId/onSelect props): the page owns it so the signal
  * feed's cards can select a niche on the board through the same channel a dot click uses.
  *
@@ -333,16 +339,17 @@ function CheckGlyph({ pass }: { pass: boolean | null }) {
 }
 
 /**
- * The verdict dossier — the rail's selection mode. Decomposes WHY the niche got its
- * ring: one block per VerdictCheck from radarVerdictTrace (the SAME evaluation that
- * placed the dot — see lib/radarVerdict.ts), each with the niche's own numbers, the bar
- * it was judged against, pass/fail in neutral steel, and a one-clause reading.
- * decides:false rows (the entrant-economics falsification tell, the solo lens) are
- * labeled "· context": they can talk you out of a niche, they never move its ring.
+ * The dossier's CONTENT — shared verbatim by both containers (the ≥lg rail pane and the
+ * <lg slide-over drawer), so the two presentations can never drift. Decomposes WHY the
+ * niche got its ring: one block per VerdictCheck from radarVerdictTrace (the SAME
+ * evaluation that placed the dot — see lib/radarVerdict.ts), each with the niche's own
+ * numbers, the bar it was judged against, pass/fail in neutral steel, and a one-clause
+ * reading. decides:false rows (the entrant-economics falsification tell, the solo lens)
+ * are labeled "· context": they can talk you out of a niche, they never move its ring.
  * Below the trace: the raw context numbers and the deep-dive link (the dossier explains;
  * the detail page is where the full workup lives).
  */
-function VerdictDossier({ blip, total, onBack }: { blip: PlacedBlip; total: number; onBack: () => void }) {
+function DossierBody({ blip }: { blip: PlacedBlip }) {
   const v = blip.verdict;
   const context = [
     blip.reviews24m != null ? `reviews 24m ${fmtInt(blip.reviews24m)}` : null,
@@ -355,10 +362,62 @@ function VerdictDossier({ blip, total, onBack }: { blip: PlacedBlip; total: numb
     .join(" · ");
 
   return (
+    <>
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        <span
+          className="inline-block h-2 w-2 shrink-0 self-center"
+          style={{ backgroundColor: RING_FILL[v.ring] }}
+          aria-hidden
+        />
+        <span className="kicker text-[11px] tracking-[.08em] text-ink-primary">
+          {blip.n}. {blip.key}
+        </span>
+        <span className="text-[11px] text-ink-muted">{SECTOR_LABEL[blip.sector]}</span>
+      </div>
+      <p className="border-b border-chartborder pb-2 pt-1 text-[12px] text-ink-secondary">
+        <span className="font-semibold text-ink-primary">{RING_LABEL[v.ring]}</span>
+        {v.caution ? " · caution" : ""} — {v.reason}
+      </p>
+
+      {blip.trace.map((c) => (
+        <div key={c.id} className="border-b border-chartborder py-2">
+          {/* flex-wrap, no truncation: the bar clause drops to its own line in the
+              narrow rail rather than eating the check's name. */}
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+            <CheckGlyph pass={c.pass} />
+            <span className="sr-only">{c.pass === null ? "unknown" : c.pass ? "passes" : "fails"}</span>
+            <span className="kicker text-[10px] tracking-[.08em] text-ink-muted">
+              {c.decides ? c.label : `${c.label} · context`}
+            </span>
+            <span className="tabular ml-auto text-right text-[10px] text-ink-muted">bar {c.threshold}</span>
+          </div>
+          <div className="tabular pt-1 text-[12px] text-ink-primary">{c.value}</div>
+          <div className="pt-0.5 text-[11px] leading-snug text-ink-secondary">{c.note}</div>
+        </div>
+      ))}
+
+      <div className="flex flex-col gap-2 pb-1 pt-2.5">
+        <span className="tabular text-[11px] text-ink-muted">{context}</span>
+        <Link
+          to={nicheDetailPath(blip.dimension, blip.key)}
+          onClick={() => trackEvent("niche_open")}
+          className="text-[13px] text-brand transition-colors hover:text-brand-hover"
+        >
+          Open deep dive →
+        </Link>
+      </div>
+    </>
+  );
+}
+
+/** The ≥lg presentation: the dossier as the rail's selection mode, scrolling inside the
+ * instrument like the verdict list does. */
+function VerdictDossier({ blip, total, onBack }: { blip: PlacedBlip; total: number; onBack: () => void }) {
+  return (
     <section
       aria-label={`Verdict dossier: ${blip.key}`}
       data-testid="verdict-dossier"
-      className="flex min-w-0 flex-col xl:min-h-0 xl:flex-1"
+      className="flex min-w-0 flex-col lg:min-h-0 lg:flex-1"
     >
       <button
         type="button"
@@ -371,55 +430,137 @@ function VerdictDossier({ blip, total, onBack }: { blip: PlacedBlip; total: numb
         <span className="tabular text-[11px] text-ink-muted">{total}</span>
       </button>
 
-      <div className="xl:relative xl:min-h-0 xl:flex-1">
-        <div className="flex flex-col pt-2.5 xl:absolute xl:inset-0 xl:overflow-y-auto xl:pr-1">
-          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-            <span
-              className="inline-block h-2 w-2 shrink-0 self-center"
-              style={{ backgroundColor: RING_FILL[v.ring] }}
-              aria-hidden
-            />
-            <span className="kicker text-[11px] tracking-[.08em] text-ink-primary">
-              {blip.n}. {blip.key}
-            </span>
-            <span className="text-[11px] text-ink-muted">{SECTOR_LABEL[blip.sector]}</span>
-          </div>
-          <p className="border-b border-chartborder pb-2 pt-1 text-[12px] text-ink-secondary">
-            <span className="font-semibold text-ink-primary">{RING_LABEL[v.ring]}</span>
-            {v.caution ? " · caution" : ""} — {v.reason}
-          </p>
-
-          {blip.trace.map((c) => (
-            <div key={c.id} className="border-b border-chartborder py-2">
-              {/* flex-wrap, no truncation: the bar clause drops to its own line in the
-                  narrow rail rather than eating the check's name. */}
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                <CheckGlyph pass={c.pass} />
-                <span className="sr-only">{c.pass === null ? "unknown" : c.pass ? "passes" : "fails"}</span>
-                <span className="kicker text-[10px] tracking-[.08em] text-ink-muted">
-                  {c.decides ? c.label : `${c.label} · context`}
-                </span>
-                <span className="tabular ml-auto text-right text-[10px] text-ink-muted">bar {c.threshold}</span>
-              </div>
-              <div className="tabular pt-1 text-[12px] text-ink-primary">{c.value}</div>
-              <div className="pt-0.5 text-[11px] leading-snug text-ink-secondary">{c.note}</div>
-            </div>
-          ))}
-
-          <div className="flex flex-col gap-2 pb-1 pt-2.5">
-            <span className="tabular text-[11px] text-ink-muted">{context}</span>
-            <Link
-              to={nicheDetailPath(blip.dimension, blip.key)}
-              onClick={() => trackEvent("niche_open")}
-              className="text-[13px] text-brand transition-colors hover:text-brand-hover"
-            >
-              Open deep dive →
-            </Link>
-          </div>
+      <div className="lg:relative lg:min-h-0 lg:flex-1">
+        <div className="flex flex-col pt-2.5 lg:absolute lg:inset-0 lg:overflow-y-auto lg:pr-1">
+          <DossierBody blip={blip} />
         </div>
       </div>
     </section>
   );
+}
+
+/**
+ * The <lg presentation: an Industry-styled slide-over drawer from the right edge — the
+ * stacked layout puts the rail BELOW the board, so an inline dossier would open out of
+ * view and force a scroll (the exact complaint this fixes). Radius 0, hairline border,
+ * mono-steel on the page plane, dimmed backdrop; closes on ✕, the back affordance, the
+ * backdrop, and Escape; focus is trapped inside while open and restored on close; the
+ * page behind cannot scroll. Only ever MOUNTED below lg (RadarBoard renders it from the
+ * same isDesktop switch that picks the rail pane), so the two presentations are
+ * mutually exclusive by construction.
+ */
+function DossierDrawer({ blip, total, onClose }: { blip: PlacedBlip; total: number; onClose: () => void }) {
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const prevFocus = document.activeElement as HTMLElement | null;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden"; // the page behind must not scroll
+    panelRef.current?.focus();
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab" || !panelRef.current) return;
+      // Minimal focus trap: cycle Tab/Shift-Tab within the drawer's focusables.
+      const nodes = Array.from(
+        panelRef.current.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (nodes.length === 0) return;
+      const first = nodes[0];
+      const last = nodes[nodes.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || active === panelRef.current)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+      prevFocus?.focus?.();
+    };
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-40 lg:hidden">
+      {/* Backdrop — click closes; decorative for AT (the dialog handles semantics). */}
+      <div
+        aria-hidden
+        data-testid="drawer-backdrop"
+        onClick={onClose}
+        className="absolute inset-0"
+        style={{ background: "color-mix(in srgb, var(--text-primary) 25%, transparent)" }}
+      />
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Verdict dossier: ${blip.key}`}
+        data-testid="verdict-dossier"
+        tabIndex={-1}
+        className="absolute inset-y-0 right-0 flex w-[min(360px,92vw)] flex-col overflow-y-auto border-l border-ink-primary/35 px-4 py-3 outline-none"
+        style={{ backgroundColor: "var(--page-plane)" }}
+      >
+        <div className="flex items-center gap-2 border-b border-ink-primary/25 pb-2">
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Back to all verdicts"
+            className="flex min-w-0 items-center gap-2 text-left text-ink-primary transition-colors hover:text-brand"
+          >
+            <span aria-hidden className="text-[12px] leading-none">←</span>
+            <span className="kicker text-[11px] tracking-[.08em]">All verdicts</span>
+            <span className="tabular text-[11px] text-ink-muted">{total}</span>
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close dossier"
+            className="ml-auto border border-ink-primary/35 px-1.5 py-0.5 text-[10px] leading-none text-ink-primary transition-colors hover:bg-ink-primary/[0.08]"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="flex flex-col pt-2.5">
+          <DossierBody blip={blip} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The side-by-side threshold. lg (1024px) since the dossier-viewport fix: at any width
+// where board and rail sit side-by-side the dossier opens beside the plate (in view);
+// below it the drawer takes over — so a selection can never strand the dossier below
+// the fold. MUST match the lg: utilities on the board/rail markup.
+const DESKTOP_QUERY = "(min-width: 1024px)";
+
+function subscribeDesktop(cb: () => void): () => void {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return () => {};
+  const mql = window.matchMedia(DESKTOP_QUERY);
+  mql.addEventListener("change", cb);
+  return () => mql.removeEventListener("change", cb);
+}
+
+function isDesktopNow(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return true;
+  return window.matchMedia(DESKTOP_QUERY).matches;
+}
+
+/** Reactive "board and rail are side-by-side" flag — drives the rail-pane vs drawer
+ * choice for the dossier. Defaults to desktop when matchMedia is unavailable. */
+function useIsDesktop(): boolean {
+  return useSyncExternalStore(subscribeDesktop, isDesktopNow, () => true);
 }
 
 export function RadarBoard({
@@ -438,6 +579,8 @@ export function RadarBoard({
   const wrapRef = useRef<HTMLDivElement>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
+  // Side-by-side (≥lg): dossier in the rail pane. Stacked (<lg): dossier as the drawer.
+  const isDesktop = useIsDesktop();
 
   const placed = useMemo(() => layoutBlips(blips), [blips]);
   const byRing = useMemo(() => {
@@ -467,9 +610,9 @@ export function RadarBoard({
   }
 
   return (
-    <div className="flex flex-col gap-5 xl:flex-row xl:items-stretch">
+    <div className="flex flex-col gap-5 lg:flex-row lg:items-stretch">
       {/* The plate */}
-      <div ref={wrapRef} className="relative mx-auto w-full max-w-[600px] xl:mx-0 xl:min-w-0 xl:flex-1">
+      <div ref={wrapRef} className="relative mx-auto w-full max-w-[600px] lg:mx-0 lg:min-w-0 lg:flex-1">
         <svg viewBox={`0 0 ${SIZE} ${SIZE}`} className="block h-auto w-full" role="img" aria-label="Radar board: niches plotted by verdict ring and sector">
           {/* Decor — hairline rings, separators, origin cross and labels. pointer-events
               none as a GROUP: only the blip dots may ever be click targets, so a click
@@ -648,14 +791,20 @@ export function RadarBoard({
           <span>dot area = P90 revenue · ring = verdict (solo never moves a dot between rings)</span>
         </div>
 
-        {/* Hover tooltip — HTML over the SVG, same TooltipPanel language as every chart. */}
+        {/* Hover tooltip — HTML over the SVG, same TooltipPanel language as every chart.
+            Clamped to the plate: it flips to the LEFT of the cursor past the horizontal
+            midline (keeps the right edge) and flips ABOVE the cursor in the bottom band
+            (the plate is square, so its rendered height is clientWidth; low dots used to
+            push the panel past the plate's bottom edge and clip). */}
         {hovered && tip && (
           <div
             className="pointer-events-none absolute z-10"
             style={{
               left: tip.x,
               top: tip.y,
-              transform: `translate(${tip.x > (wrapRef.current?.clientWidth ?? SIZE) / 2 ? "calc(-100% - 12px)" : "12px"}, 12px)`,
+              transform: `translate(${tip.x > (wrapRef.current?.clientWidth ?? SIZE) / 2 ? "calc(-100% - 12px)" : "12px"}, ${
+                tip.y > (wrapRef.current?.clientWidth || SIZE) - 180 ? "calc(-100% - 12px)" : "12px"
+              })`,
             }}
           >
             <TooltipPanel
@@ -694,12 +843,15 @@ export function RadarBoard({
         )}
       </div>
 
-      {/* THE RAIL — the board's single reading pane: the full ranked verdict list, or the
-          selected niche's dossier. At xl it matches the plate's height and scrolls inside
-          itself (absolute-inset column — full counts in the group headers, so nothing is
-          silently capped); below xl it flows with the page, uncapped. */}
-      <div className="flex min-w-0 flex-col border-t border-chartborder pt-4 xl:w-[340px] xl:shrink-0 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-0">
-        {selected ? (
+      {/* THE RAIL — the board's single reading pane: the full ranked verdict list, or (at
+          ≥lg, where board and rail are side-by-side) the selected niche's dossier. From
+          lg up it matches the plate's height and scrolls inside itself (absolute-inset
+          column — full counts in the group headers, so nothing is silently capped);
+          below lg it flows with the page, uncapped, and the dossier renders as the
+          slide-over DRAWER instead (an inline pane down there would open BELOW the board,
+          out of view — the exact complaint this layout fixes). */}
+      <div className="flex min-w-0 flex-col border-t border-chartborder pt-4 lg:w-[300px] lg:shrink-0 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0 xl:w-[340px] xl:pl-5">
+        {selected && isDesktop ? (
           <VerdictDossier blip={selected} total={placed.length} onBack={() => onSelect(null)} />
         ) : (
           <>
@@ -708,8 +860,8 @@ export function RadarBoard({
               <span className="tabular text-[11px] text-ink-muted">{placed.length}</span>
               <span className="ml-auto text-[10px] text-ink-muted">click a dot or row for its dossier</span>
             </div>
-            <div className="xl:relative xl:min-h-0 xl:flex-1">
-              <div data-testid="radar-rail-list" className="rail-scroll flex flex-col gap-4 pt-2 xl:absolute xl:inset-0 xl:overflow-y-auto xl:pb-8 xl:pr-2">
+            <div className="lg:relative lg:min-h-0 lg:flex-1">
+              <div data-testid="radar-rail-list" className="rail-scroll flex flex-col gap-4 pt-2 lg:absolute lg:inset-0 lg:overflow-y-auto lg:pb-8 lg:pr-2">
                 {RING_ORDER.map((ring) => {
                   const entries = byRing.get(ring)!;
                   return (
@@ -722,7 +874,7 @@ export function RadarBoard({
                       {entries.length === 0 ? (
                         <div className="pt-1.5 text-[12px] text-ink-muted">None in this cut.</div>
                       ) : (
-                        <div className="grid grid-cols-1 gap-x-6 pt-1 sm:grid-cols-2 xl:grid-cols-1">
+                        <div className="grid grid-cols-1 gap-x-6 pt-1 sm:grid-cols-2 lg:grid-cols-1">
                           {entries.map((b) => (
                             <button
                               type="button"
@@ -761,13 +913,20 @@ export function RadarBoard({
                   always-visible thin scrollbar (index.css). */}
               <div
                 aria-hidden
-                className="pointer-events-none absolute inset-x-0 bottom-0 hidden h-8 xl:block"
+                className="pointer-events-none absolute inset-x-0 bottom-0 hidden h-8 lg:block"
                 style={{ background: "linear-gradient(to top, var(--page-plane), transparent)" }}
               />
             </div>
           </>
         )}
       </div>
+
+      {/* Below lg the dossier is a slide-over drawer — a selection must never strand it
+          below the board (see DossierDrawer). Same close channel as the rail's back
+          button: onSelect(null). */}
+      {selected && !isDesktop && (
+        <DossierDrawer blip={selected} total={placed.length} onClose={() => onSelect(null)} />
+      )}
     </div>
   );
 }

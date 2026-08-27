@@ -40,3 +40,42 @@ if (broken) {
     Object.defineProperty(window, "localStorage", { value: shim, configurable: true });
   }
 }
+
+/**
+ * matchMedia that actually evaluates (min-width: Npx) against window.innerWidth.
+ *
+ * jsdom ships a matchMedia whose `matches` is ALWAYS false (it does not evaluate media
+ * queries), which would put every responsive component permanently in its narrow mode
+ * under test. This shim answers min-width queries from the live window.innerWidth
+ * (jsdom default 1024 — desktop for the radar's lg breakpoint) and re-notifies
+ * listeners on window resize, so a test can flip modes with
+ * `window.innerWidth = 390; window.dispatchEvent(new Event("resize"))`.
+ * Non-min-width queries keep jsdom's answer (false).
+ */
+if (typeof window !== "undefined") {
+  window.matchMedia = (query: string): MediaQueryList => {
+    const m = /\(min-width:\s*([\d.]+)px\)/.exec(query);
+    const evaluate = () => (m ? window.innerWidth >= Number(m[1]) : false);
+    const listeners = new Set<(e: MediaQueryListEvent) => void>();
+    let last = evaluate();
+    window.addEventListener("resize", () => {
+      const now = evaluate();
+      if (now === last) return;
+      last = now;
+      const event = { matches: now, media: query } as MediaQueryListEvent;
+      for (const cb of listeners) cb(event);
+    });
+    return {
+      media: query,
+      get matches() {
+        return evaluate();
+      },
+      onchange: null,
+      addEventListener: (_: string, cb: (e: MediaQueryListEvent) => void) => listeners.add(cb),
+      removeEventListener: (_: string, cb: (e: MediaQueryListEvent) => void) => listeners.delete(cb),
+      addListener: (cb: (e: MediaQueryListEvent) => void) => listeners.add(cb),
+      removeListener: (cb: (e: MediaQueryListEvent) => void) => listeners.delete(cb),
+      dispatchEvent: () => false,
+    } as MediaQueryList;
+  };
+}
