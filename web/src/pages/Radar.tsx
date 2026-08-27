@@ -239,11 +239,15 @@ function RadarBoardSection({
           picker): a genre and a micro-tag are different market claims, so they are never plotted against each other.
           The axes are the verdict&rsquo;s own decisive inputs — X: demand trend, review inflow over the last 24
           months vs the prior 24 (a structural read a release spike or a sale week cannot move) · Y: release
-          saturation YoY (the pipeline) — and the dashed quadrant lines are the verdict&rsquo;s own bars
-          (lib/radarVerdict.ts): the vertical at +40% / 24m (the enter bar), the horizontal at +15% releases YoY (the
-          flood bar). Dot area = P90 revenue; dot fill = the FINAL verdict — position is evidence, fill is the call: a
-          dot in the growing-open quadrant can still read Watch when winner-take-most concentration vetoes entry, and
-          the dossier spells out which check did it. Verdicts: Enter now = demand past the bar without a flooding
+          saturation YoY (the pipeline), drawn CALMER-UP: fewer releases toward the top, flooding toward the bottom,
+          so the washed top-right quadrant (growing demand, calm pipeline) is the focus zone — and the dashed
+          quadrant lines are the verdict&rsquo;s own bars (lib/radarVerdict.ts): the vertical at +40% / 24m (the
+          enter bar), the horizontal at +15% releases YoY (the flood bar; flooding sits below it). Dot area = P90
+          revenue; dot color = the FINAL verdict (a 2026-08-27 amendment to the old mono-steel rule: green = enter,
+          steel = watch, violet = emerging, amber = crowded, terracotta = declining — reinforcement only, every
+          meaning survives grayscale) — position is evidence, color is the call: a dot in the growing-open quadrant
+          can still read Watch when winner-take-most concentration vetoes entry, and the dossier spells out which
+          check did it. Verdicts: Enter now = demand past the bar without a flooding
           pipeline · Watch = demand holding or softening, or score-only evidence · Emerging = no comparable demand
           base — either a young label (≥80% of its reviews from games released in the last 24 months) or a prior base
           too small for a % read; no trustworthy trend % exists, so those rows sit in the dashed strip below the plot,
