@@ -35,7 +35,9 @@ from app.routers import niches
 
 # dimension, key, win, min_reviews, n_games, tier, opportunity_v2, saturation_yoy, p90_rev,
 # total_players_now, players_trend_7d_pct, reviews_24m, reviews_prev_24m,
-# demand_trend_24m_pct, reviews_24m_new_share, demand_emerging, solo_viability.
+# demand_trend_24m_pct, reviews_24m_new_share, demand_emerging, solo_viability,
+# self_published_share, indie_share, med_playtime_h (the solo-evidence trio — stripped
+# off entirely by _build(with_evidence=False), the pre-evidence mart state).
 #
 # All rows share (win='24m', min_reviews=50) — the radar endpoint's default cut (mirrors
 # NicheFinder's own default, and mockup 3a's own caption: "last 24 months · micro + theme
@@ -70,20 +72,25 @@ from app.routers import niches
 #   "MMO Sandbox"         solo 0.2 AND demand_emerging — proves the rule reaches the
 #                         emerging group too (it out-volumes Organizing at 50,000, so
 #                         under solo_only=0 it LEADS emerging).
+# Solo-evidence values: "Souls-like" carries the user's real motivating profile (0.85
+# singleplayer here, 50% self-pub, 71% indie, median 5.7h); "Colony Sim" (the hero) gets a
+# med_playtime_h ABOVE the web's 20h heavy-content bar so that path is servable; "Co-op
+# Heist" carries NULL evidence — an evidence-bearing mart may still hold NULL rows (an
+# all-NULL-input cut) and they must pass through as null, never 0.
 ROWS = [
-    ("tag", "Colony Sim", "24m", 50, 41, "micro", 87.4, -0.12, 612_000.0, 5000.0, 6.2, 6200, 5000, 24.0, 0.35, False, 0.97),
-    ("tag", "Boomer Shooter", "24m", 50, 78, "micro", 81.9, -0.05, 488_000.0, 3000.0, 3.8, 5000, 4240, 18.0, 0.28, False, 0.92),
-    ("tag", "Fishing", "24m", 50, 129, "theme", 76.2, 0.02, 301_000.0, 2000.0, 9.1, 3000, 2700, 11.0, 0.31, False, 0.88),
-    ("tag", "Souls-like", "24m", 50, 204, "micro", 41.0, -0.02, 944_000.0, 9000.0, -1.4, 2000, 2080, -4.0, 0.22, False, 0.85),
-    ("tag", "Base Building", "24m", 50, 66, "micro", 72.8, 0.01, 520_000.0, 1500.0, 2.0, 1500, 1380, 9.0, 0.4, False, 0.9),
-    ("tag", "Deckbuilder", "24m", 50, 312, "theme", 33.5, -0.08, 702_000.0, 4000.0, -3.1, 4000, 4760, -16.0, 0.18, False, 0.95),
-    ("tag", "No Baseline Tag", "24m", 50, 60, "micro", 50.0, 0.0, 200_000.0, 100.0, 1.0, 1000, 0, None, 1.0, True, 0.9),
-    ("tag", "Organizing", "24m", 50, 34, "micro", 82.0, 0.30, 250_000.0, 900.0, 5.0, 39_600, 800, 4850.0, 0.94, True, 0.94),
-    ("tag", "Open World", "24m", 50, 900, "umbrella", 90.0, 0.10, 1_200_000.0, 20000.0, 4.0, 9000, 6000, 50.0, 0.3, False, 0.85),
-    ("tag", "Extraction Shooter", "24m", 50, 88, "micro", 74.0, 0.05, 800_000.0, 12000.0, 4.4, 8000, 6015, 33.0, 0.3, False, 0.35),
-    ("tag", "Co-op Heist", "24m", 50, 47, "micro", 66.0, 0.02, 350_000.0, 2200.0, 1.1, 4200, 3500, 20.0, 0.26, False, None),
-    ("tag", "MMO Sandbox", "24m", 50, 25, "micro", 55.0, 0.4, 500_000.0, 3000.0, 2.0, 50_000, 0, None, 0.91, True, 0.2),
-    ("genre", "Roguelike", "24m", 50, 55, "genre", 60.0, -0.01, 400_000.0, 2500.0, 2.5, 2500, 2200, 13.6, 0.25, False, 0.88),
+    ("tag", "Colony Sim", "24m", 50, 41, "micro", 87.4, -0.12, 612_000.0, 5000.0, 6.2, 6200, 5000, 24.0, 0.35, False, 0.97, 0.61, 0.83, 24.3),
+    ("tag", "Boomer Shooter", "24m", 50, 78, "micro", 81.9, -0.05, 488_000.0, 3000.0, 3.8, 5000, 4240, 18.0, 0.28, False, 0.92, 0.55, 0.8, 6.1),
+    ("tag", "Fishing", "24m", 50, 129, "theme", 76.2, 0.02, 301_000.0, 2000.0, 9.1, 3000, 2700, 11.0, 0.31, False, 0.88, 0.47, 0.66, 4.2),
+    ("tag", "Souls-like", "24m", 50, 204, "micro", 41.0, -0.02, 944_000.0, 9000.0, -1.4, 2000, 2080, -4.0, 0.22, False, 0.85, 0.5, 0.71, 5.7),
+    ("tag", "Base Building", "24m", 50, 66, "micro", 72.8, 0.01, 520_000.0, 1500.0, 2.0, 1500, 1380, 9.0, 0.4, False, 0.9, 0.52, 0.7, 8.0),
+    ("tag", "Deckbuilder", "24m", 50, 312, "theme", 33.5, -0.08, 702_000.0, 4000.0, -3.1, 4000, 4760, -16.0, 0.18, False, 0.95, 0.58, 0.77, 9.4),
+    ("tag", "No Baseline Tag", "24m", 50, 60, "micro", 50.0, 0.0, 200_000.0, 100.0, 1.0, 1000, 0, None, 1.0, True, 0.9, 0.6, 0.75, 3.3),
+    ("tag", "Organizing", "24m", 50, 34, "micro", 82.0, 0.30, 250_000.0, 900.0, 5.0, 39_600, 800, 4850.0, 0.94, True, 0.94, 0.63, 0.81, 2.8),
+    ("tag", "Open World", "24m", 50, 900, "umbrella", 90.0, 0.10, 1_200_000.0, 20000.0, 4.0, 9000, 6000, 50.0, 0.3, False, 0.85, 0.3, 0.4, 30.0),
+    ("tag", "Extraction Shooter", "24m", 50, 88, "micro", 74.0, 0.05, 800_000.0, 12000.0, 4.4, 8000, 6015, 33.0, 0.3, False, 0.35, 0.2, 0.35, 40.0),
+    ("tag", "Co-op Heist", "24m", 50, 47, "micro", 66.0, 0.02, 350_000.0, 2200.0, 1.1, 4200, 3500, 20.0, 0.26, False, None, None, None, None),
+    ("tag", "MMO Sandbox", "24m", 50, 25, "micro", 55.0, 0.4, 500_000.0, 3000.0, 2.0, 50_000, 0, None, 0.91, True, 0.2, 0.15, 0.3, 60.0),
+    ("genre", "Roguelike", "24m", 50, 55, "genre", 60.0, -0.01, 400_000.0, 2500.0, 2.5, 2500, 2200, 13.6, 0.25, False, 0.88, 0.51, 0.72, 7.7),
 ]
 
 # Colony Sim's yearly demand-vs-pipeline series (mart_niche_trend) — the hero chart's real
@@ -104,19 +111,26 @@ PLAYERS_MONTHLY = [
 ]
 
 
-def _build(path: Path, *, with_players_monthly: bool) -> None:
+def _build(path: Path, *, with_players_monthly: bool, with_evidence: bool = True) -> None:
     con = duckdb.connect(str(path))
     try:
-        con.execute("""
+        evidence_ddl = (
+            ", self_published_share DOUBLE, indie_share DOUBLE, med_playtime_h DOUBLE"
+            if with_evidence else ""
+        )
+        con.execute(f"""
             CREATE TABLE mart_niche (
                 dimension VARCHAR, key VARCHAR, win VARCHAR, min_reviews INTEGER, n_games INTEGER,
                 tier VARCHAR, opportunity_v2 DOUBLE, saturation_yoy DOUBLE, p90_rev DOUBLE,
                 total_players_now DOUBLE, players_trend_7d_pct DOUBLE,
                 reviews_24m BIGINT, reviews_prev_24m BIGINT, demand_trend_24m_pct DOUBLE,
                 reviews_24m_new_share DOUBLE, demand_emerging BOOLEAN, solo_viability DOUBLE
+                {evidence_ddl}
             )
         """)
-        con.executemany(f"INSERT INTO mart_niche VALUES ({', '.join(['?'] * 17)})", ROWS)
+        n_cols = 20 if with_evidence else 17
+        rows = ROWS if with_evidence else [r[:17] for r in ROWS]
+        con.executemany(f"INSERT INTO mart_niche VALUES ({', '.join(['?'] * n_cols)})", rows)
 
         # The LIST endpoint (`GET /api/niches`) SELECTs every _BASE_COLS entry plus every
         # capability-gated column whose probe answers yes; the radar feed only reads the 16
@@ -129,6 +143,7 @@ def _build(path: Path, *, with_players_monthly: bool) -> None:
             "saturation_yoy", "p90_rev", "total_players_now", "players_trend_7d_pct",
             "reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct",
             "reviews_24m_new_share", "demand_emerging", "solo_viability",
+            "self_published_share", "indie_share", "med_playtime_h",
         }
         for col in [c for c in [*niches._BASE_COLS, "players_coverage"] if c not in narrow]:
             typ = "INTEGER DEFAULT 0" if col == "n_recent" else "DOUBLE"
@@ -165,9 +180,13 @@ def mart_paths() -> dict[str, Path]:
     paths = {
         "full": tmp / "full_mart.duckdb",
         "no_players_monthly": tmp / "no_players_monthly_mart.duckdb",
+        "no_evidence": tmp / "no_evidence_mart.duckdb",
     }
     _build(paths["full"], with_players_monthly=True)
     _build(paths["no_players_monthly"], with_players_monthly=False)
+    # The pre-evidence mart: demand24m and everything else present, but the solo-evidence
+    # trio absent — the state production is in for hours after the evidence deploy.
+    _build(paths["no_evidence"], with_players_monthly=True, with_evidence=False)
     return paths
 
 
@@ -179,6 +198,7 @@ _GATES = (
     niches._has_players_dist,
     niches._has_lifetime,
     niches._has_no_floor_cut,
+    niches._has_solo_evidence,
 )
 
 
@@ -212,6 +232,14 @@ def radar_client_no_sparklines(client, mart_paths):
     """Gated-on for demand_trend_24m_pct, but mart_niche_players_monthly doesn't exist —
     proves the sparkline degrade (empty lists, not a 500) is independent of the main gate."""
     with _swapped(mart_paths["no_players_monthly"]):
+        yield client
+
+
+@pytest.fixture
+def radar_client_no_evidence(client, mart_paths):
+    """Everything gated-on EXCEPT the solo-evidence trio — the mart state production runs
+    for hours after the evidence deploy. Rows must carry null, never 500."""
+    with _swapped(mart_paths["no_evidence"]):
         yield client
 
 
@@ -522,3 +550,62 @@ def test_list_niches_solo_only_filters_and_excludes_null(radar_client):
             "Deckbuilder", "No Baseline Tag", "Organizing"} == keys
     # COUNT respects the filter too — paging totals must not promise rows the filter drops.
     assert body["total"] == len(body["items"]) == 8
+
+
+# =========================================================================================
+# Solo-evidence trio (self_published_share / indie_share / med_playtime_h): the member
+# profile behind solo_viability (the SINGLEPLAYER SHARE — a no-netcode proxy, not a
+# production-scope measure). Served on the LIST rows the board reads and on every radar
+# card; column-existence gated so a pre-evidence mart degrades to null rows, never a 500.
+# =========================================================================================
+
+
+def test_list_niches_carries_solo_evidence(radar_client):
+    r = radar_client.get("/api/niches", params={"dimension": "tag", "window": "24m", "min_reviews": 50})
+    assert r.status_code == 200
+    rows = {i["key"]: i for i in r.json()["items"]}
+    # The user's motivating profile: Souls-like's 0.85 singleplayer share sits on top of a
+    # 50% self-published / 71% indie / median-5.7h member population.
+    souls = rows["Souls-like"]
+    assert souls["self_published_share"] == 0.5
+    assert souls["indie_share"] == 0.71
+    assert souls["med_playtime_h"] == 5.7
+    # NULL evidence rows pass through as null, never 0 — "unknown" is not a claim.
+    heist = rows["Co-op Heist"]
+    assert heist["self_published_share"] is None
+    assert heist["indie_share"] is None
+    assert heist["med_playtime_h"] is None
+
+
+def test_radar_cards_carry_solo_evidence(radar_client):
+    r = radar_client.get("/api/niches/radar", params={"limit": 24})
+    body = r.json()
+    # Hero (Colony Sim) — including a med_playtime_h above the web's 20h heavy-content bar.
+    assert body["hero"]["self_published_share"] == 0.61
+    assert body["hero"]["indie_share"] == 0.83
+    assert body["hero"]["med_playtime_h"] == 24.3
+    movers = {m["key"]: m for m in body["movers"]}
+    assert movers["Souls-like"]["med_playtime_h"] == 5.7
+    emerging = {e["key"]: e for e in body["emerging"]}
+    assert emerging["Organizing"]["self_published_share"] == 0.63
+
+
+def test_solo_evidence_degrades_to_null_on_pre_evidence_mart(radar_client_no_evidence):
+    # The mart on the server predates the evidence columns for hours after the deploy that
+    # adds them: every surface answers 200 with the fields present-but-null (the UI omits
+    # the evidence line), never a BinderException 500.
+    r = radar_client_no_evidence.get(
+        "/api/niches", params={"dimension": "tag", "window": "24m", "min_reviews": 50}
+    )
+    assert r.status_code == 200
+    for row in r.json()["items"]:
+        assert row["self_published_share"] is None
+        assert row["indie_share"] is None
+        assert row["med_playtime_h"] is None
+
+    r = radar_client_no_evidence.get("/api/niches/radar", params={"limit": 6})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["hero"]["key"] == "Colony Sim"  # the feed itself is unaffected
+    assert body["hero"]["med_playtime_h"] is None
+    assert all(m["self_published_share"] is None for m in body["movers"])

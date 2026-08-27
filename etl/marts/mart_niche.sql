@@ -28,6 +28,22 @@
 --                   own population (not copied from the all-population), so the 24m cut
 --                   reflects recent entrants. Catalog norm is ~0.9; below ~0.8 signals
 --                   meaningful multiplayer dependence.
+--
+-- Solo-evidence trio (2026-08, additive). solo_viability is the niche's SINGLEPLAYER
+-- SHARE — a no-netcode proxy, not a production-scope measure — so a bare 0.98 asserts
+-- "solo-buildable" without showing who the members actually are. These three columns are
+-- the member profile behind that share, computed over the SAME per-cut population as
+-- solo_viability (the `agg` CTE over _niche_pop — identical scoping by construction):
+--   self_published_share  AVG(self_published) over the cut's scored games. The SAME value
+--                         as the long-standing self_pub_share, published under the
+--                         evidence name the radar consumers probe for (aliased in the
+--                         final SELECT — one computation, so the two can never drift).
+--   indie_share           AVG(is_indie) over the cut's scored games.
+--   med_playtime_h        median of member games' playtime_p50 (mart_game's per-game
+--                         median playtime from the review sample, minutes), in HOURS,
+--                         1 decimal. mart_game builds before this file (MART_FILES).
+-- NULL-honest: AVG/median skip NULL inputs and return NULL when no member carries the
+-- input (an older source without is_indie/playtime degrades to NULL, never to 0).
 --   tier            tags only (dimension='genre' rows get 'genre'):
 --                   'micro' | 'umbrella' | 'theme' | 'meta'. Curated TAG_TIER map in
 --                   build_marts.py; unmapped tags: all-time n_games (win='all',
@@ -86,9 +102,14 @@ SELECT
     m.dimension, m.key, w.win, mr.min_reviews,
     g.appid, g.est_rev_reviews, g.total_reviews, g.price_initial,
     g.positive_ratio, g.owners_mid, g.self_published, g.is_singleplayer,
+    -- Solo-evidence inputs (see header): is_indie from staging; playtime_p50 from
+    -- mart_game (built earlier in MART_FILES — same cross-mart read mart_entity.sql
+    -- makes), the per-game median playtime of the review SAMPLE, in minutes.
+    g.is_indie, mg.playtime_p50,
     (g.release_valid AND g.release_date >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH) AS is_recent
 FROM membership m
 JOIN stg_game g ON g.appid = m.appid
+LEFT JOIN mart_game mg ON mg.appid = m.appid
 CROSS JOIN wins w
 CROSS JOIN mr
 WHERE g.total_reviews >= mr.min_reviews
@@ -255,6 +276,11 @@ agg AS (
         -- v2: share of THIS cut's scored games playable single-player (per-cut on purpose,
         -- so the 24m cut describes recent entrants, not the whole back catalog).
         AVG(CASE WHEN is_singleplayer THEN 1.0 ELSE 0.0 END) AS solo_viability,
+        -- Solo-evidence trio (see header): the member profile behind solo_viability, same
+        -- per-cut population by construction (this very GROUP BY). NULL-honest — AVG and
+        -- median skip NULLs and go NULL when no member carries the input.
+        AVG(CAST(is_indie AS DOUBLE)) AS indie_share,
+        median(playtime_p50) AS med_playtime_min,
         SUM(est_rev_reviews) FILTER (WHERE rev_pr >= @WINNER_TOP_PCT@)
             / NULLIF(SUM(est_rev_reviews), 0) AS winner_concentration,
         AVG(CASE WHEN est_rev_reviews > 200000 THEN 1.0 ELSE 0.0 END) AS hit_rate_200k,
@@ -355,6 +381,13 @@ SELECT
     -- v2 columns (additive; see header).
     g.entrant_ratio,
     g.solo_viability,
+    -- Solo-evidence trio (additive; see header). self_published_share IS self_pub_share
+    -- under the evidence name the radar consumers probe for — one computation, aliased,
+    -- so the two names can never disagree. med_playtime_h converts mart_game's minutes
+    -- to hours at 1 decimal; NULL stays NULL (round(NULL) is NULL).
+    g.self_pub_share AS self_published_share,
+    g.indie_share,
+    round(g.med_playtime_min / 60.0, 1) AS med_playtime_h,
     CASE WHEN g.dimension = 'genre' THEN 'genre'
          ELSE COALESCE(tt.tier,
                        CASE WHEN g.n_games_alltime >= @UMBRELLA_N_GAMES@

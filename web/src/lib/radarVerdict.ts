@@ -10,9 +10,13 @@
  *                            CATCH-ALL: a niche with no strong signal in either
  *                            direction parks here rather than being invented into a
  *                            stronger ring.
- *   emerging  "Emerging"   — a young market (demand_emerging from the mart): real
- *                            volume arriving, but no comparable demand base, so NO
- *                            trend-derived claim is possible in either direction.
+ *   emerging  "Emerging"   — no comparable demand base (demand_emerging from the mart),
+ *                            so NO trend-derived claim is possible in either direction.
+ *                            WHICH tell fired matters for the copy (PR #98 review): a
+ *                            new-game review mass >= EMERGING_NEW_MASS_SHARE marks a
+ *                            genuinely YOUNG LABEL; the low-base floor alone marks a
+ *                            small stable niche whose base is just too small for a %
+ *                            read — calling that one "new" would be a fabricated claim.
  *   crowded   "Crowded"    — supply flooding without demand keeping up, or a
  *                            winner-take-most revenue structure.
  *   declining "Declining"  — demand in sustained structural decline.
@@ -75,15 +79,30 @@
  * a one-line diff with the tests updated alongside.
  *
  * SOLO VIABILITY IS A LENS, NOT A RING — deliberately. mart_niche.solo_viability is the
- * share of the cut's scored games playable single-player (catalog norm ~0.9; below ~0.8
- * leans multiplayer/team-scale — the same reading the MCP guidance uses). It never feeds
- * the ring decision: a ring answers "is this market worth entering", which holds regardless
- * of team size, while solo-buildability is a property of the READER, not the market.
- * Folding it into the verdict would move dots between rings when the market itself did
- * not change. Since 2026-08-26 the radar POPULATION is solo-friendly-by-default — but
- * server-side (the API's solo_only param filters on the same 0.8 bar), never by moving
- * rings: with the board's "Solo-friendly only" toggle off, team-scale dots return, drawn
- * hollow via soloBucket() below, in exactly the ring the market evidence puts them.
+ * niche's SINGLEPLAYER SHARE: the share of the cut's scored games playable single-player
+ * (catalog norm ~0.9; below ~0.8 leans multiplayer/team-scale — the same reading the MCP
+ * guidance uses). Named honestly everywhere it renders (2026-08-27): it is a NO-NETCODE
+ * proxy, not a production-scope measure — "Souls-like 0.98" says its games skip netcode,
+ * not that a Souls-like is a small build. It never feeds the ring decision: a ring
+ * answers "is this market worth entering", which holds regardless of team size, while
+ * solo-buildability is a property of the READER, not the market. Folding it into the
+ * verdict would move dots between rings when the market itself did not change. Since
+ * 2026-08-26 the radar POPULATION is solo-friendly-by-default — but server-side (the
+ * API's solo_only param filters on the same 0.8 bar), never by moving rings: with the
+ * board's "Solo-friendly only" toggle off, team-scale dots return, drawn hollow via
+ * soloBucket() below, in exactly the ring the market evidence puts them.
+ *
+ * SOLO EVIDENCE (2026-08-27): because the share alone over-claims, the dossier's solo
+ * row renders the member profile behind it when the mart carries the evidence trio
+ * (same per-cut population as the share itself — see mart_niche.sql):
+ *   self_published_share  AVG(self_published)   -> "50% self-pub"
+ *   indie_share           AVG(is_indie)         -> "71% indie"
+ *   med_playtime_h        median member playtime_p50, hours -> "median 5.7h content"
+ * The pass bar stays on the singleplayer share >= SOLO_FRIENDLY_MIN exactly as before;
+ * evidence is display-only and, like the whole row, decides:false. When med_playtime_h
+ * exceeds SOLO_HEAVY_CONTENT_H the note gains a NEUTRAL caution — "heavy content scope
+ * for a solo build" — which never changes the pass/fail or the ring. Older marts serve
+ * the trio as null and the evidence clauses are simply omitted.
  *
  * THE TRACE (radarVerdictTrace) — the dossier's data. The radar must EXPLAIN its verdicts,
  * not just assert them, so the evaluation returns an ordered list of VerdictCheck rows
@@ -143,6 +162,11 @@ export const OPP_WATCH_SCORE = 60;
 export const ENTRANT_RATIO_PAR = 1.0;
 /** Catalog-median entrant_ratio (~1.08) — display context for the dossier's tell row. */
 export const ENTRANT_RATIO_CATALOG_NORM = 1.08;
+/** reviews_24m_new_share at or above which an emerging niche is a genuinely YOUNG LABEL
+ * (the mart's tell 2 — MUST stay in lockstep with DEMAND_NEW_MASS_SHARE in
+ * etl/build_marts.py). Below it, an emerging flag came from the low-base floor alone: a
+ * small stable niche, so the dossier says "base too small for a % read", never "new". */
+export const EMERGING_NEW_MASS_SHARE = 0.8;
 
 // ---- verdict ----------------------------------------------------------------------------
 
@@ -175,8 +199,14 @@ export interface RadarVerdictInput {
   // ---- dossier context — NEVER read by the ring decision (pinned by tests) ----
   /** Recent-entrant median rev / niche median rev; the falsification tell's trace row. */
   entrant_ratio?: number | null;
-  /** 0..1 solo-buildable share; the lens' trace row. */
+  /** 0..1 SINGLEPLAYER SHARE (a no-netcode proxy, not scope); the lens' trace row. */
   solo_viability?: number | null;
+  /** 0..1 share of the cut's games that are self-published — solo-evidence trio. */
+  self_published_share?: number | null;
+  /** 0..1 share of the cut's games that are indie — solo-evidence trio. */
+  indie_share?: number | null;
+  /** Median of member games' median playtime, in HOURS — solo-evidence trio. */
+  med_playtime_h?: number | null;
   /** Absolute 24-month review volume — the emerging trace's headline number. */
   reviews_24m?: number | null;
   /** Prior-window review volume — the demand row's base clause ("on a 204.7K base"). */
@@ -247,34 +277,54 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
   const vol = num(input.reviews_24m);
   const prev = num(input.reviews_prev_24m);
   const newShare = num(input.reviews_24m_new_share);
+  const selfPub = num(input.self_published_share);
+  const indie = num(input.indie_share);
+  const medH = num(input.med_playtime_h);
 
   // The solo LENS row — shared by both trace shapes. decides:false: see module doc.
+  // The pass bar stays on the SINGLEPLAYER SHARE alone; the evidence trio is inlined into
+  // the value ("0.98 singleplayer · 50% self-pub · 71% indie · median 5.7h content") so
+  // the row SHOWS the member profile instead of asserting a bare share. Missing evidence
+  // clauses are omitted (older mart), never invented.
   const soloPass = solo === null ? null : solo >= SOLO_FRIENDLY_MIN;
+  const heavyContent = medH !== null && medH > SOLO_HEAVY_CONTENT_H;
+  const evidence = [
+    selfPub !== null ? `${Math.round(selfPub * 100)}% self-pub` : null,
+    indie !== null ? `${Math.round(indie * 100)}% indie` : null,
+    medH !== null ? `median ${medH.toFixed(1)}h content` : null,
+  ].filter((p): p is string => p !== null);
+  const soloNote =
+    soloPass === null
+      ? "share unknown — never counted as solo-friendly (lens, not a ring input)"
+      : soloPass
+        ? "mostly singleplayer members — a no-netcode proxy, not a scope claim (lens — never moves a ring)"
+        : "leans multiplayer/team-scale (lens — never moves a ring)";
   const soloCheck: VerdictCheck = {
     id: "solo",
-    label: "Solo viability",
-    value: solo === null ? "unknown" : solo.toFixed(2),
-    threshold: `≥ ${SOLO_FRIENDLY_MIN} solo-friendly`,
+    label: "Solo evidence",
+    value: [solo === null ? "unknown" : `${solo.toFixed(2)} singleplayer`, ...evidence].join(" · "),
+    threshold: `≥ ${SOLO_FRIENDLY_MIN} singleplayer share`,
     pass: soloPass,
-    note:
-      soloPass === null
-        ? "unknown — never counted as solo-friendly (lens, not a ring input)"
-        : soloPass
-          ? "solo-buildable share of the cut's games (lens — never moves a ring)"
-          : "leans multiplayer/team-scale (lens — never moves a ring)",
+    // The heavy-content caution is NEUTRAL: it rides the note, never the pass/fail.
+    note: heavyContent ? `${soloNote} — heavy content scope for a solo build` : soloNote,
     decides: false,
   };
 
-  // 0. emerging — pre-empts EVERYTHING (see precedence doc): a young tag's trend % AND
-  //    its saturation read are both artifacts of the label's age, so neither the demand
-  //    verdicts nor the crowding arms may fire. Not a caution: the evidence (youth) is
-  //    solid; the honest claim is "no comparable base", and the meaningful number is
-  //    absolute volume — so the TRACE swaps the %-checks for volume + new-game share.
+  // 0. emerging — pre-empts EVERYTHING (see precedence doc): an emerging niche's trend %
+  //    AND its saturation read are both artifacts of its base, so neither the demand
+  //    verdicts nor the crowding arms may fire. Not a caution: the evidence is solid; the
+  //    honest claim is "no comparable base", and the meaningful number is absolute volume
+  //    — so the TRACE swaps the %-checks for volume + new-game share. The COPY names the
+  //    tell that fired (see EMERGING_NEW_MASS_SHARE): only a new-game review mass at or
+  //    above that bar justifies "young label" wording — an emerging flag with LOW (or
+  //    unknown) new_share came from the low-base floor, i.e. a small stable niche, and
+  //    calling it "new" would be a fabricated claim. Both suppress the headline %.
   if (input.demand_emerging === true) {
+    const youngLabel = newShare !== null && newShare >= EMERGING_NEW_MASS_SHARE;
     return {
       ring: "emerging",
       caution: false,
-      reason: "young market — no comparable demand base",
+      reason: youngLabel ? "young label — no comparable demand base" : "base too small for a % read",
       checks: [
         {
           id: "volume",
@@ -282,18 +332,22 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
           value: vol === null ? "unknown" : `${fmtCompact(vol)} reviews / 24m`,
           threshold: "judged on absolute volume",
           pass: null,
-          note:
-            "young tag — its prior 24-month window is near zero by construction, so no " +
-            "trend-% check is honest in either direction",
-          decides: true, // the mart's youth flag IS the ring decision
+          note: youngLabel
+            ? "young label — its prior 24-month window is near zero by construction, so no " +
+              "trend-% check is honest in either direction"
+            : "prior 24-month window under the comparability floor — base too small for a " +
+              "% read in either direction",
+          decides: true, // the mart's emerging flag IS the ring decision
         },
         {
           id: "new_share",
           label: "New-game share",
           value: newShare === null ? "unknown" : `${Math.round(newShare * 100)}% from games ≤ 24m old`,
-          threshold: "≥ 80% marks a young label",
+          threshold: `≥ ${Math.round(EMERGING_NEW_MASS_SHARE * 100)}% marks a young label`,
           pass: null,
-          note: "how much of the volume comes from newly released games — the mart's second youth tell",
+          note: youngLabel
+            ? "the review mass IS the newest games — the young-label tell"
+            : "below the young-label bar — a small stable niche, not a new label",
           decides: false,
         },
         soloCheck,
@@ -433,6 +487,12 @@ export function radarVerdict(input: RadarVerdictInput): RadarVerdict {
  * SAME bar this module renders in the legend, tooltip and dossier; a drift would make the
  * legend lie about what the server filtered. */
 export const SOLO_FRIENDLY_MIN = 0.8;
+
+/** med_playtime_h above which the dossier's solo row carries the neutral caution
+ * "heavy content scope for a solo build" — a median member offering 20+ hours of
+ * content is a scope signal the singleplayer share alone hides. Note-only: it never
+ * changes the row's pass/fail, let alone a ring. */
+export const SOLO_HEAVY_CONTENT_H = 20;
 
 export type SoloBucket = "solo" | "team" | "unknown";
 
