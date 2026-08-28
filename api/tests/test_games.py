@@ -185,6 +185,20 @@ def test_game_comparables_ranks_by_jaccard_similarity(client):
     assert body["items"][0]["jaccard"] > body["items"][1]["jaccard"]
 
 
+def test_game_comparables_jaccard_values_are_exact(client):
+    """Pins the |A∪B| = len(a)+len(b)−|A∩B| denominator (the perf backport from the MCP's
+    find_comparables) to the values the old list_distinct(list_concat(...)) form produced —
+    top_tags is duplicate-free by construction, so both must agree exactly:
+      1001={Deckbuilder,Roguelike,Indie} vs 1002={Deckbuilder,Roguelike,Strategy}: 2/(3+3-2)=0.5
+      1001 vs 1003={Card Battler,Roguelike}: 1/(3+2-1)=0.25"""
+    body = client.get("/api/games/1001/comparables").json()
+    by_appid = {i["appid"]: i for i in body["items"]}
+    assert by_appid[1002]["jaccard"] == 0.5
+    assert sorted(by_appid[1002]["shared_tags"]) == ["Deckbuilder", "Roguelike"]
+    assert by_appid[1003]["jaccard"] == 0.25
+    assert by_appid[1003]["shared_tags"] == ["Roguelike"]
+
+
 def test_game_comparables_unknown_appid_is_404(client):
     r = client.get("/api/games/404404404/comparables")
     assert r.status_code == 404

@@ -429,6 +429,11 @@ def game_comparables(
     else:
         lo, hi = max(0.0, price * 0.5 - 2.0), price * 2.0 + 2.0
 
+    # Jaccard denominator via |A ∪ B| = len(a) + len(b) − |A ∩ B| — exact, because
+    # top_tags is duplicate-free by construction (a top-10 ranking). The previous form,
+    # len(list_distinct(list_concat(a, b))) per row, made this the slowest handler in
+    # production (808ms p95); this skips the per-row concat+distinct and returns the
+    # identical ordering. Ported from mcp/prospect_mcp.py::find_comparables.
     rows = analytics_db.query(
         """
         WITH target AS (SELECT appid, primary_genre, top_tags FROM mart_game WHERE appid = ?),
@@ -437,7 +442,7 @@ def game_comparables(
                 g.total_reviews, g.positive_ratio, g.est_rev_reviews, g.header_image,
                 list_intersect(g.top_tags, t.top_tags) AS shared_tags,
                 len(list_intersect(g.top_tags, t.top_tags)) AS n_shared,
-                len(list_distinct(list_concat(g.top_tags, t.top_tags))) AS n_union
+                len(g.top_tags) + len(t.top_tags) AS len_sum
             FROM mart_game g, target t
             WHERE g.appid != t.appid
               AND g.primary_genre = t.primary_genre
@@ -446,9 +451,9 @@ def game_comparables(
         )
         SELECT appid, name, release_year, price_initial, owners_mid, total_reviews,
             positive_ratio, est_rev_reviews, header_image, shared_tags,
-            n_shared * 1.0 / n_union AS jaccard
+            n_shared * 1.0 / (len_sum - n_shared) AS jaccard
         FROM scored
-        WHERE n_union > 0
+        WHERE len_sum - n_shared > 0
         ORDER BY jaccard DESC, total_reviews DESC
         LIMIT ?
         """,
