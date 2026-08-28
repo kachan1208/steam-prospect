@@ -7,6 +7,7 @@ import {
   PLOT,
   RadarBoard,
   layoutXY,
+  plateGeom,
   xToPx,
   yToPx,
   type RadarBoardBlip,
@@ -47,6 +48,14 @@ import {
  *    appears (dash rank), opens a full dossier with the honest "beyond the Top N plot"
  *    note, a plotted match never carries that note, zero matches get an honest empty row
  *    naming the searched population, and Esc clears back to the plotted list.
+ *
+ * 7. CLICK-TO-ZOOM (2026-08-28 directive). Clicking a region's EMPTY area zooms the
+ *    plate into it and filters the rail to its members (chip + honest recomputed
+ *    counts); a quadrant zoom re-domains the axes to the quadrant's own bounds with the
+ *    clamp contract intact at the new edges; the strip zoom is a rail filter + an
+ *    enlarged strip, never a fake XY. Search composes with the filter. Dot clicks keep
+ *    dossier precedence. Three exits: chip ✕, Esc (search text clears first), and a
+ *    plot-background click.
  */
 
 function makeBlip(key: string, input: RadarVerdictInput, over: Partial<RadarBoardBlip> = {}): RadarBoardBlip {
@@ -721,9 +730,11 @@ describe("RadarBoard — region hover (quadrants + the strip)", () => {
       expect(ringOf(key)).toBeNull();
     }
     expect(region.getAttribute("fill")).toBe("transparent");
-    // And no dossier opened — the region rects are hover-only, never click targets.
+    // A region CLICK zooms (see the click-to-zoom suite) — it must NEVER open a
+    // dossier: only dots do that.
     fireEvent.click(region);
     expect(screen.queryByTestId("verdict-dossier")).toBeNull();
+    expect(screen.getByTestId("radar-zoom-chip")).toBeTruthy();
   });
 
   it("dot hover takes precedence: the tooltip's single-dot emphasis wins, and the wash follows the dot's own region", () => {
@@ -762,5 +773,182 @@ describe("RadarBoard — region hover (quadrants + the strip)", () => {
     expect(rowKeys()).toEqual(before); // same rows, same order — a reading aid only
     fireEvent.mouseLeave(screen.getByTestId("radar-region-growing-open"));
     expect(screen.getByTestId("radar-row-tag:Open Grower").getAttribute("data-region-tick")).toBeNull();
+  });
+});
+
+describe("RadarBoard — click-to-zoom (quadrants + the strip)", () => {
+  // Three growing-open members (one beyond the X scale — the clamp contract must hold
+  // at the ZOOMED bounds too), one member for two other quadrants, one strip resident.
+  const zoomBlips = () => [
+    makeBlip("Open Grower", { demand_trend_24m_pct: 120, saturation_yoy: 0.05 }),
+    makeBlip("Open Grower II", { demand_trend_24m_pct: 60, saturation_yoy: -0.2 }),
+    makeBlip("Runaway Grower", { demand_trend_24m_pct: 900, saturation_yoy: 0.05 }),
+    makeBlip("Flooded Grower", { demand_trend_24m_pct: 120, saturation_yoy: 0.5 }),
+    makeBlip("Calm Shrinker", { demand_trend_24m_pct: -50, saturation_yoy: 0.05 }),
+    makeBlip("Newborn", { demand_emerging: true, reviews_24m: 9_000, reviews_24m_new_share: 0.9 }),
+  ];
+  const OPEN_GROWERS = ["Open Grower", "Open Grower II", "Runaway Grower"];
+  const OTHERS = ["Flooded Grower", "Calm Shrinker", "Newborn"];
+  const dot = (key: string) => screen.queryByTestId(`radar-blip-tag:${key}`);
+  const row = (key: string) => screen.queryByTestId(`radar-row-tag:${key}`);
+  const zoomInto = (region: string) => fireEvent.click(screen.getByTestId(`radar-region-${region}`));
+  const search = () => screen.getByTestId("radar-search") as HTMLInputElement;
+
+  it("clicking a quadrant's empty area zooms: members only, re-domained axes, ONE region title", () => {
+    renderBoard(zoomBlips(), true);
+    zoomInto("growing-open");
+    // Only the quadrant's members render (edge-pinned member included, chevron intact).
+    for (const key of OPEN_GROWERS) expect(dot(key)).toBeTruthy();
+    for (const key of OTHERS) expect(dot(key)).toBeNull();
+    expect(screen.getByTestId("radar-clamp-tag:Runaway Grower")).toBeTruthy();
+    // The strip has no quadrant, so a quadrant zoom hides it entirely.
+    expect(screen.queryByTestId("xy-strip")).toBeNull();
+    // The axes re-domain to the quadrant's own bounds: the enter bar is now the left
+    // edge tick, the beyond-scale member keeps its honest ≥ edge label — and the bar
+    // hairlines vanish (each bar IS a domain edge now, carried by the plot frame).
+    expect(screen.getByText("+40")).toBeTruthy();
+    expect(screen.getByText("≥ +300")).toBeTruthy();
+    expect(screen.getByText("+15")).toBeTruthy(); // the flood bar = the calm edge's tick
+    expect(screen.queryByTestId("xy-bar-demand")).toBeNull();
+    expect(screen.queryByTestId("xy-bar-flood")).toBeNull();
+    // One region title replaces the four corner labels…
+    expect(screen.getByText("GROWING · OPEN — ZOOMED")).toBeTruthy();
+    expect(screen.queryByText("GROWING · FLOODING")).toBeNull();
+    expect(screen.queryByText("FLAT/SHRINKING · OPEN")).toBeNull();
+    // …and region hover is disabled while zoomed (single-region view — moot).
+    expect(screen.queryByTestId("radar-region-growing-open")).toBeNull();
+    expect(screen.getByTestId("radar-zoom-exit")).toBeTruthy();
+  });
+
+  it("layoutXY re-domains the zoomed quadrant and keeps the clamp contract at the new bounds", () => {
+    const layout = layoutXY(zoomBlips(), { zoom: "growing-open" });
+    const g = plateGeom(undefined, "growing-open");
+    expect(layout.geom.xd).toEqual([40, 300]);
+    expect(layout.geom.yd).toEqual([-60, 15]);
+    const byKey = new Map(layout.dots.map((d) => [d.key, d]));
+    // A member's honest position in the ZOOMED scale…
+    const a = byKey.get("Open Grower")!;
+    expect(a.hidden).toBe(false);
+    expect(a.x).toBeCloseTo(g.xToPx(120), 4);
+    expect(a.y).toBeCloseTo(g.yToPx(5), 4);
+    // …a beyond-scale member still pins at the (zoomed) right edge with the flag…
+    const run = byKey.get("Runaway Grower")!;
+    expect(run.clampX).toBe(1);
+    expect(run.x).toBeCloseTo(g.x1 - run.r - 1, 4);
+    // …and non-members (strip resident included) are hidden, never repositioned lies.
+    expect(byKey.get("Flooded Grower")!.hidden).toBe(true);
+    expect(byKey.get("Calm Shrinker")!.hidden).toBe(true);
+    expect(byKey.get("Newborn")!.hidden).toBe(true);
+    expect(layout.stripCount).toBe(0);
+  });
+
+  it("the rail filters to the zoomed region: chip with honest count, recomputed groups, board ranks kept", () => {
+    renderBoard(zoomBlips(), true);
+    zoomInto("growing-open");
+    const chip = screen.getByTestId("radar-zoom-chip");
+    expect(chip.textContent).toContain("GROWING · OPEN");
+    expect(chip.textContent).toContain("3 niche");
+    for (const key of OPEN_GROWERS) expect(row(key)).toBeTruthy();
+    for (const key of OTHERS) expect(row(key)).toBeNull();
+    // The rail header count is the filtered member count, not the plotted total.
+    expect(screen.getByText("Verdicts").parentElement?.textContent).toContain("3");
+  });
+
+  it("search composes with the zoom filter — scoped placeholder, honest arithmetic, honest empty state", () => {
+    renderBoard(zoomBlips(), true);
+    zoomInto("growing-open");
+    expect(search().placeholder).toContain("in GROWING · OPEN");
+    fireEvent.change(search(), { target: { value: "II" } });
+    expect(row("Open Grower II")).toBeTruthy();
+    expect(row("Open Grower")).toBeNull();
+    expect(screen.getByText("1 of 3 match")).toBeTruthy();
+    // A niche OUTSIDE the zoomed region must never be smuggled in by the search.
+    fireEvent.change(search(), { target: { value: "flooded" } });
+    const empty = screen.getByTestId("radar-search-empty");
+    expect(empty.textContent).toContain("searched the 3 niches in GROWING · OPEN");
+    expect(row("Flooded Grower")).toBeNull();
+  });
+
+  it("dot-click precedence survives the zoom: a dot opens its dossier, and the zoom persists behind it", () => {
+    renderBoard(zoomBlips(), true);
+    zoomInto("growing-open");
+    fireEvent.click(dot("Open Grower")!);
+    expect(screen.getByTestId("verdict-dossier").textContent).toContain("Open Grower");
+    fireEvent.click(screen.getByRole("button", { name: /back to all verdicts/i }));
+    expect(screen.getByTestId("radar-zoom-chip")).toBeTruthy(); // still zoomed
+    expect(dot("Flooded Grower")).toBeNull();
+  });
+
+  it("three exits — the chip's ✕, Escape, and the plot-background click — all restore the full view", () => {
+    renderBoard(zoomBlips(), true);
+    const restored = () => {
+      expect(screen.queryByTestId("radar-zoom-chip")).toBeNull();
+      for (const key of [...OPEN_GROWERS, ...OTHERS]) expect(dot(key)).toBeTruthy();
+      expect(screen.getByTestId("radar-region-growing-open")).toBeTruthy();
+      expect(screen.getByTestId("xy-strip")).toBeTruthy();
+    };
+    zoomInto("growing-open");
+    fireEvent.click(screen.getByTestId("radar-zoom-chip"));
+    restored();
+    zoomInto("growing-open");
+    fireEvent.keyDown(document, { key: "Escape" });
+    restored();
+    zoomInto("growing-open");
+    fireEvent.click(screen.getByTestId("radar-zoom-exit"));
+    restored();
+  });
+
+  it("Esc clears the search text first; only the NEXT Esc exits the zoom", () => {
+    renderBoard(zoomBlips(), true);
+    zoomInto("growing-open");
+    fireEvent.change(search(), { target: { value: "II" } });
+    fireEvent.keyDown(search(), { key: "Escape" });
+    expect(search().value).toBe("");
+    expect(screen.getByTestId("radar-zoom-chip")).toBeTruthy(); // zoom survived the clear
+    fireEvent.keyDown(search(), { key: "Escape" });
+    expect(screen.queryByTestId("radar-zoom-chip")).toBeNull();
+  });
+
+  it("every quadrant zooms to its own bounds", () => {
+    const cases = [
+      { region: "growing-flooding", xd: [40, 300], yd: [15, 120] },
+      { region: "shrinking-open", xd: [-100, 40], yd: [-60, 15] },
+      { region: "shrinking-flooding", xd: [-100, 40], yd: [15, 120] },
+    ] as const;
+    for (const c of cases) {
+      const layout = layoutXY(zoomBlips(), { zoom: c.region });
+      expect(layout.geom.xd).toEqual(c.xd);
+      expect(layout.geom.yd).toEqual(c.yd);
+    }
+  });
+
+  it("the strip zoom filters the rail and enlarges the strip — quadrant dots recede, no fake XY", () => {
+    renderBoard(zoomBlips(), true);
+    zoomInto("strip");
+    const chip = screen.getByTestId("radar-zoom-chip");
+    expect(chip.textContent).toContain("EMERGING");
+    expect(chip.textContent).toContain("1 niche");
+    // Rail: strip residents only.
+    expect(row("Newborn")).toBeTruthy();
+    for (const key of [...OPEN_GROWERS, "Flooded Grower", "Calm Shrinker"]) expect(row(key)).toBeNull();
+    // The plot stays a full-domain view (no quadrant zoom for the strip): quadrant dots
+    // still render, receded, and the strip resident holds the emphasis in the strip.
+    expect(dot("Open Grower")!.getAttribute("opacity")).toBe("0.25");
+    expect(dot("Newborn")!.getAttribute("opacity")).toBe("1");
+    expect(screen.getByText(/RAIL FILTERED/)).toBeTruthy();
+    // Enlarged presentation, never a repositioned lie: the resident is still below the
+    // plot in the strip band.
+    const layout = layoutXY(zoomBlips(), { zoom: "strip" });
+    const restLayout = layoutXY(zoomBlips());
+    const zoomed = layout.dots.find((d) => d.key === "Newborn")!;
+    const rest = restLayout.dots.find((d) => d.key === "Newborn")!;
+    expect(zoomed.strip).toBe(true);
+    expect(zoomed.y).toBeGreaterThan(layout.geom.y1);
+    expect(layout.stripH).toBeGreaterThan(restLayout.stripH);
+    expect(zoomed.r).toBeGreaterThanOrEqual(rest.r);
+    // Esc restores everything, strip presentation included.
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByTestId("radar-zoom-chip")).toBeNull();
+    expect(dot("Open Grower")!.getAttribute("opacity")).toBe("1");
   });
 });

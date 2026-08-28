@@ -22,6 +22,16 @@ import Docs from "./pages/Docs";
 import Terms from "./pages/Terms";
 import Privacy from "./pages/Privacy";
 
+/**
+ * THE page container — ONE width for every surface (2026-08-28, user directive: "not all
+ * pages have same size"). Header, footer and the routed page outlet all share this exact
+ * class, so every page's content edges line up with the chrome and with each other.
+ * 1600px is picked for the widest instrument (the radar board + its rail); pages must
+ * not add their own competing max-width — a READING page may cap a text column inside
+ * (typography), but its outer frame is this container like everyone else's.
+ */
+export const PAGE_CONTAINER = "mx-auto w-full max-w-[1600px] px-6 lg:px-10";
+
 // Five destinations plus one CTA, deliberately: Radar (the index — the niche instrument),
 // Games (teardown charts), Studios (developer/publisher track records — added by user
 // request: publisher scouting needs a discoverable entry point, not a link buried in game
@@ -103,7 +113,7 @@ function Logo() {
 function Header() {
   return (
     <header className="sticky top-0 z-30 border-b border-chartborder bg-page">
-      <div className="mx-auto flex w-full max-w-[1320px] flex-wrap items-center gap-x-6 px-6 lg:px-10">
+      <div className={clsx(PAGE_CONTAINER, "flex flex-wrap items-center gap-x-6")}>
         <Link to="/radar" className="flex h-14 items-center gap-2.5">
           <Logo />
           <span className="kicker text-[15px] text-ink-primary">Prospect</span>
@@ -177,7 +187,7 @@ function HealthRow() {
 function Footer() {
   return (
     <footer className="border-t border-chartborder bg-page">
-      <div className="mx-auto flex w-full max-w-[1320px] flex-wrap items-center justify-between gap-x-6 gap-y-1.5 px-6 py-3 lg:px-10">
+      <div className={clsx(PAGE_CONTAINER, "flex flex-wrap items-center justify-between gap-x-6 gap-y-1.5 py-3")}>
         <HealthRow />
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-ink-muted">
           <Link to="/datalog" className="hover:text-ink-secondary">
@@ -206,7 +216,7 @@ function AppShell() {
     <div className="flex min-h-full flex-col bg-page">
       <Header />
       <main className="flex-1">
-        <div className="mx-auto w-full max-w-[1320px] px-6 py-8 lg:px-10">
+        <div className={clsx(PAGE_CONTAINER, "py-8")}>
           <Outlet />
         </div>
       </main>

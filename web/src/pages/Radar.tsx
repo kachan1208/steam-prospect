@@ -255,9 +255,13 @@ function RadarBoardSection({
           against flat-to-down demand, or winner-take-most · Declining = demand down ≥30% per 24 months. Axes are
           linear over labeled domains (X −100…+300% / 24m, Y −60…+120% YoY); a value beyond a domain pins its dot at
           the plot edge with a chevron and the true number stays in the tooltip and dossier. Click a dot for its
-          verdict dossier — the same checks that placed it, spelled out with the bars they were judged against. The
-          board plots the class&rsquo;s Top N by opportunity; the rail&rsquo;s search covers the whole population of
-          the cut — all classes, past the plot cap.{" "}
+          verdict dossier — the same checks that placed it, spelled out with the bars they were judged against.
+          Click a quadrant&rsquo;s empty space to ZOOM into it: the axes re-domain to that quadrant&rsquo;s own
+          bounds and the rail filters to its members (the strip zooms as a rail filter + an enlarged strip — an
+          emerging niche never gets a fake XY position); Esc, the rail chip&rsquo;s ✕, or a click on the plot
+          background restores the full view. The board plots the class&rsquo;s Top N by opportunity; the
+          rail&rsquo;s search covers the whole population of the cut — all classes, past the plot cap (while
+          zoomed, the search reads within the zoomed region).{" "}
           {soloOnly
             ? `Population: solo-friendly niches only (singleplayer share ≥ ${SOLO_FRIENDLY_MIN}, filtered server-side; a niche with no solo reading is excluded — unknown is not a claim). Singleplayer share is a no-netcode proxy, not a production-scope measure — the dossier's solo row shows the member evidence behind it. Solo never changes a verdict.`
             : `Population: all niches — the solo lens restyles team-scale dots (hollow, singleplayer share < ${SOLO_FRIENDLY_MIN}) without ever changing a verdict. Singleplayer share is a no-netcode proxy, not a production-scope measure — the dossier's solo row shows the member evidence behind it.`}
@@ -383,7 +387,10 @@ export default function Radar() {
   const partialFail = !bothFailed && (genreQ.isError || tagQ.isError);
 
   return (
-    <div className="mx-auto flex max-w-[1180px] flex-col gap-5">
+    // No page-level max-width — the radar is the app's centerpiece instrument, so it
+    // fills the ONE shared page container (App.tsx PAGE_CONTAINER) like every other page.
+    // The old 1180px self-cap was exactly the "pages are different sizes" complaint.
+    <div className="flex flex-col gap-5">
       <RadarBoardSection
         blips={blips}
         pool={pool}
