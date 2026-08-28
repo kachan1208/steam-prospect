@@ -60,6 +60,56 @@ class TierRow(BaseModel):
     pct: float
 
 
+# ---- /api/market/benchmarks (previously a bare dict, invisible to OpenAPI) --------------
+class CitedBenchmarks(BaseModel):
+    """benchmarks.as_dict() — researched constants (VG Insights / GameDiscoverCo / Boxleiter
+    work), not values derived from our catalog. Shapes mirror that module's literals."""
+
+    median_indie_gross_usd: float
+    pct_new_releases_over_100k: float
+    bottom_30_pct_gross_usd: float
+    reviews_1000_revenue_usd: float
+    boxleiter_owners_per_review: dict[str, float]  # {min, mid, max}
+    wishlist_conversion_first_week: float
+    first_week_to_first_year_mult: float
+    steam_revenue_share_to_dev: float
+    dev_tiers: list[dict]  # {label, min_copies, max_copies|None, revenue_anchor_usd}
+    opportunity_weights: dict[str, float]
+    revenue_benchmark_marks: list[BenchmarkMark]
+
+
+class ComputedBenchmarks(BaseModel):
+    """Our catalog's own figures (mart_meta), with the population made explicit in
+    population_note. All floats nullable: a mart built before a metric landed simply
+    doesn't carry the key."""
+
+    median_revenue_scored: Optional[float] = None
+    median_revenue_paid: Optional[float] = None
+    boxleiter_owners_per_review_slope: Optional[float] = None
+    pct_over_100k_scored: Optional[float] = None
+    n_games_total: Optional[float] = None
+    n_games_scored: Optional[float] = None
+    population_note: str
+
+
+class MarketBenchmarks(BaseModel):
+    cited: CitedBenchmarks
+    computed: ComputedBenchmarks
+    boxleiter_by_genre: list[BoxleiterRow]
+    tiers: list[TierRow]
+
+
+# ---- /api/refresh/history (previously a bare dict, invisible to OpenAPI) ---------------
+class RefreshHistory(BaseModel):
+    """The Droplet refresh cron's run log. Each run record is free-form by design — the
+    cron grows new delta keys without an API deploy — so `runs` stays a list of dicts
+    rather than a frozen row model; the ENVELOPE is what's contractual."""
+
+    runs: list[dict]  # newest first (by finished_at)
+    total: int  # runs on disk before `limit` was applied
+    limit: int
+
+
 # ---- seasonality / launch curve -------------------------------------------------------
 class SeasonalityCell(BaseModel):
     genre: str

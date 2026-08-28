@@ -154,6 +154,8 @@ def _build_fixture_mart(path: Path) -> None:
         _create_mart_game(con)
         _create_mart_niche(con)
         _create_mart_market_boxleiter(con)
+        _create_mart_market_tiers(con)
+        _create_mart_seasonality(con)
         _create_mart_meta(con)
         _create_mart_entity(con)
         _create_mart_timing(con)
@@ -309,6 +311,62 @@ def _create_mart_market_boxleiter(con: duckdb.DuckDBPyConnection) -> None:
     )
 
 
+def _create_mart_market_tiers(con: duckdb.DuckDBPyConnection) -> None:
+    """The dev-tier histogram api/app/routers/market.py::market_benchmarks reads alongside
+    mart_market_boxleiter. Counts sum to the 6 fixture games so the row set is checkable."""
+    con.execute(
+        "CREATE TABLE mart_market_tiers (tier VARCHAR, tier_order INTEGER, count INTEGER,"
+        " pct DOUBLE)"
+    )
+    con.executemany(
+        "INSERT INTO mart_market_tiers VALUES (?, ?, ?, ?)",
+        [
+            ("Below Hobby", 0, 1, 1 / 6),
+            ("Hobby", 1, 3, 0.5),
+            ("Small", 2, 1, 1 / 6),
+            ("Middle", 3, 1, 1 / 6),
+        ],
+    )
+
+
+def _create_mart_seasonality(con: duckdb.DuckDBPyConnection) -> None:
+    """The two marts api/app/routers/seasonality.py reads. mart_seasonality is one table
+    holding four GRAINS (month_weekday / month / weekday / year), each using a different
+    subset of the month/weekday/year columns and leaving the rest NULL — the router splits
+    on `grain` and sorts each list, so all four are seeded here, deliberately out of order
+    on disk. 'Roguelike' carries a month grain only, so a genre with partial coverage is a
+    real fixture state."""
+    con.execute("""
+        CREATE TABLE mart_seasonality (
+            grain VARCHAR, genre VARCHAR, month INTEGER, weekday INTEGER, year INTEGER,
+            n_releases INTEGER, n_scored INTEGER, median_rev DOUBLE, median_reviews DOUBLE,
+            median_positive_ratio DOUBLE
+        )
+    """)
+    rows = []
+    for m in (11, 3, 7):  # out of calendar order on purpose
+        rows.append(("month", "__all__", m, None, None, m * 10, m * 5, 1000.0 * m, 50.0, 0.8))
+    for w in (5, 1):
+        rows.append(("weekday", "__all__", None, w, None, w * 20, w * 8, 2000.0, 60.0, 0.82))
+    for y in (2025, 2023, 2024):
+        rows.append(("year", "__all__", None, None, y, 300, 120, 1500.0, 55.0, 0.79))
+    rows.append(("month_weekday", "__all__", 6, 3, None, 40, 18, 900.0, 45.0, 0.77))
+    rows.append(("month_weekday", "__all__", 2, 4, None, 35, 15, 850.0, 44.0, 0.76))
+    rows.append(("month", "Roguelike", 5, None, None, 12, 6, 700.0, 40.0, 0.85))
+    con.executemany(f"INSERT INTO mart_seasonality VALUES ({', '.join(['?'] * 10)})", rows)
+
+    con.execute("""
+        CREATE TABLE mart_launch_curve (
+            genre VARCHAR, day INTEGER, mean_cum_fraction DOUBLE,
+            median_cum_fraction DOUBLE, n_games INTEGER
+        )
+    """)
+    con.executemany(
+        "INSERT INTO mart_launch_curve VALUES (?, ?, ?, ?, ?)",
+        [("__all__", d, f, f * 0.95, 500) for d, f in ((1, 0.2), (7, 0.5), (30, 0.8), (90, 1.0))],
+    )
+
+
 def _create_mart_entity(con: duckdb.DuckDBPyConnection) -> None:
     """The developer/publisher entity marts, exactly per the ETL schema contract that
     api/app/routers/entities.py reads (mart_entity full row + mart_entity_games map)."""
@@ -411,6 +469,7 @@ _build_fixture_mart(ANALYTICS_DB_PATH)
 # settings.analytics_db_path/control_dsn at (or shortly after) import time.
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app import response_cache  # noqa: E402
 from app.main import app  # noqa: E402
 
 
@@ -418,3 +477,15 @@ from app.main import app  # noqa: E402
 def client():
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def _cold_response_cache():
+    """app/response_cache.py memoizes the mart-pure handlers (benchmarks / seasonality /
+    launch-curve / timing overview) for the process lifetime, so one test's cached answer
+    would otherwise be served to the next — including to tests that monkeypatch
+    analytics_db to simulate a missing mart, which would then silently pass on stale data.
+    Every test starts and ends with a cold cache."""
+    response_cache.clear()
+    yield
+    response_cache.clear()
