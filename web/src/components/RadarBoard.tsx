@@ -110,6 +110,27 @@ import { nicheDetailPath } from "../pages/NicheDetail";
  * region washed — the pointer is physically inside that region, and dropping the wash
  * would flicker while brushing across dots. Hover-only: mouse leave restores
  * everything; click→dossier selection is untouched.
+ *
+ * CLICK-TO-ZOOM (2026-08-28, user directive: "when you click on a radar one of the
+ * sides - it zooms in to this side and filters niches on the right side"): clicking a
+ * region's EMPTY area (dots keep their dossier click — precedence unchanged) zooms the
+ * plate into that region and filters the rail to its members. A QUADRANT zoom
+ * re-domains both axes to the quadrant's own bounds (ZOOM_DOMAIN — the verdict bars
+ * become the inner edges), renders only member dots (edge-pinned members keep their
+ * chevrons, judged against the zoomed domain), re-ticks the axes for the smaller
+ * domain, and swaps the four corner labels for one region title. The STRIP's zoom is a
+ * rail filter + an ENLARGED strip presentation only — an emerging row never gets a
+ * fake XY position, so there is no quadrant view to zoom to. While zoomed: region
+ * hover is disabled (moot in a single-region view; dot hover/tooltip stays), the rail
+ * carries a clear-filter CHIP with the honest member count, search composes WITH the
+ * filter (scope = the region's members), and verdict-group counts recompute from the
+ * filtered rows. Three exits, all page-local: the chip's ✕, Esc (after more local Esc
+ * consumers — search text, the <lg drawer), and clicking the plate's background.
+ *
+ * PLATE SIZING (2026-08-28, "radar is too small" + "not all pages have same size"):
+ * see the geometry section — the plate is rectangular and responsive (viewBox rebuilt
+ * from the measured wrapper width, 1 unit = 1 CSS px), filling the shared page
+ * container beside the fixed-width rail.
  */
 
 export type RadarSector = "genre" | "micro" | "theme";
@@ -169,45 +190,133 @@ export const X_BAR = DEMAND_ENTER_PCT;
 /** The horizontal quadrant line: the verdict's own flood bar (+15% releases YoY). */
 export const Y_BAR = SAT_FLOOD_YOY * 100;
 
-const VB_W = 640;
-/** Plot rectangle inside the viewBox; margins host the tick labels and axis titles. */
-export const PLOT = { l: 46, t: 20, w: 578, h: 380 } as const;
-const PLOT_X1 = PLOT.l + PLOT.w;
-const PLOT_Y1 = PLOT.t + PLOT.h;
-const AXIS_H = 36; // bottom margin: tick labels + axis title
-const BASE_H = PLOT_Y1 + AXIS_H;
+/**
+ * THE PLATE IS RECTANGULAR AND RESPONSIVE (2026-08-28, user directive: "radar is too
+ * small"). The old board was a fixed 640-unit SQUARE viewBox (a leftover of the polar
+ * ring plate) capped at ~640 CSS px — every label and dot scaled with the box, so
+ * phones rendered 9px labels at ~5px and a wide container could only blow them up.
+ * Now the SVG viewBox is rebuilt from the wrapper's MEASURED CSS width: one viewBox
+ * unit = one CSS pixel at every breakpoint, the plot fills all horizontal space the
+ * shared page container gives it beside the rail (~880px plate at 1440, ~1040px at
+ * 1920), text keeps its true point size everywhere, and the height follows the width
+ * gently (~16:10 at desktop widths) between honest bounds so board + rail + toolbar
+ * still fit above the fold at 1440×900. plateGeom() is the single source of the plot
+ * rectangle; layoutXY() takes the measured width (and the zoom state, below) and
+ * returns positions in that space.
+ */
+const MARGIN_L = 48; // y tick labels + the rotated axis title
+const MARGIN_T = 22; // the top corner labels breathe
+const MARGIN_R = 16;
+const AXIS_H = 40; // bottom margin: tick labels + axis title
+const PLOT_H_RATIO = 0.6;
+const PLOT_H_MIN = 300;
+const PLOT_H_MAX = 560;
+/** Width before the wrapper is measured — and the effective width under jsdom (tests),
+ * where clientWidth is 0 and the fallback sticks. Exported so tests can name it. */
+export const DEFAULT_PLATE_W = 928;
 
-const X_TICKS = [-100, 0, 100, 200, 300];
-const Y_TICKS = [-60, 0, 60, 120];
-
-// The no-XY strip (emerging / no-trend rows) under the axis.
-const STRIP_GAP = 8;
-const STRIP_LABEL_H = 18;
-const STRIP_ROW_H = 20;
-const STRIP_PAD = 10;
-const STRIP_DOT_R_MIN = 2.5;
-const STRIP_DOT_R_MAX = 7;
-
-/** Domain % -> px, unclamped (clamping is layoutXY's job, so it can flag it). */
-export function xToPx(v: number): number {
-  return PLOT.l + ((v - X_DOMAIN[0]) / (X_DOMAIN[1] - X_DOMAIN[0])) * PLOT.w;
-}
-/** Domain % YoY -> px; CALMER UP — low saturation at the top, flooding at the bottom
- * (the 2026-08-27 orientation flip: the top-right corner is the focus zone). The tick
- * VALUES are untouched; they simply descend upward, and the axis title says so. */
-export function yToPx(v: number): number {
-  return PLOT.t + ((v - Y_DOMAIN[0]) / (Y_DOMAIN[1] - Y_DOMAIN[0])) * PLOT.h;
-}
-
-/** The plate's five HOVER REGIONS: the four quadrants the verdict bars tile the plot
- * into, plus the EMERGING strip as a full peer (same hover contract). Ids echo the
- * corner labels; "shrinking-open" covers the FLAT/SHRINKING · OPEN corner. */
+/** The plate's five HOVER/ZOOM REGIONS: the four quadrants the verdict bars tile the
+ * plot into, plus the EMERGING strip as a full peer (same hover + zoom-filter
+ * contract). Ids echo the corner labels; "shrinking-open" covers the FLAT/SHRINKING ·
+ * OPEN corner. */
 export type RadarRegion =
   | "growing-open"
   | "growing-flooding"
   | "shrinking-open"
   | "shrinking-flooding"
   | "strip";
+
+/** CLICK-TO-ZOOM DOMAINS (2026-08-28 directive: "when you click on a radar one of the
+ * sides - it zooms in to this side and filters niches on the right side"). Clicking a
+ * quadrant's EMPTY area re-domains the axes to that quadrant's own bounds — the
+ * verdict bars become the inner edges, the full-view domain edges stay the outer ones.
+ * The strip has no XY by construction, so it gets NO quadrant zoom — zoom === "strip"
+ * keeps the full domains and enlarges the strip instead (a rail filter + emphasis,
+ * never a fake position). */
+const ZOOM_DOMAIN: Record<
+  Exclude<RadarRegion, "strip">,
+  { x: readonly [number, number]; y: readonly [number, number] }
+> = {
+  "growing-open": { x: [X_BAR, X_DOMAIN[1]], y: [Y_DOMAIN[0], Y_BAR] },
+  "growing-flooding": { x: [X_BAR, X_DOMAIN[1]], y: [Y_BAR, Y_DOMAIN[1]] },
+  "shrinking-open": { x: [X_DOMAIN[0], X_BAR], y: [Y_DOMAIN[0], Y_BAR] },
+  "shrinking-flooding": { x: [X_DOMAIN[0], X_BAR], y: [Y_BAR, Y_DOMAIN[1]] },
+};
+
+export interface PlateGeom {
+  /** viewBox width == the wrapper's measured CSS width (1 unit = 1 px). */
+  plateW: number;
+  /** Plot rectangle inside the viewBox; margins host tick labels and axis titles. */
+  plot: { l: number; t: number; w: number; h: number };
+  /** Plot right / bottom edge. */
+  x1: number;
+  y1: number;
+  /** Plot + x-axis margin — the strip attaches below this. */
+  baseH: number;
+  /** The ACTIVE axis domains — the zoomed quadrant's bounds, or the full view's. */
+  xd: readonly [number, number];
+  yd: readonly [number, number];
+  /** Domain % -> px, unclamped (clamping is layoutXY's job, so it can flag it). */
+  xToPx: (v: number) => number;
+  /** Domain % YoY -> px; CALMER UP — low saturation at the top, flooding at the bottom
+   * (the 2026-08-27 orientation flip). Tick VALUES are untouched; they simply descend
+   * upward, and the axis title says so. */
+  yToPx: (v: number) => number;
+}
+
+export function plateGeom(plateW: number = DEFAULT_PLATE_W, zoom: RadarRegion | null = null): PlateGeom {
+  const w = Math.max(280, Math.round(plateW));
+  const plotW = w - MARGIN_L - MARGIN_R;
+  const plotH = Math.min(PLOT_H_MAX, Math.max(PLOT_H_MIN, Math.round(plotW * PLOT_H_RATIO)));
+  const plot = { l: MARGIN_L, t: MARGIN_T, w: plotW, h: plotH };
+  const zoomed = zoom !== null && zoom !== "strip" ? ZOOM_DOMAIN[zoom] : null;
+  const xd = zoomed ? zoomed.x : X_DOMAIN;
+  const yd = zoomed ? zoomed.y : Y_DOMAIN;
+  return {
+    plateW: w,
+    plot,
+    x1: plot.l + plot.w,
+    y1: plot.t + plot.h,
+    baseH: plot.t + plot.h + AXIS_H,
+    xd,
+    yd,
+    xToPx: (v: number) => plot.l + ((v - xd[0]) / (xd[1] - xd[0])) * plot.w,
+    yToPx: (v: number) => plot.t + ((v - yd[0]) / (yd[1] - yd[0])) * plot.h,
+  };
+}
+
+/** Default full-view geometry — the module-scope conveniences the tests (and the
+ * pre-measure first render) see. Under jsdom the wrapper measures 0 wide, so the
+ * component renders EXACTLY this geometry there. */
+const G0 = plateGeom();
+export const PLOT = G0.plot;
+export const xToPx = G0.xToPx;
+export const yToPx = G0.yToPx;
+
+/** Axis ticks for the ACTIVE domain: nice 1/2/2.5/5 steps at a density tuned to the
+ * rendered plot size. Domain endpoints are always included (the clamp "≥ / ≤" edge
+ * labels live there); interior ticks that would crowd an endpoint are dropped. */
+export function axisTicks(lo: number, hi: number, target: number): number[] {
+  const span = hi - lo;
+  const raw = span / Math.max(1, target);
+  const pow = 10 ** Math.floor(Math.log10(raw));
+  const step = ([1, 2, 2.5, 5, 10].find((m) => raw <= m * pow) ?? 10) * pow;
+  const ticks: number[] = [lo];
+  for (let v = Math.ceil(lo / step) * step; v < hi; v += step) {
+    if (v - lo > span * 0.06 && hi - v > span * 0.06) ticks.push(Number(v.toFixed(6)));
+  }
+  ticks.push(hi);
+  return ticks;
+}
+
+// The no-XY strip (emerging / no-trend rows) under the axis. Two presentations: the
+// resting strip, and the ENLARGED strip while zoom === "strip" (the fifth region's
+// zoom is a rail filter + visual emphasis — emerging rows never get a fake XY).
+const STRIP_GAP = 8;
+const STRIP_SIZES = {
+  rest: { labelH: 18, rowH: 20, pad: 10, rMin: 2.5, rMax: 7 },
+  zoom: { labelH: 22, rowH: 30, pad: 12, rMin: 3.5, rMax: 11 },
+} as const;
 
 export interface PlacedBlip extends RadarBoardBlip {
   id: string;
@@ -230,6 +339,11 @@ export interface PlacedBlip extends RadarBoardBlip {
    * the dashed strip under the plot, sized by 24m review volume — never fake-positioned
    * inside the quadrants. */
   strip: boolean;
+  /** True while a QUADRANT zoom is active and this dot is not a member of the zoomed
+   * region (strip residents included — the strip is not part of any quadrant): the dot
+   * is out of the zoomed domain, so it does not render. Region membership itself is
+   * untouched — it is always the raw values' side of the verdict bars. */
+  hidden: boolean;
 }
 
 /** A rail/dossier entry: a plotted blip (with its rail rank), or a pool niche beyond the
@@ -246,16 +360,34 @@ export interface XYLayout {
   stripH: number;
   /** Total viewBox height — grows with the strip so nothing overlays the axis. */
   vbH: number;
+  /** The geometry this layout was computed in — the renderer draws with the SAME object
+   * so plot frame, hit rects and dot positions can never disagree. */
+  geom: PlateGeom;
 }
 
 const clampNum = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
 
+export interface LayoutOpts {
+  /** The wrapper's measured CSS width; defaults to DEFAULT_PLATE_W (tests, pre-measure). */
+  plateW?: number;
+  /** Active zoom region — null = the full view. */
+  zoom?: RadarRegion | null;
+}
+
 /**
- * Deterministic XY placement. Pure function of the blips (hash01 jitter only), exported
- * for tests: same input, same output — a niche holds its position across renders, visits
- * and machines.
+ * Deterministic XY placement. Pure function of the blips + options (hash01 jitter only),
+ * exported for tests: same input, same output — a niche holds its position across
+ * renders, visits and machines.
  */
-export function layoutXY(blips: RadarBoardBlip[]): XYLayout {
+export function layoutXY(blips: RadarBoardBlip[], opts: LayoutOpts = {}): XYLayout {
+  const zoom = opts.zoom ?? null;
+  const zoomQuadrant = zoom !== null && zoom !== "strip";
+  const geom = plateGeom(opts.plateW, zoom);
+  const { plot, x1: plotX1, y1: plotY1, xd, yd } = geom;
+  /** Dot radius scale: BLIP_R_MIN/MAX were tuned for the old 578px-wide plot; a larger
+   * plot grows dots gently so the bigger canvas doesn't read emptier, a phone plot
+   * shrinks them slightly. Bounded — never a stretch. */
+  const rScale = Math.min(1.35, Math.max(0.9, plot.w / 578));
   const maxP90 = blips.reduce<number>((m, b) => Math.max(m, b.p90_rev ?? 0), 0);
   const ordered = [...blips].sort((a, b) => {
     const ring = RING_ORDER.indexOf(a.verdict.ring) - RING_ORDER.indexOf(b.verdict.ring);
@@ -272,25 +404,28 @@ export function layoutXY(blips: RadarBoardBlip[]): XYLayout {
     // linear axis simply has no number for.
     const strip = blip.demandEmerging || blip.demandTrendPct === null || blip.saturationYoy === null;
     if (strip) {
-      // Strip coords are assigned in the packing pass below.
+      // Strip coords are assigned in the packing pass below. A quadrant zoom hides the
+      // strip (it belongs to no quadrant); the strip's own zoom enlarges it instead.
       return {
         ...blip,
         id,
         n: i + 1,
         x: 0,
         y: 0,
-        r: STRIP_DOT_R_MIN,
-        clampX: 0,
-        clampY: 0,
+        r: STRIP_SIZES.rest.rMin,
+        clampX: 0 as const,
+        clampY: 0 as const,
         strip: true,
         region: "strip" as const,
+        hidden: zoomQuadrant,
       };
     }
     const xv = blip.demandTrendPct as number;
     const yv = (blip.saturationYoy as number) * 100;
     // Region membership on the RAW fields against the verdict's own bars (>= to grow,
     // strictly > to flood — the exact comparisons radarVerdictTrace runs), so the hover
-    // sets can never disagree with the quadrant geometry's meaning.
+    // and zoom sets can never disagree with the quadrant geometry's meaning. Membership
+    // never changes with zoom — only what the zoomed domain renders does.
     const growing = xv >= DEMAND_ENTER_PCT;
     const flooding = (blip.saturationYoy as number) > SAT_FLOOD_YOY;
     const region: RadarRegion = growing
@@ -300,57 +435,74 @@ export function layoutXY(blips: RadarBoardBlip[]): XYLayout {
       : flooding
         ? "shrinking-flooding"
         : "shrinking-open";
-    const clampX = xv > X_DOMAIN[1] ? 1 : xv < X_DOMAIN[0] ? -1 : 0;
-    const clampY = yv > Y_DOMAIN[1] ? 1 : yv < Y_DOMAIN[0] ? -1 : 0;
-    const r = blipRadius(blip.p90_rev, maxP90);
+    const hidden = zoomQuadrant && region !== zoom;
+    // Clamps are judged against the ACTIVE domain: in the full view these are the fixed
+    // axis edges; inside a zoom the outer edges still clamp (a +900% dot pins at the
+    // zoomed right edge with its chevron) while the bar-side edges cannot clamp by
+    // construction (membership already puts every value on this side of the bar).
+    const clampX = xv > xd[1] ? 1 : xv < xd[0] ? -1 : 0;
+    const clampY = yv > yd[1] ? 1 : yv < yd[0] ? -1 : 0;
+    const r = blipRadius(blip.p90_rev, maxP90) * rScale;
     // Pinned dots sit ON their edge (touching it from inside); honest dots inset by r so
     // the circle never spills out of the frame.
     const x =
-      clampX === 1 ? PLOT_X1 - r - 1 : clampX === -1 ? PLOT.l + r + 1 : clampNum(xToPx(xv), PLOT.l + r, PLOT_X1 - r);
+      clampX === 1
+        ? plotX1 - r - 1
+        : clampX === -1
+          ? plot.l + r + 1
+          : clampNum(geom.xToPx(xv), plot.l + r, plotX1 - r);
     // Calmer-up: beyond-max saturation (clampY = 1, flooding off the scale) pins at the
     // BOTTOM edge; beyond-min pins at the top.
     const y =
-      clampY === 1 ? PLOT_Y1 - r - 1 : clampY === -1 ? PLOT.t + r + 1 : clampNum(yToPx(yv), PLOT.t + r, PLOT_Y1 - r);
-    return { ...blip, id, n: i + 1, x, y, r, clampX, clampY, strip: false, region };
+      clampY === 1
+        ? plotY1 - r - 1
+        : clampY === -1
+          ? plot.t + r + 1
+          : clampNum(geom.yToPx(yv), plot.t + r, plotY1 - r);
+    return { ...blip, id, n: i + 1, x, y, r, clampX, clampY, strip: false, region, hidden };
   });
 
   // Coincident-dot jitter: only when centers land in the same ~2px cell, offset by a
   // hash-derived angle (deterministic), growing with the pile index — and NEVER along a
-  // pinned axis (a clamp edge is a claim; jitter must not soften it).
+  // pinned axis (a clamp edge is a claim; jitter must not soften it). Hidden dots are
+  // skipped: an invisible dot must not push a visible one around.
   const seen = new Map<string, number>();
   for (const d of dots) {
-    if (d.strip) continue;
+    if (d.strip || d.hidden) continue;
     const cell = `${Math.round(d.x / 2)}|${Math.round(d.y / 2)}`;
     const k = seen.get(cell) ?? 0;
     seen.set(cell, k + 1);
     if (k === 0) continue;
     const ang = hash01(`${d.id}|jitter`) * 2 * Math.PI;
     const dist = 3 + 2.5 * k;
-    if (d.clampX === 0) d.x = clampNum(d.x + Math.cos(ang) * dist, PLOT.l + d.r, PLOT_X1 - d.r);
-    if (d.clampY === 0) d.y = clampNum(d.y + Math.sin(ang) * dist, PLOT.t + d.r, PLOT_Y1 - d.r);
+    if (d.clampX === 0) d.x = clampNum(d.x + Math.cos(ang) * dist, plot.l + d.r, plotX1 - d.r);
+    if (d.clampY === 0) d.y = clampNum(d.y + Math.sin(ang) * dist, plot.t + d.r, plotY1 - d.r);
   }
 
   // Strip packing: volume desc (the strip's own honest ranking), left-to-right rows.
-  const stripDots = dots.filter((d) => d.strip);
+  // The strip spans the plot's full width whatever that width is, and its sizes swap to
+  // the enlarged presentation while the strip itself is the zoomed region.
+  const S = zoom === "strip" ? STRIP_SIZES.zoom : STRIP_SIZES.rest;
+  const stripDots = dots.filter((d) => d.strip && !d.hidden);
   stripDots.sort((a, b) => (b.reviews24m ?? -1) - (a.reviews24m ?? -1) || a.key.localeCompare(b.key));
   const maxVol = stripDots.reduce<number>((m, d) => Math.max(m, d.reviews24m ?? 0), 0);
-  const stripTop = BASE_H + STRIP_GAP;
-  let cursor = PLOT.l + STRIP_PAD;
+  const stripTop = geom.baseH + STRIP_GAP;
+  let cursor = plot.l + S.pad;
   let row = 0;
   for (const d of stripDots) {
     d.r =
       maxVol > 0 && d.reviews24m != null
-        ? STRIP_DOT_R_MIN + Math.sqrt(d.reviews24m / maxVol) * (STRIP_DOT_R_MAX - STRIP_DOT_R_MIN)
-        : STRIP_DOT_R_MIN;
-    if (cursor + 2 * d.r > PLOT_X1 - STRIP_PAD) {
+        ? S.rMin + Math.sqrt(d.reviews24m / maxVol) * (S.rMax - S.rMin)
+        : S.rMin;
+    if (cursor + 2 * d.r > plotX1 - S.pad) {
       row += 1;
-      cursor = PLOT.l + STRIP_PAD;
+      cursor = plot.l + S.pad;
     }
     d.x = cursor + d.r;
-    d.y = stripTop + STRIP_LABEL_H + STRIP_ROW_H / 2 + row * STRIP_ROW_H;
+    d.y = stripTop + S.labelH + S.rowH / 2 + row * S.rowH;
     cursor += 2 * d.r + 10;
   }
-  const stripH = stripDots.length > 0 ? STRIP_LABEL_H + (row + 1) * STRIP_ROW_H + STRIP_PAD : 0;
+  const stripH = stripDots.length > 0 ? S.labelH + (row + 1) * S.rowH + S.pad : 0;
 
   return {
     dots,
@@ -358,7 +510,8 @@ export function layoutXY(blips: RadarBoardBlip[]): XYLayout {
     stripHasNonEmerging: stripDots.some((d) => !d.demandEmerging),
     stripTop,
     stripH,
-    vbH: stripDots.length > 0 ? stripTop + stripH + 2 : BASE_H,
+    vbH: stripDots.length > 0 ? stripTop + stripH + 2 : geom.baseH,
+    geom,
   };
 }
 
@@ -402,6 +555,16 @@ const REGION_TONE: Record<RadarRegion, string> = {
   "shrinking-open": "var(--text-secondary)",
   "shrinking-flooding": "var(--verdict-crowded)",
   strip: "var(--verdict-emerging)",
+};
+
+/** Region display names — the corner labels' wording, reused verbatim by the zoom
+ * title and the rail's zoom-filter chip so the three surfaces can never drift. */
+export const REGION_NAME: Record<RadarRegion, string> = {
+  "growing-open": "GROWING · OPEN",
+  "growing-flooding": "GROWING · FLOODING",
+  "shrinking-open": "FLAT/SHRINKING · OPEN",
+  "shrinking-flooding": "SHRINKING · FLOODING",
+  strip: "EMERGING",
 };
 
 function fmtTrendPct(v: number | null): string {
@@ -821,6 +984,10 @@ export function RadarBoard({
   // The hovered REGION (quadrant or strip) — set/cleared ONLY by the five hit rects'
   // enter/leave, so a mousemove inside a region costs nothing. Hover-only, never sticky.
   const [hoverRegion, setHoverRegion] = useState<RadarRegion | null>(null);
+  // CLICK-TO-ZOOM state (page-local, never routed): the region whose domain the plate
+  // is zoomed to and whose members the rail is filtered to. Entered by clicking a
+  // region's empty area; exited by Esc, the rail chip's ✕, or a background click.
+  const [zoom, setZoom] = useState<RadarRegion | null>(null);
   const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
   // The rail's niche search. Local state deliberately: the query is a reading aid for
   // the list (like hover), not page state a card elsewhere needs to drive.
@@ -831,15 +998,49 @@ export function RadarBoard({
   // Side-by-side (≥lg): dossier in the rail pane. Stacked (<lg): dossier as the drawer.
   const isDesktop = useIsDesktop();
 
-  const layout = useMemo(() => layoutXY(blips), [blips]);
+  // The plate's MEASURED width — the viewBox is rebuilt from it (1 unit = 1 CSS px, see
+  // plateGeom). jsdom measures 0, so the DEFAULT_PLATE_W fallback is the test geometry.
+  const [plateW, setPlateW] = useState<number | null>(null);
+  const hasBlips = blips.length > 0;
+  useEffect(() => {
+    if (!hasBlips) return; // the empty state renders no plate to measure
+    const el = wrapRef.current;
+    if (!el) return;
+    const measure = () => {
+      const w = Math.round(el.clientWidth);
+      if (w > 0) setPlateW(w);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [hasBlips]);
+
+  const layout = useMemo(
+    () => layoutXY(blips, { plateW: plateW ?? DEFAULT_PLATE_W, zoom }),
+    [blips, plateW, zoom],
+  );
   const placed = layout.dots;
   const q = query.trim().toLowerCase();
 
-  /** The rail's row source. No query: the plotted list, rank order (the board's own
-   * reading). With a query: a live case-insensitive substring filter over the FULL pool —
-   * plotted rows keep their rank, beyond-board rows carry n: null. */
+  /** The rail's base rows under the zoom filter: the zoomed region's member dots (board
+   * rank preserved — a gap in the numbers is honest, the rank IS the board's), or every
+   * plotted dot in the full view. Chip count, header count and the zoomed search scope
+   * all read from this one list. */
+  const zoomMembers = useMemo<PlacedBlip[]>(
+    () => (zoom === null ? placed : placed.filter((d) => d.region === zoom)),
+    [zoom, placed],
+  );
+
+  /** The rail's row source. No query: the (possibly zoom-filtered) plotted list, rank
+   * order. With a query: a live case-insensitive substring filter — over the FULL pool
+   * in the full view (plotted rows keep their rank, beyond-board rows carry n: null),
+   * or WITHIN the zoomed region's members while zoomed (search composes with the zoom
+   * filter — it must never smuggle an outside niche into a filtered rail). */
   const railEntries = useMemo<RailBlip[]>(() => {
-    if (!q) return placed;
+    if (!q) return zoomMembers;
+    if (zoom !== null) return zoomMembers.filter((b) => b.key.toLowerCase().includes(q));
     const plottedById = new Map<string, PlacedBlip>(placed.map((p) => [p.id, p]));
     const rows: RailBlip[] = [];
     for (const b of pool) {
@@ -848,7 +1049,21 @@ export function RadarBoard({
       rows.push(plottedById.get(id) ?? { ...b, id, n: null });
     }
     return rows;
-  }, [q, placed, pool]);
+  }, [q, zoom, zoomMembers, placed, pool]);
+
+  // Esc exits the zoom — AFTER the more local Esc consumers: the search input clears
+  // its text first (its handler stops propagation when it does), and the <lg dossier
+  // drawer owns Esc outright while open (skip — closing it must not also unzoom).
+  useEffect(() => {
+    if (zoom === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (selectedId !== null && !isDesktop) return; // the drawer's Esc
+      setZoom(null);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [zoom, selectedId, isDesktop]);
 
   const byRing = useMemo(() => {
     const m = new Map<RadarRing, RailBlip[]>(RING_ORDER.map((r) => [r, []]));
@@ -870,11 +1085,17 @@ export function RadarBoard({
   /** Region membership by id for the rail's left-edge ticks (plotted rows only — a
    * beyond-board search hit has no dot, so no region and never a tick). */
   const regionById = useMemo(() => new Map<string, RadarRegion>(placed.map((d) => [d.id, d.region])), [placed]);
-  /** Dot opacity under the two hover channels. DOT hover takes precedence (existing
-   * tooltip behavior: only the hovered dot stays full); otherwise a hovered region
-   * lifts its members and mutes everything outside; no hover leaves everyone full. */
-  const dotOpacity = (b: PlacedBlip): number =>
-    hoverId !== null ? (hoverId === b.id ? 1 : 0.35) : hoverRegion !== null ? (b.region === hoverRegion ? 1 : 0.35) : 1;
+  /** Dot opacity under the hover channels + the strip zoom. DOT hover takes precedence
+   * (existing tooltip behavior: only the hovered dot stays full); otherwise a hovered
+   * region lifts its members and mutes everything outside; while the STRIP is the
+   * zoomed region the quadrant dots recede (the strip has the emphasis — a quadrant
+   * zoom simply hides non-members instead); no hover leaves everyone full. */
+  const dotOpacity = (b: PlacedBlip): number => {
+    if (hoverId !== null) return hoverId === b.id ? 1 : 0.35;
+    if (hoverRegion !== null) return b.region === hoverRegion ? 1 : 0.35;
+    if (zoom === "strip" && !b.strip) return 0.25;
+    return 1;
+  };
   // Selection resolves against the PLOTTED board first (dot highlight comes free), then
   // the full pool — a search hit beyond the board still opens its dossier. It survives
   // population toggles only while the niche is still in the pool.
@@ -926,43 +1147,71 @@ export function RadarBoard({
     );
   }
 
-  const anyClampMaxX = placed.some((d) => d.clampX === 1);
-  const anyClampMinX = placed.some((d) => d.clampX === -1);
-  const anyClampMaxY = placed.some((d) => d.clampY === 1);
-  const anyClampMinY = placed.some((d) => d.clampY === -1);
-  const xBarPx = xToPx(X_BAR);
-  const yBarPx = yToPx(Y_BAR);
+  // Everything below draws in the layout's OWN geometry (zoom-aware domains included) —
+  // never the module-scope full-view defaults.
+  const geom = layout.geom;
+  const { plot, xd, yd } = geom;
+  const plotX1 = geom.x1;
+  const plotY1 = geom.y1;
+  /** What actually renders: a quadrant zoom hides non-members (and the strip). */
+  const visible = placed.filter((d) => !d.hidden);
+  const anyClampMaxX = visible.some((d) => d.clampX === 1);
+  const anyClampMinX = visible.some((d) => d.clampX === -1);
+  const anyClampMaxY = visible.some((d) => d.clampY === 1);
+  const anyClampMinY = visible.some((d) => d.clampY === -1);
+  // The verdict bars' pixels — only meaningful where the bar is inside the active
+  // domain (in a zoom the bar IS a domain edge, so it merges with the plot frame).
+  const xBarPx = geom.xToPx(X_BAR);
+  const yBarPx = geom.yToPx(Y_BAR);
+  const xBarInside = X_BAR > xd[0] && X_BAR < xd[1];
+  const yBarInside = Y_BAR > yd[0] && Y_BAR < yd[1];
+  /** Ticks for the ACTIVE domains, density tuned to the rendered plot size. */
+  const xTicks = axisTicks(xd[0], xd[1], Math.max(4, Math.round(plot.w / 110)));
+  const yTicks = axisTicks(yd[0], yd[1], Math.max(3, Math.round(plot.h / 85)));
   /** The five region hit rects (spec: 4 transparent quadrant rects + the strip rect —
    * never per-dot math on mousemove). Bounds are the bar hairlines' own pixels, computed
    * once per render; the rects sit UNDER the dots, so every dot keeps its own hover/click
-   * and moving onto a dot naturally hands precedence to it. */
-  const regionRects: { id: RadarRegion; x: number; y: number; w: number; h: number }[] = [
-    { id: "shrinking-open", x: PLOT.l, y: PLOT.t, w: xBarPx - PLOT.l, h: yBarPx - PLOT.t },
-    { id: "growing-open", x: xBarPx, y: PLOT.t, w: PLOT_X1 - xBarPx, h: yBarPx - PLOT.t },
-    { id: "shrinking-flooding", x: PLOT.l, y: yBarPx, w: xBarPx - PLOT.l, h: PLOT_Y1 - yBarPx },
-    { id: "growing-flooding", x: xBarPx, y: yBarPx, w: PLOT_X1 - xBarPx, h: PLOT_Y1 - yBarPx },
-    ...(layout.stripCount > 0
-      ? [{ id: "strip" as const, x: PLOT.l, y: layout.stripTop, w: PLOT.w, h: layout.stripH }]
-      : []),
-  ];
+   * and moving onto a dot naturally hands precedence to it. Full view only — inside a
+   * zoom the single-region view makes region hover moot (spec), and ONE background rect
+   * takes their place as the click-to-exit surface. */
+  const regionRects: { id: RadarRegion; x: number; y: number; w: number; h: number }[] =
+    zoom !== null
+      ? []
+      : [
+          { id: "shrinking-open", x: plot.l, y: plot.t, w: xBarPx - plot.l, h: yBarPx - plot.t },
+          { id: "growing-open", x: xBarPx, y: plot.t, w: plotX1 - xBarPx, h: yBarPx - plot.t },
+          { id: "shrinking-flooding", x: plot.l, y: yBarPx, w: xBarPx - plot.l, h: plotY1 - yBarPx },
+          { id: "growing-flooding", x: xBarPx, y: yBarPx, w: plotX1 - xBarPx, h: plotY1 - yBarPx },
+          ...(layout.stripCount > 0
+            ? [{ id: "strip" as const, x: plot.l, y: layout.stripTop, w: plot.w, h: layout.stripH }]
+            : []),
+        ];
   const stripLabel = layout.stripHasNonEmerging
     ? "EMERGING / NO TREND BASE — not plottable · sized by 24m volume"
     : "EMERGING — no % base · sized by 24m volume";
-  /** The plate's rendered height in CSS px (viewBox scales with width) — the tooltip's
-   * bottom-flip band needs it, and the plate is no longer square. */
-  const plateHPx = ((wrapRef.current?.clientWidth ?? VB_W) * layout.vbH) / VB_W;
+  /** COMPACT decor for narrow plates (phones): labels keep their TRUE point size now
+   * (1 viewBox unit = 1 px), so a 230px-wide plot can't fit the full wording — shorten
+   * the labels and step the decor type down a notch instead of letting it collide. */
+  const compact = plot.w < 420;
+  /** The plate's rendered height in CSS px — the tooltip's bottom-flip band needs it.
+   * One viewBox unit = one CSS px once measured, so this is simply the viewBox height. */
+  const plateHPx = layout.vbH;
 
   return (
     <div className="flex flex-col gap-5 lg:flex-row lg:items-stretch">
-      {/* The plate. max-w: 640 from lg (the widened rail eats the difference first — at
-          1024 the plate settles near 500px; 640 = the viewBox width, so it never
-          upscales). */}
-      <div ref={wrapRef} className="relative mx-auto w-full max-w-[600px] lg:mx-0 lg:min-w-0 lg:max-w-[640px] lg:flex-1">
+      {/* The plate — UNCAPPED (2026-08-28 sizing directive): it takes every horizontal
+          pixel the shared page container leaves beside the rail, and the viewBox is
+          rebuilt from this wrapper's measured width (1 unit = 1 CSS px — labels and
+          dots never scale with the box). The rail keeps its fixed 360/460px, so the
+          plate alone absorbs the container's growth. */}
+      <div ref={wrapRef} className="relative w-full lg:min-w-0 lg:flex-1">
         <svg
-          viewBox={`0 0 ${VB_W} ${layout.vbH}`}
+          viewBox={`0 0 ${geom.plateW} ${layout.vbH}`}
           className="block h-auto w-full"
           role="img"
-          aria-label="Radar board: niches plotted by 24-month demand trend (x) against release saturation YoY (y, calmer at the top); dot area is P90 revenue and dot color/style is the verdict"
+          aria-label={`Radar board: niches plotted by 24-month demand trend (x) against release saturation YoY (y, calmer at the top); dot area is P90 revenue and dot color/style is the verdict${
+            zoom !== null ? `; zoomed to the ${REGION_NAME[zoom]} region` : ""
+          }`}
         >
           {/* Decor — frame, zero lines, THE THRESHOLD HAIRLINES, ticks, axis titles and
               quadrant labels. pointer-events none as a GROUP: only the dots may ever be
@@ -970,60 +1219,88 @@ export function RadarBoard({
               click landing on a hairline can never read as a dead dot. */}
           <g pointerEvents="none" data-testid="xy-decor">
             {/* Plot frame. */}
-            <rect x={PLOT.l} y={PLOT.t} width={PLOT.w} height={PLOT.h} fill="none" stroke="var(--baseline)" strokeWidth={1} />
+            <rect x={plot.l} y={plot.t} width={plot.w} height={plot.h} fill="none" stroke="var(--baseline)" strokeWidth={1} />
 
-            {/* THE FOCUS WASH — a very low-alpha tint over the GROWING · OPEN quadrant
-                (demand past the enter bar, pipeline below the flood bar) with its own
-                hairline, drawing the eye to the "choose from here" region without
-                shouting. Reinforcement only: the quadrant is already defined by the two
-                bars. */}
-            <rect
-              data-testid="xy-focus-wash"
-              x={xBarPx}
-              y={PLOT.t}
-              width={PLOT_X1 - xBarPx}
-              height={yBarPx - PLOT.t}
-              fill="var(--verdict-enter-wash)"
-              stroke="var(--verdict-enter-wash-line)"
-              strokeWidth={1}
-            />
+            {/* Washes. Zoomed quadrant: the whole plot IS the region, so it takes the
+                region's own hover-wash tone (continuity with the hover language that
+                led here). Otherwise THE FOCUS WASH — a very low-alpha tint over the
+                GROWING · OPEN quadrant (demand past the enter bar, pipeline below the
+                flood bar) with its own hairline, drawing the eye to the "choose from
+                here" region without shouting. Reinforcement only: the quadrant is
+                already defined by the two bars. */}
+            {zoom !== null && zoom !== "strip" ? (
+              <rect
+                data-testid="xy-zoom-wash"
+                x={plot.l}
+                y={plot.t}
+                width={plot.w}
+                height={plot.h}
+                fill={REGION_WASH[zoom]}
+              />
+            ) : (
+              <rect
+                data-testid="xy-focus-wash"
+                x={xBarPx}
+                y={plot.t}
+                width={plotX1 - xBarPx}
+                height={yBarPx - plot.t}
+                fill="var(--verdict-enter-wash)"
+                stroke="var(--verdict-enter-wash-line)"
+                strokeWidth={1}
+              />
+            )}
 
-            {/* Zero lines — fainter than the verdict bars (gridline vs baseline). */}
-            <line x1={xToPx(0)} y1={PLOT.t} x2={xToPx(0)} y2={PLOT_Y1} stroke="var(--gridline)" strokeWidth={1} />
-            <line x1={PLOT.l} y1={yToPx(0)} x2={PLOT_X1} y2={yToPx(0)} stroke="var(--gridline)" strokeWidth={1} />
+            {/* Zero lines — fainter than the verdict bars (gridline vs baseline); only
+                where zero is inside the active domain (a zoomed quadrant may not span it). */}
+            {0 > xd[0] && 0 < xd[1] && (
+              <line x1={geom.xToPx(0)} y1={plot.t} x2={geom.xToPx(0)} y2={plotY1} stroke="var(--gridline)" strokeWidth={1} />
+            )}
+            {0 > yd[0] && 0 < yd[1] && (
+              <line x1={plot.l} y1={geom.yToPx(0)} x2={plotX1} y2={geom.yToPx(0)} stroke="var(--gridline)" strokeWidth={1} />
+            )}
 
             {/* THE QUADRANT LINES = THE VERDICT'S OWN THRESHOLDS (lib/radarVerdict.ts):
                 a dot right of the vertical bar passes the enter demand check; a dot
                 BELOW the horizontal bar is in flood territory (supply veto) — calmer-up
-                orientation. */}
-            <line
-              data-testid="xy-bar-demand"
-              x1={xBarPx}
-              y1={PLOT.t}
-              x2={xBarPx}
-              y2={PLOT_Y1}
-              stroke="var(--baseline)"
-              strokeWidth={1}
-              strokeDasharray="6 3"
-            />
-            <line
-              data-testid="xy-bar-flood"
-              x1={PLOT.l}
-              y1={yBarPx}
-              x2={PLOT_X1}
-              y2={yBarPx}
-              stroke="var(--baseline)"
-              strokeWidth={1}
-              strokeDasharray="6 3"
-            />
-            <HaloText x={xBarPx + 4} y={PLOT.t + 11} anchor="start" size={8.5} fill="var(--text-secondary)">
-              ENTER BAR +{X_BAR}% / 24M
-            </HaloText>
-            {/* Flooding lives BELOW the bar now (calmer-up), so the bar's label sits on
-                the flooding side of its own line. */}
-            <HaloText x={PLOT.l + 5} y={yBarPx + 12} anchor="start" size={8.5} fill="var(--text-secondary)">
-              FLOOD BAR +{Y_BAR}% YOY — FLOODING BELOW
-            </HaloText>
+                orientation. Inside a zoom a bar becomes the domain edge itself (the
+                plot frame carries it; the edge tick names the value), so the hairline +
+                label draw only while the bar cuts through the interior. */}
+            {xBarInside && (
+              <>
+                <line
+                  data-testid="xy-bar-demand"
+                  x1={xBarPx}
+                  y1={plot.t}
+                  x2={xBarPx}
+                  y2={plotY1}
+                  stroke="var(--baseline)"
+                  strokeWidth={1}
+                  strokeDasharray="6 3"
+                />
+                <HaloText x={xBarPx + 4} y={plot.t + 11} anchor="start" size={compact ? 8 : 9.5} fill="var(--text-secondary)">
+                  {compact ? `ENTER +${X_BAR}%` : `ENTER BAR +${X_BAR}% / 24M`}
+                </HaloText>
+              </>
+            )}
+            {yBarInside && (
+              <>
+                <line
+                  data-testid="xy-bar-flood"
+                  x1={plot.l}
+                  y1={yBarPx}
+                  x2={plotX1}
+                  y2={yBarPx}
+                  stroke="var(--baseline)"
+                  strokeWidth={1}
+                  strokeDasharray="6 3"
+                />
+                {/* Flooding lives BELOW the bar (calmer-up), so the bar's label sits on
+                    the flooding side of its own line. */}
+                <HaloText x={plot.l + 5} y={yBarPx + 12} anchor="start" size={compact ? 8 : 9.5} fill="var(--text-secondary)">
+                  {compact ? `FLOOD +${Y_BAR}% — BELOW` : `FLOOD BAR +${Y_BAR}% YOY — FLOODING BELOW`}
+                </HaloText>
+              </>
+            )}
 
             {/* Quadrant readings — region names only; the DOT STYLE carries the final
                 verdict (a growing·open dot can still be Watch on a concentration veto).
@@ -1031,59 +1308,87 @@ export function RadarBoard({
                 label alone takes the enter hue. While a region is hovered its label
                 BRIGHTENS (region-hover contract): the neutral corners step muted →
                 primary, and the focus corner mixes its green toward primary — more
-                contrast on both themes without abandoning the hue. */}
-            <HaloText
-              x={PLOT_X1 - 8}
-              y={PLOT.t + 26}
-              anchor="end"
-              fill={
-                effectiveRegion === "growing-open"
-                  ? "color-mix(in srgb, var(--verdict-enter) 60%, var(--text-primary))"
-                  : "var(--verdict-enter)"
-              }
-            >
-              GROWING · OPEN
-            </HaloText>
-            <HaloText
-              x={PLOT_X1 - 8}
-              y={PLOT_Y1 - 10}
-              anchor="end"
-              fill={effectiveRegion === "growing-flooding" ? "var(--text-primary)" : "var(--text-muted)"}
-            >
-              GROWING · FLOODING
-            </HaloText>
-            <HaloText
-              x={PLOT.l + 8}
-              y={PLOT_Y1 - 10}
-              anchor="start"
-              fill={effectiveRegion === "shrinking-flooding" ? "var(--text-primary)" : "var(--text-muted)"}
-            >
-              SHRINKING · FLOODING
-            </HaloText>
-            <HaloText
-              x={PLOT.l + 8}
-              y={PLOT.t + 26}
-              anchor="start"
-              fill={effectiveRegion === "shrinking-open" ? "var(--text-primary)" : "var(--text-muted)"}
-            >
-              FLAT/SHRINKING · OPEN
-            </HaloText>
+                contrast on both themes without abandoning the hue. While a QUADRANT is
+                zoomed the four corner labels give way to ONE plot title naming the
+                zoomed region (+ the exit affordances) — four corners would lie about a
+                single-region view. */}
+            {zoom !== null && zoom !== "strip" ? (
+              <>
+                <HaloText
+                  x={plot.l + 8}
+                  y={plot.t + 18}
+                  anchor="start"
+                  size={11}
+                  fill={REGION_TONE[zoom]}
+                >
+                  {REGION_NAME[zoom]} — ZOOMED
+                </HaloText>
+                <HaloText x={plot.l + 8} y={plot.t + 33} anchor="start" size={8.5}>
+                  ESC · BACKGROUND CLICK · OR THE RAIL CHIP ✕ EXITS
+                </HaloText>
+              </>
+            ) : (
+              <>
+                <HaloText
+                  x={plotX1 - 8}
+                  y={plot.t + 26}
+                  anchor="end"
+                  size={compact ? 7.5 : 9}
+                  fill={
+                    effectiveRegion === "growing-open"
+                      ? "color-mix(in srgb, var(--verdict-enter) 60%, var(--text-primary))"
+                      : "var(--verdict-enter)"
+                  }
+                >
+                  {compact ? "GROW · OPEN" : "GROWING · OPEN"}
+                </HaloText>
+                <HaloText
+                  x={plotX1 - 8}
+                  y={plotY1 - 10}
+                  anchor="end"
+                  size={compact ? 7.5 : 9}
+                  fill={effectiveRegion === "growing-flooding" ? "var(--text-primary)" : "var(--text-muted)"}
+                >
+                  {compact ? "GROW · FLOOD" : "GROWING · FLOODING"}
+                </HaloText>
+                <HaloText
+                  x={plot.l + 8}
+                  y={plotY1 - 10}
+                  anchor="start"
+                  size={compact ? 7.5 : 9}
+                  fill={effectiveRegion === "shrinking-flooding" ? "var(--text-primary)" : "var(--text-muted)"}
+                >
+                  {compact ? "SHRINK · FLOOD" : "SHRINKING · FLOODING"}
+                </HaloText>
+                <HaloText
+                  x={plot.l + 8}
+                  y={plot.t + 26}
+                  anchor="start"
+                  size={compact ? 7.5 : 9}
+                  fill={effectiveRegion === "shrinking-open" ? "var(--text-primary)" : "var(--text-muted)"}
+                >
+                  {compact ? "FLAT · OPEN" : "FLAT/SHRINKING · OPEN"}
+                </HaloText>
+              </>
+            )}
 
-            {/* X ticks + labels. Edge labels grow a ≥ / ≤ prefix when something clamps
-                there — the scale is telling you it ends before the data does. */}
-            {X_TICKS.map((t) => (
+            {/* X ticks + labels — computed for the ACTIVE domain (density follows the
+                plot width; a zoom re-domains and re-ticks). Edge labels grow a ≥ / ≤
+                prefix when something clamps there — the scale is telling you it ends
+                before the data does. */}
+            {xTicks.map((t) => (
               <g key={`xt${t}`}>
-                <line x1={xToPx(t)} y1={PLOT_Y1} x2={xToPx(t)} y2={PLOT_Y1 + 4} stroke="var(--baseline)" strokeWidth={1} />
+                <line x1={geom.xToPx(t)} y1={plotY1} x2={geom.xToPx(t)} y2={plotY1 + 4} stroke="var(--baseline)" strokeWidth={1} />
                 <text
-                  x={xToPx(t)}
-                  y={PLOT_Y1 + 15}
+                  x={geom.xToPx(t)}
+                  y={plotY1 + 16}
                   textAnchor="middle"
                   className="tabular"
-                  style={{ fontSize: 10, fill: "var(--text-muted)" }}
+                  style={{ fontSize: compact ? 10 : 11, fill: "var(--text-muted)" }}
                 >
-                  {t === X_DOMAIN[1] && anyClampMaxX
+                  {t === xd[1] && anyClampMaxX
                     ? `≥ +${t}`
-                    : t === X_DOMAIN[0] && anyClampMinX
+                    : t === xd[0] && anyClampMinX
                       ? `≤ ${t}`
                       : t > 0
                         ? `+${t}`
@@ -1092,19 +1397,19 @@ export function RadarBoard({
               </g>
             ))}
             {/* Y ticks + labels. */}
-            {Y_TICKS.map((t) => (
+            {yTicks.map((t) => (
               <g key={`yt${t}`}>
-                <line x1={PLOT.l - 4} y1={yToPx(t)} x2={PLOT.l} y2={yToPx(t)} stroke="var(--baseline)" strokeWidth={1} />
+                <line x1={plot.l - 4} y1={geom.yToPx(t)} x2={plot.l} y2={geom.yToPx(t)} stroke="var(--baseline)" strokeWidth={1} />
                 <text
-                  x={PLOT.l - 7}
-                  y={yToPx(t) + 3}
+                  x={plot.l - 7}
+                  y={geom.yToPx(t) + 3.5}
                   textAnchor="end"
                   className="tabular"
-                  style={{ fontSize: 10, fill: "var(--text-muted)" }}
+                  style={{ fontSize: compact ? 10 : 11, fill: "var(--text-muted)" }}
                 >
-                  {t === Y_DOMAIN[1] && anyClampMaxY
+                  {t === yd[1] && anyClampMaxY
                     ? `≥ +${t}`
-                    : t === Y_DOMAIN[0] && anyClampMinY
+                    : t === yd[0] && anyClampMinY
                       ? `≤ ${t}`
                       : t > 0
                         ? `+${t}`
@@ -1115,27 +1420,35 @@ export function RadarBoard({
 
             {/* Axis titles, units spelled out — the Y title makes the flipped direction
                 unmistakable (values descend upward; calm is up). */}
-            <HaloText x={PLOT.l + PLOT.w / 2} y={PLOT_Y1 + 30} anchor="middle">
-              DEMAND TREND · % / 24M (LAST 24 VS PRIOR 24)
+            <HaloText x={plot.l + plot.w / 2} y={plotY1 + 32} anchor="middle" size={compact ? 8.5 : 10}>
+              {compact ? "DEMAND TREND · % / 24M" : "DEMAND TREND · % / 24M (LAST 24 VS PRIOR 24)"}
             </HaloText>
-            <HaloText x={0} y={0} anchor="middle" transform={`translate(12 ${PLOT.t + PLOT.h / 2}) rotate(-90)`}>
-              RELEASES YOY · % — CALMER ↑ · FLOODING ↓
+            <HaloText
+              x={0}
+              y={0}
+              anchor="middle"
+              size={compact ? 8.5 : 10}
+              transform={`translate(12 ${plot.t + plot.h / 2}) rotate(-90)`}
+            >
+              {compact ? "RELEASES YOY · % — CALM ↑" : "RELEASES YOY · % — CALMER ↑ · FLOODING ↓"}
             </HaloText>
 
-            {/* The no-XY strip frame + label (only when it has residents). The strip is
-                the fifth hover region: while hovered its dashed frame and label lean the
-                emerging violet — the same lift contract as a quadrant's corner label. */}
+            {/* The no-XY strip frame + label (only when it has residents — a quadrant
+                zoom hides it entirely). The strip is the fifth hover/zoom region: while
+                hovered OR while it is the zoomed region, its dashed frame and label lean
+                the emerging violet — the same lift contract as a quadrant's corner
+                label, held steady for the zoom's enlarged presentation. */}
             {layout.stripCount > 0 && (
               <>
                 <rect
                   data-testid="xy-strip"
-                  x={PLOT.l}
+                  x={plot.l}
                   y={layout.stripTop}
-                  width={PLOT.w}
+                  width={plot.w}
                   height={layout.stripH}
                   fill="none"
                   stroke={
-                    effectiveRegion === "strip"
+                    effectiveRegion === "strip" || zoom === "strip"
                       ? "color-mix(in srgb, var(--verdict-emerging) 45%, transparent)"
                       : "var(--gridline)"
                   }
@@ -1143,40 +1456,63 @@ export function RadarBoard({
                   strokeDasharray="4 3"
                 />
                 <HaloText
-                  x={PLOT.l + STRIP_PAD}
-                  y={layout.stripTop + 12}
+                  x={plot.l + (zoom === "strip" ? STRIP_SIZES.zoom.pad : STRIP_SIZES.rest.pad)}
+                  y={layout.stripTop + (zoom === "strip" ? 15 : 12)}
                   anchor="start"
-                  size={8.5}
-                  fill={effectiveRegion === "strip" ? "var(--text-primary)" : "var(--text-muted)"}
+                  size={zoom === "strip" ? 10 : 8.5}
+                  fill={
+                    effectiveRegion === "strip" || zoom === "strip" ? "var(--text-primary)" : "var(--text-muted)"
+                  }
                 >
-                  {stripLabel}
+                  {zoom === "strip" ? `${stripLabel} — RAIL FILTERED` : stripLabel}
                 </HaloText>
               </>
             )}
           </g>
 
-          {/* REGION HOVER HIT RECTS — the quadrant/strip hit-testing (module doc, REGION
+          {/* REGION HIT RECTS — the quadrant/strip hit-testing (module doc, REGION
               HOVER). Transparent fills (not "none": transparent still hit-tests) that
               take the region's wash while it is lit; drawn OVER the decor so the wash
               covers the whole region, UNDER the dots so every dot keeps its own hover
-              and click. Hover-only — deliberately no onClick (click-target hygiene: only
-              dots open dossiers), and no mousemove work at all. */}
-          <g data-testid="xy-regions">
-            {regionRects.map((r) => (
-              <rect
-                key={r.id}
-                data-testid={`radar-region-${r.id}`}
-                x={r.x}
-                y={r.y}
-                width={r.w}
-                height={r.h}
-                fill={effectiveRegion === r.id ? REGION_WASH[r.id] : "transparent"}
-                style={{ transition: "fill 120ms" }}
-                onMouseEnter={() => setHoverRegion(r.id)}
-                onMouseLeave={() => setHoverRegion(null)}
-              />
-            ))}
-          </g>
+              and click (dot-click precedence: a dot click opens its dossier, never
+              zooms). A click on a region's EMPTY area ZOOMS into it (2026-08-28
+              directive) — still never a dossier, so empty-plate clicks keep reading as
+              background where it matters. While zoomed the five rects give way to ONE
+              full-viewBox background rect whose click exits the zoom (region hover is
+              moot in a single-region view). */}
+          {zoom === null ? (
+            <g data-testid="xy-regions">
+              {regionRects.map((r) => (
+                <rect
+                  key={r.id}
+                  data-testid={`radar-region-${r.id}`}
+                  x={r.x}
+                  y={r.y}
+                  width={r.w}
+                  height={r.h}
+                  fill={effectiveRegion === r.id ? REGION_WASH[r.id] : "transparent"}
+                  style={{ transition: "fill 120ms", cursor: "zoom-in" }}
+                  onMouseEnter={() => setHoverRegion(r.id)}
+                  onMouseLeave={() => setHoverRegion(null)}
+                  onClick={() => {
+                    setHoverRegion(null);
+                    setZoom(r.id);
+                  }}
+                />
+              ))}
+            </g>
+          ) : (
+            <rect
+              data-testid="radar-zoom-exit"
+              x={0}
+              y={0}
+              width={geom.plateW}
+              height={layout.vbH}
+              fill="transparent"
+              style={{ cursor: "zoom-out" }}
+              onClick={() => setZoom(null)}
+            />
+          )}
 
           {/* Dots — plot + strip; the rail carries the accessible buttons. Solo lens as
               dot STYLE: team-scale (singleplayer share < SOLO_FRIENDLY_MIN) draws hollow —
@@ -1185,7 +1521,7 @@ export function RadarBoard({
               VERDICT is the fill vocabulary; a caution verdict adds a dotted ring;
               emerging keeps its dashed halo (in the strip). */}
           <g aria-hidden>
-            {placed.map((b) => (
+            {visible.map((b) => (
               <g key={b.id}>
                 {b.demandEmerging ? (
                   <circle
@@ -1223,7 +1559,11 @@ export function RadarBoard({
                   stroke={soloBucket(b.solo_viability) === "team" ? RING_FILL[b.verdict.ring] : "var(--page-plane)"}
                   strokeWidth={soloBucket(b.solo_viability) === "team" ? 1.5 : 1}
                   opacity={dotOpacity(b)}
-                  style={{ cursor: "pointer", transition: "opacity 120ms" }}
+                  // cx/cy/r ride a short CSS transition so entering/leaving a zoom
+                  // glides instead of snapping (SVG geometry properties are CSS-
+                  // transitionable in every current engine; where not, it just snaps —
+                  // correctness never depends on it).
+                  style={{ cursor: "pointer", transition: "opacity 120ms, cx 240ms, cy 240ms, r 240ms" }}
                   onMouseEnter={(e) => {
                     setHoverId(b.id);
                     moveTip(e);
@@ -1322,7 +1662,8 @@ export function RadarBoard({
           <span>
             dot area = P90 revenue · color = verdict (position is evidence, color is the call — reinforcement, never
             the only channel) · calm is UP: the washed top-right quadrant is the focus zone · chevron at an edge =
-            beyond the axis scale, true % in the tooltip
+            beyond the axis scale, true % in the tooltip · click a quadrant&rsquo;s empty space to zoom into it and
+            filter the rail (Esc, the rail chip&rsquo;s ✕, or a background click exits)
           </span>
         </div>
 
@@ -1336,7 +1677,7 @@ export function RadarBoard({
             style={{
               left: tip.x,
               top: tip.y,
-              transform: `translate(${tip.x > (wrapRef.current?.clientWidth ?? VB_W) / 2 ? "calc(-100% - 12px)" : "12px"}, ${
+              transform: `translate(${tip.x > geom.plateW / 2 ? "calc(-100% - 12px)" : "12px"}, ${
                 tip.y > plateHPx - 180 ? "calc(-100% - 12px)" : "12px"
               })`,
             }}
@@ -1395,12 +1736,33 @@ export function RadarBoard({
           the plate shrinks first; the dossier's value+bar rows fit one line at both. */}
       <div className="flex min-w-0 flex-col border-t border-chartborder pt-4 lg:w-[360px] lg:shrink-0 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0 xl:w-[460px] xl:pl-5">
         {selected && isDesktop ? (
-          <VerdictDossier blip={selected} plotCap={plotCap} total={placed.length} onBack={() => onSelect(null)} />
+          <VerdictDossier blip={selected} plotCap={plotCap} total={zoomMembers.length} onBack={() => onSelect(null)} />
         ) : (
           <>
-            {/* The niche search — scope is the FULL pool across all classes, stated
+            {/* THE ZOOM-FILTER CHIP — while a region is zoomed the rail reads that
+                region only, and this chip says so at the top with the honest member
+                count. The whole chip is the clear button (✕ affordance on the right) —
+                the third exit path beside Esc and the plot-background click. */}
+            {zoom !== null && (
+              <button
+                type="button"
+                data-testid="radar-zoom-chip"
+                onClick={() => setZoom(null)}
+                aria-label={`Clear region filter: ${REGION_NAME[zoom]}`}
+                className="mb-2 flex w-full items-center gap-2 border border-ink-primary/35 px-2.5 py-1.5 text-left transition-colors hover:bg-ink-primary/[0.08]"
+              >
+                <span className="inline-block h-2 w-2 shrink-0" style={{ backgroundColor: REGION_TONE[zoom] }} aria-hidden />
+                <span className="kicker text-[10px] tracking-[.08em] text-ink-primary">{REGION_NAME[zoom]}</span>
+                <span className="tabular text-[11px] text-ink-muted">
+                  {zoomMembers.length} niche{zoomMembers.length === 1 ? "" : "s"}
+                </span>
+                <span aria-hidden className="ml-auto text-[11px] leading-none text-ink-muted">✕</span>
+              </button>
+            )}
+            {/* The niche search — scope is the FULL pool across all classes (stated
                 right in the placeholder so nobody has to guess it only reaches the
-                plotted class. */}
+                plotted class), EXCEPT while zoomed: search composes with the zoom
+                filter, reading within the region's members only — and says so. */}
             <input
               type="text"
               data-testid="radar-search"
@@ -1410,8 +1772,16 @@ export function RadarBoard({
                 setActiveIdx(0);
               }}
               onKeyDown={onSearchKey}
-              placeholder={`Search all ${pool.length} niches…`}
-              aria-label={`Search all ${pool.length} niches in this cut`}
+              placeholder={
+                zoom !== null
+                  ? `Search ${zoomMembers.length} in ${REGION_NAME[zoom]}…`
+                  : `Search all ${pool.length} niches…`
+              }
+              aria-label={
+                zoom !== null
+                  ? `Search the ${zoomMembers.length} niches in the zoomed ${REGION_NAME[zoom]} region`
+                  : `Search all ${pool.length} niches in this cut`
+              }
               autoComplete="off"
               spellCheck={false}
               className="mb-2 w-full border border-ink-primary/30 bg-transparent px-2.5 py-1.5 text-[13px] text-ink-primary placeholder:text-ink-muted"
@@ -1419,7 +1789,9 @@ export function RadarBoard({
             <div className="flex items-baseline gap-2 border-b border-ink-primary/25 pb-2">
               <span className="kicker text-[11px] tracking-[.08em] text-ink-primary">Verdicts</span>
               <span className="tabular text-[11px] text-ink-muted">
-                {q ? `${railEntries.length} of ${pool.length} match` : placed.length}
+                {q
+                  ? `${railEntries.length} of ${zoom !== null ? zoomMembers.length : pool.length} match`
+                  : zoomMembers.length}
               </span>
               <span className="ml-auto text-[10px] text-ink-muted">
                 {q ? "Esc clears · ↑↓ + Enter opens" : "click a dot or row for its dossier"}
@@ -1430,14 +1802,18 @@ export function RadarBoard({
                 {/* The honest empty state: the search really looked at the whole pool. */}
                 {q && railEntries.length === 0 && (
                   <div data-testid="radar-search-empty" className="pt-1.5 text-[12px] text-ink-muted">
-                    No niches match &ldquo;{query.trim()}&rdquo; — searched all {pool.length} niches in this cut.
+                    No niches match &ldquo;{query.trim()}&rdquo; —{" "}
+                    {zoom !== null
+                      ? `searched the ${zoomMembers.length} niches in ${REGION_NAME[zoom]}.`
+                      : `searched all ${pool.length} niches in this cut.`}
                   </div>
                 )}
                 {RING_ORDER.map((ring) => {
                   const entries = byRing.get(ring)!;
-                  // While searching, a ring with no matches is noise — drop the whole
-                  // group (the unfiltered list keeps its explicit "None in this cut.").
-                  if (q && entries.length === 0) return null;
+                  // While searching OR zoom-filtered, a ring with no matches is noise —
+                  // drop the whole group (the chip/header already carry the honest
+                  // totals; the unfiltered list keeps its explicit "None in this cut.").
+                  if ((q || zoom !== null) && entries.length === 0) return null;
                   return (
                     <div key={ring}>
                       <div className="flex items-baseline gap-2 border-b border-chartborder pb-1.5">
@@ -1517,7 +1893,7 @@ export function RadarBoard({
           below the board (see DossierDrawer). Same close channel as the rail's back
           button: onSelect(null). */}
       {selected && !isDesktop && (
-        <DossierDrawer blip={selected} plotCap={plotCap} total={placed.length} onClose={() => onSelect(null)} />
+        <DossierDrawer blip={selected} plotCap={plotCap} total={zoomMembers.length} onClose={() => onSelect(null)} />
       )}
     </div>
   );
