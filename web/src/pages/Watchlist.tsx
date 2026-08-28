@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { useQueries } from "@tanstack/react-query";
 
 import { EmptyState } from "../components/ui/EmptyState";
+import { Loading } from "../components/ui/Loading";
 import { gameProfileQueryOptions, request, useHealth, type Dimension, type GameProfile, type NicheDetail, type NicheRow } from "../lib/api";
 import { monthName } from "../lib/format";
 import {
@@ -157,6 +158,22 @@ export default function Watchlist() {
       : gameMetricValue(gameData.get(entry.id), entry.rule.metric);
   }
 
+  // THE HONESTY GATE for the alert banners. currentValue() returns null for "still
+  // loading" AND "failed to load" alike, and ruleFires maps null -> null — so filtering
+  // on `=== true` alone would render the same confident bannerless page during the
+  // fan-out and after a network failure as for a genuine all-clear. The banners may
+  // only claim "nothing fired" once EVERY fan-out query has resolved; failures are
+  // named, with a retry, because an unreachable metric is "unknown", never "not fired".
+  const alertChecks = [
+    ...nicheEntries.map((e, i) => ({ entry: e, result: nicheResults[i] })),
+    ...gameEntries.map((e, i) => ({ entry: e, result: gameResults[i] })),
+  ].filter((c) => c.entry.rule != null && c.result != null);
+  const alertsPending = alertChecks.some((c) => c.result.isPending);
+  const failedEntries = alertChecks.filter((c) => c.result.isError).map((c) => c.entry);
+  const retryFailed = () => {
+    for (const c of alertChecks) if (c.result.isError) void c.result.refetch();
+  };
+
   const fired = entries.filter((e) => e.rule && ruleFires(e.rule, currentValue(e)) === true);
   const builtAt = formatBuiltAt(healthQ.data?.built_at);
 
@@ -186,9 +203,41 @@ export default function Watchlist() {
     <div className="flex flex-col gap-[18px]">
       <Header count={entries.length} builtAt={builtAt} />
 
-      {fired.map((entry) => (
-        <AlertBanner key={entry.id} entry={entry} value={currentValue(entry)} to={entryPath(entry)} />
-      ))}
+      {/* Alerts section: loading until every fan-out query resolves; failures named with
+          a retry; banners (or their honest absence) only once the answers are real. */}
+      {alertsPending ? (
+        <div className="blueprint px-5 py-1.5">
+          <i className="bp-corner" />
+          <Loading label="Checking alert rules against live data…" className="py-2 text-[13px]" />
+        </div>
+      ) : (
+        <>
+          {failedEntries.length > 0 && (
+            <div
+              role="alert"
+              className="blueprint flex flex-wrap items-center gap-3.5 px-5 py-3.5"
+              style={{ borderColor: "var(--status-serious)" }}
+            >
+              <i className="bp-corner" />
+              <span className="text-sm text-ink-primary">
+                Couldn&rsquo;t check alerts for{" "}
+                <strong className="font-semibold">{failedEntries.map((e) => e.name).join(", ")}</strong> — live data
+                failed to load, so those rules are unknown, not &ldquo;not fired&rdquo;.
+              </span>
+              <button
+                type="button"
+                onClick={retryFailed}
+                className="ml-auto shrink-0 border border-chartborder px-3.5 py-1.5 text-xs font-semibold text-ink-primary transition-colors hover:border-brand hover:text-brand"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+          {fired.map((entry) => (
+            <AlertBanner key={entry.id} entry={entry} value={currentValue(entry)} to={entryPath(entry)} />
+          ))}
+        </>
+      )}
 
       <div className="blueprint">
         <i className="bp-corner" />

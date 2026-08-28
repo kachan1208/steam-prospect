@@ -110,6 +110,106 @@ describe("empty state", () => {
   });
 });
 
+describe("alerts section honesty (pending / failed / resolved)", () => {
+  beforeEach(() => {
+    addNicheToWatchlist("tag", "Colony Sim", "Colony Sim", {
+      metric: "players_trend_7d_pct",
+      comparator: "gt",
+      threshold: 20,
+    });
+    addGameToWatchlist(1, "Frostharbor", { metric: "price_initial", comparator: "lt", threshold: 14.99 });
+  });
+
+  it("shows a loading state — never a confident bannerless page — while any fan-out query is pending", async () => {
+    // Health resolves; the niche/game fan-out hangs forever.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith("/api/health")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ status: "ok", mart_version: "v1", built_at: null, source_db: "m" }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        return new Promise<Response>(() => {}); // pending forever
+      }),
+    );
+    renderWatchlist();
+
+    expect(await screen.findByText("Checking alert rules against live data…")).toBeTruthy();
+    // No fired-banner and no failure claim while the answer isn't in yet.
+    expect(screen.queryByText("Open deep dive")).toBeNull();
+    expect(screen.queryByText(/Couldn.t check alerts/)).toBeNull();
+  });
+
+  it("names failed items with a retry instead of pretending nothing fired — and retry recovers", async () => {
+    // First pass: the niche query fails, the game resolves below its threshold (no fire).
+    let nicheFails = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        const json = (body: unknown, status = 200) =>
+          new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+        if (url.startsWith("/api/health")) return json({ status: "ok", mart_version: "v1", built_at: null, source_db: "m" });
+        if (/^\/api\/niches\//.test(url)) return nicheFails ? json({ detail: "boom" }, 500) : json(nicheFixture());
+        if (/^\/api\/games\//.test(url)) return json(gameFixture({ price_initial: 19.99 })); // 19.99 > 14.99 -> no fire
+        return json({});
+      }),
+    );
+    renderWatchlist();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Colony Sim");
+    expect(alert.textContent).not.toContain("Frostharbor"); // only the FAILED item is named
+    expect(screen.queryByText("Open deep dive")).toBeNull();
+    expect(screen.queryByText("Checking alert rules against live data…")).toBeNull();
+
+    // Retry: the niche now resolves at 24% > 20% — the banner appears, the error clears.
+    nicheFails = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Open deep dive")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("claims nothing fired only after every query resolved below its threshold", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockFetch({
+        niches: { "Colony Sim": nicheFixture({ players: { players_trend_7d_pct: 5 } }) }, // 5 < 20
+        games: { 1: gameFixture({ price_initial: 19.99 }) }, // 19.99 > 14.99
+      }),
+    );
+    renderWatchlist();
+
+    // Settled: live trend values are on screen…
+    await waitFor(() => expect(screen.getByText("$19.99")).toBeTruthy());
+    // …and only THEN is the bannerless page an honest all-clear (no loading, no error).
+    expect(screen.queryByText("Checking alert rules against live data…")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText("Open deep dive")).toBeNull();
+  });
+
+  it("banners a resolved rule that fires", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockFetch({
+        niches: { "Colony Sim": nicheFixture() }, // 24 > 20 -> fires
+        games: { 1: gameFixture({ price_initial: 19.99 }) }, // no fire
+      }),
+    );
+    renderWatchlist();
+
+    const banners = await screen.findAllByText("Open deep dive");
+    expect(banners).toHaveLength(1); // exactly the fired rule, not the resolved-quiet one
+    expect(document.body.textContent).toMatch(/Colony Sim\s*currently meets your alert/);
+    expect(screen.queryByText("Checking alert rules against live data…")).toBeNull();
+  });
+});
+
 describe("populated watchlist", () => {
   beforeEach(() => {
     addNicheToWatchlist("tag", "Colony Sim", "Colony Sim", {
