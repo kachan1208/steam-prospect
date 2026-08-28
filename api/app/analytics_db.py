@@ -21,13 +21,32 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
+from fastapi import HTTPException
 
 _conn: duckdb.DuckDBPyConnection | None = None
 _pool: "queue.Queue[duckdb.DuckDBPyConnection] | None" = None
+# mart_meta's mart_version, read ONCE at init (the DB is swapped atomically + the app
+# restarted on each nightly ETL, so a per-process value can't go stale). None when the DB
+# isn't initialised or the mart predates mart_meta — consumers treat None as "not cacheable".
+_mart_version: str | None = None
+
+# How long a request may wait for a free cursor before giving up with a 503. The pool is 4
+# cursors against a public concurrency that has been measured at 40 — without a timeout a
+# request flood parks every worker in `_pool.get()` forever (a documented production hang).
+# Mart queries are sub-second, so a request that has already queued 10s is not going to be
+# served usefully; shedding it keeps the process responsive.
+_ACQUIRE_TIMEOUT_S = 10.0
+
+_DB_MISSING_DETAIL = (
+    "analytics database not available — the ETL hasn't produced current.duckdb yet"
+)
+_POOL_BUSY_DETAIL = (
+    "server busy — all analytics cursors are in use; retry shortly"
+)
 
 
 def init(path: str, pool_size: int = 4) -> None:
-    global _conn, _pool
+    global _conn, _pool, _mart_version
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(
@@ -38,10 +57,17 @@ def init(path: str, pool_size: int = 4) -> None:
     _pool = queue.Queue(maxsize=n)
     for _ in range(n):
         _pool.put(_conn.cursor())
+    try:
+        row = _conn.execute(
+            "SELECT value FROM mart_meta WHERE key = 'mart_version'"
+        ).fetchone()
+        _mart_version = str(row[0]) if row and row[0] is not None else None
+    except duckdb.Error:  # mart predates mart_meta — nothing to key caches on
+        _mart_version = None
 
 
 def close() -> None:
-    global _conn, _pool
+    global _conn, _pool, _mart_version
     if _pool is not None:
         while True:
             try:
@@ -52,17 +78,35 @@ def close() -> None:
     if _conn is not None:
         _conn.close()
         _conn = None
+    _mart_version = None
 
 
 def is_ready() -> bool:
     return _pool is not None
 
 
+def mart_version() -> str | None:
+    """The loaded mart's version string (mart_meta.mart_version), or None when the DB is
+    absent / predates mart_meta. Read once at init — see _mart_version."""
+    return _mart_version
+
+
 @contextmanager
 def _cursor():
+    # Raised as an HTTPException so EVERY router keeps the deploy contract main.py promises
+    # ("endpoints will 503" when the ETL hasn't produced the DB) without each handler
+    # re-checking is_ready() — previously only entities/timing checked, and everything else
+    # leaked a RuntimeError 500.
     if _pool is None:
-        raise RuntimeError("analytics db not initialised")
-    cur = _pool.get()  # blocks (bounding concurrency) when all cursors are in use
+        raise HTTPException(status_code=503, detail=_DB_MISSING_DETAIL)
+    try:
+        # Bounded wait (was: block forever — pool of 4 vs concurrency 40 parked every
+        # worker in this call, a documented production hang). On timeout, shed the request.
+        cur = _pool.get(timeout=_ACQUIRE_TIMEOUT_S)
+    except queue.Empty:
+        raise HTTPException(
+            status_code=503, detail=_POOL_BUSY_DETAIL, headers={"Retry-After": "5"}
+        )
     try:
         yield cur
     except Exception:
