@@ -1,16 +1,21 @@
 name: CI
 
-# Track O2 (prospect-production-and-marketing-plan.md): stop shipping blind. Four
-# independent jobs (disjoint concerns, same split the codebase itself uses: web / api /
-# etl / mcp) so a failure in one doesn't hide the others' signal. Nothing here needs the real
-# ~176MB data/current.duckdb or the 4GB source catalog: api/tests/conftest.py builds its
-# own tiny synthetic mart at test time, and mcp/smoke_test.py runs against a small,
-# curated, REAL-data-derived fixture committed at .github/fixtures/mcp_smoke_mart.db (see
-# .github/scripts/build_mcp_fixture.py for how it was produced and why it's real rows,
-# not synthetic ones).
+# Track O2 (prospect-production-and-marketing-plan.md): stop shipping blind. Independent
+# jobs (disjoint concerns, same split the codebase itself uses: web / api / etl / mcp, plus
+# the deploy + image checks) so a failure in one doesn't hide the others' signal. Nothing
+# here needs the real ~557MB data/current.duckdb or the 5.2GB source catalog:
+# api/tests/conftest.py builds its own tiny synthetic mart at test time, and mcp/smoke_test.py
+# runs against a small, curated, REAL-data-derived fixture committed at
+# .github/fixtures/mcp_smoke_mart.db (see .github/fixtures/README.md).
 "on":
   push:
   pull_request:
+
+# push + pull_request both fire on a PR branch, so every push used to run the whole matrix
+# twice. Group per ref and cancel the in-flight run: only the newest commit's result matters.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   web:
@@ -29,21 +34,11 @@ jobs:
         working-directory: web
         run: npm ci
 
+      # Was continue-on-error while tsconfig.node.json (a composite referenced project with
+      # no explicit `noEmit`) made `tsc -b --noEmit` fail with TS6310. That tsconfig fix
+      # landed separately, so this is blocking again — the whole point of the job.
       - name: Typecheck (tsc -b --noEmit)
         working-directory: web
-        # KNOWN PRE-EXISTING FAILURE, unrelated to this workflow: tsconfig.node.json is a
-        # composite referenced project with no explicit `noEmit`, and `tsc -b --noEmit`
-        # (TS6310) refuses to build a referenced project that "may not disable emit" in
-        # that combination. Verified present on main before this CI existed (`tsc -b`
-        # WITHOUT --noEmit — i.e. the first half of `npm run build`, below — already
-        # type-checks the whole project successfully, so this is specifically a
-        # --noEmit + project-references interaction, not a real type error). Fix is one
-        # line in tsconfig.node.json (add `"noEmit": false`) or dropping --noEmit from the
-        # `typecheck` script — both out of this change's ownership scope (api/tests/,
-        # web/src/**/*.test.*, vitest.config.*, .github/, + additive deps only). Left
-        # non-blocking (continue-on-error) so this one known issue doesn't hide the rest
-        # of CI's signal; unset continue-on-error here once it's fixed.
-        continue-on-error: true
         run: npm run typecheck
 
       - name: Build (tsc -b + vite build)
@@ -64,9 +59,16 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install API dependencies
+      # Install the PINNED set the image installs, so CI tests what production runs.
+      - name: Install API dependencies (locked)
         working-directory: api
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.lock
+
+      # Test-only extras live in requirements-dev.txt, which arrives with a separate branch;
+      # guarded so this workflow is green both before and after that lands.
+      - name: Install API dev dependencies (if present)
+        working-directory: api
+        run: if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
 
       - name: Run pytest
         working-directory: api
@@ -75,6 +77,36 @@ jobs:
         # module docstring for the full ordering story (env vars + fixture mart must exist
         # before app.main is ever imported).
         run: python -m pytest tests/ -v
+
+  locks:
+    name: Dependency locks in sync
+    runs-on: ubuntu-latest
+    # A lock that has drifted from its requirements.txt is worse than no lock: the image
+    # silently keeps installing the old pins while the source file claims otherwise.
+    # Recompile both and fail on any diff.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Recompile and diff
+        run: |
+          set -euo pipefail
+          for d in api etl; do
+            uv pip compile "$d/requirements.txt" -o "/tmp/$d.lock" \
+              --python-version 3.14 --python-platform x86_64-unknown-linux-gnu --quiet
+            if ! diff -u "$d/requirements.lock" "/tmp/$d.lock"; then
+              echo "::error::$d/requirements.lock is out of date — regenerate it:"
+              echo "  uv pip compile $d/requirements.txt -o $d/requirements.lock \\"
+              echo "      --python-version 3.14 --python-platform x86_64-unknown-linux-gnu"
+              exit 1
+            fi
+          done
 
   etl:
     name: ETL (mart invariants)
@@ -89,9 +121,10 @@ jobs:
       # pytest is NOT in etl/requirements.txt on purpose: that file describes what the droplet's
       # ETL venv installs, and it is kept deliberately thin (the aspect classifier is
       # dependency-free for exactly this reason). Test-only tooling belongs here, not there.
-      - name: Install ETL dependencies
+      # The lock is CI's pinned view of that same file; the droplet venv is managed separately.
+      - name: Install ETL dependencies (locked)
         working-directory: etl
-        run: pip install -r requirements.txt pytest
+        run: pip install -r requirements.lock pytest
 
       - name: Run mart invariant tests
         working-directory: etl
@@ -119,3 +152,50 @@ jobs:
         env:
           PROSPECT_ANALYTICS_DB_PATH: ${{ github.workspace }}/.github/fixtures/mcp_smoke_mart.db
         run: python smoke_test.py
+
+  shellcheck:
+    name: Shellcheck (deploy scripts)
+    runs-on: ubuntu-latest
+    # These scripts ARE production: the nightly pipeline, the cron lock wrapper, backups and
+    # rollback all run from /root/ on the droplet, where a typo is discovered at 21:00 UTC by
+    # a missing mart. -x follows the sourced deploy/lib.sh.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run shellcheck
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --version
+          shellcheck -x deploy/*.sh
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    # The Dockerfile had never been built in CI, and an unpinned dependency resolving
+    # differently on a rebuild (mcp>=1.2 -> 2.0) already took /mcp down in production once.
+    # Build only — nothing is pushed; the droplet builds its own image on deploy.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        env:
+          DOCKER_BUILDKIT: "1"   # the Dockerfile's `# syntax=` directive needs BuildKit
+        run: docker build -t prospect:ci .
+
+      - name: Smoke the built image
+        # Boots with no PROSPECT_DUCKDB_URL, which the entrypoint handles by design (degraded
+        # mode: API up, data endpoints 503). Proves the image starts and serves HTTP — a
+        # build that succeeds but crash-loops on boot is still a broken deploy.
+        run: |
+          set -euo pipefail
+          docker run -d --name prospect-ci -p 8080:8080 prospect:ci
+          for i in $(seq 1 30); do
+            if curl -sf -m 5 http://localhost:8080/api/health >/dev/null; then
+              echo "image is serving /api/health after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::image never answered /api/health"
+          docker logs prospect-ci
+          exit 1

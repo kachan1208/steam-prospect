@@ -25,9 +25,20 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Python deps first (cached unless requirements.txt changes).
-COPY api/requirements.txt ./api/requirements.txt
-RUN pip install --no-cache-dir -r api/requirements.txt
+# Python deps first (cached unless the lock changes).
+#
+# Installs from api/requirements.lock — fully pinned, uv-compiled against THIS image's
+# python (3.14) and linux/amd64. requirements.txt holds the loose, human-edited ranges and
+# is copied too so `uv pip compile` inputs travel with the image, but it is NOT what gets
+# installed: an unpinned build resolves differently on every rebuild, which is exactly how
+# `mcp>=1.2` silently became 2.0.0 on a routine rebuild, dropped the module
+# prospect_mcp.py imports, and took /mcp down in production with one line in the log.
+#
+# Regenerate after editing requirements.txt (CI fails if they drift):
+#   uv pip compile api/requirements.txt -o api/requirements.lock \
+#       --python-version 3.14 --python-platform x86_64-unknown-linux-gnu
+COPY api/requirements.txt api/requirements.lock ./api/
+RUN pip install --no-cache-dir -r api/requirements.lock
 
 # API source + the standalone MCP server (served at /mcp), then the built frontend.
 COPY api/ ./api/
