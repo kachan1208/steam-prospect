@@ -24,6 +24,7 @@ import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib
 // the two pages share one link site and one visual language instead of drifting apart.
 import { KpiCell } from "./NicheDetail";
 import { nicheDetailPath } from "../lib/nichePath";
+import { usePageTitle } from "../lib/usePageTitle";
 
 export { nicheDetailPath };
 
@@ -192,6 +193,7 @@ function variantGames(detail: NicheDetail | undefined, cut: NicheCut): number | 
 }
 
 export default function NicheCombined() {
+  usePageTitle("Combined niches");
   const [searchParams, setSearchParams] = useSearchParams();
 
   const selection = useMemo(() => parseNicheSelection(searchParams), [searchParams]);

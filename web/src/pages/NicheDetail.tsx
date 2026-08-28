@@ -40,6 +40,7 @@ import {
 import { fmtAxisCompact, fmtCompact, fmtInt, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtSigned, fmtUsd, titleCase } from "../lib/format";
 import { heatDomain, heatStyle } from "../lib/heat";
 import { CSS_VAR } from "../lib/palette";
+import { usePageTitle } from "../lib/usePageTitle";
 import { useDetailView } from "../lib/viewMode";
 import { nicheCombinedPath } from "./NicheCombined";
 
@@ -409,6 +410,8 @@ export default function NicheDetail() {
   // React Router has already decoded the segment (and restored an escaped "/"), so this is
   // the niche key exactly as the finder linked it.
   const nicheKey = keyParam ?? null;
+  // The niche key is in the route, so the title is right from the first paint.
+  usePageTitle(nicheKey);
   const watchlisted =
     dimension != null &&
     nicheKey != null &&

@@ -42,6 +42,7 @@ import { fmtAxisCompact, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtP
 import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { markerMonths } from "../lib/notable";
 import { CSS_VAR, MONO} from "../lib/palette";
+import { usePageTitle } from "../lib/usePageTitle";
 import { useDetailView } from "../lib/viewMode";
 
 const CONDENSED: CSSProperties = { fontFamily: '"Barlow Condensed", "Barlow", system-ui, sans-serif' };
@@ -430,6 +431,9 @@ export default function GameProfile() {
   // (the panel labels it "These games") rather than an artifact of a pending query.
   const genreCurveQ = useLaunchCurve(profileQ.data ? (profileQ.data.primary_genre ?? "__all__") : null);
   const benchmarksQ = useMarketBenchmarks();
+  // The game's own name once it lands; the app default holds until then (never
+  // "undefined — Prospect"), so a history entry reads as the game you looked at.
+  usePageTitle(profileQ.data?.name);
   const teardownQ = useGameTeardown(validAppid ? appid : null);
   const channelMixQ = useGameChannelMix(validAppid ? appid : null);
 

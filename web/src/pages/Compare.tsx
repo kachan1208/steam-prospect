@@ -10,6 +10,7 @@ import { gameProfileQueryOptions, type GameProfile } from "../lib/api";
 import { COMPARE_CAP, removeFromCompare, useCompareList } from "../lib/compareList";
 import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtRevenue } from "../lib/format";
 import { genreTintStyle } from "../lib/heat";
+import { usePageTitle } from "../lib/usePageTitle";
 
 /**
  * Side-by-side comparison for 2-6 games (mockup 4d). The ids ride the URL (?ids=1,2,3) so a
@@ -123,6 +124,7 @@ function Panel({ children, className }: { children: ReactNode; className?: strin
 }
 
 export default function Compare() {
+  usePageTitle("Compare");
   const [searchParams, setSearchParams] = useSearchParams();
   const stored = useCompareList();
 

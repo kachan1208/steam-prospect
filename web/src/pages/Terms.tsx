@@ -1,5 +1,6 @@
 import { ChatMarkdown } from "../components/chat/ChatMarkdown";
 import { LegalLayout } from "../components/LegalLayout";
+import { usePageTitle } from "../lib/usePageTitle";
 
 const UPDATED = "July 16, 2026";
 
@@ -71,6 +72,7 @@ To be finalized with counsel prior to commercial launch.
 Questions about these terms: see the Support page under Docs for the current contact channel.`;
 
 export default function Terms() {
+  usePageTitle("Terms of Service");
   return (
     <LegalLayout title="Terms of Service" updated={UPDATED}>
       <ChatMarkdown text={TERMS_MD} />

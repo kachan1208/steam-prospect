@@ -25,6 +25,7 @@ import {
   type WatchlistKind,
 } from "../lib/watchlist";
 import { nicheDetailPath } from "../lib/nichePath";
+import { usePageTitle } from "../lib/usePageTitle";
 
 /**
  * Watchlist — saved niches & games with alert rules (mockup 4f).
@@ -127,6 +128,7 @@ function formatBuiltAt(iso: string | null | undefined): string | null {
 }
 
 export default function Watchlist() {
+  usePageTitle("Watchlist");
   const entries = useWatchlist();
   const healthQ = useHealth();
 

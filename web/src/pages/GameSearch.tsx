@@ -9,6 +9,7 @@ import { useGameSearch, useGenres, type GameSearchRow, type GameSortKey } from "
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { fmtCompact, fmtInt, fmtPct, fmtRevenue, fmtUsd } from "../lib/format";
 import { useDebounced } from "../lib/useDebounced";
+import { usePageTitle } from "../lib/usePageTitle";
 
 const LIMIT = 25;
 
@@ -362,6 +363,7 @@ function CompareCell({ g }: { g: GameSearchRow }) {
 // ---- the page ------------------------------------------------------------------------------
 
 export default function GameSearch() {
+  usePageTitle("Games");
   const navigate = useNavigate();
   const genres = useGenres();
   const [searchParams, setSearchParams] = useSearchParams();

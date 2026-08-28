@@ -11,6 +11,7 @@ import { fmtInt, fmtPct, fmtUsd } from "../lib/format";
 import { genreTintStyle, heatDomain, heatStyle } from "../lib/heat";
 import { CSS_VAR, MONO} from "../lib/palette";
 import { useDebounced } from "../lib/useDebounced";
+import { usePageTitle } from "../lib/usePageTitle";
 
 const LIMIT = 50;
 // Browse floor: without a search term, only studios with 3+ scored games rank — a lone
@@ -40,6 +41,7 @@ function fmtYears(first: number | null, last: number | null): string {
  * page's reason to exist. Rows open the full career profile at /entity/:role?name=.
  */
 export default function Studios() {
+  usePageTitle("Studios");
   const navigate = useNavigate();
   const [role, setRole] = useState<EntityRole>("publisher");
   const [q, setQ] = useState("");

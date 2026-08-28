@@ -18,6 +18,7 @@ import clsx from "clsx";
 import { fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
 import { genreTintStyle, heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { CSS_VAR, MONO} from "../lib/palette";
+import { usePageTitle } from "../lib/usePageTitle";
 
 const ROLES: EntityRole[] = ["developer", "publisher"];
 
@@ -40,6 +41,8 @@ export default function EntityProfile() {
 
   const profileQ = useEntityProfile(role, name);
   const entity = profileQ.data?.entity;
+  // The studio/publisher name rides ?name=, so it titles the tab immediately.
+  usePageTitle(name);
 
   // Same-name entity in the OTHER role. Self-publishing devs exist under both roles with
   // different game sets (e.g. a dev with 4 titles who self-published only 2 — the publisher

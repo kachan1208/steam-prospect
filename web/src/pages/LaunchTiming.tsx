@@ -20,6 +20,7 @@ import {
 } from "../lib/api";
 import { fmtPct, fmtUsd, monthName } from "../lib/format";
 import { CSS_VAR } from "../lib/palette";
+import { usePageTitle } from "../lib/usePageTitle";
 
 const DEFAULT_CURVE_GENRES = ["__all__", "Indie", "Action", "Adventure", "Casual", "Simulation", "Strategy", "RPG"];
 
@@ -116,6 +117,7 @@ function RecommendationCard({ overview }: { overview: TimingOverview }) {
 }
 
 export default function LaunchTiming() {
+  usePageTitle("Launch timing");
   const genres = useGenres();
   const [timingGenre, setTimingGenre] = useState("__all__");
   const { data: overview, isLoading: timingLoading, error: timingError } = useTimingOverview(timingGenre);

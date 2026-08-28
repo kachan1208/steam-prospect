@@ -6,6 +6,7 @@ import { RadarBoard, type RadarBoardBlip, type RadarSector } from "../components
 import { Loading } from "../components/ui/Loading";
 import { useNiches, type NicheRow } from "../lib/api";
 import { SOLO_FRIENDLY_MIN, radarVerdictTrace } from "../lib/radarVerdict";
+import { usePageTitle } from "../lib/usePageTitle";
 
 /**
  * Radar — the index route. ONE INSTRUMENT, nothing below it (2026-08-27, user directive:
@@ -185,7 +186,10 @@ function RadarBoardSection({
             Verdict quadrants · last 24 months · {CLASS_KICKER[boardClass]}
             {soloOnly ? " · solo-friendly only" : ""}
           </div>
-          <h2 className="text-[26px] text-ink-primary sm:text-[30px]">Niche radar</h2>
+          {/* h1, not h2: this is the index route's only heading, and a page whose
+              document outline starts at h2 has no top level at all. Styled identically —
+              index.css gives every h1–h6 the same condensed face, so only the tag changed. */}
+          <h1 className="text-[26px] text-ink-primary sm:text-[30px]">Niche radar</h1>
         </div>
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 sm:ml-auto">
           <SegRow label="Class" options={CLASS_OPTIONS} value={boardClass} onChange={onBoardClass} />
@@ -273,6 +277,7 @@ function RadarBoardSection({
 }
 
 export default function Radar() {
+  usePageTitle("Radar");
   // ONE selection + ONE population toggle for the whole page: the board's two list
   // queries and the rail all hang off this state. Top-N and the class picker are
   // client-side display slices (see POPULATION_LIMIT), so only the solo toggle changes

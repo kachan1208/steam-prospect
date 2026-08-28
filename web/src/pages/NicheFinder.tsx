@@ -18,6 +18,7 @@ import {
 } from "../lib/api";
 import { fmtCompact, fmtInt, fmtMonths, fmtPct, fmtSigned, fmtUsd } from "../lib/format";
 import { useDebounced } from "../lib/useDebounced";
+import { usePageTitle } from "../lib/usePageTitle";
 import {
   formatNicheRef,
   nicheCombinedPath,
@@ -197,6 +198,7 @@ function SegButton({
 }
 
 export default function NicheFinder() {
+  usePageTitle("Niche Finder");
   const [dimension, setDimension] = useState<Dimension>("tag");
   // 24m is the market a new entrant actually faces — the all-time cut is context, not an
   // entry decision, so it is NOT the default (same default as the MCP tool).

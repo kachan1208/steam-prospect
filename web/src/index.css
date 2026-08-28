@@ -76,11 +76,16 @@
   --verdict-enter-wash: color-mix(in srgb, #3e8a4c 6%, transparent);
   --verdict-enter-wash-line: color-mix(in srgb, #3e8a4c 30%, transparent);
 
-  /* elevation */
-  --shadow-xs: 0 1px 2px rgba(16, 24, 40, 0.05);
-  --shadow-sm: 0 1px 3px rgba(16, 24, 40, 0.08), 0 1px 2px rgba(16, 24, 40, 0.04);
-  --shadow-md: 0 4px 12px -2px rgba(16, 24, 40, 0.10), 0 2px 6px -2px rgba(16, 24, 40, 0.05);
-  --shadow-lg: 0 16px 40px -12px rgba(16, 24, 40, 0.18);
+  /* Elevation: NONE. The blueprint identity has no drop shadows — a card is a hairline
+     frame, not a floating slab. This used to be applied at runtime by lib/theme.tsx's
+     "industry" preset (which overrode a soft ramp declared here), so the stylesheet and
+     the shipped look disagreed and only the JS was right. The preset machinery is gone
+     (2026-08-28) and this is now the single source of truth; the tokens stay declared
+     because tailwind.config.js maps them to shadow-xs/sm/md/lg, which components use. */
+  --shadow-xs: none;
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
 
   /* categorical, fixed order — validated, do not change */
   --series-1: #2a78d6;
@@ -160,10 +165,11 @@
   --verdict-enter-wash: color-mix(in srgb, #8fce91 7%, transparent);
   --verdict-enter-wash-line: color-mix(in srgb, #8fce91 28%, transparent);
 
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
-  --shadow-md: 0 6px 16px -4px rgba(0, 0, 0, 0.55);
-  --shadow-lg: 0 20px 48px -12px rgba(0, 0, 0, 0.6);
+  /* Elevation stays NONE on dark too — see the :root block's note. */
+  --shadow-xs: none;
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
 
   --series-1: #3987e5;
   --series-2: #199e70;
