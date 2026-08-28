@@ -25,10 +25,21 @@ services:
     instance_count: 1
     instance_size_slug: basic-xxs           # 512MB / ~$5/mo. Bump to a 1GB slug if it OOMs.
     health_check:
-      http_path: /api/health
-      initial_delay_seconds: 45             # allow time for the first DuckDB download on boot
+      # /api/health/ready (NOT /api/health): readiness returns 503 until the mart is
+      # actually loaded, so App Platform stops routing traffic to an instance that boots
+      # fine but has no data. DEPENDENCY: that endpoint ships with the API branch that adds
+      # it — with a build that predates it this path 404s and every health check fails.
+      http_path: /api/health/ready
+      # 45s was never enough: the boot-time mart download is ~557MB, and App Platform kills
+      # the instance when the check fails, so a slow download became a crash loop.
+      initial_delay_seconds: 120
 
     envs:
+      # basic-xxs is 512MB and one DuckDB-loaded worker already exceeds that; the
+      # entrypoint's default of 2 (right for the 2-vCPU droplet) cannot fit here.
+      - key: WEB_CONCURRENCY
+        scope: RUN_TIME
+        value: "1"
       # The API downloads the analytics DB from here on boot (a GitHub Release asset, ≤2GB).
       - key: PROSPECT_DUCKDB_URL
         scope: RUN_TIME
