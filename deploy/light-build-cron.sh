@@ -25,8 +25,10 @@ set -uo pipefail
 if [ -f "$(dirname "$0")/lib.sh" ]; then
     . "$(dirname "$0")/lib.sh"
 else
-    echo "WARN: $(dirname "$0")/lib.sh missing — restart verification degraded to a blind restart" >&2
+    echo "WARN: $(dirname "$0")/lib.sh missing — restart verification degraded to a blind" \
+         "restart and metric pushes disabled" >&2
     prospect_restart_verify() { docker restart prospect && sleep 15; }
+    prospect_push_metrics() { :; }
 fi
 
 pgrep -f "[b]uild_marts" >/dev/null && exit 0
