@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import threading
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -28,7 +29,13 @@ from mcp.server.fastmcp import FastMCP
 # (this file's only relationship to that module: mirroring its idiom, not importing it).
 # ----------------------------------------------------------------------------------------
 DB_PATH = Path(
-    os.environ.get("PROSPECT_ANALYTICS_DB_PATH", "/Users/maximbaginskiy/hobby/prospect/data/current.duckdb")
+    os.environ.get(
+        "PROSPECT_ANALYTICS_DB_PATH",
+        # Default: this repo's own data/current.duckdb, computed relative to this file
+        # (mcp/ -> repo root) so any checkout or worktree resolves it without a hardcoded
+        # user path. The env var still overrides (CI fixture, hosted container).
+        str(Path(__file__).resolve().parent.parent / "data" / "current.duckdb"),
+    )
 )
 
 if not DB_PATH.exists():
@@ -56,159 +63,154 @@ def query_one(sql: str, params: list[Any] | None = None) -> dict | None:
     return rows[0] if rows else None
 
 
-# Whether the mart carries mart_game.name_lower (persisted lower(name)); if so game_search
-# filters via the cheaper contains(name_lower, ?) rather than name ILIKE '%q%'. Falls back to
-# ILIKE on older marts. Read once — the DB is swapped + process restarted on each ETL build.
-_HAS_NAME_LOWER = bool(
-    query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'name_lower'"
-    )
-)
+_closed = False
 
-# Whether the mart carries the live-player (CCU) marts/columns (mart_players.sql — daily
-# per-game history, niche rollup, and the players_* summary columns on mart_game/mart_niche).
-# Both column sets land in the same ETL build; checked together so a half-present state
-# (impossible via the atomic mart swap) still degrades safely. Same read-once idiom as
-# _HAS_NAME_LOWER.
-_HAS_PLAYERS = bool(
-    query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'players_7d_avg'"
-    )
-) and bool(
-    query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_niche' AND column_name = 'total_players_now'"
-    )
-)
 
-_HAS_PLAYERS_HISTORY = bool(
-    query(
-        "SELECT 1 FROM information_schema.tables WHERE table_name = 'mart_game_players_history'"
-    )
-)
+def close() -> None:
+    """Close the module-global read-only DuckDB connection. Idempotent — the hosted API
+    calls this from its shutdown path (api/app/main.py lifespan); standalone stdio runs
+    simply exit and never need it. After close(), query() raises, so it must be the last
+    thing this module does."""
+    global _closed
+    with _lock:
+        if _closed:
+            return
+        _closed = True
+        _conn.close()
 
-_HAS_PLAYERS_DIST = bool(
-    query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_niche' AND column_name = 'players_top5_share'"
-    )
-)
 
-# Whether the mart carries the game-lifetime columns/table (mart_players.sql
-# _game_lifetime/_niche_lifetime + mart_market_lifetime): how long a game keeps an
-# audience once it has one — t0 = first calendar month averaging >= 100 concurrent
-# players, death = first FULL month after t0 averaging < 10 (steamcharts monthly,
-# top-8k-by-reviews coverage). Three probes because the columns land on different marts.
-_HAS_LIFETIME = bool(
-    query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_niche' AND column_name = 'lifetime_survival_12m'"
+# ----------------------------------------------------------------------------------------
+# Schema-capability probes — which additive marts/columns this current.duckdb carries.
+# LAZY on purpose (evaluated on first use, cached for the process lifetime): the hosted
+# API imports this module at startup, and running all ~18 probe queries per worker at
+# import time taxed every cold start before a single request was served. Caching is safe
+# for exactly the reason the old module-level read-once probes were: the analytics DB is
+# swapped atomically + the process restarted on each ETL build, so capabilities cannot
+# change under a running process. None of these feed docstrings or registration-time
+# logic (docstrings are static strings), so every probe can be lazy.
+# ----------------------------------------------------------------------------------------
+@lru_cache(maxsize=None)
+def _has_column(table: str, column: str) -> bool:
+    return bool(
+        query(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = ? AND column_name = ?",
+            [table, column],
+        )
     )
-)
 
-_HAS_LIFETIME_GAME = bool(
-    query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'lifetime_months'"
-    )
-)
 
-_HAS_LIFETIME_CURVE = bool(
-    query(
-        "SELECT 1 FROM information_schema.tables WHERE table_name = 'mart_market_lifetime'"
+@lru_cache(maxsize=None)
+def _has_table(table: str) -> bool:
+    return bool(
+        query("SELECT 1 FROM information_schema.tables WHERE table_name = ?", [table])
     )
-)
 
-# Whether the mart carries the dev-socials columns: mart_game.dev_x_handle (the game's
-# most prominent official X handle, harvested from its developer-CONTROLLED pages —
-# store page + dev website — never from X itself) and the majority-vote
-# mart_entity.x_handle built from it. Both land in the same ETL build; checked together
-# so a half-present state (impossible via the atomic mart swap) still degrades safely —
-# same idiom as _HAS_PLAYERS.
-_HAS_DEV_SOCIALS = bool(
-    query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'dev_x_handle'"
-    )
-) and bool(
-    query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_entity' AND column_name = 'x_handle'"
-    )
-)
 
-# Whether the mart carries the DEMO flag (mart_game.has_demo/demo_appid — the game's playable
-# Steam demo, from its own appdetails). has_demo is TRI-STATE: NULL means the game's appdetails
-# has not been re-read since demo capture landed, i.e. "not checked", never "no demo".
-_HAS_DEMO = bool(
-    query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'has_demo'"
-    )
-)
+def _has_name_lower() -> bool:
+    """mart_game.name_lower (persisted lower(name)); if present game_search filters via
+    the cheaper contains(name_lower, ?) rather than name ILIKE '%q%'."""
+    return _has_column("mart_game", "name_lower")
 
-# Whether the mart carries every harvested social platform (Discord/YouTube/Bluesky + the X
-# profile URL) rather than only dev_x_handle. The harvest always collected all four; older
-# marts simply dropped everything but X.
-_HAS_ALL_SOCIALS = bool(
-    query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'dev_discord_url'"
-    )
-)
 
-# Whether the mart carries metacritic_url (the Metacritic page Steam links in appdetails).
-# The SCORE needs no gate — every mart has it; only the outbound link is conditional.
-_HAS_METACRITIC_URL = bool(
-    query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'metacritic_url'"
+def _has_players() -> bool:
+    """Live-player (CCU) marts/columns (mart_players.sql — daily per-game history, niche
+    rollup, and the players_* summary columns on mart_game/mart_niche). Both column sets
+    land in the same ETL build; checked together so a half-present state (impossible via
+    the atomic mart swap) still degrades safely."""
+    return _has_column("mart_game", "players_7d_avg") and _has_column(
+        "mart_niche", "total_players_now"
     )
-)
 
-# Per-game review marts behind game_reviews_summary / aspect_reviews. Probed like the other
-# additive marts so an older analytics DB degrades with a message instead of a SQL error.
-_HAS_GAME_REVIEWS = bool(
-    query(
-        "SELECT 1 FROM information_schema.tables "
-        "WHERE table_name = 'mart_game_reviews_timeline'"
-    )
-)
-_HAS_ASPECT_REVIEWS = bool(
-    query(
-        "SELECT 1 FROM information_schema.tables "
-        "WHERE table_name = 'mart_game_aspect_reviews'"
-    )
-)
 
-# Revenue percentiles per niche (p25/p75/p90_rev). They land in mart_niche from the same ETL,
-# and the REST API has exposed them since 2026-08-14 — the MCP simply never selected them, so
-# agents could only ever see the MEDIAN of a niche. The median is the wrong target for someone
-# deciding what to build: it is dragged down by asset flips and abandoned projects, while p90 is
-# what a niche pays when the game actually lands.
-_HAS_NICHE_P90 = bool(
-    query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_niche' AND column_name = 'p90_rev'"
-    )
-)
+def _has_players_history() -> bool:
+    return _has_table("mart_game_players_history")
 
-# 24-month demand trend per niche (reviews_24m / reviews_prev_24m / demand_trend_24m_pct,
-# plus the emerging pair reviews_24m_new_share / demand_emerging — one ETL build, one
-# probe): the niche's review-histogram inflow over the last 24 complete months vs the 24
-# before them — the structural demand read the Radar surfaces ring on, matching the
-# radar's own pinned 24m membership cut. Cut-independent in the mart (one value per
-# (dimension, key), identical on every window/floor cut). These REPLACED the earlier
-# 12-month columns outright (which had replaced the 90-day ones), so a mart carrying only
-# those old columns probes False here and the fields are simply omitted.
-_HAS_DEMAND24M = bool(
-    query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_niche' AND column_name = 'demand_trend_24m_pct'"
+
+def _has_players_dist() -> bool:
+    return _has_column("mart_niche", "players_top5_share")
+
+
+def _has_lifetime() -> bool:
+    """Game-lifetime columns/table (mart_players.sql _game_lifetime/_niche_lifetime +
+    mart_market_lifetime): how long a game keeps an audience once it has one — t0 = first
+    calendar month averaging >= 100 concurrent players, death = first FULL month after t0
+    averaging < 10 (steamcharts monthly, top-8k-by-reviews coverage). Three probes
+    (_has_lifetime/_has_lifetime_game/_has_lifetime_curve) because the columns land on
+    different marts."""
+    return _has_column("mart_niche", "lifetime_survival_12m")
+
+
+def _has_lifetime_game() -> bool:
+    return _has_column("mart_game", "lifetime_months")
+
+
+def _has_lifetime_curve() -> bool:
+    return _has_table("mart_market_lifetime")
+
+
+def _has_dev_socials() -> bool:
+    """Dev-socials columns: mart_game.dev_x_handle (the game's most prominent official X
+    handle, harvested from its developer-CONTROLLED pages — store page + dev website —
+    never from X itself) and the majority-vote mart_entity.x_handle built from it. Both
+    land in the same ETL build; checked together, same idiom as _has_players."""
+    return _has_column("mart_game", "dev_x_handle") and _has_column(
+        "mart_entity", "x_handle"
     )
-)
+
+
+def _has_demo() -> bool:
+    """DEMO flag (mart_game.has_demo/demo_appid — the game's playable Steam demo, from
+    its own appdetails). has_demo is TRI-STATE: NULL means the game's appdetails has not
+    been re-read since demo capture landed, i.e. "not checked", never "no demo"."""
+    return _has_column("mart_game", "has_demo")
+
+
+def _has_all_socials() -> bool:
+    """Every harvested social platform (Discord/YouTube/Bluesky + the X profile URL)
+    rather than only dev_x_handle. The harvest always collected all four; older marts
+    simply dropped everything but X."""
+    return _has_column("mart_game", "dev_discord_url")
+
+
+def _has_metacritic_url() -> bool:
+    """metacritic_url (the Metacritic page Steam links in appdetails). The SCORE needs no
+    gate — every mart has it; only the outbound link is conditional."""
+    return _has_column("mart_game", "metacritic_url")
+
+
+def _has_game_reviews() -> bool:
+    """Per-game review marts behind game_reviews_summary / aspect_reviews. Probed like
+    the other additive marts so an older analytics DB degrades with a message instead of
+    a SQL error."""
+    return _has_table("mart_game_reviews_timeline")
+
+
+def _has_aspect_reviews() -> bool:
+    return _has_table("mart_game_aspect_reviews")
+
+
+def _has_niche_p90() -> bool:
+    """Revenue percentiles per niche (p25/p75/p90_rev). They land in mart_niche from the
+    same ETL, and the REST API has exposed them since 2026-08-14 — the MCP simply never
+    selected them, so agents could only ever see the MEDIAN of a niche. The median is the
+    wrong target for someone deciding what to build: it is dragged down by asset flips
+    and abandoned projects, while p90 is what a niche pays when the game actually
+    lands."""
+    return _has_column("mart_niche", "p90_rev")
+
+
+def _has_demand24m() -> bool:
+    """24-month demand trend per niche (reviews_24m / reviews_prev_24m /
+    demand_trend_24m_pct, plus the emerging pair reviews_24m_new_share / demand_emerging
+    — one ETL build, one probe): the niche's review-histogram inflow over the last 24
+    complete months vs the 24 before them — the structural demand read the Radar surfaces
+    ring on, matching the radar's own pinned 24m membership cut. Cut-independent in the
+    mart (one value per (dimension, key), identical on every window/floor cut). These
+    REPLACED the earlier 12-month columns outright (which had replaced the 90-day ones),
+    so a mart carrying only those old columns probes False here and the fields are simply
+    omitted."""
+    return _has_column("mart_niche", "demand_trend_24m_pct")
 
 _PLAYERS_MISSING = (
     "this analytics DB predates the live-player (CCU) marts (mart_game_players_daily / "
@@ -227,8 +229,11 @@ _DEMO_MISSING = (
 )
 
 # Row probe, not a schema probe: the min_reviews=0 (no-floor) cut adds ROWS to mart_niche,
-# not columns, so its presence is detected by looking for one.
-_HAS_NO_FLOOR_CUT = bool(query("SELECT 1 FROM mart_niche WHERE min_reviews = 0 LIMIT 1"))
+# not columns, so its presence is detected by looking for one. Cached directly (it can't
+# share the schema-probe helpers) — same lazy/read-once semantics as the rest.
+@lru_cache(maxsize=None)
+def _has_no_floor_cut() -> bool:
+    return bool(query("SELECT 1 FROM mart_niche WHERE min_reviews = 0 LIMIT 1"))
 
 _NO_FLOOR_MISSING = (
     "This mart predates the no-floor (min_reviews=0) cut of mart_niche (an older ETL "
@@ -331,8 +336,8 @@ mcp = FastMCP(
         "under-served niches, benchmark the market, estimate revenue, check launch "
         "timing, look up games and rank a game's closest competitors (find_comparables), "
         "profile developers/publishers and scout publishers active in a genre "
-        "(entity_profile, publisher_pitch_list), and find press/creator pitch targets "
-        "across the press marketing channel. Read the "
+        "(entity_profile, publisher_pitch_list), and find press pitch targets "
+        "(press_pitch_list). Read the "
         "prospect-data-dictionary resource first. "
         "For 'what should I build' questions, keep find_niches' defaults (24m window, "
         "opportunity_v2 sort, micro+theme tags only) and apply its falsification rules: "
@@ -592,14 +597,14 @@ games clearing the review floor).
 - **mart_buzz_trends / mart_buzz_trends_summary** — rising/cooling game-concept bigrams
   mined from journalist article titles. -> `buzz_trends`.
 - **mart_channel_mix** — per (genre, channel): share of marketing attention (raw mention
-  count AND reach-weighted) for the press channel — "where does this genre
-  actually get attention." -> `channel_mix`.
+  count AND reach-weighted). PRESS-ONLY since 2026-08-25 (the creator vertical was
+  decommissioned), so it now reads as the press channel's per-genre footprint — "how much
+  press attention does this genre actually get." -> `channel_mix`.
 - **mart_channel_buzz / mart_channel_buzz_summary** — reach-weighted trending game-concept
-  bigrams across EVERY channel (press + creator platforms combined), the multi-channel,
-  audience-weighted sequel to mart_buzz_trends. -> `channel_buzz`.
-  All three are empty until the channel scrapers (steam-scraper's creator/
-  game_creator_mention/creator_reach_snapshot tables) have been run — degrades to zero rows,
-  never an error.
+  bigrams per channel (press-only since 2026-08-25), the audience-weighted sequel to
+  mart_buzz_trends. -> `channel_buzz`.
+  All three degrade to zero rows (never an error) when the press scrape hasn't populated
+  them yet.
 
 ## Caveats that apply broadly (also repeated per-tool where most relevant)
 
@@ -635,7 +640,7 @@ _NICHE_SORTABLE = {
     "reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct",
 }
 # The subset of _NICHE_SORTABLE that only exists on marts with the players columns
-# (sorting/filtering on them needs _HAS_PLAYERS; everything else works on older marts).
+# (sorting/filtering on them needs _has_players(); everything else works on older marts).
 _NICHE_PLAYERS_COLS = {"total_players_now", "players_trend_7d_pct", "players_coverage"}
 _NICHE_PLAYERS_DIST_COLS = {"median_players_now", "players_top5_share"}
 _NICHE_LIFETIME_COLS = {"lifetime_survival_12m", "lifetime_median_dead_months"}
@@ -784,10 +789,11 @@ def find_niches(
         its absolute reviews_24m instead.
 
     EXACT MATERIALISATION: only the precomputed cuts exist — window in {"all","24m"} x
-    min_reviews in {50,100} (must stay in sync with MIN_REVIEWS_LEVELS in
-    etl/build_marts.py; a value the ETL didn't materialise matches no rows and returns an
-    empty list, not an error). window="all" scores full history — use it for context, not
-    for entry decisions. min_reviews=50 is broader/noisier, 100 stricter/cleaner.
+    min_reviews in {0,50,100} (must stay in sync with MIN_REVIEWS_LEVELS in
+    etl/build_marts.py; the 0 cut only exists on marts built after the no-floor cut
+    landed — older marts get a clear re-run-ETL error for min_reviews=0). window="all"
+    scores full history — use it for context, not for entry decisions. min_reviews=50 is
+    broader/noisier, 100 stricter/cleaner; 0 is the no-floor honest-tag-size read.
 
     min_median_rev / max_competition / min_total_owners are optional post-filters
     (e.g. min_median_rev=200000, max_competition=50, min_total_owners=1000000). sort is
@@ -798,15 +804,15 @@ def find_niches(
     """
     if sort not in _NICHE_SORTABLE:
         return {"error": f"sort must be one of {sorted(_NICHE_SORTABLE)}"}
-    if not _HAS_PLAYERS and (sort in _NICHE_PLAYERS_COLS or min_total_players is not None):
+    if not _has_players() and (sort in _NICHE_PLAYERS_COLS or min_total_players is not None):
         return {"error": _PLAYERS_MISSING}
-    if not _HAS_PLAYERS_DIST and sort in _NICHE_PLAYERS_DIST_COLS:
+    if not _has_players_dist() and sort in _NICHE_PLAYERS_DIST_COLS:
         return {"error": _PLAYERS_MISSING}
-    if not _HAS_LIFETIME and sort in _NICHE_LIFETIME_COLS:
+    if not _has_lifetime() and sort in _NICHE_LIFETIME_COLS:
         return {"error": _LIFETIME_MISSING}
-    if not _HAS_DEMAND24M and sort in _NICHE_DEMAND24M_COLS:
+    if not _has_demand24m() and sort in _NICHE_DEMAND24M_COLS:
         return {"error": _DEMAND24M_MISSING}
-    if min_reviews == 0 and not _HAS_NO_FLOOR_CUT:
+    if min_reviews == 0 and not _has_no_floor_cut():
         return {"error": _NO_FLOOR_MISSING}
     if include_tiers is not None:
         bad = [t for t in include_tiers if t not in _NICHE_TIERS]
@@ -837,24 +843,24 @@ def find_niches(
     limit = max(1, min(limit, 50))
 
     pct_cols = (
-        ",\n                   p25_rev, p75_rev, p90_rev" if _HAS_NICHE_P90 else ""
+        ",\n                   p25_rev, p75_rev, p90_rev" if _has_niche_p90() else ""
     )
     players_cols = (
         ",\n                   total_players_now, players_trend_7d_pct, players_coverage"
-        if _HAS_PLAYERS
+        if _has_players()
         else ""
     )
-    if _HAS_PLAYERS_DIST:
+    if _has_players_dist():
         players_cols += ",\n                   median_players_now, players_top5_share"
     lifetime_cols = (
         ",\n                   lifetime_n_games, lifetime_survival_12m, lifetime_median_dead_months"
-        if _HAS_LIFETIME
+        if _has_lifetime()
         else ""
     )
     demand_cols = (
         ",\n                   reviews_24m, reviews_prev_24m, demand_trend_24m_pct"
         ",\n                   reviews_24m_new_share, demand_emerging"
-        if _HAS_DEMAND24M
+        if _has_demand24m()
         else ""
     )
     try:
@@ -944,24 +950,24 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
     # reason api/app/routers/niches.py renames win -> window in Python, after the fetch,
     # rather than in SQL.
     pct_cols = (
-        ",\n                   p25_rev, p75_rev, p90_rev" if _HAS_NICHE_P90 else ""
+        ",\n                   p25_rev, p75_rev, p90_rev" if _has_niche_p90() else ""
     )
     players_cols = (
         ",\n                   total_players_now, players_trend_7d_pct, players_coverage"
-        if _HAS_PLAYERS
+        if _has_players()
         else ""
     )
-    if _HAS_PLAYERS_DIST:
+    if _has_players_dist():
         players_cols += ",\n                   median_players_now, players_top5_share"
     lifetime_cols = (
         ",\n                   lifetime_n_games, lifetime_survival_12m, lifetime_median_dead_months"
-        if _HAS_LIFETIME
+        if _has_lifetime()
         else ""
     )
     demand_cols = (
         ",\n                   reviews_24m, reviews_prev_24m, demand_trend_24m_pct"
         ",\n                   reviews_24m_new_share, demand_emerging"
-        if _HAS_DEMAND24M
+        if _has_demand24m()
         else ""
     )
     try:
@@ -1007,7 +1013,7 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
     # latest row + bounds). None when the mart predates CCU or the niche was never
     # measured — a real answer, not an error.
     players = None
-    if _HAS_PLAYERS:
+    if _has_players():
         try:
             latest = query_one(
                 "SELECT date, total_players, measured_players, n_games_measured, "
@@ -1506,7 +1512,7 @@ def lifetime_curve() -> dict:
     live on game_profile / game_search. Returns {"error": ...} asking you to re-run the
     ETL when the mart predates the lifetime build.
     """
-    if not _HAS_LIFETIME_CURVE:
+    if not _has_lifetime_curve():
         return {"error": _LIFETIME_MISSING}
     rows = query("SELECT t, n_observable, share_alive FROM mart_market_lifetime ORDER BY t")
     by_t = {int(r["t"]): r["share_alive"] for r in rows}
@@ -1780,13 +1786,13 @@ def game_search(
     """
     if sort not in _GAME_SORTABLE:
         return {"error": f"sort must be one of {sorted(_GAME_SORTABLE)}"}
-    if (min_lifetime_months is not None or lifetime_alive is not None) and not _HAS_LIFETIME_GAME:
+    if (min_lifetime_months is not None or lifetime_alive is not None) and not _has_lifetime_game():
         return {"error": _LIFETIME_MISSING}
 
     where = ["total_reviews >= ?"]
     params: list = [min_reviews]
     if q:
-        if _HAS_NAME_LOWER:
+        if _has_name_lower():
             where.append("contains(name_lower, ?)")
             params.append(q.lower())
         else:
@@ -1847,7 +1853,7 @@ def game_search(
         where.append("is_indie = ?")
         params.append(1 if indie else 0)
     if has_demo is not None:
-        if not _HAS_DEMO:
+        if not _has_demo():
             return {"error": _DEMO_MISSING}
         # Tri-state: NULL (not yet checked) satisfies neither = comparison, so unknowns drop
         # out rather than being counted as "no demo".
@@ -1856,10 +1862,10 @@ def game_search(
     limit = max(1, min(limit, 50))
 
     lifetime_cols = (
-        ",\n               lifetime_months, lifetime_alive" if _HAS_LIFETIME_GAME else ""
+        ",\n               lifetime_months, lifetime_alive" if _has_lifetime_game() else ""
     )
-    socials_cols = ",\n               dev_x_handle" if _HAS_DEV_SOCIALS else ""
-    demo_cols = ",\n               has_demo" if _HAS_DEMO else ""
+    socials_cols = ",\n               dev_x_handle" if _has_dev_socials() else ""
+    demo_cols = ",\n               has_demo" if _has_demo() else ""
     rows = query(
         f"""
         SELECT appid, name, primary_genre, release_year, release_date, price_initial,
@@ -1917,21 +1923,21 @@ def game_profile(appid: int) -> dict:
     """
     players_cols = (
         ",\n               live_players, players_7d_avg, players_trend_7d_pct"
-        if _HAS_PLAYERS
+        if _has_players()
         else ""
     )
     lifetime_cols = (
         ",\n               lifetime_first_100_month, lifetime_died_month, lifetime_months,"
         "\n               lifetime_alive"
-        if _HAS_LIFETIME_GAME
+        if _has_lifetime_game()
         else ""
     )
-    socials_cols = ",\n               dev_x_handle" if _HAS_DEV_SOCIALS else ""
-    if _HAS_ALL_SOCIALS:
+    socials_cols = ",\n               dev_x_handle" if _has_dev_socials() else ""
+    if _has_all_socials():
         socials_cols += (",\n               dev_x_url, dev_discord_url, dev_youtube_url,"
                          "\n               dev_bluesky_handle, dev_bluesky_url")
-    demo_cols = ",\n               has_demo, demo_appid" if _HAS_DEMO else ""
-    if _HAS_METACRITIC_URL:
+    demo_cols = ",\n               has_demo, demo_appid" if _has_demo() else ""
+    if _has_metacritic_url():
         demo_cols += ",\n               metacritic_url"
     row = query_one(
         f"""
@@ -1954,7 +1960,7 @@ def game_profile(appid: int) -> dict:
             "or has fewer than 10 sampled reviews and didn't clear the analysis floor."
         }
     out = clean(row)
-    if _HAS_PLAYERS:
+    if _has_players():
         out["caveats"] = [_PLAYERS_POINT_SAMPLE_CAVEAT]
     return out
 
@@ -2217,7 +2223,7 @@ def game_reviews_summary(appid: int) -> dict:
 
     Empty lists (eligible=false) mean this game has too few sampled reviews for the marts,
     not that it was badly received."""
-    if not _HAS_GAME_REVIEWS:
+    if not _has_game_reviews():
         return {
             "error": "mart_game_reviews_* are not present in this analytics DB — it was "
             "built by an older ETL. Re-run the ETL (`task etl`) and retry."
@@ -2281,7 +2287,7 @@ def aspect_reviews(
     reviews and the same floor as game_teardown, highest-voted first. An eligible game with
     nothing said about that aspect returns an empty list — that is an absence of evidence,
     not a negative finding."""
-    if not _HAS_ASPECT_REVIEWS:
+    if not _has_aspect_reviews():
         return {
             "error": "mart_game_aspect_reviews is not present in this analytics DB — it was "
             "built by an older ETL. Re-run the ETL (`task etl`) and retry."
@@ -2310,6 +2316,24 @@ def aspect_reviews(
     )
 
 
+# In-process cache of the distinct (tag, n_games) list behind tag_suggest. Same tradeoff
+# the REST twin measured (api/app/routers/games.py::_tag_frequencies, duplicated here per
+# this file's no-api-imports rule): re-running the UNNEST(top_tags) aggregate over
+# mart_game costs ~90ms per call, while the FULL distinct list is only ~460 rows — build
+# it once (~25ms), then every suggest call is a sub-millisecond in-memory substring
+# filter. Caching for the process lifetime is safe because the analytics DB is swapped +
+# the process restarted on each ETL build (the same invariant the schema probes rely on).
+@lru_cache(maxsize=1)
+def _tag_frequencies() -> tuple[tuple[str, int], ...]:
+    rows = query(
+        "SELECT tag, COUNT(*) AS n_games "
+        "FROM (SELECT UNNEST(top_tags) AS tag FROM mart_game) "
+        "WHERE tag IS NOT NULL "
+        "GROUP BY tag ORDER BY n_games DESC, tag"
+    )
+    return tuple((r["tag"], int(r["n_games"])) for r in rows)
+
+
 @mcp.tool()
 def tag_suggest(q: str = "", limit: int = 10) -> dict:
     """Resolve a partial tag to the EXACT tag strings the catalog uses, with how many games
@@ -2318,18 +2342,10 @@ def tag_suggest(q: str = "", limit: int = 10) -> dict:
     find_niches rather than guessing the spelling. Empty q returns the most common tags."""
     needle = (q or "").strip().lower()
     limit = max(1, min(limit, 50))
-    rows = query(
-        """
-        SELECT tag, COUNT(*) AS n_games
-        FROM (SELECT UNNEST(top_tags) AS tag FROM mart_game)
-        WHERE ? = '' OR contains(lower(tag), ?)
-        GROUP BY tag
-        ORDER BY n_games DESC
-        LIMIT ?
-        """,
-        [needle, needle, limit],
-    )
-    return {"q": q, "n_returned": len(rows), "tags": clean_rows(rows)}
+    freqs = _tag_frequencies()
+    matched = [(t, n) for t, n in freqs if needle in t.lower()] if needle else list(freqs)
+    rows = [{"tag": t, "n_games": n} for t, n in matched[:limit]]
+    return {"q": q, "n_returned": len(rows), "tags": rows}
 
 
 # ==========================================================================================
@@ -2426,7 +2442,7 @@ def entity_profile(name: str, role: Literal["developer", "publisher"] = "develop
       official X links from the games' store pages/websites (may be a game's, the
       studio's or the dev's personal account — we cannot disambiguate without X API
       access); NULL = none found or socials not yet fetched."""
-    socials_cols = ",\n                   x_handle" if _HAS_DEV_SOCIALS else ""
+    socials_cols = ",\n                   x_handle" if _has_dev_socials() else ""
     try:
         ent = query_one(
             f"""
@@ -2701,46 +2717,53 @@ def buzz_trends(
 
 @mcp.tool()
 def channel_mix(genre: str | None = None) -> dict:
-    """Share of marketing "attention" by channel — press-only since 2026-08-25 (the creator
-    platforms were decommissioned) — for one genre, or the full matrix if genre is omitted. Two parallel
-    measures per channel: n_mentions (raw coverage volume) and reach_weighted (mentions
-    weighted by audience size — press = 1/mention since outlets carry no audience-size
-    figure here; creator mentions = reach at the time of the mention, falling back to the
-    latest known snapshot, then 1). share_reach_weighted is usually the more decision-
-    relevant number ("where do the eyeballs actually come from"), but a single very-large
-    channel can dominate it — compare both before deciding where to spend effort. Before any
-    channel scraper has run, every genre's mix reads 100% press — a real snapshot of today's
-    coverage, not an error.
+    """Marketing-attention volume by channel for one genre, or the full matrix if genre is
+    omitted. PRESS-ONLY since 2026-08-25: the creator platforms (YouTube/Reddit/Twitch/X)
+    were decommissioned and the mart now carries only the press channel, so every genre's
+    mix reads 100% press (share_mentions = share_reach_weighted = 1.0) and the useful
+    number per row is the absolute n_mentions — how much press coverage this genre
+    actually gets. reach_weighted = n_mentions for press (1/mention; outlets carry no
+    audience-size figure). The per-channel SHARE framing is kept so the shape is stable
+    if another channel is ever added back. An empty result means the genre label is
+    wrong/unrecognized or no press data has been collected yet — a real answer, not an
+    error.
     """
     where = ""
     params: list = []
     if genre:
         where = "WHERE genre = ?"
         params.append(genre)
-    rows = query(
-        f"SELECT genre, channel, n_mentions, reach_weighted, share_mentions, share_reach_weighted "
-        f"FROM mart_channel_mix {where} ORDER BY genre, share_reach_weighted DESC",
-        params,
-    )
+    try:
+        rows = query(
+            f"SELECT genre, channel, n_mentions, reach_weighted, share_mentions, share_reach_weighted "
+            f"FROM mart_channel_mix {where} ORDER BY genre, share_reach_weighted DESC",
+            params,
+        )
+    except duckdb.CatalogException:
+        return {
+            "error": "mart_channel_mix is not present in this analytics DB — it is built "
+            "by a newer ETL than the one that produced this current.duckdb. Re-run the "
+            "ETL (`task etl` in the main prospect checkout) and retry."
+        }
     if not rows:
         return {
             "genre": genre,
             "items": [],
             "note": "No channel-mix data yet for this genre — either the genre label is "
-            "wrong/unrecognized, or no marketing data (press or creator scrapers) has been "
-            "collected yet.",
+            "wrong/unrecognized, or no press data has been collected yet.",
         }
     return {"genre": genre, "n_returned": len(rows), "items": clean_rows(rows)}
 
 
 @mcp.tool()
 def channel_buzz(direction: Literal["rising", "cooling"] = "rising", limit: int = 15, include_series: bool = False) -> dict:
-    """Reach-WEIGHTED trending game-concepts across every marketing channel (press + YouTube +
-    press) — the sequel to buzz_trends (which is press-
-    title-only and unweighted). Same bigram/concept-allowlist mining as buzz_trends, but each
-    mention is weighted by its audience size (a mega-channel's coverage moves this more than
-    a tiny one) instead of counted equally — see total_weighted vs total_mentions (raw count)
-    per term, and by_channel for which channel(s) are actually driving a term.
+    """Reach-WEIGHTED trending game-concepts by marketing channel — PRESS-ONLY since
+    2026-08-25 (the creator platforms were decommissioned) — the sequel to buzz_trends
+    (which is press-title-only and unweighted). Same bigram/concept-allowlist mining as
+    buzz_trends, but each mention carries a reach weight — press = 1/mention since
+    outlets have no audience-size figure here, so with press as the only channel
+    total_weighted currently tracks total_mentions. by_channel shows which channel(s)
+    drive a term (today: press alone; the shape is kept for if a channel is added back).
 
     direction="rising"/"cooling" sorts by steepest recent-vs-prior weighted-average change.
     include_series=True adds each term's per-period (n_mentions, reach_weighted_score) —
@@ -2748,50 +2771,76 @@ def channel_buzz(direction: Literal["rising", "cooling"] = "rising", limit: int 
     """
     order = "DESC" if direction == "rising" else "ASC"
     limit = max(1, min(limit, 50))
-    rows = query(
-        f"SELECT term, total_mentions, total_weighted, recent_avg_weighted, prior_avg_weighted, "
-        f"slope_weighted FROM mart_channel_buzz_summary WHERE direction = ? "
-        f"ORDER BY slope_weighted {order} LIMIT ?",
-        [direction, limit],
-    )
-    items = clean_rows(rows)
-
-    if items:
-        terms = [item["term"] for item in items]
-        placeholders = ",".join("?" for _ in terms)
-        detail_rows = query(
-            f"SELECT term, channel, period, n_mentions, reach_weighted_score FROM mart_channel_buzz "
-            f"WHERE term IN ({placeholders}) ORDER BY term, period",
-            terms,
+    try:
+        rows = query(
+            f"SELECT term, total_mentions, total_weighted, recent_avg_weighted, prior_avg_weighted, "
+            f"slope_weighted FROM mart_channel_buzz_summary WHERE direction = ? "
+            f"ORDER BY slope_weighted {order} LIMIT ?",
+            [direction, limit],
         )
-        breakdown: dict[str, dict[str, dict]] = {t: {} for t in terms}
-        series: dict[str, dict[str, dict]] = {t: {} for t in terms}
-        for r in detail_rows:
-            t, ch, per = r["term"], r["channel"], r["period"]
-            cb = breakdown[t].setdefault(ch, {"n_mentions": 0, "reach_weighted_score": 0.0})
-            cb["n_mentions"] += r["n_mentions"]
-            cb["reach_weighted_score"] += r["reach_weighted_score"]
-            sp = series[t].setdefault(per, {"n_mentions": 0, "reach_weighted_score": 0.0})
-            sp["n_mentions"] += r["n_mentions"]
-            sp["reach_weighted_score"] += r["reach_weighted_score"]
-        for item in items:
-            item["by_channel"] = clean_rows(
-                [
-                    {"channel": ch, **v}
-                    for ch, v in sorted(breakdown[item["term"]].items(), key=lambda kv: -kv[1]["reach_weighted_score"])
-                ]
-            )
+        items = clean_rows(rows)
+
+        if items:
+            terms = [item["term"] for item in items]
+            placeholders = ",".join("?" for _ in terms)
+            breakdown: dict[str, dict[str, dict]] = {t: {} for t in terms}
+            series: dict[str, dict[str, dict]] = {t: {} for t in terms}
             if include_series:
-                item["series"] = clean_rows([{"period": per, **v} for per, v in sorted(series[item["term"]].items())])
+                # Per-period detail: one scan feeds BOTH the per-channel totals and each
+                # term's period series.
+                detail_rows = query(
+                    f"SELECT term, channel, period, n_mentions, reach_weighted_score FROM mart_channel_buzz "
+                    f"WHERE term IN ({placeholders}) ORDER BY term, period",
+                    terms,
+                )
+                for r in detail_rows:
+                    t, ch, per = r["term"], r["channel"], r["period"]
+                    cb = breakdown[t].setdefault(ch, {"n_mentions": 0, "reach_weighted_score": 0.0})
+                    cb["n_mentions"] += r["n_mentions"]
+                    cb["reach_weighted_score"] += r["reach_weighted_score"]
+                    sp = series[t].setdefault(per, {"n_mentions": 0, "reach_weighted_score": 0.0})
+                    sp["n_mentions"] += r["n_mentions"]
+                    sp["reach_weighted_score"] += r["reach_weighted_score"]
+            else:
+                # Summary-only: by_channel needs per-(term, channel) TOTALS, not the
+                # per-period rows — aggregate in the DB and skip shipping/looping the full
+                # period detail the caller didn't ask for.
+                for r in query(
+                    f"SELECT term, channel, SUM(n_mentions) AS n_mentions, "
+                    f"SUM(reach_weighted_score) AS reach_weighted_score "
+                    f"FROM mart_channel_buzz WHERE term IN ({placeholders}) "
+                    f"GROUP BY term, channel",
+                    terms,
+                ):
+                    breakdown[r["term"]][r["channel"]] = {
+                        "n_mentions": int(r["n_mentions"]),
+                        "reach_weighted_score": r["reach_weighted_score"],
+                    }
+            for item in items:
+                item["by_channel"] = clean_rows(
+                    [
+                        {"channel": ch, **v}
+                        for ch, v in sorted(breakdown[item["term"]].items(), key=lambda kv: -kv[1]["reach_weighted_score"])
+                    ]
+                )
+                if include_series:
+                    item["series"] = clean_rows([{"period": per, **v} for per, v in sorted(series[item["term"]].items())])
+    except duckdb.CatalogException:
+        return {
+            "error": "mart_channel_buzz/mart_channel_buzz_summary are not present in this "
+            "analytics DB — they are built by a newer ETL than the one that produced this "
+            "current.duckdb. Re-run the ETL (`task etl` in the main prospect checkout) "
+            "and retry."
+        }
 
     return {
         "direction": direction,
         "n_returned": len(items),
         "terms": items,
         "caveats": [
-            "Weighting: press = 1/mention (no audience-size data); creator mentions = reach at "
-            "time of mention, falling back to the latest known snapshot, then 1 — a single very-"
-            "large channel can dominate total_weighted.",
+            "Weighting: press = 1/mention (outlets carry no audience-size figure), and press "
+            "is the only channel since the creator platforms were decommissioned 2026-08-25 — "
+            "total_weighted currently tracks total_mentions.",
             "Compares the last 3 complete months to the 3 before that; the current in-progress "
             "month is excluded.",
             "Restricted to Steam's tag/genre vocabulary (word-level match), same as buzz_trends.",
@@ -2820,7 +2869,7 @@ def game_player_history(appid: int, days: int = 30) -> dict:
     rotation), not an error. Returns {"error": ...} for an unknown appid or a mart that
     predates the CCU marts (re-run the ETL).
     """
-    if not _HAS_PLAYERS:
+    if not _has_players():
         return {"error": _PLAYERS_MISSING}
     days = max(7, min(days, 365))
     game = query_one(
@@ -2882,7 +2931,7 @@ def game_player_history(appid: int, days: int = 30) -> dict:
             )
 
     monthly: list[dict] = []
-    if _HAS_PLAYERS_HISTORY:
+    if _has_players_history():
         monthly = query(
             "SELECT CAST(date AS VARCHAR) AS month, avg_players, peak_players "
             "FROM mart_game_players_history WHERE appid = ? AND grain = 'monthly' ORDER BY date",
@@ -2926,10 +2975,10 @@ def niche_player_history(dimension: Literal["tag", "genre"], key: str, days: int
     biggest games (the top-12k games hold ~99% of all Steam CCU) — a big total says
     people play the niche's HITS, not that a new entrant gets players.
     """
-    if not _HAS_PLAYERS:
+    if not _has_players():
         return {"error": _PLAYERS_MISSING}
     days = max(7, min(days, 365))
-    dist_cols = ", median_players_now, players_top5_share" if _HAS_PLAYERS_DIST else ""
+    dist_cols = ", median_players_now, players_top5_share" if _has_players_dist() else ""
     niche = query_one(
         f"SELECT total_players_now, players_trend_7d_pct, players_coverage{dist_cols} "
         "FROM mart_niche WHERE dimension = ? AND key = ? LIMIT 1",
@@ -2972,7 +3021,7 @@ def niche_player_history(dimension: Literal["tag", "genre"], key: str, days: int
         }
 
     monthly: list[dict] = []
-    if _HAS_PLAYERS_HISTORY:
+    if _has_players_history():
         try:
             monthly = query(
                 "SELECT CAST(month AS VARCHAR) AS month, avg_players_sum, n_games_measured "
@@ -2989,7 +3038,7 @@ def niche_player_history(dimension: Literal["tag", "genre"], key: str, days: int
             )
 
     top_games: list[dict] = []
-    if _HAS_PLAYERS_DIST:
+    if _has_players_dist():
         try:
             top_games = query(
                 "SELECT rank, appid, name, players, share FROM mart_niche_players_top "
@@ -3008,8 +3057,8 @@ def niche_player_history(dimension: Literal["tag", "genre"], key: str, days: int
                 "total_players_now": niche["total_players_now"],
                 "players_trend_7d_pct": niche["players_trend_7d_pct"],
                 "players_coverage": niche["players_coverage"],
-                "median_players_now": niche.get("median_players_now") if _HAS_PLAYERS_DIST else None,
-                "players_top5_share": niche.get("players_top5_share") if _HAS_PLAYERS_DIST else None,
+                "median_players_now": niche.get("median_players_now") if _has_players_dist() else None,
+                "players_top5_share": niche.get("players_top5_share") if _has_players_dist() else None,
                 "n_games_panel": panel["n_games_panel"] if panel else None,
                 "history": history,
             }

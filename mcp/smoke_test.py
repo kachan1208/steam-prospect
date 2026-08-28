@@ -42,12 +42,12 @@ def main() -> None:
             "opportunity_v2 must never exceed opportunity (gate is <= 1)"
         # Live-player columns ride along exactly when the mart carries them (values may
         # be None — e.g. a fixture whose one capture day is > 7d stale).
-        if srv._HAS_PLAYERS:
+        if srv._has_players():
             for field in ("total_players_now", "players_trend_7d_pct", "players_coverage"):
                 assert field in top, f"missing players field {field!r} in find_niches rows"
         # Lifetime columns ride along exactly when the mart carries them (values may be
         # None pre-mart — e.g. fewer than 5 steamcharts-covered games in the niche).
-        if srv._HAS_LIFETIME:
+        if srv._has_lifetime():
             assert "lifetime_survival_12m" in top, "missing lifetime field in find_niches rows"
         print(f"\n[OK] top niche is {top['key']!r} (tier={top['tier']}, "
               f"opportunity_v2={top['opportunity_v2']}, gate={top['decline_gate']})")
@@ -115,7 +115,7 @@ def main() -> None:
     # dev_x_handle rides along exactly when the mart carries the socials columns (value
     # may be None — official links are harvested from store pages / dev websites, and
     # not every game has one or has been fetched yet).
-    if srv._HAS_DEV_SOCIALS:
+    if srv._has_dev_socials():
         assert "dev_x_handle" in profile, "missing dev_x_handle in game_profile"
         assert all("dev_x_handle" in g for g in search["games"]), \
             "missing dev_x_handle in game_search rows"
@@ -216,7 +216,7 @@ def main() -> None:
         assert ep["trajectory"]["debut"]["seq"] == 1
         # x_handle rides along exactly when the mart carries the socials columns (value
         # may be None — majority vote over the entity's games' dev_x_handle).
-        if srv._HAS_DEV_SOCIALS:
+        if srv._has_dev_socials():
             assert "x_handle" in ep["entity"], "missing x_handle in entity_profile"
         print(f"\n[OK] entity_profile: EA published {ep['entity']['n_games']} games, "
               f"{ep['entity']['n_recent_24m']} in the last 24m, {ep['entity']['n_partners']} partners")
@@ -244,6 +244,105 @@ def main() -> None:
     # the resource-read protocol, same "decorator returns fn unchanged" property as tools).
     dd = srv.data_dictionary()
     print(f"\n=== data_dictionary() resource ===\n{dd[:400]}\n... [{len(dd)} chars total]")
+
+    # 11. niche_review_themes — tolerant: mart_niche_themes only exists on marts built by
+    # the ETL that added it; absence must yield the tool's clear error dict, never a crash.
+    themes = srv.niche_review_themes("tag", detail_key)
+    show(f"niche_review_themes('tag', {detail_key!r})", themes)
+    if "error" in themes:
+        assert "mart_niche_themes" in themes["error"] or "no niche found" in themes["error"], \
+            f"unexpected niche_review_themes error: {themes['error']!r}"
+        print("\n[OK] niche_review_themes degraded cleanly")
+    else:
+        assert isinstance(themes["praise_themes"], list) and isinstance(themes["complaint_themes"], list)
+        assert themes["caveats"], "niche_review_themes must always state its caveats"
+        print(f"\n[OK] niche_review_themes: {len(themes['praise_themes'])} praise / "
+              f"{len(themes['complaint_themes'])} complaint themes")
+
+    # 12. find_comparables — computed on demand from mart_game, so it works on any mart;
+    # shape-checked only (the fixture's tiny catalog may yield zero matches — a real
+    # answer, flagged by `note`).
+    comps = srv.find_comparables(367520, limit=5)
+    show("find_comparables(367520)  # Hollow Knight", comps)
+    assert "error" not in comps
+    assert comps["name"] == "Hollow Knight"
+    assert isinstance(comps["comparables"], list) and "price_band" in comps
+    assert comps["caveats"], "find_comparables must always state its caveats"
+    for c in comps["comparables"]:
+        assert "jaccard" in c and "shared_tags" in c
+    print(f"\n[OK] find_comparables: {comps['n_returned']} comparables "
+          f"(band ${comps['price_band']['low']}-${comps['price_band']['high']})")
+
+    miss_comp = srv.find_comparables(1)  # appid 1 never exists
+    assert "error" in miss_comp
+    print("\n[OK] find_comparables miss -> error dict")
+
+    # 13. game_reviews_summary — tolerant: the mart_game_reviews_* marts are additive.
+    grs = srv.game_reviews_summary(367520)
+    show("game_reviews_summary(367520)", grs)
+    if "error" in grs:
+        assert "mart_game_reviews" in grs["error"], \
+            f"unexpected game_reviews_summary error: {grs['error']!r}"
+        print("\n[OK] game_reviews_summary degraded cleanly (marts not built yet — run `task etl`)")
+    else:
+        assert "eligible" in grs and isinstance(grs["timeline"], list)
+        assert isinstance(grs["language_split"], list) and isinstance(grs["launch_curve"], list)
+        print(f"\n[OK] game_reviews_summary: {len(grs['timeline'])} timeline rows, "
+              f"eligible={grs['eligible']}")
+
+    # 14. aspect_reviews — tolerant: mart_game_aspect_reviews is additive. An eligible
+    # game with nothing said about an aspect returns an empty list (absence of evidence).
+    ar = srv.aspect_reviews(367520, "Combat & Bosses", "praise", limit=2)
+    show("aspect_reviews(367520, 'Combat & Bosses', 'praise')", ar)
+    if "error" in ar:
+        assert "mart_game_aspect_reviews" in ar["error"], \
+            f"unexpected aspect_reviews error: {ar['error']!r}"
+        print("\n[OK] aspect_reviews degraded cleanly (mart not built yet — run `task etl`)")
+    else:
+        assert isinstance(ar["items"], list) and ar["n_returned"] == len(ar["items"])
+        print(f"\n[OK] aspect_reviews: {ar['n_returned']} excerpts")
+        # Aspect validation only runs once the mart-presence gate passes.
+        bad_aspect = srv.aspect_reviews(367520, "Not An Aspect", "praise")
+        assert "error" in bad_aspect and "aspect must be one of" in bad_aspect["error"]
+        print("\n[OK] aspect_reviews rejects unknown aspects")
+
+    # 15. tag_suggest — works on any mart (reads mart_game.top_tags); the second call must
+    # hit the in-process frequency cache and agree with the first.
+    sugg = srv.tag_suggest("rogue", limit=5)
+    show("tag_suggest('rogue')", sugg)
+    assert isinstance(sugg["tags"], list) and sugg["n_returned"] == len(sugg["tags"])
+    for t in sugg["tags"]:
+        assert "tag" in t and "n_games" in t
+        assert "rogue" in t["tag"].lower()
+    assert srv.tag_suggest("rogue", limit=5) == sugg, "tag_suggest must be deterministic (cached)"
+    top_tags = srv.tag_suggest("", limit=3)
+    assert top_tags["n_returned"] <= 3
+    print(f"\n[OK] tag_suggest: {sugg['n_returned']} matches for 'rogue', cache consistent")
+
+    # 16. channel_mix + channel_buzz — tolerant: the channel marts are additive (and
+    # press-only since 2026-08-25); absence must yield the tools' clear error dict.
+    cm = srv.channel_mix()
+    show("channel_mix()", cm)
+    if "error" in cm:
+        assert "mart_channel_mix" in cm["error"], f"unexpected channel_mix error: {cm['error']!r}"
+        print("\n[OK] channel_mix degraded cleanly (mart not built yet — run `task etl`)")
+    else:
+        assert isinstance(cm["items"], list)
+        print(f"\n[OK] channel_mix: {len(cm['items'])} (genre, channel) rows")
+
+    cb = srv.channel_buzz("rising", limit=5)
+    show("channel_buzz('rising')", cb)
+    if "error" in cb:
+        assert "mart_channel_buzz" in cb["error"], f"unexpected channel_buzz error: {cb['error']!r}"
+        print("\n[OK] channel_buzz degraded cleanly (marts not built yet — run `task etl`)")
+    else:
+        assert isinstance(cb["terms"], list) and cb["n_returned"] == len(cb["terms"])
+        for term in cb["terms"]:
+            assert "by_channel" in term and "series" not in term  # series only when asked
+        cb_series = srv.channel_buzz("rising", limit=2, include_series=True)
+        assert all("series" in t and "by_channel" in t for t in cb_series["terms"])
+        print(f"\n[OK] channel_buzz: {cb['n_returned']} terms, by_channel always attached, "
+              "series only with include_series=True")
 
     print("\nALL SMOKE TESTS PASSED")
 
