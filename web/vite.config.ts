@@ -30,8 +30,16 @@ export default defineConfig(({ mode }) => {
         output: {
           // Split the big, rarely-changing vendor libs into their own chunks so an
           // app-code change doesn't invalidate the (larger) charting/query caches.
+          //
+          // `clsx` is listed EXPLICITLY with vendor-react, and that placement is
+          // load-bearing (2026-08-28): clsx is also a dependency of recharts, so without
+          // this rollup hoists it into vendor-recharts — and since every eager module
+          // (App, Radar, RadarBoard) imports clsx directly, the entry then statically
+          // depends on the 406KB recharts chunk and index.html modulepreloads it. That
+          // silently defeats the route-level code splitting: /radar draws hand-rolled
+          // SVG and imports no chart at all. Keep clsx out of the recharts chunk.
           manualChunks: {
-            "vendor-react": ["react", "react-dom", "react-router-dom"],
+            "vendor-react": ["react", "react-dom", "react-router-dom", "clsx"],
             "vendor-recharts": ["recharts"],
             "vendor-query": ["@tanstack/react-query", "@tanstack/react-table"],
           },

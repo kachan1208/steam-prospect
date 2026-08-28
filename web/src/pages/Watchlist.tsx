@@ -24,7 +24,7 @@ import {
   type WatchlistEntry,
   type WatchlistKind,
 } from "../lib/watchlist";
-import { nicheDetailPath } from "./NicheDetail";
+import { nicheDetailPath } from "../lib/nichePath";
 
 /**
  * Watchlist — saved niches & games with alert rules (mockup 4f).

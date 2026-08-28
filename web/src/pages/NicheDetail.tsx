@@ -60,8 +60,11 @@ const CONDENSED = '"Barlow Condensed", "Barlow", system-ui, sans-serif';
 
 // ---- route + URL contract ----------------------------------------------------------------
 
-/** The one place the route pattern is spelled; App.tsx and the round-trip test both use it. */
-export const NICHE_ROUTE_PATH = "/niches/:dimension/:key";
+// The route pattern + link builder moved to lib/nichePath.ts (eager modules — App's route
+// table, RadarBoard — must be able to link here without statically importing this whole
+// page module, or the route-level code splitting is defeated). Re-exported so the pages
+// and tests that always imported them from here keep working.
+export { NICHE_ROUTE_PATH, nicheDetailPath } from "../lib/nichePath";
 
 export const GAMES_PAGE_SIZE = 25;
 
@@ -84,28 +87,6 @@ function readNum(raw: string | null): number | undefined {
   if (raw === null || raw.trim() === "") return undefined;
   const n = Number(raw);
   return Number.isFinite(n) ? n : undefined;
-}
-
-/**
- * Canonical link to a niche page. Keys carry spaces AND slashes ("Action Roguelike",
- * "Massively Multiplayer/RPG"), so the key segment is always percent-encoded — React Router
- * decodes `:key` back (it un-escapes each segment and then restores %2F to "/"), so the
- * value handed to useParams is byte-for-byte the key we linked. See NicheDetail.test.tsx.
- */
-export function nicheDetailPath(
-  dimension: string,
-  key: string,
-  search?: Record<string, string | number | undefined | null>,
-): string {
-  const base = `/niches/${encodeURIComponent(dimension)}/${encodeURIComponent(key)}`;
-  if (!search) return base;
-  const sp = new URLSearchParams();
-  for (const [k, v] of Object.entries(search)) {
-    if (v === undefined || v === null || v === "") continue;
-    sp.set(k, String(v));
-  }
-  const s = sp.toString();
-  return s ? `${base}?${s}` : base;
 }
 
 /** A bucket brush is only a filter when BOTH bounds are present and ordered — a half-written

@@ -19,7 +19,7 @@ import {
   type VerdictCheck,
 } from "../lib/radarVerdict";
 import { TooltipPanel } from "./charts/TooltipPanel";
-import { nicheDetailPath } from "../pages/NicheDetail";
+import { nicheDetailPath } from "../lib/nichePath";
 
 /**
  * RadarBoard — the XY QUADRANT plate (2026-08-27, user directive: "score them accordingly

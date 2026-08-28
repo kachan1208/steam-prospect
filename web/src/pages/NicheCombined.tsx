@@ -22,7 +22,8 @@ import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib
 // The deep-dive page owns the canonical /niches/:dimension/:key link builder AND the §4b
 // KPI-cell primitive (condensed-numeral, 1px-gap blueprint grid); re-exported/reused below so
 // the two pages share one link site and one visual language instead of drifting apart.
-import { KpiCell, nicheDetailPath } from "./NicheDetail";
+import { KpiCell } from "./NicheDetail";
+import { nicheDetailPath } from "../lib/nichePath";
 
 export { nicheDetailPath };
 
