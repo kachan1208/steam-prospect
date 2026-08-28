@@ -3,6 +3,8 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import clsx from "clsx";
 
+import { EmptyState } from "../components/ui/EmptyState";
+import { Loading } from "../components/ui/Loading";
 import { trackEvent } from "../lib/analytics";
 import {
   nicheExportCsvUrl,
@@ -695,14 +697,17 @@ export default function NicheFinder() {
 
       <div className={clsx("blueprint", isFetching && "opacity-90 transition-opacity")}>
         <i className="bp-corner" />
-        {isLoading && <div className="p-8 text-center text-sm text-ink-muted">Loading niches…</div>}
+        {isLoading && <Loading label="Loading niches…" className="p-8 text-sm" />}
         {isError && (
           <div className="p-8 text-center text-sm text-status-serious">
             Failed to load niches{error instanceof Error ? `: ${error.message}` : "."}
           </div>
         )}
         {data && data.items.length === 0 && (
-          <div className="p-8 text-center text-sm text-ink-muted">No niches match these filters.</div>
+          <EmptyState
+            title="No niches match these filters"
+            description="Try a broader tier selection, a lower review floor, or clear the search."
+          />
         )}
         {data && data.items.length > 0 && (
           <div className="overflow-x-auto">

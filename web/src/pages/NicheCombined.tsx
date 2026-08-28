@@ -5,6 +5,7 @@ import clsx from "clsx";
 
 import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Loading } from "../components/ui/Loading";
 import { trackEvent } from "../lib/analytics";
 import {
   ApiError,
@@ -451,7 +452,7 @@ export default function NicheCombined() {
 
       {enough && combinedQ.isLoading && (
         <Card>
-          <div className="py-8 text-center text-sm text-ink-muted">Combining {selection.length} niches…</div>
+          <Loading label={`Combining ${selection.length} niches…`} className="py-8 text-sm" />
         </Card>
       )}
 

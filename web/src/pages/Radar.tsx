@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import clsx from "clsx";
 
 import { RadarBoard, type RadarBoardBlip, type RadarSector } from "../components/RadarBoard";
+import { Loading } from "../components/ui/Loading";
 import { useNiches, type NicheRow } from "../lib/api";
 import { SOLO_FRIENDLY_MIN, radarVerdictTrace } from "../lib/radarVerdict";
 
@@ -201,7 +202,7 @@ function RadarBoardSection({
         </div>
       </div>
 
-      {loading && <div className="py-16 text-center text-sm text-ink-muted">Plotting the board…</div>}
+      {loading && <Loading label="Plotting the board…" className="py-16 text-sm" />}
       {bothFailed && (
         <div className="py-16 text-center text-sm text-status-serious">
           Failed to load the niche cuts{errorMessage ? `: ${errorMessage}` : "."}

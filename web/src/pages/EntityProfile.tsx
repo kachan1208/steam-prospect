@@ -5,6 +5,7 @@ import { EntityReleaseBars } from "../components/charts/EntityReleaseBars";
 import { Badge } from "../components/ui/Badge";
 import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Loading } from "../components/ui/Loading";
 import { StatTile } from "../components/ui/StatTile";
 import {
   ApiError,
@@ -65,7 +66,7 @@ export default function EntityProfile() {
   }
 
   if (profileQ.isLoading) {
-    return <div className="p-6 text-sm text-ink-muted">Loading {role}…</div>;
+    return <Loading label={`Loading ${role}…`} className="p-6 text-sm" />;
   }
 
   if (profileQ.isError || !entity) {

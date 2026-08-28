@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { Card } from "../components/ui/Card";
+import { Loading } from "../components/ui/Loading";
 import { request } from "../lib/api";
 
 type Counts = { games?: number; reviews?: number; players?: number };
@@ -95,7 +96,9 @@ export default function DataLog() {
       </div>
 
       {isLoading ? (
-        <Card className="py-10 text-center text-sm text-ink-muted">Loading…</Card>
+        <Card className="py-10">
+          <Loading className="text-sm" />
+        </Card>
       ) : isError ? (
         <Card className="py-10 text-center text-sm text-verdict-serious">Couldn’t load the refresh log.</Card>
       ) : runs.length === 0 ? (

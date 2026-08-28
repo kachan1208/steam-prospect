@@ -12,6 +12,8 @@ import {
 import { SaturationTrend } from "../components/charts/SaturationTrend";
 import { TooltipPanel } from "../components/charts/TooltipPanel";
 import { Card } from "../components/ui/Card";
+import { EmptyState } from "../components/ui/EmptyState";
+import { Loading } from "../components/ui/Loading";
 import { BulletMeter } from "../components/ui/Meter";
 import { StatTile } from "../components/ui/StatTile";
 import { ViewToggle } from "../components/ui/ViewToggle";
@@ -534,7 +536,7 @@ export default function NicheDetail() {
   }
 
   if (detailQ.isLoading) {
-    return <div className="p-6 text-sm text-ink-muted">Loading niche…</div>;
+    return <Loading label="Loading niche…" className="p-6 text-sm" />;
   }
 
   if (detailQ.isError || !detail || !activeVariant) {
@@ -1549,21 +1551,25 @@ export default function NicheDetail() {
             )}
 
             {!gamesUnavailable && gamesQ.data && gamesQ.data.items.length === 0 && (
-              <div className="flex flex-col items-center gap-2 py-6 text-center text-xs text-ink-muted">
-                <span>No games in this niche match the selected buckets.</span>
-                {hasSelection && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      patch(writeSelection(writeSelection(searchParams, "revenue", null), "price", null));
-                      trackEvent("niche_filter_apply");
-                    }}
-                    className="rounded-md border border-chartborder px-2.5 py-1 font-medium text-ink-secondary transition-colors hover:border-brand hover:text-brand"
-                  >
-                    Clear filters
-                  </button>
-                )}
-              </div>
+              <EmptyState
+                className="py-6"
+                title="No games match the selected buckets"
+                description="Every game in this niche falls outside the brushed revenue/price range."
+                action={
+                  hasSelection ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        patch(writeSelection(writeSelection(searchParams, "revenue", null), "price", null));
+                        trackEvent("niche_filter_apply");
+                      }}
+                      className="rounded-md border border-chartborder px-2.5 py-1 text-xs font-medium text-ink-secondary transition-colors hover:border-brand hover:text-brand"
+                    >
+                      Clear filters
+                    </button>
+                  ) : undefined
+                }
+              />
             )}
 
             {!gamesUnavailable && gamesQ.data && gamesQ.data.items.length > 0 && (

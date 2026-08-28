@@ -8,6 +8,7 @@ import { SeasonalityHeatmap } from "../components/charts/SeasonalityHeatmap";
 import { TimingBars } from "../components/charts/TimingBars";
 import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Loading } from "../components/ui/Loading";
 import {
   ApiError,
   launchCurveQueryOptions,
@@ -24,7 +25,7 @@ const DEFAULT_CURVE_GENRES = ["__all__", "Indie", "Action", "Adventure", "Casual
 
 /** Shared loading / refreshing / no-data handling for the timing sections. */
 function TimingStatus({ isLoading, error }: { isLoading: boolean; error: unknown }) {
-  if (isLoading) return <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading…</div>;
+  if (isLoading) return <Loading className="h-40 text-xs" />;
   if (error instanceof ApiError && error.status === 503) {
     return (
       <EmptyState
@@ -224,7 +225,7 @@ export default function LaunchTiming() {
         subtitle="Median estimated revenue (or release count) by the calendar month and weekday games shipped — where past releases landed well, and where the catalog piles up"
       >
         {seasonLoading && !seasonality && (
-          <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading…</div>
+          <Loading className="h-40 text-xs" />
         )}
         {seasonality &&
           (seasonality.month_weekday.length > 0 ? (
@@ -312,7 +313,7 @@ export default function LaunchTiming() {
                   {result?.data && <span className="text-[10px] text-ink-muted">{result.data.points[0]?.n_games ?? 0} games</span>}
                 </div>
                 {result?.isLoading && (
-                  <div className="flex h-32 items-center justify-center text-xs text-ink-muted">Loading…</div>
+                  <Loading className="h-32 text-xs" />
                 )}
                 {result?.data && <LaunchShapeBars points={result.data.points} height={140} />}
               </div>
@@ -326,7 +327,7 @@ export default function LaunchTiming() {
         subtitle={priceDist ? `${priceDist.n.toLocaleString()} paid games · $2.50 bins` : "What paid games actually charge"}
         action={<GenreSelect genres={genres} value={priceGenre} onChange={setPriceGenre} />}
       >
-        {priceLoading && !priceDist && <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading…</div>}
+        {priceLoading && !priceDist && <Loading className="h-40 text-xs" />}
         {priceDist && (
           <>
             <Histogram
