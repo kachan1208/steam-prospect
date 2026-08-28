@@ -28,6 +28,10 @@ FILES=(
     "lib.sh"
     "backup.sh"
     "rollback.sh"
+    # Not on any cron schedule — a one-shot backlog drain the operator launches by hand
+    # (per ops notes, under systemd-run with a MemoryMax). Shipped so /root/ matches the
+    # repo; copying it does not start it.
+    "socials_marathon.sh"
     "observability/alert_check.py:alert_check.py"
     "crontab.txt"
 )
