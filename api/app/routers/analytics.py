@@ -2,8 +2,9 @@
 
 Public, unauthenticated, and deliberately thin: it validates a small batch, increments bounded
 counters, and returns 204. Nothing is stored — the counters ARE the storage, scraped by
-VictoriaMetrics and charted in Grafana. Unknown routes/events are silently ignored (bounded
-cardinality), so the worst a bad client can do is inflate a known counter, never mint new series.
+VictoriaMetrics and charted in Grafana. Unknown routes are counted under route="unknown" and
+unknown events are ignored (bounded cardinality either way), so the worst a bad client can do
+is inflate a known counter, never mint new series.
 """
 from __future__ import annotations
 
