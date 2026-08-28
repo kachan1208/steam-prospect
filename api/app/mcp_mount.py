@@ -17,6 +17,32 @@ from typing import Any
 
 from .config import REPO_ROOT, settings
 
+# The loaded prospect_mcp module (None until load_prospect_mcp succeeds). Kept so the
+# app's shutdown path can close the module's own DuckDB connection — main.py closes
+# analytics_db explicitly, and without this hook the MCP's read-only conn would leak.
+_loaded_module: Any | None = None
+
+# Size cap for the JSONL tool-call log before it rolls over to a single <path>.1 archive
+# (overwritten each rollover) — bounds disk use at ~2x this figure without needing a
+# log-rotation daemon. Lines are capped at ~2KB (see _log_call), so 5MB is ~2.5K calls.
+_MAX_LOG_BYTES = 5 * 1024 * 1024
+
+
+def close_prospect_mcp() -> None:
+    """Close the loaded MCP module's DuckDB connection (idempotent, best-effort).
+
+    Called unconditionally from main.py's lifespan shutdown; a no-op when the MCP was
+    never loaded, and tolerant of an older prospect_mcp.py without close().
+    """
+    global _loaded_module
+    module, _loaded_module = _loaded_module, None
+    if module is None:
+        return
+    try:
+        module.close()
+    except Exception:  # noqa: BLE001 — shutdown must never fail on cleanup
+        pass
+
 
 def load_prospect_mcp() -> tuple[Any | None, Any | None]:
     """Return (fastmcp_server, asgi_app) for mounting, or (None, None) if unavailable."""
@@ -35,6 +61,8 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
             return None, None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)  # defines the tools; guarded __main__ won't run
+        global _loaded_module
+        _loaded_module = module  # conn is open from here on — track it for shutdown close
 
         server = module.mcp
         # Stateless: each request is independent — right for many unrelated Claude clients
@@ -83,6 +111,18 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
                     },
                     ensure_ascii=False,
                 )
+                # Size-based rotation BEFORE the append: at the cap, the live file becomes
+                # the single .1 archive (os.replace overwrites the previous archive) and a
+                # fresh log starts — so an append-forever log can't eat the disk. Racing
+                # writers are benign: at worst two rotations happen back-to-back and a few
+                # lines land in the archive early.
+                import os
+
+                try:
+                    if os.path.getsize(_log_path) >= _MAX_LOG_BYTES:
+                        os.replace(_log_path, f"{_log_path}.1")
+                except OSError:
+                    pass  # first write (no file yet) or a racing worker already rotated
                 with open(_log_path, "a", encoding="utf-8") as fh:
                     fh.write(line + "\n")
             except Exception:
@@ -97,10 +137,27 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
                 except Exception:
                     pass
             import time as _time
+            from functools import partial
+
+            import anyio
+            import anyio.to_thread
 
             t0 = _time.monotonic()
+            # Every Prospect tool is a plain sync `def`, and the FastMCP SDK calls sync
+            # tools INLINE on the event loop (func_metadata.call_fn_with_arg_validation:
+            # `if fn_is_async: await fn(...) else: fn(...)`) — so one slow DuckDB read
+            # would freeze ALL HTTP traffic on this worker. Offload the whole SDK call to
+            # a worker thread: anyio.run() there spins a private event loop to drive the
+            # SDK's async plumbing (arg validation + result conversion — loop-independent
+            # pure computation), and the blocking DuckDB read blocks only that thread.
+            # Concurrent tool calls still serialize on prospect_mcp's module-global
+            # connection lock — correct, just not parallel. CONSTRAINT: this relies on no
+            # tool taking a Context parameter (none does today) — Context methods talk to
+            # the client session over the SERVER loop and must not be driven from the
+            # worker loop.
+            _bound = partial(_orig_call, name, arguments, *a, **kw)
             try:
-                result = await _orig_call(name, arguments, *a, **kw)
+                result = await anyio.to_thread.run_sync(lambda: anyio.run(_bound))
             except Exception:
                 _log_call(name, arguments, ok=False, ms=int((_time.monotonic() - t0) * 1000))
                 raise
@@ -108,11 +165,12 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
             return result
 
         server._tool_manager.call_tool = _observed_call
-        print(f"[api] MCP: tool-call observability on (metrics={'yes' if _tool_calls else 'no'}, log={_log_path or 'off'}).")
+        print(f"[api] MCP: tool-call observability on (metrics={'yes' if _tool_calls else 'no'}, log={_log_path or 'off'}); sync tools offloaded to worker threads.")
         asgi_app = server.streamable_http_app()  # also lazily creates server.session_manager
 
         print("[api] MCP: mounted 'prospect-market-intel' at /mcp (Streamable HTTP, stateless).")
         return server, asgi_app
     except Exception as exc:  # noqa: BLE001 — MCP wiring must never take down the API
         print(f"[api] MCP: failed to load ({exc!r}); skipping /mcp mount.")
+        close_prospect_mcp()  # module may have opened its conn before the wiring failed
         return None, None

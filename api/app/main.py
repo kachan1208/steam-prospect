@@ -15,7 +15,7 @@ from .observability import setup_observability
 from .routers import (
     analytics, entities, games, health, market, niches, refresh, seasonality, timing, trends,
 )
-from .mcp_mount import load_prospect_mcp
+from .mcp_mount import close_prospect_mcp, load_prospect_mcp
 
 # Optionally load the standalone Prospect MCP (mcp/prospect_mcp.py) as a Streamable-HTTP app
 # so hosted users can add Prospect to their own Claude. (None, None) when disabled/unavailable
@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI):
     else:
         yield
     analytics_db.close()
+    close_prospect_mcp()  # the mounted MCP module's own DuckDB conn (no-op when disabled)
 
 
 app = FastAPI(title=settings.api_title, version=settings.api_version, lifespan=lifespan)

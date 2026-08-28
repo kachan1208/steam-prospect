@@ -31,6 +31,25 @@ def test_mcp_log_returns_entries_newest_first(client, monkeypatch, tmp_path):
     assert [e["tool"] for e in body["entries"]] == ["game_teardown", "find_niches"]
 
 
+def test_mcp_log_tails_without_loading_whole_file(client, monkeypatch, tmp_path):
+    """limit slices to the LAST N lines while total still counts every line."""
+    log = tmp_path / "mcp_calls.jsonl"
+    log.write_text(
+        "\n".join(json.dumps({"tool": f"tool_{i}"}) for i in range(300)) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "admin_token", "s3cret")
+    monkeypatch.setattr(settings, "mcp_call_log_path", str(log))
+
+    resp = client.get("/api/analytics/mcp-log", params={"token": "s3cret", "limit": 100})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 300
+    assert len(body["entries"]) == 100
+    assert body["entries"][0]["tool"] == "tool_299"   # newest first
+    assert body["entries"][-1]["tool"] == "tool_200"  # exactly the last 100 lines
+
+
 def test_mcp_log_empty_when_file_missing(client, monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "admin_token", "s3cret")
     monkeypatch.setattr(settings, "mcp_call_log_path", str(tmp_path / "nope.jsonl"))
