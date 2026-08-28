@@ -580,11 +580,17 @@ DENYLIST_TAG = [
     "Kickstarter", "Epic", "Games Workshop", "Warhammer 40K", "Batman", "Reboot",
     "Masterpiece", "LEGO", "Lego", "Feature Film", "Documentary",
 ]
-# Genres in game_genres that are application-type / non-game and should be dropped.
+# Genres in game_genres that are application-type / non-game and should be dropped, plus
+# release-state/monetization labels Steam ships in the appdetails `genres` field that are
+# not genres (user-reported 2026-08-28): 'Early Access', 'Free To Play'. Both 'To'/'to'
+# case variants listed defensively — the genres field spells it 'Free To Play', other
+# Steam fields (tags) spell it 'Free to Play' (same exact-twin precedent as LEGO/Lego
+# in DENYLIST_TAG).
 DENYLIST_GENRE = [
     "Utilities", "Design & Illustration", "Web Publishing", "Video Production",
     "Audio Production", "Animation & Modeling", "Game Development", "Photo Editing",
     "Accounting", "Software Training", "Movie", "Short", "Documentary", "Episodic",
+    "Early Access", "Free To Play", "Free to Play",
 ]
 
 # English stopwords for mart_buzz_trends' title-bigram mining (see mart_press.sql). Grammatical
@@ -930,12 +936,17 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         SELECT DISTINCT gt.appid FROM stg_game_tags gt WHERE gt.tag = 'Singleplayer';
 
         -- Moved ahead of stg_game (below needs it for the owners-floor genre lookup).
+        -- 'Early Access'/'Free To Play' are denylisted upstream (release-state/monetization
+        -- labels, not genres — user-reported 2026-08-28), so they left the deprioritized
+        -- CASE list: a game keeps its best REMAINING real genre, and a game whose ONLY
+        -- genres are denylisted gets no row here -> NULL primary_genre downstream (every
+        -- consumer LEFT JOINs this table or filters primary_genre IS NOT NULL).
         CREATE TEMP TABLE stg_primary_genre AS
         WITH g AS (
             SELECT gg.appid, gg.genre,
                 row_number() OVER (PARTITION BY gg.appid ORDER BY
-                    CASE WHEN gg.genre IN ('Indie','Casual','Early Access','Free To Play',
-                                           'Massively Multiplayer') THEN 1 ELSE 0 END,
+                    CASE WHEN gg.genre IN ('Indie','Casual','Massively Multiplayer')
+                         THEN 1 ELSE 0 END,
                     gg.genre) AS rn
             FROM src.game_genres gg
             WHERE gg.genre NOT IN (SELECT genre FROM denylist_genre)
