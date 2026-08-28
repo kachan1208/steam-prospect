@@ -1574,16 +1574,29 @@ def _sentiment_cache_enabled() -> bool:
     return os.environ.get("PROSPECT_SENTIMENT_CACHE", "").strip().lower() not in ("off", "0")
 
 
-def _aspect_model_fingerprint() -> str:
-    """Size+mtime of the shipped classifier, folded into the sentiment config hash. Swapping the
-    model changes what a cached mention's clf_* verdict would be, so it must invalidate the cache
-    exactly like a lexicon edit does — otherwise a new model would silently serve old verdicts."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), aspect_classifier.MODEL_FILENAME)
+def _aspect_model_fingerprint(path: str | None = None) -> str:
+    """SHA-256 of the shipped classifier's CONTENT, folded into the sentiment config hash.
+    Swapping the model changes what a cached mention's clf_* verdict would be, so it must
+    invalidate the cache exactly like a lexicon edit does — otherwise a new model would silently
+    serve old verdicts.
+
+    Content hash, deliberately NOT size+mtime: the model ships via scp/git checkout, and both
+    reset mtime freely — a re-copy of the IDENTICAL file used to change the old size:mtime
+    fingerprint and wipe the 16M-row sentiment cache, triggering a multi-hour full rescore for
+    nothing (real incident; see the `scp -p` workaround it forced). Hashing the 6MB file takes
+    milliseconds and only ever changes when the model's bytes actually change.
+
+    `path` is a test seam; production callers use the default (next to the ETL code)."""
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), aspect_classifier.MODEL_FILENAME)
+    h = hashlib.sha256()
     try:
-        st = os.stat(path)
-        return f"{st.st_size}:{int(st.st_mtime)}"
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
     except OSError:
         return "absent"
+    return h.hexdigest()
 
 
 def _sentiment_config_hash() -> str:
@@ -1688,17 +1701,43 @@ def _refresh_sentiment_cache(con: duckdb.DuckDBPyConnection) -> bool:
 
 
 _CLF = None
+_CLF_ABSENT = False  # set only when PROSPECT_ALLOW_NO_CLASSIFIER=1 accepted a missing model;
+                     # write_meta() records it as a sentiment_classifier=absent provenance row.
 
 
 def _get_classifier():
-    """One classifier per process, loaded lazily. A MISSING model is not fatal: the pipeline falls
-    back to the keyword aspect it always used, so a bad deploy degrades to the old behaviour
-    instead of failing the nightly build."""
-    global _CLF
-    if _CLF is None:
-        _CLF = aspect_classifier.load_default("")
+    """One classifier per process, loaded lazily. A MISSING (or unloadable) model is FATAL by
+    default: without it the pipeline silently degrades — the 'NONE' aspect class (alone ~22% of
+    keyword matches) stops being dropped and aspect counts inflate ~28%, which then ships as if
+    it were real data. A bad deploy should fail loudly, not publish quietly-wrong marts.
+
+    Escape hatch: PROSPECT_ALLOW_NO_CLASSIFIER=1 runs the old degraded keyword-aspect fallback
+    (for emergencies only); write_meta() then stamps sentiment_classifier=absent into mart_meta
+    so the degraded build is identifiable after the fact."""
+    global _CLF, _CLF_ABSENT
+    if _CLF is None and not _CLF_ABSENT:
+        allow_degraded = os.environ.get("PROSPECT_ALLOW_NO_CLASSIFIER", "").strip() == "1"
+        try:
+            _CLF = aspect_classifier.load_default("")
+            load_error = None
+        except Exception as e:  # unloadable (corrupt/truncated) model — same fatality as missing
+            _CLF, load_error = None, e
         if _CLF is None:
-            print("[etl] WARNING: aspect model not found — falling back to keyword aspects")
+            reason = f"unloadable: {load_error}" if load_error is not None else "not found"
+            if allow_degraded:
+                _CLF_ABSENT = True
+                print(f"[etl] WARNING: aspect model {reason} — DEGRADED keyword-aspect mode "
+                      "(PROSPECT_ALLOW_NO_CLASSIFIER=1): 'NONE' windows are not dropped, "
+                      "aspect counts inflate ~28%")
+            else:
+                model_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), aspect_classifier.MODEL_FILENAME)
+                raise RuntimeError(
+                    f"aspect classifier model {reason} ({model_path}). Without it the pipeline "
+                    "silently degrades (keyword aspects only, 'NONE' class kept, counts inflated "
+                    "~28%). Restore the model file, or set PROSPECT_ALLOW_NO_CLASSIFIER=1 to run "
+                    "degraded on purpose."
+                ) from load_error
         else:
             print(f"[etl] aspect classifier loaded ({_CLF.n_train:,} training examples)")
     return _CLF
