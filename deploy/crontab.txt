@@ -1,17 +1,82 @@
-# Droplet root crontab (142.93.49.69) — reference copy, updated 2026-08-18. This file is
-# documentation, not deployment: edit the crontab on the box, then refresh this copy.
-0 21 * * * /usr/bin/flock -n /root/.prospect-refresh.lock /root/prospect-refresh.sh  # daily 21:00 UTC
-# Daytime review-coverage keeper: deepen sampled review TEXT toward min(true_total, 20k)
-# for EVERY reviewed game (--min-reviews 1 since 2026-08-18: the old floor of 50 permanently
-# excluded 31.3K small games with missing/zero texts — their whole gap is only ~415K texts).
-# Selection is smallest-total-first = cost order (a deepen re-paginates the whole list, so
-# cost ∝ total, not the gap) — small games clear first, 20k-cap megahits land last. Runs in
-# the 06:00-19:00 UTC window (nightly refresh owns 21:00-04:40), 13h timeout, flock-guarded
-# against a still-running nightly. Self-draining: exits in seconds once coverage is full,
-# then keeps new reviews topped up (games re-enter via the 7d staleness recheck).
-0 6 * * * cd /root/steam-scraper && /usr/bin/flock -n /root/.prospect-refresh.lock timeout 46800 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 20000 --min-reviews 1 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0 >> /root/deepen_backfill.log 2>&1
-# Daytime socials keeper: harvest official social links for ALL games, reviews-desc
-# (min-reviews 0 -> literally the whole catalog, most-reviewed first), then hold a 90d
-# rotation. Own lock (not the refresh lock — must run ALONGSIDE the 06:00 review keeper;
-# different endpoints: store pages vs appreviews). 13h timeout ends before the 21:00 nightly.
-15 6 * * * cd /root/steam-scraper && /usr/bin/flock -n /root/.prospect-socials.lock timeout 46800 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db dev-socials --min-reviews 0 --refresh-days 90 --limit 60000 --workers 8 --rate 2.0 >> /root/dev_socials_keeper.log 2>&1
+# Droplet root crontab (142.93.49.69) — the DEPLOYED ARTIFACT, not documentation.
+# Edit HERE, then install on the box (after deploy/deploy-scripts.sh has copied the scripts):
+#     scp -i ~/.ssh/prospect_droplet deploy/crontab.txt root@142.93.49.69:/root/crontab.txt
+#     ssh -i ~/.ssh/prospect_droplet root@142.93.49.69 'crontab /root/crontab.txt && crontab -l'
+#
+# Rewritten 2026-08-28 from the scheduling notes embedded in deploy/prospect-refresh.sh
+# (the previous copy of this file, "updated 2026-08-18", predated three scheduling moves
+# that only ever lived on the box). Entries whose live form could not be read from the box
+# are RECONSTRUCTED from those script comments and marked
+#     # NEEDS-VERIFICATION vs live crontab -l
+# — before the first install, run `crontab -l` on the droplet and reconcile any drift INTO
+# this file (this file wins afterwards).
+#
+# Locking: every job that must not overlap the pipeline goes through /root/cron-wrap.sh,
+# which takes the named lock with flock -n and, when it loses the race, logs the skip to
+# /var/log/prospect-cron-wrap.log and pushes prospect_cron_skipped{job=...} so alert_check
+# sees it. The wrapped command inherits the lock fd and holds the lock for its whole life
+# (this replaces the old bare `flock -n <lock> <job>` entries whose skips were invisible).
+#
+# Daily UTC shape: 21:00-~05:00 nightly refresh -> 05:00 twitch slot (retired?) ->
+# 06:00/06:15 daytime keepers (hold RAM until 19:00) -> 19:15 quiet-window scraper jobs ->
+# 19:30 backups -> back to 21:00. Never schedule a DuckDB build or anything RAM-heavy
+# inside 06:00-19:00 without going through the refresh lock.
+
+# ── Nightly refresh: scrape -> ETL -> verified app restart. The script does its own
+# logging to /var/log/prospect-refresh.log (+ per-step logs in /var/log/prospect-steps).
+0 21 * * * /root/cron-wrap.sh nightly_refresh /root/prospect-refresh.sh
+
+# ── Twitch collector, alone in its own 05:00 slot (moved out of the nightly's Lane B
+# 2026-08-22 after failing 22 of 26 nights to "database is locked": SQLite has no writer
+# fairness — only scheduling fixes that). Takes the refresh lock: a nightly that overruns
+# costs twitch one day, and its 3000s timeout ends by ~05:50, before the 06:00 keeper wants
+# the same lock. NOTE: the twitch/creator vertical was retired product-wide (commits
+# da0a002/17e7daf) — this entry may have been DELETED on the box since; if `crontab -l`
+# has no twitch line, drop this one too.
+# NEEDS-VERIFICATION vs live crontab -l
+0 5 * * * /root/cron-wrap.sh twitch bash -c 'cd /root/steam-scraper && STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=6 RATE_PER_WORKER=1.5 MIN_REVIEWS=50 timeout 3000 .venv/bin/python3 twitch_bulk.py' >> /var/log/prospect-steps/twitch.cron.log 2>&1
+
+# ── Daytime review-coverage keeper: deepen sampled review TEXT toward min(true_total, 20k)
+# for EVERY reviewed game (--min-reviews 1 since 2026-08-18). Selection is
+# smallest-total-first = cost order. Runs in the 06:00-19:00 window (nightly owns
+# 21:00-~05:00), 13h timeout, refresh-lock-guarded against a still-running nightly.
+# Self-draining: exits in seconds once coverage is full, then keeps new reviews topped up
+# (games re-enter via the 7d staleness recheck). While it drains a backlog it HOLDS the
+# refresh lock all day — the midday light build skipping then is expected, not a bug.
+0 6 * * * /root/cron-wrap.sh review_keeper bash -c 'cd /root/steam-scraper && timeout 46800 .venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 20000 --min-reviews 1 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0' >> /root/deepen_backfill.log 2>&1
+
+# ── Daytime socials keeper: harvest official social links for the whole catalog,
+# reviews-desc, then hold a 90d rotation. OWN lock (-l): must run ALONGSIDE the 06:00
+# review keeper (different endpoints: store pages vs appreviews). 13h timeout ends before
+# the 21:00 nightly. NOTE: /root/socials_marathon.sh (one-shot backlog drain, same lock,
+# possibly under systemd-run with MemoryMax per ops notes) makes this keeper no-op while it
+# runs; the keeper resumes ownership when the marathon exits.
+# NEEDS-VERIFICATION vs live crontab -l
+15 6 * * * /root/cron-wrap.sh -l /root/.prospect-socials.lock socials_keeper bash -c 'cd /root/steam-scraper && timeout 46800 .venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db dev-socials --min-reviews 0 --refresh-days 90 --limit 60000 --workers 8 --rate 2.0' >> /root/dev_socials_keeper.log 2>&1
+
+# ── Midday light mart build (every mart except the two full-text monsters; ~30min) so a
+# morning data/mart fix is visible same-day instead of after the nightly. The script had NO
+# crontab entry in any repo copy — time below is a reconstruction of "midday". Skips (lock
+# held by a keeper backlog drain or an overrunning nightly) are expected and now visible.
+# NEEDS-VERIFICATION vs live crontab -l
+0 13 * * * /root/cron-wrap.sh light_build /root/light-build-cron.sh
+
+# ── Quiet-window scraper jobs, 19:15 (keeper's 13h timeout ends 19:00; nightly starts
+# 21:00): tags_refresh + refresh_released + review_histogram, each moved here 2026-08-24/26
+# after losing the nightly's SQLite write race ("database is locked") two+ nights running.
+# Serial, under the refresh lock, with an OUTER timeout 6000 (ends ~20:55) so an overrun can
+# NEVER hold the lock into 21:00 and cost the whole nightly — per-step budgets from their
+# old run_step lines (3600/2700/1800) would sum past 21:00 in the worst case.
+# NEEDS-VERIFICATION vs live crontab -l
+15 19 * * * /root/cron-wrap.sh quiet1915 timeout 6000 bash -c 'cd /root/steam-scraper && timeout 3600 .venv/bin/python3 -m steam_scraper.scraper --db steam_games.db refresh-stale-tags --workers 12 --rate 3.0 --limit 4000; timeout 2700 .venv/bin/python3 -m steam_scraper.scraper --db steam_games.db enrich --refresh-unreleased --limit 6000 --workers 12 --rate 6.0; timeout 1800 .venv/bin/python3 -m steam_scraper.scraper --db steam_games.db review-histogram --min-reviews 50 --workers 16 --rate 10.0' >> /var/log/prospect-steps/quiet1915.cron.log 2>&1
+
+# ── Backups, 19:30 (new 2026-08-28): signals.db daily (forward-only series — can NEVER be
+# backfilled), steam_games.db weekly (Sun). 19:30 because signals.db's writers only run in
+# the nightly (21:00+), and it dodges both the pipeline window and the RAM-pinned keeper
+# window. No lock: sqlite3 .backup is safe against live writers. See deploy/backup.sh.
+30 19 * * * /root/backup.sh >> /var/log/prospect-backup.log 2>&1
+
+# ── Alert check, every 30 min (new 2026-08-28): evaluates the pipeline-health metrics in
+# the local VictoriaMetrics and notifies via ntfy/webhook. No lock: read-only + cheap.
+# Config: /root/.prospect-alerts.env — see deploy/observability/ALERTING.md.
+*/30 * * * * /root/alert_check.py >> /var/log/prospect-alerts.log 2>&1
