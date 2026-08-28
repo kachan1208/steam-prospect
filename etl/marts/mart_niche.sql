@@ -496,3 +496,12 @@ JOIN counts c ON c.dimension = m.dimension AND c.key = m.key
 WHERE g.release_year IS NOT NULL
   AND g.release_year BETWEEN @TREND_START_YEAR@ AND @CUR_YEAR@
 GROUP BY m.dimension, m.key, g.release_year;
+
+-- Temp-table hygiene: _niche_demand24m is file-local; _niche_players_now /
+-- _niche_lifetime are mart_players.sql handoffs whose LAST consumer is this file
+-- (verified — no later mart file or build_marts.py reads them). _niche_pop is
+-- deliberately left alive: mart_niche_game.sql (next in MART_FILES) reads it and
+-- drops it itself.
+DROP TABLE IF EXISTS _niche_demand24m;
+DROP TABLE IF EXISTS _niche_players_now;
+DROP TABLE IF EXISTS _niche_lifetime;

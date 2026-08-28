@@ -121,3 +121,6 @@ WITH wide AS (
 SELECT appid, n, pctile, value
 FROM wide
 UNPIVOT (value FOR pctile IN (p10, p25, p50, p75, p90));
+
+-- Temp-table hygiene: file-local staging (nothing downstream reads it).
+DROP TABLE IF EXISTS _gr_elig;

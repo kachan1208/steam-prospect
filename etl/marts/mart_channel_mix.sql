@@ -25,14 +25,15 @@
 
 DROP TABLE IF EXISTS mart_channel_mix;
 
+-- Journalist mention rows come from the SHARED stg_press_base (create_staging in
+-- build_marts.py) — the same base every press mart counts, so the mix can't disagree
+-- with them about what a press mention is.
 CREATE TEMP TABLE _mix_press AS
 SELECT gm.genre, 'press' AS channel,
     COUNT(*) AS n_mentions,
     COUNT(*)::DOUBLE AS reach_weighted
-FROM src.article_game_mentions m
-JOIN src.articles a ON a.id = m.article_id
-JOIN stg_genre_membership gm ON gm.appid = m.appid
-WHERE a.source != 'steam_news' AND m.match_confidence >= @PRESS_MIN_CONFIDENCE@
+FROM stg_press_base pb
+JOIN stg_genre_membership gm ON gm.appid = pb.appid
 GROUP BY gm.genre;
 
 -- Creator platforms (twitch/youtube) removed 2026-08-25 — that vertical is decommissioned
@@ -53,3 +54,8 @@ SELECT mx.genre, mx.channel, mx.n_mentions, mx.reach_weighted,
 FROM _mix_all mx
 JOIN _mix_genre_totals t ON t.genre = mx.genre
 ORDER BY mx.genre, share_reach_weighted DESC NULLS LAST;
+
+-- Temp-table hygiene: file-local staging (nothing downstream reads these).
+DROP TABLE IF EXISTS _mix_press;
+DROP TABLE IF EXISTS _mix_all;
+DROP TABLE IF EXISTS _mix_genre_totals;

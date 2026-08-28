@@ -220,3 +220,10 @@ LEFT JOIN _entity_top_genres tg ON tg.role = f.role AND tg.name = f.name
 LEFT JOIN _publisher_partners pp ON f.role = 'publisher' AND pp.name = f.name
 LEFT JOIN _entity_x_handle xh ON xh.role = f.role AND xh.name = f.name
 GROUP BY f.role, f.name;
+
+-- Temp-table hygiene: file-local staging (nothing downstream reads these).
+DROP TABLE IF EXISTS _entity_map;
+DROP TABLE IF EXISTS _entity_game_facts;
+DROP TABLE IF EXISTS _entity_top_genres;
+DROP TABLE IF EXISTS _publisher_partners;
+DROP TABLE IF EXISTS _entity_x_handle;

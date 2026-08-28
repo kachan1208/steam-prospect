@@ -117,3 +117,6 @@ CREATE TABLE mart_market_boxleiter AS
 SELECT genre, n, owners_per_review_median, owners_per_review_p25, owners_per_review_p75,
     slope, intercept
 FROM stg_genre_boxleiter;
+
+-- Temp-table hygiene: file-local staging (nothing downstream reads it).
+DROP TABLE IF EXISTS _mkt_obs;

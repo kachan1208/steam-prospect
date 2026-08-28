@@ -132,3 +132,6 @@ SELECT
 FROM agg ag
 JOIN baseline b USING (aspect)
 ORDER BY ag.dimension, ag.key, ag.aspect;
+
+-- Temp-table hygiene: file-local staging (nothing downstream reads it).
+DROP TABLE IF EXISTS _theme_member;

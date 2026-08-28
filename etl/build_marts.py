@@ -1250,6 +1250,26 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         WHERE r.language = 'english'
           AND r.review_text IS NOT NULL
           AND length(trim(r.review_text)) > 0;
+
+        -- SHARED press base (2026-08): the journalist-article set — articles fuzzy-linked
+        -- to a game, Steam News excluded, match_confidence-floored — one row per
+        -- (article, mentioned appid), ~1.12M rows. This exact join + filter used to be
+        -- re-derived in five mart files (mart_game_teardown, mart_press, mart_niche_press,
+        -- mart_channel_mix); deriving it ONCE here means the definition of "a journalist
+        -- article about a game" cannot drift between marts, and the 3-way sqlite join runs
+        -- once instead of five times. published_at is pre-TRY_CAST so every consumer reads
+        -- the same TIMESTAMP (or NULL for unparseable dates).
+        -- NOT this table's population (deliberately): mart_press.sql's buzz corpus
+        -- (_buzz_articles) — that is ALL journalist articles, mention-matched or not, with
+        -- no confidence floor, one row per article; it keeps its own src.articles read.
+        CREATE TEMP TABLE stg_press_base AS
+        SELECT m.appid, a.id AS article_id, a.source, a.author, a.title, a.url,
+            TRY_CAST(a.published_at AS TIMESTAMP) AS published_at,
+            m.match_confidence
+        FROM src.article_game_mentions m
+        JOIN src.articles a ON a.id = m.article_id
+        WHERE a.source != 'steam_news'
+          AND m.match_confidence >= @PRESS_MIN_CONFIDENCE@;
         """,
         params,
     )

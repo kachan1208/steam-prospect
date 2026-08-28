@@ -160,3 +160,21 @@ SELECT tcm.term, tcm.channel, tcm.period, tcm.month_idx, tcm.n_mentions, tcm.rea
 FROM _cb_term_channel_month tcm
 JOIN mart_channel_buzz_summary s ON s.term = tcm.term
 ORDER BY tcm.term, tcm.channel, tcm.month_idx DESC;
+
+-- ------------------------------------------------------------------------------------
+-- Temp-table hygiene: all _cb_* staging is file-local by design (own namespace, see the
+-- header) — drop it so it stops holding memory/spill for the rest of the build.
+-- ------------------------------------------------------------------------------------
+DROP TABLE IF EXISTS _cb_press_rows;
+DROP TABLE IF EXISTS _cb_rows;
+DROP TABLE IF EXISTS _cb_articles;
+DROP TABLE IF EXISTS _cb_words;
+DROP TABLE IF EXISTS _cb_bigrams;
+DROP TABLE IF EXISTS _cb_concept_source;
+DROP TABLE IF EXISTS _cb_concept_words;
+DROP TABLE IF EXISTS _cb_concept_unigram;
+DROP TABLE IF EXISTS _cb_concept_bigram;
+DROP TABLE IF EXISTS _cb_terms;
+DROP TABLE IF EXISTS _cb_term_channel_month;
+DROP TABLE IF EXISTS _cb_term_month;
+DROP TABLE IF EXISTS _cb_term_stats;

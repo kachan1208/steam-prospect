@@ -191,19 +191,18 @@ HAVING COUNT(DISTINCT appid) >= @TEARDOWN_MIN_GENRE_GAMES@ OR genre = '__all__';
 -- ------------------------------------------------------------------------------------
 -- Press footprint (journalist coverage only — steam_news excluded, see file header).
 -- ------------------------------------------------------------------------------------
--- LEFT JOINs stg_press_article_sentiment (precomputed just above, in build_marts.py's
--- compute_press_sentiment — same table mart_game_press_summary's aggregate already reads) so
--- every downstream press mart, including mart_game_press_notable below, can carry each
--- article's own url + VADER compound alongside the aggregate.
+-- The journalist-article population comes from the SHARED stg_press_base (built once in
+-- build_marts.py's create_staging — same base every press mart reads, so the marts cannot
+-- disagree on what "a journalist article about a game" is). This file's _press_base adds the
+-- one column only it needs: a LEFT JOIN to stg_press_article_sentiment (precomputed in
+-- build_marts.py's compute_press_sentiment) so every downstream press mart, including
+-- mart_game_press_notable below, can carry each article's own url + VADER compound
+-- alongside the aggregate.
 CREATE TEMP TABLE _press_base AS
-SELECT m.appid, a.id AS article_id, a.source, a.title, a.author, a.url,
-    TRY_CAST(a.published_at AS TIMESTAMP) AS published_at,
-    m.match_confidence, ps.compound AS sentiment_compound
-FROM src.article_game_mentions m
-JOIN src.articles a ON a.id = m.article_id
-LEFT JOIN stg_press_article_sentiment ps ON ps.article_id = a.id
-WHERE a.source != 'steam_news'
-  AND m.match_confidence >= @PRESS_MIN_CONFIDENCE@;
+SELECT pb.appid, pb.article_id, pb.source, pb.title, pb.author, pb.url,
+    pb.published_at, pb.match_confidence, ps.compound AS sentiment_compound
+FROM stg_press_base pb
+LEFT JOIN stg_press_article_sentiment ps ON ps.article_id = pb.article_id;
 
 -- Press-coverage sentiment: VADER over each article's headline+summary (stg_press_article_sentiment,
 -- precomputed in etl/build_marts.py compute_press_sentiment), aggregated over this game's matched
@@ -272,3 +271,13 @@ ORDER BY appid, published_at ASC NULLS LAST;
 -- copies coexisting was a big part of the ETL's memory peak once the review corpus doubled.
 -- Recreated by create_staging() on the next run.
 DROP TABLE IF EXISTS stg_review_text;
+
+-- Temp-table hygiene: this file's remaining staging is file-local too — in particular
+-- _review_aspect_flags (one row per eligible english review, 10 regex-flag columns) is the
+-- biggest temp in the whole build after the text pools. _teardown_elig is safe to drop:
+-- mart_game_aspect_reviews.sql derives its own identical-population _aspectrev_elig rather
+-- than reading this one (verified — its only mention there is a comment).
+DROP TABLE IF EXISTS _teardown_elig;
+DROP TABLE IF EXISTS _review_aspect_flags;
+DROP TABLE IF EXISTS _aspect_agg;
+DROP TABLE IF EXISTS _press_base;
