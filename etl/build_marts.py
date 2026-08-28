@@ -306,8 +306,10 @@ TIMING_LAUNCH_EXCLUDE_MONTHS = 2 # demand EXCLUDES each game's first N calendar 
 TIMING_DEMAND_MIN_GAMES = 50     # a genre needs >= this many contributing games to get a
                                  # demand curve (else its shares are a few titles' noise)
 TIMING_CONGESTION_YEARS = 3      # congestion averages releases over the last N complete years
-TIMING_BIG_REV = 200_000         # est_rev_reviews >= this = a "big" release (mirrors the
-                                 # hit_rate_200k threshold used across the niche marts)
+TIMING_BIG_REV = 200_000         # est_rev_reviews >= this = a "big" release. Single source of
+                                 # truth for the $200K bar: rendered as @TIMING_BIG_REV@ into
+                                 # mart_timing.sql AND the hit_rate_200k columns in
+                                 # mart_niche.sql / mart_entity.sql / mart_tag_lift.sql
 TIMING_DECAY_MONTHS = 24         # payout-decay horizon: months 0..23 since release
 TIMING_DECAY_MIN_REVIEWS = 50    # a game's first-24-months histogram total must reach this
                                  # to enter the decay stats (coverage floor: tiny games'
@@ -649,17 +651,10 @@ DENYLIST_BUZZ_WORD = [
     "dlc", "launch",
 ]
 
-# Track M — multi-channel marketing tunables (see etl/marts/mart_creator_pitch.sql,
-# mart_channel_mix.sql, mart_channel_buzz.sql). These marts read the scraper's creator /
-# game_creator_mention / creator_reach_snapshot SQLite tables via create_marketing_staging()
-# below, which replays the SAME fuzzy-match + genre-join pattern mart_press.sql uses for
-# article_game_mentions -- hence constants that mirror PRESS_MIN_CONFIDENCE /
-# PRESS_AUTHOR_MIN_ARTICLES, kept as separate names in case creator-match tuning needs to
-# diverge from article-match tuning later (same starting values today).
-CREATOR_PITCH_MIN_MENTIONS = 1    # a (creator, genre) needs >= this many mentions to be kept
-                                  # (mirrors PRESS_AUTHOR_MIN_ARTICLES's role but floored at 1,
-                                  # not 3 -- channel collection is new/low-volume; raise once
-                                  # real volume exists).
+# NOTE: the creator/twitch marketing vertical was decommissioned product-wide on
+# 2026-08-25. mart_channel_mix.sql / mart_channel_buzz.sql remain (the MCP channel_mix /
+# channel_buzz tools still read them) but are press-only now; the creator-side staging,
+# mart_creator_pitch.sql and CREATOR_PITCH_MIN_MENTIONS are gone.
 
 # --------------------------------------------------------------------------------------
 # Entity marts (mart_entity.sql) — corporate-suffix re-merge for the developers/publishers
@@ -835,7 +830,6 @@ def build_params() -> dict[str, str]:
         "BUZZ_RECENT_MONTHS": BUZZ_RECENT_MONTHS,
         "BUZZ_MIN_TOTAL_MENTIONS": BUZZ_MIN_TOTAL_MENTIONS,
         "BUZZ_SLOPE_EPSILON": BUZZ_SLOPE_EPSILON,
-        "CREATOR_PITCH_MIN_MENTIONS": CREATOR_PITCH_MIN_MENTIONS,
         "TAG_PAIR_MIN_GAMES": TAG_PAIR_MIN_GAMES,
         "CCU_STALE_DAYS": CCU_STALE_DAYS,
         "CCU_FRESH_DAYS": CCU_FRESH_DAYS,

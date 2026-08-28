@@ -36,11 +36,10 @@
 -- denylist_buzz_term / denylist_buzz_word ARE shared globals (created once in
 -- build_marts.py's create_staging(), same ones mart_press.sql itself reads).
 --
--- Degrades gracefully: if the marketing source tables are absent/empty (see
--- create_marketing_staging() in build_marts.py), stg_game_creator_mention is empty, so this
--- mart falls back to press-only buzz (still real output, since the press corpus already
--- exists) — never a crash either way, and never empty outright unless the whole articles
--- corpus is also empty.
+-- The creator/twitch vertical was decommissioned product-wide on 2026-08-25, so today this
+-- is press-only buzz (still real output — the press corpus exists regardless); the
+-- channel-tagged shape stays so a future channel is a _cb_rows UNION arm, not a rewrite.
+-- Never empty outright unless the whole articles corpus is also empty.
 
 DROP TABLE IF EXISTS mart_channel_buzz;
 DROP TABLE IF EXISTS mart_channel_buzz_summary;

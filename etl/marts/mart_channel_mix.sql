@@ -18,12 +18,10 @@
 -- share_mentions / share_reach_weighted = this channel's measure / SUM(measure) across every
 -- channel for that genre (0-1, NULL if the genre's total is 0) — the pie/bar-ready share.
 --
--- Same confidence floor / genre-membership join as mart_creator_pitch.sql (creator side)
--- and mart_press.sql (press side); press's steam_news exclusion carried over unchanged.
--- Degrades gracefully: if the marketing source tables are absent/empty (see
--- create_marketing_staging() in build_marts.py), stg_game_creator_mention is empty, so every
--- genre's mix collapses to 100% press (still correct, never a crash) until channel
--- collectors run.
+-- Same confidence floor / genre-membership join as mart_press.sql; press's steam_news
+-- exclusion carried over unchanged. The creator/twitch vertical was decommissioned
+-- product-wide on 2026-08-25, so press is currently the only channel with rows — every
+-- genre's mix reads 100% press until another channel is (re)added as a _mix_all UNION arm.
 
 DROP TABLE IF EXISTS mart_channel_mix;
 

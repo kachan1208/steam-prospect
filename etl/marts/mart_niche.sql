@@ -283,7 +283,7 @@ agg AS (
         median(playtime_p50) AS med_playtime_min,
         SUM(est_rev_reviews) FILTER (WHERE rev_pr >= @WINNER_TOP_PCT@)
             / NULLIF(SUM(est_rev_reviews), 0) AS winner_concentration,
-        AVG(CASE WHEN est_rev_reviews > 200000 THEN 1.0 ELSE 0.0 END) AS hit_rate_200k,
+        AVG(CASE WHEN est_rev_reviews > @TIMING_BIG_REV@ THEN 1.0 ELSE 0.0 END) AS hit_rate_200k,
         AVG(CASE WHEN est_rev_reviews > 500000 THEN 1.0 ELSE 0.0 END) AS hit_rate_500k,
         AVG(CASE WHEN positive_ratio IS NULL OR positive_ratio < @BEATABLE_RATIO_BAR@
                       OR total_reviews < @THIN_REVIEWS_BAR@ THEN 1.0 ELSE 0.0 END) AS beatable_share
