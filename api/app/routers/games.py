@@ -14,10 +14,8 @@ from ..schemas import (
     GameChannelMix,
     GameComparable,
     GameComparablesResponse,
-    FollowerPoint,
     GameEvent,
     GameEventList,
-    GameFollowers,
     GamePriceHistory,
     PricePoint,
     GameLaunchCurvePoint,
@@ -527,7 +525,7 @@ def game_events(appid: int) -> GameEventList:
     Degrades to items=[] when the mart predates mart_game_event, via CatalogException rather
     than an information_schema probe: annotations are ADDITIVE (a chart without markers is
     complete, just less explained), so the absent-table case is an empty feed, not a 503 —
-    the same convention as the radar sparklines. Not 404-guarded against mart_game either,
+    the same convention as niche_detail's players.monthly. Not 404-guarded against mart_game either,
     mirroring teardown/aspect-reviews: the game page 404s upstream via /games/{appid} before
     this is ever fetched for a nonexistent appid."""
     try:
@@ -539,18 +537,6 @@ def game_events(appid: int) -> GameEventList:
     except duckdb.CatalogException:
         rows = []
     return GameEventList(appid=appid, items=[GameEvent(**r) for r in rows])
-
-
-@router.get("/{appid}/followers", response_model=GameFollowers)
-def game_followers(appid: int) -> GameFollowers:
-    """Live follower series from signals.db — skips the nightly mart cycle entirely (see
-    signals_db.py). Empty until the rotating collector first reaches this game."""
-    rows = signals_db.query(
-        "SELECT captured_on, member_count FROM game_followers"
-        " WHERE appid = ? ORDER BY captured_on",
-        (appid,),
-    )
-    return GameFollowers(appid=appid, items=[FollowerPoint(**r) for r in rows])
 
 
 @router.get("/{appid}/price-history", response_model=GamePriceHistory)

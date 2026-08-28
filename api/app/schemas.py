@@ -355,21 +355,6 @@ class GameEvent(BaseModel):
     url: Optional[str] = None
 
 
-class FollowerPoint(BaseModel):
-    captured_on: str  # 'YYYY-MM-DD'
-    member_count: int
-
-
-class GameFollowers(BaseModel):
-    """Community-group follower series from signals.db — LIVE collector data, not the mart:
-    a point captured this morning is served this morning. items == [] until the rotating
-    collector first reaches this game (the cohort refreshes on a ~10-day wheel; games people
-    are waiting for refresh most often — see deploy/collectors/followers_bulk.py)."""
-
-    appid: int
-    items: list[FollowerPoint]
-
-
 class PricePoint(BaseModel):
     captured_on: str  # 'YYYY-MM-DD'
     final_cents: Optional[int] = None  # NULL = unpriced/delisted that day
@@ -381,8 +366,10 @@ class PricePoint(BaseModel):
 
 class GamePriceHistory(BaseModel):
     """Daily price snapshots from signals.db (catalog price_change_number diff -> batched
-    GetItems). Live like GameFollowers; depth grows one day at a time from 2026-08-24 —
-    the raw material for '-20% SALE' chart markers once discount deltas exist."""
+    GetItems) — LIVE collector data, not the mart: a snapshot captured this morning is
+    served this morning, skipping the nightly mart cycle entirely. Depth grows one day at a
+    time from 2026-08-24 — the raw material for '-20% SALE' chart markers once discount
+    deltas exist."""
 
     appid: int
     items: list[PricePoint]
@@ -391,7 +378,8 @@ class GamePriceHistory(BaseModel):
 class GameEventList(BaseModel):
     """Chart-annotation feed. items == [] both for a game with no recorded events AND when
     the mart predates mart_game_event — annotations are additive, so an old mart degrades
-    to charts without markers, never to a 503 (same convention as the radar sparklines)."""
+    to charts without markers, never to a 503 (same convention as NicheDetail's monthly
+    player series)."""
 
     appid: int
     items: list[GameEvent]
@@ -845,94 +833,3 @@ class NicheDetail(BaseModel):
     # (below the covered-games floor / genuinely uncovered).
     press: Optional[NichePress] = None
     hit_rates: dict
-
-
-# ---- Radar feed (the opportunity-feed home, mockup 3a) ---------------------------------
-# Ranks on demand_trend_24m_pct (mart_niche — see niches.py::_has_demand24m). Every field
-# below is real: no series is interpolated/invented to fill a gap the marts don't cover, and
-# a niche whose demand_trend_24m_pct is NULL (no prior-24-month baseline — a brand-new
-# niche, not a flat one) never reaches the hero/movers ranking; the router filters those
-# rows out rather than rendering a false "unchanged". Emerging niches (demand_emerging —
-# near-zero prior base BY CONSTRUCTION, see mart_niche.sql) are likewise excluded from the
-# % ranking and returned in their own `emerging` group, ranked by absolute volume.
-class RadarSparklinePoint(BaseModel):
-    """One month of real player history (mart_niche_players_monthly, steamcharts top-8k
-    coverage) — the card sparkline's actual shape, not an invented curve. Absent (empty list
-    on the card) when that mart predates the niche or the table itself doesn't exist yet."""
-
-    month: str  # 'YYYY-MM-DD' (month start)
-    players: float
-
-
-class RadarNicheCard(BaseModel):
-    """One niche in the feed — the hero pick, every 'Moving niches' grid card and every
-    `emerging` card share this shape (the hero repeats as the grid's first card, same as
-    mockup 3a). reviews_24m / reviews_prev_24m are Steam's own monthly review totals
-    (review_histogram; 42K games carrying ~98% of review volume), summed over two adjacent
-    24-calendar-month windows anchored on the last complete month — see mart_niche.sql's
-    _niche_demand24m header. The trend was briefly counted from the sampled reviews table
-    instead, which inflated every top trend to +1000%..+1500% (the keeper collects new
-    reviews near-completely while big games' tails stay capped, so the ratio amplifies
-    collector bias; measured: Rainbow Six read 16x on the sample and flat on the histogram)
-    — the histogram source note still applies verbatim to the 24-month windows.
-    demand_trend_24m_pct is the ratio between the two windows; non-null on hero/mover cards
-    (the router filters), but may be null on `emerging` cards — a zero prior-window base is
-    the canonical emerging case. It lags reality by up to a month until histogram refresh
-    cadence improves."""
-
-    dimension: str
-    key: str
-    tier: Optional[str] = None
-    n_games: int
-    p90_rev: Optional[float] = None  # absent on marts that predate p90_rev (2026-08-14)
-    opportunity_v2: Optional[float] = None
-    saturation_yoy: Optional[float] = None
-    reviews_24m: int
-    reviews_prev_24m: int
-    demand_trend_24m_pct: Optional[float] = None
-    # Emerging pair (same ETL build as the 24m windows — see NicheRow). The trend above
-    # stays populated even when demand_emerging is true: the raw data stays honest, and
-    # NOT headlining a non-representative % is the client's presentation call.
-    reviews_24m_new_share: Optional[float] = None
-    demand_emerging: bool = False
-    # The radar population rule's input (share of the cut's scored games playable
-    # single-player; the feed filters on solo_viability >= RADAR_SOLO_FRIENDLY_MIN unless
-    # solo_only=0) — served on every card so clients can show the score that gated the
-    # population. None = unknown, which the filter treats as NOT solo-friendly.
-    solo_viability: Optional[float] = None
-    # Solo-evidence trio (same family as NicheRow's): the member profile behind
-    # solo_viability, so clients can SHOW the evidence ("50% self-pub · 71% indie ·
-    # median 5.7h content") instead of asserting a bare share. None on older marts.
-    self_published_share: Optional[float] = None
-    indie_share: Optional[float] = None
-    med_playtime_h: Optional[float] = None
-    # Live-player momentum (mart_niche, gated like p90_rev) — absent on older marts.
-    players_trend_7d_pct: Optional[float] = None
-    sparkline: list[RadarSparklinePoint] = Field(default_factory=list)
-
-
-class RadarHero(RadarNicheCard):
-    """The hero pick (the cut's biggest 24-month riser) plus its yearly demand-vs-pipeline
-    trend for the chart column. §3a's mockup shows a smooth ~monthly two-series curve; no mart
-    materialises niche review velocity or releases at monthly granularity, so — same call
-    NicheDetail's §4b 'Demand vs. pipeline, by year' panel already made for the identical
-    gap — this reuses that real, yearly mart_niche_trend series instead of inventing a
-    monthly shape."""
-
-    trend: list[TrendPoint] = Field(default_factory=list)
-
-
-class RadarFeed(BaseModel):
-    dimension: str
-    window: str
-    min_reviews: int
-    hero: RadarHero
-    # Includes the hero as movers[0] (mirrors the mockup, whose hero niche is also the grid's
-    # first card) followed by the cut's other biggest 24-month movers, UP or DOWN, ranked by
-    # |demand_trend_24m_pct| — "Moving niches", not "Rising niches". Never contains an
-    # emerging niche (see module note).
-    movers: list[RadarNicheCard]
-    # Emerging niches in the cut (demand_emerging) — a separate group because their trend %
-    # is not representative: ranked by reviews_24m DESC (absolute volume), and rendered by
-    # the client as EMERGING rather than as a % mover.
-    emerging: list[RadarNicheCard] = Field(default_factory=list)
