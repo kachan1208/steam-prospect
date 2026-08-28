@@ -644,8 +644,22 @@ export function launchCurveQueryOptions(genre: string) {
   };
 }
 
-export function useLaunchCurve(genre: string) {
-  return useQuery(launchCurveQueryOptions(genre));
+/**
+ * The launch curve for ONE genre.
+ *
+ * `genre: null` means "the genre isn't known yet" and disables the fetch — it is not the
+ * same as the catalog-wide cut. GameProfile reads its genre from a profile query that
+ * resolves later, and passing "__all__" as a stand-in fired a throwaway catalog-wide
+ * request on every mount, immediately superseded by the real one. Callers that genuinely
+ * want the catalog-wide curve (LaunchTiming's "All genres" option) pass "__all__"
+ * EXPLICITLY, so that request is deliberate rather than a side effect of a pending
+ * profile. Hook order is unaffected — the hook always runs, only `enabled` moves.
+ */
+export function useLaunchCurve(genre: string | null | undefined) {
+  return useQuery({
+    ...launchCurveQueryOptions(genre ?? "__all__"),
+    enabled: genre != null,
+  });
 }
 
 // ---- launch & timing overview (mart_timing_* — TRUE monthly review histograms) -----------

@@ -423,7 +423,12 @@ export default function GameProfile() {
   const comparablesQ = useGameComparables(validAppid ? appid : null);
   const reviewsQ = useGameReviewsSummary(validAppid ? appid : null);
   const eventsQ = useGameEvents(validAppid ? appid : null);
-  const genreCurveQ = useLaunchCurve(profileQ.data?.primary_genre ?? "__all__");
+  // null until the profile RESOLVES — the genre isn't known before then, and passing
+  // "__all__" as a stand-in fired a throwaway catalog-wide /launch-curve on every mount
+  // that the real genre request immediately superseded. Once resolved, a game with no
+  // primary_genre still falls back to the catalog-wide cut, now as a deliberate choice
+  // (the panel labels it "These games") rather than an artifact of a pending query.
+  const genreCurveQ = useLaunchCurve(profileQ.data ? (profileQ.data.primary_genre ?? "__all__") : null);
   const benchmarksQ = useMarketBenchmarks();
   const teardownQ = useGameTeardown(validAppid ? appid : null);
   const channelMixQ = useGameChannelMix(validAppid ? appid : null);

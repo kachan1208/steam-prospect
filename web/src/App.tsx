@@ -7,6 +7,7 @@ import { useHealth } from "./lib/api";
 import { initAnalytics, trackPageview } from "./lib/analytics";
 import { NICHE_ROUTE_PATH } from "./lib/nichePath";
 import { CompareTray } from "./components/CompareTray";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Loading } from "./components/ui/Loading";
 import Terms from "./pages/Terms";
 import Privacy from "./pages/Privacy";
@@ -227,16 +228,24 @@ function Footer() {
 }
 
 function AppShell() {
+  // The boundary resets when the PATH changes: an error latches until told otherwise, so
+  // without this a single bad page would keep showing the fallback after you navigated
+  // away. It wraps only the routed content — the header, nav, compare tray and footer
+  // stay alive and usable when a page blows up, which is the whole point.
+  const { pathname } = useLocation();
   return (
     <div className="flex min-h-full flex-col bg-page">
       <Header />
       <main className="flex-1">
         <div className={clsx(PAGE_CONTAINER, "py-8")}>
-          {/* THE Suspense boundary for every lazy route (one, deliberately — see the
-              lazy() block above). Inside the shell so the chrome paints first. */}
-          <Suspense fallback={<Loading className="py-24 text-sm" />}>
-            <Outlet />
-          </Suspense>
+          <ErrorBoundary resetKey={pathname}>
+            {/* THE Suspense boundary for every lazy route (one, deliberately — see the
+                lazy() block above). Inside the shell so the chrome paints first, and
+                inside the ErrorBoundary so a chunk that fails to LOAD is caught too. */}
+            <Suspense fallback={<Loading className="py-24 text-sm" />}>
+              <Outlet />
+            </Suspense>
+          </ErrorBoundary>
         </div>
       </main>
       {/* Compare tray on every page (sticky above the footer; renders nothing when empty). */}
