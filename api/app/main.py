@@ -43,10 +43,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.api_title, version=settings.api_version, lifespan=lifespan)
 
-# O3 (metrics /metrics + structured request logging + env-gated Sentry) + O4 (rate-limit
-# middleware). Registered BEFORE CORSMiddleware below: Starlette's add_middleware() makes
-# the LAST-added middleware outermost, so calling this first keeps CORS wrapping
-# everything else (including a 429 from the rate limiter) — see observability.py.
+# O3 (metrics /metrics + structured request logging + env-gated Sentry) + O4 (per-IP
+# rate limiter on POST /api/analytics/collect and /mcp — rate_limit.py, env-tunable via
+# PROSPECT_RATE_LIMIT_PER_MIN, 0 disables). Registered BEFORE CORSMiddleware below:
+# Starlette's add_middleware() makes the LAST-added middleware outermost, so calling this
+# first keeps CORS wrapping everything else (including a 429 from the rate limiter) — see
+# observability.py.
 setup_observability(app)
 
 app.add_middleware(

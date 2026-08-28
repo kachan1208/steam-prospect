@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     api_title: str = "Prospect API"
     api_version: str = "0.1.0"
 
+    # Per-IP rate limit (api/app/rate_limit.py) on POST /api/analytics/collect and the
+    # /mcp mount — requests per minute per client IP, sliding window. 0 disables the
+    # limiter entirely (env: PROSPECT_RATE_LIMIT_PER_MIN).
+    rate_limit_per_min: int = 120
+
     # Observability (api/app/observability.py). Sentry is fully inert until
     # PROSPECT_SENTRY_DSN is set — local dev runs with zero Sentry footprint, no
     # import side effects beyond a no-op check.

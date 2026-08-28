@@ -6,15 +6,18 @@ middleware outermost (see main.py for the full ordering rationale), so calling t
 first keeps CORS wrapping everything else, including an early exception, exactly as
 it does today.
 
-Three pieces:
+Four pieces:
   - Metrics: prometheus-fastapi-instrumentator exposes GET /metrics in the standard
     Prometheus exposition format — VictoriaMetrics (or Prometheus) scrapes this
     directly, no special wiring needed on the VM side beyond a scrape target.
-  - Request logging: a pure-ASGI middleware (NOT BaseHTTPMiddleware, which can
-    buffer/interfere with StreamingResponse — the chat endpoint streams SSE and must
-    reach the client incrementally) that stamps every request with a UUID
+  - Request logging: a pure-ASGI middleware (NOT BaseHTTPMiddleware, which buffers/
+    re-chunks response bodies through its own iterator — kept raw so any streamed
+    response passes through untouched) that stamps every request with a UUID
     (`X-Request-ID` response header + `request.state.request_id`), times it, and
     emits one structured JSON log line per request.
+  - Rate limiting: rate_limit.RateLimitMiddleware (per-IP sliding window on
+    POST /api/analytics/collect + /mcp; env-tunable, see that module). Added FIRST,
+    so it sits innermost — its 429s still get request IDs and access-log lines.
   - Sentry: env-gated on PROSPECT_SENTRY_DSN. A no-op (no init call at all) when
     unset, so local dev has zero Sentry footprint and no network calls.
 """
@@ -81,10 +84,12 @@ class RequestContextMiddleware:
     read it via `request.state.request_id`), times the request, and emits one JSON access-
     log line on completion.
 
-    Written as raw ASGI rather than Starlette's BaseHTTPMiddleware so StreamingResponse
-    bodies (the chat SSE endpoint, routers/chat.py) pass through untouched instead of being
-    buffered/re-chunked — BaseHTTPMiddleware wraps the whole response body in its own
-    iterator, which is exactly the kind of interference an SSE stream can't tolerate.
+    Written as raw ASGI rather than Starlette's BaseHTTPMiddleware so response bodies
+    pass through untouched instead of being buffered/re-chunked — BaseHTTPMiddleware
+    wraps the whole body in its own iterator, which is exactly the kind of interference
+    a streamed response (SSE, chunked downloads) can't tolerate. No current route
+    streams (the old chat SSE router is gone), but the raw-ASGI form costs nothing and
+    keeps that door open.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -145,9 +150,10 @@ def _setup_metrics(app: Any) -> None:
     inst = Instrumentator(
         should_group_status_codes=True,
         should_ignore_untemplated=True,
-        # The chat SSE stream can run for tens of seconds; excluding streaming duration
-        # keeps the request-latency histogram meaningful for the rest of the API instead
-        # of getting skewed by long-lived connections (request COUNT is still tracked).
+        # Long-lived streamed responses would skew the request-latency histogram, so
+        # streaming duration is excluded (request COUNT is still tracked). No current
+        # route streams — kept for the same forward-compatibility reason as the raw-ASGI
+        # RequestContextMiddleware.
         should_exclude_streaming_duration=True,
         excluded_handlers=["/metrics"],
     )
@@ -192,7 +198,13 @@ def _setup_sentry() -> None:
 # Entry point — call once, right after `FastAPI()` and BEFORE `app.add_middleware(CORSMiddleware, ...)`.
 # ==========================================================================================
 def setup_observability(app: Any) -> None:
+    from .rate_limit import RateLimitMiddleware
+
     configure_json_logging()
     _setup_sentry()
     _setup_metrics(app)
-    app.add_middleware(RequestContextMiddleware)  # outermost: logs everything
+    # Order is load-bearing (last-added = outermost): the rate limiter goes innermost so
+    # RequestContextMiddleware still logs its 429s, and CORS (added later, in main.py)
+    # wraps both.
+    app.add_middleware(RateLimitMiddleware)
+    app.add_middleware(RequestContextMiddleware)  # outermost here: logs everything
