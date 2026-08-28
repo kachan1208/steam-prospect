@@ -1263,34 +1263,78 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
 
 
 # --------------------------------------------------------------------------------------
-# Track M — multi-channel marketing staging. Guarded: the scraper's creator /
-# game_creator_mention / creator_reach_snapshot tables are owned by a separate, concurrently
-# -built collectors track and may not exist yet (schema migration hasn't landed) or may exist
-# but be entirely empty (tables created, no collectors run yet). Either way this must not
-# crash a normal `task etl` run -- _sqlite_table_exists() probes each table with a real
-# SELECT (not information_schema, whose catalog/schema semantics for an ATTACHed sqlite db
-# are an extra thing to get right) and create_marketing_staging() falls back to empty,
-# correctly-typed staging tables when any are missing. Downstream mart_creator_pitch.sql /
-# mart_channel_mix.sql / mart_channel_buzz.sql then query these staging tables
-# UNCONDITIONALLY -- either real rows flow through, or every join resolves to zero rows (the
-# app's "connect a channel" empty state) -- the .sql files never need to know which mode
-# they're in.
+# Guarded staging for OPTIONAL source tables. Some scraper tables (player_counts,
+# player_history_external, review_histogram, game_socials) roll out independently of this
+# ETL and may genuinely be absent on an older source DB. Each create_*_staging() below
+# builds real staging when its table exists, else an empty, correctly-typed temp table so
+# the downstream mart .sql files run unconditionally (real rows flow through, or every
+# join resolves to zero rows) without knowing which mode they're in.
+#
+# HONESTY FIX (2026-08): the old probe ran `SELECT 1 FROM src."<table>" LIMIT 0` under a
+# bare `except duckdb.Error: return False`, which made a broken ATTACH / sqlite-extension
+# failure indistinguishable from a genuinely absent table — whole mart families (timing /
+# players / socials) went silently empty with exit 0. Now the source catalog is enumerated
+# ONCE via duckdb_tables() — a query that hard-fails the build if the attached source
+# cannot be read at all — and table presence is a plain name lookup against that listing.
+# Genuinely-absent tables are additionally recorded in mart_meta (absent_sources).
 # --------------------------------------------------------------------------------------
 
+# Optional source tables the guarded staging probes for. Their absence is legitimate
+# (older source DB); anything else the ETL reads (games, reviews, articles, ...) is
+# required and fails the build naturally when missing.
+GUARDED_SOURCE_TABLES = (
+    "player_counts", "player_history_external", "review_histogram", "game_socials",
+)
 
-def _sqlite_table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
+
+def _source_table_names(con: duckdb.DuckDBPyConnection) -> set[str]:
+    """Enumerate every table the attached source exposes, via DuckDB's own catalog metadata
+    (duckdb_tables()). Matches both shapes the codebase uses: the real ETL's ATTACHed sqlite
+    (database_name='src') and the tests' in-memory `src` SCHEMA (schema_name='src').
+
+    Raises (hard build failure) if the catalog itself cannot be read — that is a broken
+    ATTACH / sqlite-extension problem, never "the table is absent"."""
     try:
-        con.execute(f'SELECT 1 FROM src."{table}" LIMIT 0')
-        return True
-    except duckdb.Error:
-        return False
+        rows = con.execute(
+            "SELECT table_name FROM duckdb_tables() "
+            "WHERE database_name = 'src' OR schema_name = 'src'"
+        ).fetchall()
+    except duckdb.Error as e:
+        raise RuntimeError(
+            f"cannot enumerate the attached source's tables (broken ATTACH or sqlite "
+            f"extension?): {e}"
+        ) from e
+    return {r[0] for r in rows}
 
 
+def _verify_source_attach(con: duckdb.DuckDBPyConnection) -> set[str]:
+    """Called once right after ATTACH: returns the source's table names, hard-failing the
+    build when the source exposes no tables at all — an attached-but-unreadable source must
+    never masquerade as 'every optional table is absent'."""
+    names = _source_table_names(con)
+    if not names:
+        raise RuntimeError(
+            "attached source database exposes no tables at all — broken ATTACH, wrong file, "
+            "or sqlite-extension failure; refusing to build empty marts from it"
+        )
+    return names
 
-def create_ccu_staging(con: duckdb.DuckDBPyConnection) -> bool:
+
+def _sqlite_table_exists(con: duckdb.DuckDBPyConnection, table: str,
+                         src_tables: set[str] | None = None) -> bool:
+    """Membership probe against the enumerated source catalog (see _source_table_names).
+    `src_tables` lets main() pass the once-verified listing; direct callers (tests) may omit
+    it and pay for a fresh enumeration."""
+    if src_tables is None:
+        src_tables = _source_table_names(con)
+    return table in src_tables
+
+
+def create_ccu_staging(con: duckdb.DuckDBPyConnection,
+                       src_tables: set[str] | None = None) -> bool:
     """Live concurrent-player staging from the scraper's `player_counts` table
-    (steam_players_bulk.py — keyless GetNumberOfCurrentPlayers snapshots). Guarded exactly like
-    create_marketing_staging(): builds real staging when the table exists, else empty typed
+    (steam_players_bulk.py — keyless GetNumberOfCurrentPlayers snapshots). Guarded (see the
+    guarded-staging block above): builds real staging when the table exists, else empty typed
     tables so downstream marts never crash on an older source DB. Two tables:
 
       stg_player_count_latest — newest snapshot per game (mart_game.live_players);
@@ -1299,7 +1343,7 @@ def create_ccu_staging(con: duckdb.DuckDBPyConnection) -> bool:
           deliberately NOT a daily peak. Feeds mart_players.sql (daily/niche series).
 
     This is REAL live traction, distinct from SteamSpy's stale daily-peak stg_game.ccu."""
-    if _sqlite_table_exists(con, "player_counts"):
+    if _sqlite_table_exists(con, "player_counts", src_tables):
         con.execute(
             """
             CREATE TEMP TABLE stg_player_count_latest AS
@@ -1329,7 +1373,7 @@ def create_ccu_staging(con: duckdb.DuckDBPyConnection) -> bool:
     # period AVERAGES (+ monthly peaks), a DIFFERENT measure from our instantaneous point
     # samples — never blended, the `source` column stays the discriminator all the way to
     # the charts. Guarded separately: the table only exists once the backfill has run.
-    if _sqlite_table_exists(con, "player_history_external"):
+    if _sqlite_table_exists(con, "player_history_external", src_tables):
         con.execute(
             """
             CREATE TEMP TABLE stg_player_history_external AS
@@ -1350,15 +1394,16 @@ def create_ccu_staging(con: duckdb.DuckDBPyConnection) -> bool:
     return have
 
 
-def create_timing_staging(con: duckdb.DuckDBPyConnection) -> bool:
+def create_timing_staging(con: duckdb.DuckDBPyConnection,
+                          src_tables: set[str] | None = None) -> bool:
     """TRUE monthly review counts per game from the scraper's `review_histogram` table
     (Steam's own per-month review-graph totals — uncapped, unlike the sampled `reviews`
     table; covers every game with >=50 total reviews, ~40K appids). Guarded exactly like
-    create_marketing_staging()/create_ccu_staging(): builds stg_review_histogram when the
-    table exists, else an empty typed table so mart_timing.sql builds empty marts (never
-    crashes) on an older source DB. n_reviews = up + down votes — demand is measured as
-    review-WRITING velocity regardless of verdict."""
-    if _sqlite_table_exists(con, "review_histogram"):
+    create_ccu_staging(): builds stg_review_histogram when the table exists, else an empty
+    typed table so mart_timing.sql builds empty marts (never crashes) on an older source
+    DB. n_reviews = up + down votes — demand is measured as review-WRITING velocity
+    regardless of verdict."""
+    if _sqlite_table_exists(con, "review_histogram", src_tables):
         con.execute(
             """
             CREATE TEMP TABLE stg_review_histogram AS
@@ -1377,7 +1422,8 @@ def create_timing_staging(con: duckdb.DuckDBPyConnection) -> bool:
     return False
 
 
-def create_socials_staging(con: duckdb.DuckDBPyConnection) -> bool:
+def create_socials_staging(con: duckdb.DuckDBPyConnection,
+                           src_tables: set[str] | None = None) -> bool:
     """Official social links per game from the scraper's `game_socials` table. These are
     harvested from developer-CONTROLLED pages (the Steam store page + the dev's own
     website, `source` says which), NOT from the platforms themselves — so a handle may be
@@ -1390,7 +1436,7 @@ def create_socials_staging(con: duckdb.DuckDBPyConnection) -> bool:
     marts never crash on an older source DB. rk = sqlite ROWID (insertion order — the
     scraper inserts store_page rows before website rows per game), so MIN(rk) per
     (appid, platform) = the game's most PROMINENT link for that platform."""
-    if _sqlite_table_exists(con, "game_socials"):
+    if _sqlite_table_exists(con, "game_socials", src_tables):
         con.execute(
             """
             CREATE TEMP TABLE stg_game_socials AS
@@ -2128,7 +2174,22 @@ def compute_press_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> i
     return n
 
 
-def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str) -> None:
+def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str,
+               build_mode: str = "full", absent_sources: list[str] | tuple[str, ...] = (),
+               classifier_absent: bool = False) -> None:
+    """Provenance/meta rows for the mart. Beyond the headline stats:
+
+      build_mode           'full' | 'light' — a --light build copies the heavy teardown/aspect
+                           tables verbatim from the previous mart, so downstream consumers (and
+                           the light-overwrite guard in main()) need to be able to tell the two
+                           apart; the filename alone (prospect_<YYYYMMDD>.duckdb) cannot.
+      absent_sources       comma-joined optional source tables (GUARDED_SOURCE_TABLES) that were
+                           genuinely absent this run — the queryable record of which mart
+                           families were built empty on purpose (empty string = none).
+      sentiment_classifier written only as 'absent', when PROSPECT_ALLOW_NO_CLASSIFIER=1
+                           accepted a missing aspect model — flags a degraded build whose
+                           aspect counts are keyword-only (inflated ~28%).
+    """
     med_rev = con.execute(
         "SELECT median(est_rev_reviews) FROM stg_game WHERE total_reviews >= ? AND est_rev_reviews IS NOT NULL",
         [MIN_REVIEWS_DEFAULT],
@@ -2180,26 +2241,214 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
         ),
         "ccu_panel_games": str(ccu_panel_games),
         "ccu_history_days": str(ccu_history_days),
+        "build_mode": build_mode,
+        "absent_sources": ",".join(absent_sources),
     }
+    if classifier_absent:
+        rows["sentiment_classifier"] = "absent"
     con.execute("DROP TABLE IF EXISTS mart_meta")
     con.execute("CREATE TABLE mart_meta(key VARCHAR, value VARCHAR)")
     con.executemany("INSERT INTO mart_meta VALUES (?, ?)", list(rows.items()))
 
 
-def main() -> int:
+# --------------------------------------------------------------------------------------
+# Pre-swap validation gate. The build used to swap current.duckdb unconditionally — a
+# silently-degraded build (broken source join, empty staging, a regressed mart file) went
+# straight to production with exit 0. Before the os.replace/symlink swap, the finished
+# .building file is compared table-by-table against the currently published mart and the
+# build FAILS (non-zero exit, no swap, current.duckdb untouched) when data went missing.
+# --------------------------------------------------------------------------------------
+VALIDATE_MAX_DROP_PCT = 40.0     # a mart table shrinking more than this vs the published mart
+                                 # fails the build; env-overridable via
+                                 # PROSPECT_VALIDATE_MAX_DROP_PCT (nightly source growth means
+                                 # real drops of this size are never organic).
+# Absolute sanity floors for the core tables, checked on EVERY build (a previous mart is not
+# needed to know these are wrong). Floors sit far below the real counts so organic shrinkage
+# never trips them, but a structurally broken build cannot clear them:
+#   mart_game  ~174K rows on the 2026-08 catalog (the full live-games universe) -> floor 100K
+#   mart_niche ~414 tags x windows x MIN_REVIEWS_LEVELS cuts, a few thousand rows  -> floor 1K
+VALIDATE_MIN_ROWS: dict[str, int] = {
+    "mart_game": 100_000,
+    "mart_niche": 1_000,
+}
+
+
+def _validate_max_drop_pct() -> float:
+    raw = os.environ.get("PROSPECT_VALIDATE_MAX_DROP_PCT", "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            print(f"[etl] WARNING: ignoring non-numeric PROSPECT_VALIDATE_MAX_DROP_PCT={raw!r}")
+    return VALIDATE_MAX_DROP_PCT
+
+
+def _mart_row_counts(db_path: Path) -> dict[str, int]:
+    """Row count of every mart% table in a mart file, opened READ-ONLY (the previous mart may
+    be concurrently served; the new one is finished and closed)."""
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        tables = [r[0] for r in con.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'main' AND table_name LIKE 'mart%' ORDER BY table_name"
+        ).fetchall()]
+        return {t: con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0] for t in tables}
+    finally:
+        con.close()
+
+
+def validate_mart(new_path: Path, prev_path: Path | None) -> list[str]:
+    """The pre-swap gate. Prints a per-table old-vs-new comparison and returns the list of
+    failures (empty = pass):
+
+      - absolute floors (VALIDATE_MIN_ROWS) checked on every build, previous mart or not;
+      - any table that had >0 rows in the previous mart and has 0 (or is gone) now;
+      - any table that dropped more than the max-drop threshold vs the previous mart.
+
+    First build (no previous mart) skips the comparison with a note — only the floors apply.
+    A previous mart that exists but cannot be opened read-only (e.g. an exotic lock state)
+    downgrades to a loud warning + floors-only: blocking every nightly on a transient lock
+    would hurt more than one uncompared swap. mart_meta is exempt from the comparison (it is
+    a small provenance key/value table whose keys legitimately come and go)."""
+    failures: list[str] = []
+    new_counts = _mart_row_counts(Path(new_path))
+    max_drop = _validate_max_drop_pct()
+
+    for tbl, floor in VALIDATE_MIN_ROWS.items():
+        n = new_counts.get(tbl, 0)
+        if n < floor:
+            failures.append(f"{tbl}: {n:,} rows is below the absolute sanity floor of {floor:,}")
+
+    prev_counts: dict[str, int] | None = None
+    if prev_path is None or not Path(prev_path).exists():
+        print("[etl] validation: no previous mart to compare against (first build) — "
+              "comparison skipped, absolute floors only")
+    else:
+        try:
+            prev_counts = _mart_row_counts(Path(prev_path))
+        except duckdb.Error as e:
+            print(f"[etl] validation WARNING: previous mart {prev_path} unreadable ({e}) — "
+                  "comparison skipped, absolute floors only")
+
+    if prev_counts is not None:
+        print(f"[etl] validation: comparing against {prev_path} "
+              f"(max allowed drop {max_drop:.0f}%)")
+        print(f"        {'table':32s} {'previous':>12s} {'new':>12s} {'change':>9s}")
+        for tbl in sorted(set(prev_counts) | set(new_counts)):
+            if tbl == "mart_meta":
+                continue
+            prev_n = prev_counts.get(tbl)
+            new_n = new_counts.get(tbl, 0)
+            if prev_n is None:
+                print(f"        {tbl:32s} {'—':>12s} {new_n:>12,} {'NEW':>9s}")
+                continue
+            pct = ((new_n - prev_n) * 100.0 / prev_n) if prev_n > 0 else 0.0
+            flag = ""
+            if prev_n > 0 and new_n == 0:
+                flag = "  FAIL (was non-empty, now 0)"
+                failures.append(f"{tbl}: {prev_n:,} rows -> 0 (previously non-empty table is empty)")
+            elif prev_n > 0 and -pct > max_drop:
+                flag = f"  FAIL (drop > {max_drop:.0f}%)"
+                failures.append(f"{tbl}: {prev_n:,} -> {new_n:,} rows ({pct:+.1f}%, exceeds the "
+                                f"{max_drop:.0f}% max drop)")
+            print(f"        {tbl:32s} {prev_n:>12,} {new_n:>12,} {pct:>+8.1f}%{flag}")
+    return failures
+
+
+def _light_overwrite_error(versioned: Path) -> str | None:
+    """Guard for task '--light must never replace a same-day FULL build': a --light build
+    writes the same prospect_<YYYYMMDD>.duckdb name as a full build, and its copied-stale
+    teardown/aspect tables would silently supersede a full build's fresh ones. Returns an
+    error string when the existing same-version file must not be overwritten by a light
+    build, else None. Unknown provenance (no mart_meta / no build_mode key — a pre-marker
+    build — or an unreadable file) counts as full: refuse unless proven light."""
+    if not versioned.exists():
+        return None
+    try:
+        c = duckdb.connect(str(versioned), read_only=True)
+        try:
+            row = c.execute("SELECT value FROM mart_meta WHERE key = 'build_mode'").fetchone()
+        finally:
+            c.close()
+        mode = row[0] if row else None
+    except duckdb.Error as e:
+        return (f"--light refused: cannot read {versioned.name}'s mart_meta ({e}); "
+                "it may be a full build, and a light build must never replace one. "
+                "Run a full build, or remove the file deliberately first.")
+    if mode != "light":
+        described = f"build_mode={mode!r}" if mode is not None else "an unmarked (pre-build_mode) build, assumed full"
+        return (f"--light refused: {versioned.name} already exists and is {described}. "
+                "A light build (stale copied teardown/aspect tables) must never replace a "
+                "same-day full build. Run a full build instead, or remove the file "
+                "deliberately first.")
+    return None
+
+
+def _sweep_scratch(data_dir: Path, exclude_version: str | None = None) -> None:
+    """Remove build scratch the ETL itself created: `prospect_*.duckdb.building` (a dead
+    partial build), its `.wal`, and the `.building.tmp/` DuckDB spill directory (documented
+    to reach 18GB on the droplet — the scarcest resource there is disk, so a failed build
+    must not leave it behind; the log, not the dead .building file, carries the
+    diagnostics). Called pre-build (stale leftovers from crashed runs) and in main()'s
+    try/finally (a failed build cleans up after itself; on success only the .wal/.tmp
+    leftovers still match — the .building file has already been os.replace()d away).
+
+    `exclude_version` spares that version's scratch (for use while a build is in flight);
+    both call sites in main() pass None. Never touches prospect_*.duckdb, current.duckdb,
+    or the sentiment cache — the patterns only match .building artifacts."""
+    import shutil
+
+    def _excluded(p: Path) -> bool:
+        return exclude_version is not None and p.name.startswith(f"prospect_{exclude_version}.")
+
+    for pattern in ("prospect_*.duckdb.building", "prospect_*.duckdb.building.wal"):
+        for p in sorted(data_dir.glob(pattern)):
+            if _excluded(p) or not p.is_file():
+                continue
+            try:
+                p.unlink()
+                print(f"[etl] swept scratch {p.name}")
+            except OSError as e:
+                print(f"[etl] WARNING: could not remove scratch {p.name}: {e}")
+    for p in sorted(data_dir.glob("prospect_*.duckdb.building.tmp")):
+        if _excluded(p) or not p.is_dir():
+            continue
+        shutil.rmtree(p, ignore_errors=True)
+        print(f"[etl] swept scratch dir {p.name}/")
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Build Prospect DuckDB marts.")
-    ap.add_argument("--source", default="/Users/maximbaginskiy/hobby/steam-scraper/steam_games.db",
-                    help="Path to the read-only steam_games.db SQLite source.")
+    # Default source: PROSPECT_SOURCE_DB env first (the droplet's layout differs from the
+    # laptop's), then the historical local path so a plain `task etl` keeps working.
+    ap.add_argument("--source",
+                    default=os.environ.get(
+                        "PROSPECT_SOURCE_DB",
+                        "/Users/maximbaginskiy/hobby/steam-scraper/steam_games.db"),
+                    help="Path to the read-only steam_games.db SQLite source "
+                         "(default: $PROSPECT_SOURCE_DB, else the local steam-scraper path).")
     ap.add_argument("--data-dir", default=str(HERE.parent / "data"),
                     help="Directory for versioned duckdb files + current.duckdb symlink.")
-    ap.add_argument("--keep", type=int, default=3, help="How many versioned marts to retain.")
+    # 2 = the serving mart + one rollback. Disk is the droplet's scarcest resource and the
+    # deploy script's own duplicate prune is being removed separately — retention is owned
+    # here, and 3 versions of a ~4GB mart was one version of pure waste.
+    ap.add_argument("--keep", type=int, default=2,
+                    help="How many versioned marts to retain (default 2: current + one rollback).")
     ap.add_argument("--light", action="store_true",
                     help="Fast partial build: rebuild every mart EXCEPT the two full-text "
                          "monsters (teardown family + aspect excerpts), whose tables are "
                          "copied verbatim from the currently published mart instead. Turns a "
                          "~3h build into ~30min so a data/mart fix is visible the same hour; "
                          "the copied review-text tables stay as fresh as the last full build.")
-    args = ap.parse_args()
+    ap.add_argument("--skip-validation", action="store_true",
+                    help="Escape hatch: skip the pre-swap row-count validation gate and swap "
+                         "unconditionally (e.g. after a deliberate mart removal or an expected "
+                         "large shrink).")
+    return ap
+
+
+def main() -> int:
+    args = build_arg_parser().parse_args()
 
     source_db = str(Path(args.source).resolve())
     if not Path(source_db).exists():
@@ -2212,25 +2461,34 @@ def main() -> int:
     versioned = data_dir / f"prospect_{mart_version}.duckdb"
     current = data_dir / "current.duckdb"
 
+    # A --light build must never replace a same-day FULL build (its teardown/aspect tables
+    # are stale copies) — checked up front so the mistake costs seconds, not the 30min build.
+    if args.light:
+        err = _light_overwrite_error(versioned)
+        if err is not None:
+            print(f"ERROR: {err}", file=sys.stderr)
+            return 2
+
     # Build into a scratch file and only os.replace() it over the versioned name once the
     # build succeeds. A SAME-DAY rerun otherwise deletes and rebuilds the very file
     # current.duckdb points at, so the serving app and the ETL fight over a DuckDB file
     # lock — any app (re)start mid-build then crash-loops on "Conflicting lock is held"
     # (took the site down on 2026-08-04 after several manual same-day rebuilds). The
     # nightly never hits this only because each day gets a fresh filename; this makes
-    # reruns safe regardless of restart timing. A failed/killed run leaves only a stale
-    # .building file, which the next run removes — the served mart is never touched.
+    # reruns safe regardless of restart timing. A failed/killed run leaves stale .building
+    # scratch (the file, its .wal, an up-to-18GB .tmp spill dir) — swept here before the
+    # build and again in the try/finally below, so a failed run cleans up after itself.
+    _sweep_scratch(data_dir)
     building = data_dir / f"prospect_{mart_version}.duckdb.building"
-    if building.exists():
-        building.unlink()
 
     params = build_params()
     print(f"[etl] source     : {source_db}")
     print(f"[etl] output     : {versioned}")
     t0 = time.perf_counter()
 
-    con = duckdb.connect(str(building))
     try:
+      con = duckdb.connect(str(building))
+      try:
         # On memory-constrained hosts (e.g. a small Droplet) cap DuckDB's memory so it spills
         # to its on-disk temp dir instead of being OOM-killed. Env-driven; unset = default.
         _mem = os.environ.get("PROSPECT_DUCKDB_MEMORY_LIMIT")
@@ -2240,18 +2498,25 @@ def main() -> int:
         con.execute("INSTALL sqlite; LOAD sqlite;")
         con.execute(f"ATTACH '{source_db}' AS src (TYPE sqlite, READ_ONLY)")
 
+        # Verify the ATTACH actually exposes tables (hard fail if not) and enumerate them
+        # once — the guarded staging below probes THIS listing, so a broken attach can no
+        # longer masquerade as "every optional table is absent" (see the guarded-staging
+        # block above create_ccu_staging).
+        src_tables = _verify_source_attach(con)
+        absent_sources = sorted(t for t in GUARDED_SOURCE_TABLES if t not in src_tables)
+
         print("[etl] building staging tables ...")
         create_staging(con, params)
 
-        have_ccu = create_ccu_staging(con)
+        have_ccu = create_ccu_staging(con, src_tables)
         print("[etl] player_counts (live CCU): "
               + ("found" if have_ccu else "ABSENT — live_players will be NULL"))
 
-        have_timing = create_timing_staging(con)
+        have_timing = create_timing_staging(con, src_tables)
         print("[etl] review_histogram (true monthly review counts): "
               + ("found" if have_timing else "ABSENT — mart_timing_* will be empty"))
 
-        have_socials = create_socials_staging(con)
+        have_socials = create_socials_staging(con, src_tables)
         print("[etl] game_socials (official social links): "
               + ("found" if have_socials else "ABSENT — dev_x_handle/x_handle will be NULL"))
 
@@ -2315,7 +2580,10 @@ def main() -> int:
         if args.light:
             con.execute("DETACH prevmart")
 
-        write_meta(con, source_db, mart_version)
+        write_meta(con, source_db, mart_version,
+                   build_mode="light" if args.light else "full",
+                   absent_sources=absent_sources,
+                   classifier_absent=_CLF_ABSENT)
 
         # Per-mart row counts.
         tables = [r[0] for r in con.execute(
@@ -2326,27 +2594,50 @@ def main() -> int:
         for tbl in tables:
             n = con.execute(f'SELECT COUNT(*) FROM "{tbl}"').fetchone()[0]
             print(f"        {tbl:24s} {n:>10,}")
-    finally:
+      finally:
         con.close()
 
-    # Land the finished build atomically over the versioned name (see the .building
-    # comment above). os.replace is atomic on the same filesystem; if the app is serving
-    # this same-day file, it keeps its open inode until the post-ETL restart.
-    os.replace(building, versioned)
+      # Pre-swap validation gate: compare the finished build against the currently
+      # published mart and refuse to swap when data went missing (see validate_mart).
+      if args.skip_validation:
+          print("[etl] validation: SKIPPED (--skip-validation)")
+      else:
+          prev_mart = current.resolve() if current.exists() else None
+          failures = validate_mart(building, prev_mart)
+          if failures:
+              print(f"\n[etl] VALIDATION FAILED — {len(failures)} problem(s); "
+                    f"current.duckdb is NOT being swapped:", file=sys.stderr)
+              for f in failures:
+                  print(f"        - {f}", file=sys.stderr)
+              print("        (re-run with --skip-validation to swap anyway)", file=sys.stderr)
+              return 1
 
-    # Atomic symlink swap: current.duckdb -> prospect_<version>.duckdb (relative target).
-    tmp_link = data_dir / ".current.tmp"
-    if tmp_link.exists() or tmp_link.is_symlink():
-        tmp_link.unlink()
-    os.symlink(versioned.name, tmp_link)
-    os.replace(tmp_link, current)
-    print(f"\n[etl] swapped {current} -> {versioned.name}")
+      # Land the finished build atomically over the versioned name (see the .building
+      # comment above). os.replace is atomic on the same filesystem; if the app is serving
+      # this same-day file, it keeps its open inode until the post-ETL restart.
+      os.replace(building, versioned)
 
-    # Retention: keep the newest N versioned files.
-    versions = sorted(data_dir.glob("prospect_*.duckdb"), key=lambda p: p.name, reverse=True)
-    for old in versions[args.keep:]:
-        old.unlink()
-        print(f"[etl] pruned old mart {old.name}")
+      # Atomic symlink swap: current.duckdb -> prospect_<version>.duckdb (relative target).
+      tmp_link = data_dir / ".current.tmp"
+      if tmp_link.exists() or tmp_link.is_symlink():
+          tmp_link.unlink()
+      os.symlink(versioned.name, tmp_link)
+      os.replace(tmp_link, current)
+      print(f"\n[etl] swapped {current} -> {versioned.name}")
+
+      # Retention: keep the newest N versioned files (default 2 = current + one rollback;
+      # disk is the droplet's scarcest resource). Never matches the sentiment cache or
+      # .building scratch — the glob is exact-suffix.
+      versions = sorted(data_dir.glob("prospect_*.duckdb"), key=lambda p: p.name, reverse=True)
+      for old in versions[args.keep:]:
+          old.unlink()
+          print(f"[etl] pruned old mart {old.name}")
+    finally:
+        # Scratch is owned by the tool: a failed/aborted build removes its own .building
+        # file, .wal, and spill dir (disk beats post-mortem artifacts — the log has the
+        # diagnostics); on success this only sweeps the .wal/.tmp leftovers, since the
+        # .building file itself was just os.replace()d into place.
+        _sweep_scratch(data_dir)
 
     print(f"[etl] done in {time.perf_counter() - t0:.1f}s  (version {mart_version})")
     return 0
