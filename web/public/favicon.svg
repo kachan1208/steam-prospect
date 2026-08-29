@@ -4,13 +4,19 @@
        steel blue (#b5d9fd, --brand on dark) in hairline strokes — the blueprint grammar
        the whole app is drawn in: strokes on the ground, never a filled chip. -->
   <rect width="32" height="32" fill="#1d2d3d"/>
-  <g fill="none" stroke="#b5d9fd" stroke-width="1.6">
-    <circle cx="16" cy="16" r="10"/>
-    <circle cx="16" cy="16" r="5.5"/>
+  <!-- DRAWN FOR 16px, THE ONLY SIZE THAT MATTERS (2026-08-29). A browser tab renders this
+       at 16 CSS px, where one viewBox unit is half a pixel: the mark's third element — the
+       r=1.9 centre dot the app logo carries — sat 1.4px from the inner ring and the two
+       antialiased into one blob. Two rings is what fits. The inner ring also moved out
+       (5.5 -> 6) and thinned (1.6 -> 1.5) so the ring gap lands on whole pixels instead of
+       greying out. Verified by screenshotting this file at exactly 16x16, not by eye at
+       poster size — any future edit here has to clear the same bar. -->
+  <g fill="none" stroke="#b5d9fd">
+    <circle cx="16" cy="16" r="10" stroke-width="1.6"/>
+    <circle cx="16" cy="16" r="6" stroke-width="1.5"/>
   </g>
   <!-- Crosshair ticks, overhanging the outer ring like the .blueprint corner marks. -->
   <g stroke="#b5d9fd" stroke-width="1.6" stroke-linecap="butt">
     <path d="M16 2.5v5M16 24.5v5M2.5 16h5M24.5 16h5"/>
   </g>
-  <circle cx="16" cy="16" r="1.9" fill="#b5d9fd"/>
 </svg>

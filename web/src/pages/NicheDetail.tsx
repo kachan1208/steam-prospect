@@ -13,6 +13,7 @@ import { SaturationTrend } from "../components/charts/SaturationTrend";
 import { TooltipPanel } from "../components/charts/TooltipPanel";
 import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
+import { KpiCell } from "../components/ui/KpiCell";
 import { Loading } from "../components/ui/Loading";
 import { BulletMeter } from "../components/ui/Meter";
 import { StatTile } from "../components/ui/StatTile";
@@ -42,7 +43,7 @@ import { heatDomain, heatStyle } from "../lib/heat";
 import { CSS_VAR } from "../lib/palette";
 import { usePageTitle } from "../lib/usePageTitle";
 import { useDetailView } from "../lib/viewMode";
-import { nicheCombinedPath } from "./NicheCombined";
+import { nicheCombinedPath } from "../lib/nicheSelection";
 
 /** The condensed stack the foundation applies to h1–h6 and .kicker (index.css) — used inline
  * for KPI/panel numerals that aren't semantically headings, so they still read as the
@@ -324,38 +325,6 @@ const TABS = [
   { key: "games", label: "Games & distribution" },
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
-
-/** One cell of the KPI strip: condensed uppercase label -> 38px condensed value -> footnote,
- * matching §4b exactly. Not StatTile — that component's rounded tile doesn't carry this
- * grid's "gap colour IS the rule" layout or the 38px numeral, so this stays page-local.
- * Exported so NicheCombined's KPI row can reuse the same blueprint grid language. */
-export function KpiCell({
-  label,
-  value,
-  footnote,
-  valueClassName,
-}: {
-  label: string;
-  value: ReactNode;
-  footnote?: ReactNode;
-  valueClassName?: string;
-}) {
-  return (
-    <div className="bg-page px-5 py-4">
-      <div className="kicker text-[11px] text-ink-primary/55">{label}</div>
-      {/* Only one text-color utility ever applies: two same-specificity color classes race on
-          Tailwind's generated-CSS order, not className string order, so the default has to be
-          the FALLBACK (via ??), not a base class the override tries to beat. */}
-      <div
-        className={clsx("mt-1 truncate leading-none", valueClassName ?? "text-ink-primary")}
-        style={{ fontFamily: CONDENSED, fontWeight: 600, fontSize: 38 }}
-      >
-        {value}
-      </div>
-      {footnote && <div className="mt-1.5 truncate text-[11px] text-ink-primary/55">{footnote}</div>}
-    </div>
-  );
-}
 
 /** Sortable header for the games table — same click-to-sort/arrow affordance as the Niche
  * Finder's SortLabel, scaled down to this table's type ramp. */

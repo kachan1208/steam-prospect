@@ -19,10 +19,12 @@ import Privacy from "./pages/Privacy";
  * app (most importantly vendor-recharts, ~109KB gz, which only the chart-heavy pages
  * import). ONE Suspense boundary, inside AppShell around the Outlet, carries the
  * fallback — so a hard load into a lazy route still paints the header/footer chrome
- * immediately; react-router wraps navigations in startTransition, so an IN-APP
- * navigation never shows the spinner at all (the old page holds until the chunk
- * arrives). Terms/Privacy render without the shell and are tiny static text, so they
- * stay eager rather than earning a second boundary.
+ * immediately; and because main.tsx opts the router into `v7_startTransition`, an IN-APP
+ * navigation never shows the spinner at all (the location update is a transition, so the
+ * old page holds until the chunk arrives). That flag is load-bearing for this comment:
+ * without it react-router 6 sets state synchronously and every navigation to a lazy route
+ * flashes the fallback. Terms/Privacy render without the shell and are tiny static text,
+ * so they stay eager rather than earning a second boundary.
  */
 const Watchlist = lazy(() => import("./pages/Watchlist"));
 const LaunchTiming = lazy(() => import("./pages/LaunchTiming"));

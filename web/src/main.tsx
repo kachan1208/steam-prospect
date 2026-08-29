@@ -25,7 +25,13 @@ createRoot(rootEl).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
-        <BrowserRouter>
+        {/* v7_startTransition makes the router wrap its location state update in
+            React.startTransition — which is what lets App's ONE Suspense boundary hold the
+            OLD page on screen while a lazy route's chunk downloads, instead of blanking it
+            to a spinner on every in-app navigation. Without the flag (react-router 6.30's
+            default) that claim is simply false. See the comment above the lazy() block in
+            App.tsx; the two must stay in agreement. */}
+        <BrowserRouter future={{ v7_startTransition: true }}>
           <App />
         </BrowserRouter>
       </ThemeProvider>

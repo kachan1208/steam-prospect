@@ -3,7 +3,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-import NicheCombined, {
+import NicheCombined from "./NicheCombined";
+import {
   NICHE_COMBINE_CAP,
   formatNicheRef,
   nicheCombinedPath,
@@ -12,7 +13,7 @@ import NicheCombined, {
   parseNicheRef,
   parseNicheSelection,
   type NicheSelection,
-} from "./NicheCombined";
+} from "../lib/nicheSelection";
 
 /**
  * The URL contract is the load-bearing part of this feature: the finder WRITES these links

@@ -19,108 +19,30 @@ import {
   type Window,
 } from "../lib/api";
 import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
-// The deep-dive page owns the canonical /niches/:dimension/:key link builder AND the §4b
-// KPI-cell primitive (condensed-numeral, 1px-gap blueprint grid); re-exported/reused below so
-// the two pages share one link site and one visual language instead of drifting apart.
-import { KpiCell } from "./NicheDetail";
+// The §4b KPI-cell primitive (condensed numeral, 1px-gap blueprint grid) is shared with the
+// deep-dive page — from components/ui, so neither page has to import the other.
+import { KpiCell } from "../components/ui/KpiCell";
+import {
+  formatNicheRef,
+  nicheFinderPath,
+  parseCombineMode,
+  parseNicheSelection,
+  NICHE_COMBINE_CAP,
+  type NicheCut,
+  type NicheSelection,
+} from "../lib/nicheSelection";
 import { nicheDetailPath } from "../lib/nichePath";
 import { usePageTitle } from "../lib/usePageTitle";
-
-export { nicheDetailPath };
 
 /**
  * Combined niche analysis — the answer to "a game carries many tags, so it lives in many
  * niches; what does the OVERLAP look like?".
  *
- * A niche selection rides the URL as repeated `niches=<dimension>:<key>` params (plus
- * `mode`, `win`, `min_reviews`), so every combination is shareable and bookmarkable —
- * the same reasoning as /compare?ids=. Keys carry spaces, ampersands and apostrophes
- * ("Point & Click", "Beat 'em up"), so every hop through a URL goes through
- * URLSearchParams / encodeURIComponent and never through hand-rolled string joins.
- *
- * This module is the single source of truth for the SELECTION URL contract: NicheFinder
- * imports the helpers below to WRITE the links this page READS, so a serialize/parse
- * mismatch can't drift between the two pages. The single-niche deep-dive link is NicheDetail's
- * (that page owns its own route); it is re-exported above so the finder has one import site.
+ * The selection URL contract this page READS and the finder WRITES lives in
+ * lib/nicheSelection.ts — a leaf module, deliberately: while it lived here, NicheFinder's
+ * import of six pure helpers dragged this page (and NicheDetail, and recharts) into the
+ * /niches chunk. Nothing may import a helper from a page module; see that file's header.
  */
-
-/** Six is the point where the intersection is almost always empty and the chips stop
- * fitting on one row — the same cap, for the same reason, as the games compare list. */
-export const NICHE_COMBINE_CAP = 6;
-
-export interface NicheSelection {
-  dimension: Dimension;
-  key: string;
-}
-
-const DIMENSIONS: Dimension[] = ["tag", "genre"];
-
-/** "tag:Point & Click" — dimension, a colon, then the key VERBATIM (URL encoding is the
- * URLSearchParams layer's job, not this one's). */
-export function formatNicheRef(sel: NicheSelection): string {
-  return `${sel.dimension}:${sel.key}`;
-}
-
-/** Inverse of formatNicheRef. Splits on the FIRST colon so a key containing one survives;
- * returns null for an unknown dimension or an empty key rather than inventing a niche. */
-export function parseNicheRef(raw: string): NicheSelection | null {
-  const i = raw.indexOf(":");
-  if (i <= 0) return null;
-  const dimension = raw.slice(0, i);
-  const key = raw.slice(i + 1);
-  if (!DIMENSIONS.includes(dimension as Dimension) || key === "") return null;
-  return { dimension: dimension as Dimension, key };
-}
-
-/** Every valid `niches=` param, deduped, in URL order, capped at NICHE_COMBINE_CAP. */
-export function parseNicheSelection(params: URLSearchParams): NicheSelection[] {
-  const out: NicheSelection[] = [];
-  const seen = new Set<string>();
-  for (const raw of params.getAll("niches")) {
-    const sel = parseNicheRef(raw);
-    if (!sel) continue;
-    const ref = formatNicheRef(sel);
-    if (seen.has(ref)) continue;
-    seen.add(ref);
-    out.push(sel);
-    if (out.length >= NICHE_COMBINE_CAP) break;
-  }
-  return out;
-}
-
-export function parseCombineMode(raw: string | null): NicheCombineMode {
-  return raw === "union" ? "union" : "intersect";
-}
-
-export interface NicheCut {
-  win: Window;
-  min_reviews: number;
-}
-
-/** /niches/combined?niches=tag:Roguelike&niches=tag:Deckbuilding&mode=intersect — the
- * link the finder's "Analyse combined" button navigates to. */
-export function nicheCombinedPath(
-  selection: NicheSelection[],
-  mode: NicheCombineMode,
-  cut?: NicheCut,
-): string {
-  const sp = new URLSearchParams();
-  for (const s of selection) sp.append("niches", formatNicheRef(s));
-  sp.set("mode", mode);
-  if (cut) {
-    sp.set("win", cut.win);
-    sp.set("min_reviews", String(cut.min_reviews));
-  }
-  return `/niches/combined?${sp.toString()}`;
-}
-
-/** Back-link to the finder with the selection intact, so the checkboxes stay ticked. */
-export function nicheFinderPath(selection: NicheSelection[]): string {
-  if (selection.length === 0) return "/niches";
-  const sp = new URLSearchParams();
-  for (const s of selection) sp.append("niches", formatNicheRef(s));
-  return `/niches?${sp.toString()}`;
-}
 
 const PAGE = 25;
 const MIN_REVIEW_OPTIONS = [0, 50, 100];

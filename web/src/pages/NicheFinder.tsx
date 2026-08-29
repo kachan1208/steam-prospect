@@ -19,14 +19,17 @@ import {
 import { fmtCompact, fmtInt, fmtMonths, fmtPct, fmtSigned, fmtUsd } from "../lib/format";
 import { useDebounced } from "../lib/useDebounced";
 import { usePageTitle } from "../lib/usePageTitle";
+// From the leaf module, NEVER from pages/NicheCombined (which is where these lived until
+// 2026-08-29): a static import of a page module drags that page — and NicheDetail, and
+// vendor-recharts with it — into this route's chunk, defeating the code splitting.
 import {
   formatNicheRef,
   nicheCombinedPath,
-  nicheDetailPath,
   parseNicheSelection,
   NICHE_COMBINE_CAP,
   type NicheSelection,
-} from "./NicheCombined";
+} from "../lib/nicheSelection";
+import { nicheDetailPath } from "../lib/nichePath";
 
 const LIMIT = 50;
 

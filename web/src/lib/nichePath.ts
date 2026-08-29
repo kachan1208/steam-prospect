@@ -1,12 +1,18 @@
 /**
- * The canonical /niches/:dimension/:key route pattern + link builder.
+ * THE niche URL contract: the /niches/:dimension/:key route pattern, the link builders,
+ * and the `?niches=` multi-select serialisation the finder writes and /niches/combined
+ * reads. A leaf module — types only from lib/api, no components, no charts.
  *
  * Extracted from pages/NicheDetail.tsx (2026-08-28, route code-splitting): App.tsx's
  * route table and the eagerly-loaded RadarBoard both need to LINK to a niche, and when
  * these lived on the page module that import statically dragged the whole 80K
  * NicheDetail page (and, through its chart imports, all of recharts) into the entry
- * chunk — defeating React.lazy. Pages keep importing them via pages/NicheDetail's
- * re-export; only eager modules must use this file directly.
+ * chunk — defeating React.lazy. Pages may import from here freely; NOTHING may import a
+ * helper FROM a pages/* module (see lib/nicheSelection.ts, which exists because they did).
+ *
+ * These two are what the EAGER modules (App's route table, RadarBoard) need, so they — and
+ * only they — ride in the entry chunk. The multi-select `?niches=` contract, which no eager
+ * module touches, lives one door down in lib/nicheSelection.ts and stays out of the entry.
  */
 
 /** The one place the route pattern is spelled; App.tsx and the round-trip test both use it. */
@@ -33,3 +39,4 @@ export function nicheDetailPath(
   const s = sp.toString();
   return s ? `${base}?${s}` : base;
 }
+
