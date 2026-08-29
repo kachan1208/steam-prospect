@@ -197,15 +197,24 @@ jobs:
     # These scripts ARE production: the nightly pipeline, the cron lock wrapper, backups and
     # rollback all run from /root/ on the droplet, where a typo is discovered at 21:00 UTC by
     # a missing mart. -x follows the sourced deploy/lib.sh.
+    env:
+      # PINNED, for the same reason UV_VERSION is. `apt install shellcheck` gave 0.9.0, whose
+      # SC2317 ("command appears to be unreachable") fires on every line of a trap handler —
+      # backup.sh's cleanup trap is exactly that, so the job failed on a false positive that
+      # newer shellcheck does not emit. An unpinned linter means the runner image decides
+      # whether CI is green, which is how a check stops meaning anything.
+      SHELLCHECK_VERSION: "v0.11.0"
     steps:
       - uses: actions/checkout@v4
 
       - name: Run shellcheck
         run: |
           set -euo pipefail
-          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          shellcheck --version
-          shellcheck -x deploy/*.sh
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            | tar -xJf - -C /tmp
+          SC="/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck"
+          "$SC" --version
+          "$SC" -x deploy/*.sh
 
   docker:
     name: Docker image builds
