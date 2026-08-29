@@ -36,6 +36,22 @@ FILES=(
     "crontab.txt"
 )
 
+# Names (as they land in /root/) that are NOT executed directly — everything else gets an
+# explicit `chmod +x` on the box after the copy.
+#
+# This is not belt-and-braces, it is load-bearing: `scp -p` PRESERVES the local mode, and
+# several of these files were committed 100644 (deploy/prospect-refresh.sh and
+# deploy/light-build-cron.sh among them — the nightly itself and the midday build). Copying
+# them would have chmod'd the +x bit AWAY on the live box and left cron entries that exec
+# them directly failing with "Permission denied" every night. The git modes are corrected in
+# the same commit as this; the chmod makes the deploy correct regardless of what mode the
+# local checkout happens to have (a fresh clone on a filesystem without exec bits, an
+# operator's `cp` from a zip, …).
+NO_EXEC=(
+    "crontab.txt"   # data, installed with `crontab <file>`
+    "lib.sh"        # sourced with `.`, never executed
+)
+
 EXECUTE=0
 [ "${1:-}" = "--execute" ] && EXECUTE=1
 
@@ -49,6 +65,7 @@ echo
 
 REMOTE_HASH_CMD="sha256sum"
 DESTS=()
+EXEC_DESTS=()
 for spec in "${FILES[@]}"; do
     src="${spec%%:*}"
     dest="${spec#*:}"; [ "$dest" = "$spec" ] && dest="$(basename "$src")"
@@ -57,6 +74,9 @@ for spec in "${FILES[@]}"; do
         exit 1
     fi
     DESTS+=("/root/$dest")
+    skip_exec=0
+    for n in "${NO_EXEC[@]}"; do [ "$dest" = "$n" ] && skip_exec=1; done
+    [ "$skip_exec" = 0 ] && EXEC_DESTS+=("/root/$dest")
     cmd=(scp -p -i "$KEY" "$SCRIPT_DIR/$src" "$HOST:/root/$dest")
     if [ "$EXECUTE" = 1 ]; then
         echo "+ ${cmd[*]}"
@@ -65,6 +85,17 @@ for spec in "${FILES[@]}"; do
         echo "${cmd[*]}"
     fi
 done
+
+CHMOD_CMD="chmod +x ${EXEC_DESTS[*]}"
+if [ "$EXECUTE" = 1 ]; then
+    echo
+    echo "+ ssh ... '$CHMOD_CMD'"
+    ssh -i "$KEY" "$HOST" "$CHMOD_CMD"
+else
+    echo
+    echo "# make the scripts executable (scp -p preserves the LOCAL mode — see NO_EXEC above):"
+    echo "ssh -i $KEY $HOST '$CHMOD_CMD'"
+fi
 
 if [ "$EXECUTE" = 1 ]; then
     echo
