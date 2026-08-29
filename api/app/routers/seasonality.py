@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response
 
-from .. import analytics_db
+from .. import analytics_db, response_cache
 from ..schemas import LaunchCurve, LaunchCurvePoint, Seasonality, SeasonalityCell
 
 router = APIRouter(tags=["timing"])
@@ -15,8 +15,25 @@ _SEASON_COLS = (
 
 @router.get("/api/seasonality", response_model=Seasonality)
 def seasonality(
+    response: Response,
     genre: str = Query("__all__"),
 ) -> Seasonality:
+    """A pure function of the mart for a given genre — cached in-process keyed by the mart
+    identity, and sent with an hour of public cache (see response_cache).
+
+    An unknown genre is not an error here, it is an empty grid — and an empty grid is NOT
+    cached (`cache_if`), so enumerating genre names can't push the real ones out."""
+    response.headers["Cache-Control"] = response_cache.CACHE_CONTROL
+    return response_cache.get_or_compute(
+        "seasonality", (genre,), lambda: _seasonality(genre), cache_if=_has_seasonality
+    )
+
+
+def _has_seasonality(s: Seasonality) -> bool:
+    return bool(s.month_weekday or s.month or s.weekday or s.year)
+
+
+def _seasonality(genre: str) -> Seasonality:
     rows = analytics_db.query(
         f"SELECT grain, {_SEASON_COLS} FROM mart_seasonality WHERE genre = ?",
         [genre],
@@ -35,8 +52,18 @@ def seasonality(
 
 @router.get("/api/launch-curve", response_model=LaunchCurve)
 def launch_curve(
+    response: Response,
     genre: str = Query("__all__"),
 ) -> LaunchCurve:
+    """Cached + Cache-Control'd for the same reason as /api/seasonality above, including
+    not caching the empty answer an unknown genre produces."""
+    response.headers["Cache-Control"] = response_cache.CACHE_CONTROL
+    return response_cache.get_or_compute(
+        "launch_curve", (genre,), lambda: _launch_curve(genre), cache_if=lambda c: bool(c.points)
+    )
+
+
+def _launch_curve(genre: str) -> LaunchCurve:
     rows = analytics_db.query(
         "SELECT day, mean_cum_fraction, median_cum_fraction, n_games "
         "FROM mart_launch_curve WHERE genre = ? ORDER BY day",

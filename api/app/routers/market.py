@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response
 
-from .. import analytics_db, benchmarks
+from .. import analytics_db, benchmarks, response_cache
 from ..schemas import (
     BenchmarkMark,
     BoxleiterRow,
+    ComputedBenchmarks,
     HistBucket,
+    MarketBenchmarks,
     MarketDistribution,
     PercentilePoint,
     TierRow,
@@ -68,8 +70,16 @@ def distribution(
     )
 
 
-@router.get("/benchmarks")
-def market_benchmarks() -> dict:
+@router.get("/benchmarks", response_model=MarketBenchmarks)
+def market_benchmarks(response: Response) -> MarketBenchmarks:
+    """Cited benchmark constants + our catalog's own figures. A pure function of the mart
+    (no parameters at all), so it is cached in-process keyed by the mart version and sent
+    with an hour of public cache — see response_cache."""
+    response.headers["Cache-Control"] = response_cache.CACHE_CONTROL
+    return response_cache.get_or_compute("market_benchmarks", (), _market_benchmarks)
+
+
+def _market_benchmarks() -> MarketBenchmarks:
     meta = {r["key"]: r["value"] for r in analytics_db.query("SELECT key, value FROM mart_meta")}
     boxleiter = analytics_db.query(
         "SELECT genre, n, owners_per_review_median, owners_per_review_p25, "
@@ -83,21 +93,21 @@ def market_benchmarks() -> dict:
         v = meta.get(key)
         return float(v) if v not in (None, "") else None
 
-    return {
-        "cited": benchmarks.as_dict(),
-        "computed": {
+    return MarketBenchmarks(
+        cited=benchmarks.as_dict(),
+        computed=ComputedBenchmarks(
             # our catalog figures, with the population made explicit
-            "median_revenue_scored": _f("global_median_revenue"),
-            "median_revenue_paid": _f("global_median_revenue_paid"),
-            "boxleiter_owners_per_review_slope": _f("boxleiter_owners_per_review"),
-            "pct_over_100k_scored": _f("pct_over_100k"),
-            "n_games_total": _f("n_games_total"),
-            "n_games_scored": _f("n_games_scored"),
-            "population_note": (
+            median_revenue_scored=_f("global_median_revenue"),
+            median_revenue_paid=_f("global_median_revenue_paid"),
+            boxleiter_owners_per_review_slope=_f("boxleiter_owners_per_review"),
+            pct_over_100k_scored=_f("pct_over_100k"),
+            n_games_total=_f("n_games_total"),
+            n_games_scored=_f("n_games_scored"),
+            population_note=(
                 "computed medians/pct are Boxleiter gross over games with >=10 reviews "
                 "(paid = price>0, >=1 review); cited $249/8.5% are first-year/net over ALL releases"
             ),
-        },
-        "boxleiter_by_genre": [BoxleiterRow(**b).model_dump() for b in boxleiter],
-        "tiers": [TierRow(**t).model_dump() for t in tiers],
-    }
+        ),
+        boxleiter_by_genre=[BoxleiterRow(**b) for b in boxleiter],
+        tiers=[TierRow(**t) for t in tiers],
+    )

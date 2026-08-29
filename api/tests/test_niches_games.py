@@ -145,3 +145,11 @@ def test_combined_is_not_swallowed_by_the_dimension_route(client):
     r = client.get("/api/niches/combined", params={"niches": ["tag:A", "tag:B"]})
     assert r.status_code == 503  # reached the handler; the mart is what's missing
     assert "dimension" not in r.json()["detail"]
+
+
+def test_detail_bad_dimension_is_422_like_the_drilldown(client):
+    """niche_detail used to answer 400 where every other hand-validated dimension check
+    answers 422 — unified on 422 (web/src treats both identically, verified 2026-08-28)."""
+    r = client.get("/api/niches/bogus/Whatever")
+    assert r.status_code == 422
+    assert r.json()["detail"] == "dimension must be tag or genre"

@@ -1,0 +1,10 @@
+# Test-only dependencies for api/tests/ — deliberately NOT in requirements.txt, which is
+# what the production container image installs. Nothing under api/app/ imports either of
+# these: httpx is pulled in solely by starlette's TestClient, and pytest by the runner.
+#
+# Install alongside the runtime deps when running the suite:
+#     pip install -r api/requirements.txt -r api/requirements-dev.txt
+-r requirements.txt
+
+pytest>=8.0
+httpx>=0.27

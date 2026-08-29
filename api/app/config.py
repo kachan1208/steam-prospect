@@ -48,6 +48,21 @@ class Settings(BaseSettings):
     api_title: str = "Prospect API"
     api_version: str = "0.1.0"
 
+    # Per-IP rate limit (api/app/rate_limit.py) on POST /api/analytics/collect and the
+    # /mcp mount — requests per minute per client IP, sliding window. 0 disables the
+    # limiter entirely (env: PROSPECT_RATE_LIMIT_PER_MIN).
+    rate_limit_per_min: int = 120
+
+    # How many TRUSTED reverse proxies sit in front of this app — the number of hops at the
+    # RIGHT of X-Forwarded-For that were written by infrastructure we control, and therefore
+    # the only part of that header a client cannot forge. Production is exactly one: Caddy on
+    # the droplet terminates TLS on :443 and `reverse_proxy 127.0.0.1:8080`s into the
+    # container (the port is bound to loopback, so Caddy is the only possible peer), and
+    # Caddy APPENDS the real peer to any client-supplied X-Forwarded-For. 0 = nothing
+    # trustworthy in front, ignore the header entirely and use the socket peer
+    # (env: PROSPECT_TRUSTED_PROXY_HOPS). See rate_limit._client_key.
+    trusted_proxy_hops: int = 1
+
     # Observability (api/app/observability.py). Sentry is fully inert until
     # PROSPECT_SENTRY_DSN is set — local dev runs with zero Sentry footprint, no
     # import side effects beyond a no-op check.
