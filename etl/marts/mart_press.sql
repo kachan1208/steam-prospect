@@ -27,11 +27,13 @@
 --
 -- Both press marts key off the SAME journalist-only, confidence-filtered article set as
 -- mart_game_teardown.sql's mart_game_press_* (source != 'steam_news', match_confidence >=
--- @PRESS_MIN_CONFIDENCE@) — deliberately re-derived here rather than shared across files
--- (each mart file owns its own temp staging, matching this repo's convention), so this
--- file has no load-order dependency on mart_game_teardown.sql. Genre is the full
--- multi-label membership (stg_genre_membership), same convention as mart_market.sql /
--- mart_lang.sql — a game in two genres contributes to both.
+-- @PRESS_MIN_CONFIDENCE@) — read from the SHARED stg_press_base staging table built once
+-- in build_marts.py's create_staging() (the old convention of re-deriving it per mart file
+-- was dropped 2026-08: five copies of the same 3-way join, five chances to drift). Staging
+-- is built before any mart file runs, so there is still no load-order dependency on
+-- mart_game_teardown.sql. Genre is the full multi-label membership
+-- (stg_genre_membership), same convention as mart_market.sql / mart_lang.sql — a game in
+-- two genres contributes to both.
 --
 -- Caveats baked into the design (surface these in the API/UI, don't just bury them here):
 --   - Selection bias: covered games are already notable -> descriptive, not predictive.
@@ -65,21 +67,18 @@ DROP TABLE IF EXISTS mart_buzz_trends_summary;
 -- therefore an ALL-TIME count (a prolific long-retired contributor can still rank #1);
 -- n_articles_recent_24m is the deliberate "still active" signal alongside it.
 CREATE TEMP TABLE _press_journalist AS
-SELECT m.appid, a.id AS article_id, a.source, a.author, a.title, a.url,
-    TRY_CAST(a.published_at AS TIMESTAMP) AS published_at,
-    m.match_confidence,
-    (TRY_CAST(a.published_at AS TIMESTAMP) >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH) AS is_recent,
-    (a.author IS NOT NULL AND TRIM(a.author) != ''
+SELECT pb.appid, pb.article_id, pb.source, pb.author, pb.title, pb.url,
+    pb.published_at,
+    pb.match_confidence,
+    (pb.published_at >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH) AS is_recent,
+    (pb.author IS NOT NULL AND TRIM(pb.author) != ''
         AND NOT regexp_matches(
-            a.author,
+            pb.author,
             '(staff|\bteam\b|\beditors?\b|press release|редакція|^gamesindustry\.biz$|^ign$|^pc gamer$|^eurogamer$|^game developer$)',
             'i'
         )
     ) AS has_named_author
-FROM src.article_game_mentions m
-JOIN src.articles a ON a.id = m.article_id
-WHERE a.source != 'steam_news'
-  AND m.match_confidence >= @PRESS_MIN_CONFIDENCE@;
+FROM stg_press_base pb;
 
 -- ------------------------------------------------------------------------------------
 -- mart_press_outlet_genre
@@ -174,7 +173,9 @@ ORDER BY c.genre, c.n_articles DESC;
 -- complete month ... @BUZZ_TOTAL_MONTHS@ = oldest retained month. recent = months
 -- 1..@BUZZ_RECENT_MONTHS@; prior = the equal-length window immediately before it.
 -- Not scoped to article_game_mentions — this is whole-corpus press-discourse buzz, not
--- tied to a specific matched game.
+-- tied to a specific matched game. DELIBERATELY NOT read from stg_press_base: that shared
+-- base is mention-joined (drops unmatched articles, duplicates multi-game articles) and
+-- confidence-floored — a different population than this per-article corpus.
 -- ------------------------------------------------------------------------------------
 CREATE TEMP TABLE _buzz_articles AS
 SELECT a.id, a.title,
@@ -291,3 +292,27 @@ SELECT tm.term, tm.period, tm.month_idx, tm.n_mentions
 FROM _buzz_term_month tm
 JOIN mart_buzz_trends_summary s ON s.term = tm.term
 ORDER BY tm.term, tm.month_idx DESC;
+
+-- ------------------------------------------------------------------------------------
+-- Temp-table hygiene: TEMP tables live for the whole shared build connection, so every
+-- file-local staging temp left behind holds memory/spill for hours of build. Everything
+-- this file created is file-local (verified: no other mart file or build_marts.py reads
+-- them) — drop it all.
+-- ------------------------------------------------------------------------------------
+DROP TABLE IF EXISTS _press_journalist;
+DROP TABLE IF EXISTS _outlet_genre_articles;
+DROP TABLE IF EXISTS _outlet_genre_example;
+DROP TABLE IF EXISTS _author_genre_articles;
+DROP TABLE IF EXISTS _author_genre_counts;
+DROP TABLE IF EXISTS _author_genre_outlets;
+DROP TABLE IF EXISTS _author_genre_example;
+DROP TABLE IF EXISTS _buzz_articles;
+DROP TABLE IF EXISTS _buzz_words;
+DROP TABLE IF EXISTS _buzz_bigrams;
+DROP TABLE IF EXISTS _concept_source;
+DROP TABLE IF EXISTS _concept_words;
+DROP TABLE IF EXISTS concept_unigram;
+DROP TABLE IF EXISTS concept_bigram;
+DROP TABLE IF EXISTS _buzz_terms;
+DROP TABLE IF EXISTS _buzz_term_month;
+DROP TABLE IF EXISTS _buzz_term_stats;

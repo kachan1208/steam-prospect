@@ -283,7 +283,7 @@ agg AS (
         median(playtime_p50) AS med_playtime_min,
         SUM(est_rev_reviews) FILTER (WHERE rev_pr >= @WINNER_TOP_PCT@)
             / NULLIF(SUM(est_rev_reviews), 0) AS winner_concentration,
-        AVG(CASE WHEN est_rev_reviews > 200000 THEN 1.0 ELSE 0.0 END) AS hit_rate_200k,
+        AVG(CASE WHEN est_rev_reviews > @TIMING_BIG_REV@ THEN 1.0 ELSE 0.0 END) AS hit_rate_200k,
         AVG(CASE WHEN est_rev_reviews > 500000 THEN 1.0 ELSE 0.0 END) AS hit_rate_500k,
         AVG(CASE WHEN positive_ratio IS NULL OR positive_ratio < @BEATABLE_RATIO_BAR@
                       OR total_reviews < @THIN_REVIEWS_BAR@ THEN 1.0 ELSE 0.0 END) AS beatable_share
@@ -496,3 +496,12 @@ JOIN counts c ON c.dimension = m.dimension AND c.key = m.key
 WHERE g.release_year IS NOT NULL
   AND g.release_year BETWEEN @TREND_START_YEAR@ AND @CUR_YEAR@
 GROUP BY m.dimension, m.key, g.release_year;
+
+-- Temp-table hygiene: _niche_demand24m is file-local; _niche_players_now /
+-- _niche_lifetime are mart_players.sql handoffs whose LAST consumer is this file
+-- (verified — no later mart file or build_marts.py reads them). _niche_pop is
+-- deliberately left alive: mart_niche_game.sql (next in MART_FILES) reads it and
+-- drops it itself.
+DROP TABLE IF EXISTS _niche_demand24m;
+DROP TABLE IF EXISTS _niche_players_now;
+DROP TABLE IF EXISTS _niche_lifetime;

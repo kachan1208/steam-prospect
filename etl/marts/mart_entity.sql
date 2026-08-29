@@ -203,7 +203,7 @@ SELECT
     CAST(SUM(f.est_rev_reviews) AS DOUBLE) AS total_rev,
     CAST(median(f.est_rev_reviews) AS DOUBLE) AS median_rev,
     CAST(quantile_cont(f.est_rev_reviews, 0.90) AS DOUBLE) AS p90_rev,
-    CAST(AVG(CASE WHEN f.est_rev_reviews > 200000 THEN 1.0 ELSE 0.0 END)
+    CAST(AVG(CASE WHEN f.est_rev_reviews > @TIMING_BIG_REV@ THEN 1.0 ELSE 0.0 END)
             FILTER (WHERE f.est_rev_reviews IS NOT NULL) AS DOUBLE) AS hit_rate_200k,
     CAST(median(f.total_reviews) AS DOUBLE) AS median_reviews,
     CAST(median(f.positive_ratio) AS DOUBLE) AS median_positive_ratio,
@@ -220,3 +220,10 @@ LEFT JOIN _entity_top_genres tg ON tg.role = f.role AND tg.name = f.name
 LEFT JOIN _publisher_partners pp ON f.role = 'publisher' AND pp.name = f.name
 LEFT JOIN _entity_x_handle xh ON xh.role = f.role AND xh.name = f.name
 GROUP BY f.role, f.name;
+
+-- Temp-table hygiene: file-local staging (nothing downstream reads these).
+DROP TABLE IF EXISTS _entity_map;
+DROP TABLE IF EXISTS _entity_game_facts;
+DROP TABLE IF EXISTS _entity_top_genres;
+DROP TABLE IF EXISTS _publisher_partners;
+DROP TABLE IF EXISTS _entity_x_handle;

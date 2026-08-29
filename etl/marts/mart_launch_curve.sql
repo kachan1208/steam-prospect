@@ -57,3 +57,6 @@ CREATE TABLE mart_game_launch_curve AS
 SELECT appid, day, f AS cum_fraction, fy_total AS sample_first_year_reviews
 FROM _launch_frac
 ORDER BY appid, day;
+
+-- Temp-table hygiene: file-local staging (nothing downstream reads it).
+DROP TABLE IF EXISTS _launch_frac;

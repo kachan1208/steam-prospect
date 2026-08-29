@@ -31,8 +31,9 @@
 -- never disagree with the per-game press cards built from those same tables. The ONE
 -- deliberate exception is _niche_press_last below: the per-game marts carry no
 -- per-(appid, source) dates, so last_article_at needs a minimal date-only lookup against
--- src, using the IDENTICAL journalist-only/confidence filters as mart_game_teardown.sql's
--- _press_base — the dated set matches the counted set by construction.
+-- the SHARED stg_press_base — the same journalist-only, confidence-floored base
+-- mart_game_teardown.sql's press marts aggregate, so the dated set matches the counted
+-- set by construction.
 --
 -- Reliability floor: a niche needs >= @NICHE_PRESS_MIN_GAMES@ press-covered member games
 -- (tunable NICHE_PRESS_MIN_GAMES in build_marts.py) — below that, one title's press cycle
@@ -81,16 +82,15 @@ JOIN mart_game_press_timeline t ON t.appid = m.appid
 GROUP BY m.dimension, m.key, t.period
 ORDER BY m.dimension, m.key, month;
 
--- Date-only lookup (see header): the latest dated article per (appid, source), same
--- filters as mart_game_teardown.sql's _press_base. Articles without a parseable
+-- Date-only lookup (see header): the latest dated article per (appid, source), read from
+-- the SHARED stg_press_base (built in build_marts.py's create_staging — the same
+-- journalist-only, confidence-floored base mart_game_teardown.sql's press marts use, so
+-- the dated set matches the counted set by construction). Articles without a parseable
 -- published_at are counted in n_articles but can't move last_article_at.
 CREATE TEMP TABLE _niche_press_last AS
-SELECT m.appid, a.source, MAX(TRY_CAST(a.published_at AS TIMESTAMP)) AS last_article_at
-FROM src.article_game_mentions m
-JOIN src.articles a ON a.id = m.article_id
-WHERE a.source != 'steam_news'
-  AND m.match_confidence >= @PRESS_MIN_CONFIDENCE@
-GROUP BY m.appid, a.source;
+SELECT pb.appid, pb.source, MAX(pb.published_at) AS last_article_at
+FROM stg_press_base pb
+GROUP BY pb.appid, pb.source;
 
 CREATE TABLE mart_niche_press_outlets AS
 WITH agg AS (
@@ -115,3 +115,11 @@ SELECT dimension, key, source, n_articles, n_games_covered, last_article_at
 FROM ranked
 WHERE outlet_rank <= @NICHE_PRESS_TOP_OUTLETS@
 ORDER BY dimension, key, n_articles DESC, source;
+
+-- Temp-table hygiene: file-local staging (nothing downstream reads these). This file is
+-- also the LAST in MART_FILES and the last consumer of the shared stg_press_base — drop
+-- that too (same last-consumer convention as mart_niche_game.sql's _niche_pop drop).
+DROP TABLE IF EXISTS _press_niche_member;
+DROP TABLE IF EXISTS _press_niche_eligible;
+DROP TABLE IF EXISTS _niche_press_last;
+DROP TABLE IF EXISTS stg_press_base;

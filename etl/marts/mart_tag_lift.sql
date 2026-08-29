@@ -60,7 +60,7 @@ agg AS (
         tag_a, tag_b,
         COUNT(*) AS n_games,
         median(est_rev_reviews) AS median_rev,
-        AVG(CASE WHEN est_rev_reviews > 200000 THEN 1.0 ELSE 0.0 END) AS hit_rate_200k
+        AVG(CASE WHEN est_rev_reviews > @TIMING_BIG_REV@ THEN 1.0 ELSE 0.0 END) AS hit_rate_200k
     FROM pairs
     GROUP BY tag_a, tag_b
     HAVING COUNT(*) >= @TAG_PAIR_MIN_GAMES@

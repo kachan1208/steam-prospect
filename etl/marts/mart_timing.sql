@@ -172,3 +172,8 @@ SELECT genre, month_since_release,
 FROM gg
 GROUP BY genre, month_since_release
 HAVING COUNT(DISTINCT appid) >= @TIMING_DECAY_MIN_GAMES@ OR genre = '__all__';
+
+-- Temp-table hygiene: file-local staging (nothing downstream reads these).
+DROP TABLE IF EXISTS _timing_hist;
+DROP TABLE IF EXISTS _timing_demand_base;
+DROP TABLE IF EXISTS _timing_decay_pergame;

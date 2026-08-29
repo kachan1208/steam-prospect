@@ -150,3 +150,10 @@ LEFT JOIN _game_players_summary gps ON gps.appid = g.appid
 LEFT JOIN _game_lifetime gl ON gl.appid = g.appid
 LEFT JOIN dev_x dx ON dx.appid = g.appid
 LEFT JOIN src.games gh ON gh.appid = g.appid;
+
+-- Temp-table hygiene: last consumer of mart_players.sql's per-GAME handoffs (verified —
+-- no later mart file or build_marts.py reads them); the per-NICHE handoffs
+-- (_niche_players_now / _niche_lifetime) stay alive for mart_niche.sql. Same
+-- last-consumer convention as mart_niche_game.sql's _niche_pop drop.
+DROP TABLE IF EXISTS _game_players_summary;
+DROP TABLE IF EXISTS _game_lifetime;
