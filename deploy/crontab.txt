@@ -16,6 +16,15 @@
 # /var/log/prospect-cron-wrap.log and pushes prospect_cron_skipped{job=...} so alert_check
 # sees it. The wrapped command inherits the lock fd and holds the lock for its whole life
 # (this replaces the old bare `flock -n <lock> <job>` entries whose skips were invisible).
+# cron-wrap also pushes each job's OUTCOME as prospect_pipeline_step_success{step="<job>"} —
+# wrapping a job is what puts it under alerting, so new jobs belong behind the wrapper even
+# when they cannot collide with anything.
+#
+# `mkdir -p /var/log/prospect-steps &&` prefixes: cron's own shell performs a line's `>>`
+# redirect BEFORE it execs anything, so a line logging into that directory fails outright if
+# the directory is missing — and it used to be created only by the 21:00 nightly, hours after
+# the first job that logs there. The prefix runs first; the redirect belongs to the command
+# after the `&&`, so it is evaluated afterwards.
 #
 # Daily UTC shape: 21:00-~05:00 nightly refresh -> 05:00 twitch slot (retired?) ->
 # 06:00/06:15 daytime keepers (hold RAM until 19:00) -> 19:15 quiet-window scraper jobs ->
@@ -34,7 +43,7 @@
 # da0a002/17e7daf) — this entry may have been DELETED on the box since; if `crontab -l`
 # has no twitch line, drop this one too.
 # NEEDS-VERIFICATION vs live crontab -l
-0 5 * * * /root/cron-wrap.sh twitch bash -c 'cd /root/steam-scraper && STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=6 RATE_PER_WORKER=1.5 MIN_REVIEWS=50 timeout 3000 .venv/bin/python3 twitch_bulk.py' >> /var/log/prospect-steps/twitch.cron.log 2>&1
+0 5 * * * mkdir -p /var/log/prospect-steps && /root/cron-wrap.sh twitch bash -c 'cd /root/steam-scraper && STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=6 RATE_PER_WORKER=1.5 MIN_REVIEWS=50 timeout 3000 .venv/bin/python3 twitch_bulk.py' >> /var/log/prospect-steps/twitch.cron.log 2>&1
 
 # ── Daytime review-coverage keeper: deepen sampled review TEXT toward min(true_total, 20k)
 # for EVERY reviewed game (--min-reviews 1 since 2026-08-18). Selection is
@@ -64,17 +73,30 @@
 # ── Quiet-window scraper jobs, 19:15 (keeper's 13h timeout ends 19:00; nightly starts
 # 21:00): tags_refresh + refresh_released + review_histogram, each moved here 2026-08-24/26
 # after losing the nightly's SQLite write race ("database is locked") two+ nights running.
-# Serial, under the refresh lock, with an OUTER timeout 6000 (ends ~20:55) so an overrun can
-# NEVER hold the lock into 21:00 and cost the whole nightly — per-step budgets from their
-# old run_step lines (3600/2700/1800) would sum past 21:00 in the worst case.
+# Serial, under the refresh lock, bounded by ONE deadline ~20:55 so an overrun can never hold
+# the lock into 21:00 and cost the whole nightly.
+#
+# This was an inline `timeout 6000 bash -c 'timeout 3600 A; timeout 2700 B; timeout 1800 C'`
+# and the outer timeout could NOT enforce that deadline: each inner `timeout` puts itself in
+# its OWN process group, so the outer timeout's group kill misses it; all the outer could
+# reach was the `bash -c`, which does not forward signals to the child it is waiting on. The
+# inner step survived as an orphan STILL HOLDING the inherited flock fd — for up to another
+# hour — and the 21:00 nightly would have been skipped entirely. The logic now lives in
+# /root/quiet-window.sh, which derives each step's budget from one absolute deadline, runs
+# every step as its own outermost `timeout`, and kills the in-flight step's process group if
+# it is terminated. It also pushes per-step success metrics, which these three never had.
 # NEEDS-VERIFICATION vs live crontab -l
-15 19 * * * /root/cron-wrap.sh quiet1915 timeout 6000 bash -c 'cd /root/steam-scraper && timeout 3600 .venv/bin/python3 -m steam_scraper.scraper --db steam_games.db refresh-stale-tags --workers 12 --rate 3.0 --limit 4000; timeout 2700 .venv/bin/python3 -m steam_scraper.scraper --db steam_games.db enrich --refresh-unreleased --limit 6000 --workers 12 --rate 6.0; timeout 1800 .venv/bin/python3 -m steam_scraper.scraper --db steam_games.db review-histogram --min-reviews 50 --workers 16 --rate 10.0' >> /var/log/prospect-steps/quiet1915.cron.log 2>&1
+15 19 * * * mkdir -p /var/log/prospect-steps && /root/cron-wrap.sh quiet1915 /root/quiet-window.sh >> /var/log/prospect-steps/quiet1915.cron.log 2>&1
 
 # ── Backups, 19:30 (new 2026-08-28): signals.db daily (forward-only series — can NEVER be
 # backfilled), steam_games.db weekly (Sun). 19:30 because signals.db's writers only run in
 # the nightly (21:00+), and it dodges both the pipeline window and the RAM-pinned keeper
-# window. No lock: sqlite3 .backup is safe against live writers. See deploy/backup.sh.
-30 19 * * * /root/backup.sh >> /var/log/prospect-backup.log 2>&1
+# window. Its OWN lock (-l), never the refresh lock: sqlite3 .backup is safe against live
+# writers so it must not queue behind the pipeline, but a long Sunday run must not overlap
+# the next day's either. Wrapped so the run itself is monitored like every other job (its
+# own prospect_backup_last_success_timestamp covers staleness; the wrapper covers "the run
+# exploded"). See deploy/backup.sh.
+30 19 * * * /root/cron-wrap.sh -l /root/.prospect-backup.lock backup /root/backup.sh >> /var/log/prospect-backup.log 2>&1
 
 # ── Alert check, every 30 min (new 2026-08-28): evaluates the pipeline-health metrics in
 # the local VictoriaMetrics and notifies via ntfy/webhook. No lock: read-only + cheap.

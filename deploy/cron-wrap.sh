@@ -13,11 +13,24 @@
 #
 # On lock held:    logs the skip to /var/log/prospect-cron-wrap.log, pushes
 #                  prospect_cron_skipped{job="JOB_NAME"} 1 to the droplet-local
-#                  VictoriaMetrics (deploy/observability/alert_check.py alerts on it),
+#                  VictoriaMetrics (deploy/observability/alert_check.py evaluates it),
 #                  and exits 0 — a skip is a deliberate outcome, not a cron error.
 # On lock free:    pushes the same series as 0 (so "ran" is distinguishable from "no
-#                  data") and execs COMMAND, which inherits the lock fd and therefore
-#                  holds the lock for its whole life.
+#                  data"), runs COMMAND — which inherits the lock fd and therefore holds
+#                  the lock for its whole life — and then pushes COMMAND's OUTCOME.
+#
+# WHY THE OUTCOME PUSH (2026-08-29): alert_check.py's headline check is "any
+# prospect_pipeline_step_success == 0 in the last 24h", and only prospect-refresh.sh and
+# light-build-cron.sh ever pushed that series. Everything else on the schedule — the twitch
+# collector, the 19:15 quiet-window steps, the review/socials keepers, the backup — pushed
+# NOTHING, so a repeat of the "22 of 26 nightlies failed silently" incident on exactly those
+# jobs would still have been silent. Wrapping is now what makes a job monitored. Same metric
+# names and labels prospect-refresh.sh's run_step uses (step="<JOB_NAME>"), so the existing
+# check covers every wrapped job with no special-casing. Jobs that ALSO push the series
+# themselves (light_build) just write the same value twice — harmless for min_over_time.
+#
+# COMMAND is run, not exec'd, so this wrapper survives to push that outcome. It forwards
+# SIGTERM/SIGINT to COMMAND so `kill <cron-wrap pid>` still stops the job.
 #
 # Version-controlled at prospect/deploy/cron-wrap.sh; scp'd to /root/cron-wrap.sh.
 set -uo pipefail
@@ -25,6 +38,14 @@ set -uo pipefail
 LOCK=/root/.prospect-refresh.lock
 WRAP_LOG=${CRON_WRAP_LOG:-/var/log/prospect-cron-wrap.log}
 VM_IMPORT=${PROSPECT_VM_IMPORT:-http://localhost:8428/api/v1/import/prometheus}
+STEP_LOG_DIR=${PROSPECT_STEP_LOG_DIR:-/var/log/prospect-steps}
+
+# /var/log/prospect-steps used to be created only by the 21:00 nightly, yet earlier jobs log
+# into it. Create it here, in the outermost wrapper, so it exists from the first job of the
+# day. NOTE: this does NOT cover a crontab line's own `>> /var/log/prospect-steps/x.log`
+# redirect — cron's shell performs that BEFORE exec'ing this script — which is why those
+# entries in deploy/crontab.txt carry their own `mkdir -p … &&` prefix.
+mkdir -p "$STEP_LOG_DIR" 2>/dev/null || true
 
 usage() { echo "usage: $0 [-l LOCKFILE] JOB_NAME COMMAND [ARG...]" >&2; exit 2; }
 while getopts "l:" opt; do
@@ -58,5 +79,28 @@ if ! flock -n 9; then
     exit 0
 fi
 push "prospect_cron_skipped{job=\"$JOB\"} 0"
-log "lock acquired — exec: $*"
-exec "$@"
+log "lock acquired — running: $*"
+
+T0=$(date -u +%s)
+"$@" &
+CHILD=$!
+# shellcheck disable=SC2329  # invoked indirectly, from the trap below
+forward() { kill -TERM "$CHILD" 2>/dev/null || true; }
+trap forward TERM INT HUP
+wait "$CHILD"; RC=$?
+# `wait` returns 128+N when a trapped signal interrupted it, with the child still running;
+# wait again for its real status so the metric below is not a lie.
+while kill -0 "$CHILD" 2>/dev/null; do wait "$CHILD"; RC=$?; done
+trap - TERM INT HUP
+
+DUR=$(( $(date -u +%s) - T0 ))
+NOW=$(date -u +%s)
+OK=1; [ "$RC" -ne 0 ] && OK=0
+log "finished rc=$RC after ${DUR}s"
+push "prospect_pipeline_step_success{step=\"$JOB\"} $OK
+prospect_pipeline_step_duration_seconds{step=\"$JOB\"} $DUR
+prospect_pipeline_step_last_run_timestamp{step=\"$JOB\"} $NOW"
+# A per-job success clock, so alert_check can tell "skipped once, ran fine yesterday" (normal,
+# and the design explicitly calls some skips expected) from "has not completed in days".
+[ "$OK" -eq 1 ] && push "prospect_cron_last_success_timestamp{job=\"$JOB\"} $NOW"
+exit "$RC"

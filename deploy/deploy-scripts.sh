@@ -25,6 +25,7 @@ FILES=(
     "prospect-refresh.sh"
     "light-build-cron.sh"
     "cron-wrap.sh"
+    "quiet-window.sh"
     "lib.sh"
     "backup.sh"
     "rollback.sh"
