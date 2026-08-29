@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes, useLocation, useParams } from "react-route
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import NicheFinder from "./NicheFinder";
-import { parseCombineMode, parseNicheSelection } from "./NicheCombined";
+import { parseCombineMode, parseNicheSelection } from "../lib/nicheSelection";
 import { ThemeProvider } from "../lib/theme";
 
 /**

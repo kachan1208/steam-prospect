@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import Radar from "./Radar";
@@ -56,13 +56,24 @@ const TAGS = [
   row("tag", "Horror", "theme", -20, 0.3, 50),
 ];
 
-function renderRadar() {
+/** Mirrors the URL back out so the tests can assert what a share-link would carry. */
+function LocationProbe() {
+  const loc = useLocation();
+  return <div data-testid="loc">{`${loc.pathname}${loc.search}`}</div>;
+}
+
+function url(): string {
+  return screen.getByTestId("loc").textContent ?? "";
+}
+
+function renderRadar(entry = "/radar") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   return render(
     <QueryClientProvider client={client}>
       <ThemeProvider>
-        <MemoryRouter initialEntries={["/radar"]}>
+        <MemoryRouter initialEntries={[entry]}>
           <Radar />
+          <LocationProbe />
         </MemoryRouter>
       </ThemeProvider>
     </QueryClientProvider>,
@@ -141,5 +152,74 @@ describe("Radar — class picker", () => {
     fireEvent.keyDown(screen.getByTestId("radar-search"), { key: "Escape" });
     expect(screen.getByTestId("radar-row-genre:Strategy")).toBeTruthy();
     expect(screen.queryByTestId("radar-row-tag:Roguelike Deckbuilder")).toBeNull();
+  });
+});
+
+/**
+ * URL STATE (2026-08-28). The flagship page was the only surface whose view couldn't be
+ * linked — class, solo lens, Top-N and the open dossier all lived in useState. They ride
+ * search params now, with DEFAULTS OMITTED so a pristine /radar stays a clean URL.
+ */
+describe("Radar — shareable URL state", () => {
+  it("writes nothing for the default view", async () => {
+    renderRadar();
+    await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder");
+    expect(url()).toBe("/radar");
+  });
+
+  it("restores class, solo lens and Top-N from the URL on load", async () => {
+    renderRadar("/radar?class=theme&solo=off&top=40");
+    expect(await screen.findByTestId("radar-row-tag:Fishing")).toBeTruthy();
+    expect(screen.getByTestId("radar-row-tag:Horror")).toBeTruthy();
+    expect(screen.queryByTestId("radar-row-tag:Roguelike Deckbuilder")).toBeNull();
+    // The controls reflect the URL, not their defaults.
+    expect(screen.getByText(/theme tags/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Off" }).className).toContain("bg-brand");
+    expect(screen.getByRole("button", { name: "40" }).className).toContain("bg-brand");
+  });
+
+  it("opens the dossier named by ?niche= — a deep link to one verdict", async () => {
+    renderRadar("/radar?niche=tag%3ACity+Builder");
+    const dossier = await screen.findByTestId("verdict-dossier");
+    expect(dossier.textContent).toContain("City Builder");
+  });
+
+  it("every control writes its param, and returning to a default clears it", async () => {
+    renderRadar();
+    await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder");
+
+    fireEvent.click(screen.getByRole("button", { name: "Themes" }));
+    expect(url()).toBe("/radar?class=theme");
+
+    fireEvent.click(screen.getByRole("button", { name: "Off" }));
+    expect(url()).toContain("solo=off");
+
+    fireEvent.click(screen.getByRole("button", { name: "40" }));
+    expect(url()).toContain("top=40");
+
+    // Back to every default: the params drop out rather than lingering as noise.
+    fireEvent.click(screen.getByRole("button", { name: "Micro-genres" }));
+    fireEvent.click(screen.getByRole("button", { name: "On" }));
+    fireEvent.click(screen.getByRole("button", { name: "80" }));
+    expect(url()).toBe("/radar");
+  });
+
+  it("a cross-class selection writes BOTH params in one go — neither clobbers the other", async () => {
+    renderRadar();
+    await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder");
+
+    fireEvent.change(screen.getByTestId("radar-search"), { target: { value: "simulation" } });
+    fireEvent.click(screen.getByTestId("radar-row-genre:Simulation"));
+
+    const u = url();
+    expect(u).toContain("class=genre");
+    expect(u).toContain("niche=genre%3ASimulation");
+  });
+
+  it("garbage params fall back to the defaults instead of breaking the board", async () => {
+    renderRadar("/radar?class=nonsense&top=9999");
+    expect(await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder")).toBeTruthy();
+    expect(screen.getByText(/micro-genre tags/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "80" }).className).toContain("bg-brand");
   });
 });

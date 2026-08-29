@@ -1,23 +1,10 @@
 {
-  "compilerOptions": {
-    "target": "ES2020",
-    "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
-    "module": "ESNext",
-    "skipLibCheck": true,
-    "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "noEmit": true,
-    "jsx": "react-jsx",
-    "strict": true,
-    "noFallthroughCasesInSwitch": true,
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["src/*"]
-    }
-  },
-  "include": ["src"],
-  "references": [{ "path": "./tsconfig.node.json" }]
+  // Solution-style root (the create-vite layout): no sources of its own, just the two
+  // real projects. This is what lets `tsc -b --noEmit` work — a COMPOSITE referenced
+  // project may not disable emit (TS6310), but plain noEmit projects referenced from a
+  // solution root may. It also kills the old landmine at the root: `tsc -b` used to
+  // EMIT vite.config.js/.d.ts next to vite.config.ts, and the transpiled .js silently
+  // shadowed the .ts for Vite (which resolves .js first).
+  "files": [],
+  "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.node.json" }]
 }

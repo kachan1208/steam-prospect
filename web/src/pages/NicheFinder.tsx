@@ -3,6 +3,8 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import clsx from "clsx";
 
+import { EmptyState } from "../components/ui/EmptyState";
+import { Loading } from "../components/ui/Loading";
 import { trackEvent } from "../lib/analytics";
 import {
   nicheExportCsvUrl,
@@ -16,14 +18,18 @@ import {
 } from "../lib/api";
 import { fmtCompact, fmtInt, fmtMonths, fmtPct, fmtSigned, fmtUsd } from "../lib/format";
 import { useDebounced } from "../lib/useDebounced";
+import { usePageTitle } from "../lib/usePageTitle";
+// From the leaf module, NEVER from pages/NicheCombined (which is where these lived until
+// 2026-08-29): a static import of a page module drags that page — and NicheDetail, and
+// vendor-recharts with it — into this route's chunk, defeating the code splitting.
 import {
   formatNicheRef,
   nicheCombinedPath,
-  nicheDetailPath,
   parseNicheSelection,
   NICHE_COMBINE_CAP,
   type NicheSelection,
-} from "./NicheCombined";
+} from "../lib/nicheSelection";
+import { nicheDetailPath } from "../lib/nichePath";
 
 const LIMIT = 50;
 
@@ -195,6 +201,7 @@ function SegButton({
 }
 
 export default function NicheFinder() {
+  usePageTitle("Niche Finder");
   const [dimension, setDimension] = useState<Dimension>("tag");
   // 24m is the market a new entrant actually faces — the all-time cut is context, not an
   // entry decision, so it is NOT the default (same default as the MCP tool).
@@ -695,14 +702,17 @@ export default function NicheFinder() {
 
       <div className={clsx("blueprint", isFetching && "opacity-90 transition-opacity")}>
         <i className="bp-corner" />
-        {isLoading && <div className="p-8 text-center text-sm text-ink-muted">Loading niches…</div>}
+        {isLoading && <Loading label="Loading niches…" className="p-8 text-sm" />}
         {isError && (
           <div className="p-8 text-center text-sm text-status-serious">
             Failed to load niches{error instanceof Error ? `: ${error.message}` : "."}
           </div>
         )}
         {data && data.items.length === 0 && (
-          <div className="p-8 text-center text-sm text-ink-muted">No niches match these filters.</div>
+          <EmptyState
+            title="No niches match these filters"
+            description="Try a broader tier selection, a lower review floor, or clear the search."
+          />
         )}
         {data && data.items.length > 0 && (
           <div className="overflow-x-auto">

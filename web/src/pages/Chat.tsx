@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { Card } from "../components/ui/Card";
+import { usePageTitle } from "../lib/usePageTitle";
 
 // The deployed app serves the MCP from its own origin at /mcp/ (trailing slash is canonical;
 // /mcp 307-redirects to it). Deriving from window.location.origin keeps this correct wherever
@@ -68,6 +69,7 @@ function ClientBlock({
 }
 
 export default function Chat() {
+  usePageTitle("MCP");
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4 pb-10">
       <div>
@@ -141,8 +143,11 @@ export default function Chat() {
         </ClientBlock>
       </Card>
 
+      {/* KEEP IN SYNC with mcp/prospect_mcp.py — the count is the number of @mcp.tool()
+          decorators in that file (verify with: grep -c '@mcp.tool()' mcp/prospect_mcp.py).
+          It read 15 for a long stretch while the server had grown to 25. */}
       <p className="px-1 text-[11px] text-ink-muted">
-        Prospect exposes 15 read-only analytics tools plus a data-dictionary resource — ask Claude to read
+        Prospect exposes 25 read-only analytics tools plus a data-dictionary resource — ask Claude to read
         the dictionary first for definitions of opportunity, demand, competition, and quality-gap.
       </p>
     </div>

@@ -1,5 +1,6 @@
 import { ChatMarkdown } from "../components/chat/ChatMarkdown";
 import { LegalLayout } from "../components/LegalLayout";
+import { usePageTitle } from "../lib/usePageTitle";
 
 const UPDATED = "July 16, 2026";
 
@@ -56,6 +57,7 @@ We'll update the "last updated" date above when this policy changes and, once ac
 Questions about this policy: see the Support page under Docs for the current contact channel.`;
 
 export default function Privacy() {
+  usePageTitle("Privacy Policy");
   return (
     <LegalLayout title="Privacy Policy" updated={UPDATED}>
       <ChatMarkdown text={PRIVACY_MD} />

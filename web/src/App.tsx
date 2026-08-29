@@ -1,26 +1,44 @@
 import { Link, NavLink, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import Radar from "./pages/Radar";
-import Watchlist from "./pages/Watchlist";
 import clsx from "clsx";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Suspense, lazy, useEffect, type ReactNode } from "react";
 
 import { useHealth } from "./lib/api";
 import { initAnalytics, trackPageview } from "./lib/analytics";
-import LaunchTiming from "./pages/LaunchTiming";
-import NicheFinder from "./pages/NicheFinder";
-import NicheDetail, { NICHE_ROUTE_PATH } from "./pages/NicheDetail";
-import NicheCombined from "./pages/NicheCombined";
-import GameSearch from "./pages/GameSearch";
-import GameProfile from "./pages/GameProfile";
-import Compare from "./pages/Compare";
+import { NICHE_ROUTE_PATH } from "./lib/nichePath";
 import { CompareTray } from "./components/CompareTray";
-import EntityProfile from "./pages/EntityProfile";
-import Studios from "./pages/Studios";
-import Chat from "./pages/Chat";
-import DataLog from "./pages/DataLog";
-import Docs from "./pages/Docs";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { Loading } from "./components/ui/Loading";
 import Terms from "./pages/Terms";
 import Privacy from "./pages/Privacy";
+
+/**
+ * ROUTE-LEVEL CODE SPLITTING (2026-08-28). Radar — the index route, always the first
+ * paint — stays a static import: it is hand-rolled SVG (RadarBoard) with zero recharts.
+ * Every other AppShell page is React.lazy, so the entry chunk no longer ships the whole
+ * app (most importantly vendor-recharts, ~109KB gz, which only the chart-heavy pages
+ * import). ONE Suspense boundary, inside AppShell around the Outlet, carries the
+ * fallback — so a hard load into a lazy route still paints the header/footer chrome
+ * immediately; and because main.tsx opts the router into `v7_startTransition`, an IN-APP
+ * navigation never shows the spinner at all (the location update is a transition, so the
+ * old page holds until the chunk arrives). That flag is load-bearing for this comment:
+ * without it react-router 6 sets state synchronously and every navigation to a lazy route
+ * flashes the fallback. Terms/Privacy render without the shell and are tiny static text,
+ * so they stay eager rather than earning a second boundary.
+ */
+const Watchlist = lazy(() => import("./pages/Watchlist"));
+const LaunchTiming = lazy(() => import("./pages/LaunchTiming"));
+const NicheFinder = lazy(() => import("./pages/NicheFinder"));
+const NicheDetail = lazy(() => import("./pages/NicheDetail"));
+const NicheCombined = lazy(() => import("./pages/NicheCombined"));
+const GameSearch = lazy(() => import("./pages/GameSearch"));
+const GameProfile = lazy(() => import("./pages/GameProfile"));
+const Compare = lazy(() => import("./pages/Compare"));
+const EntityProfile = lazy(() => import("./pages/EntityProfile"));
+const Studios = lazy(() => import("./pages/Studios"));
+const Chat = lazy(() => import("./pages/Chat"));
+const DataLog = lazy(() => import("./pages/DataLog"));
+const Docs = lazy(() => import("./pages/Docs"));
 
 /**
  * THE page container — ONE width for every surface (2026-08-28, user directive: "not all
@@ -212,12 +230,24 @@ function Footer() {
 }
 
 function AppShell() {
+  // The boundary resets when the PATH changes: an error latches until told otherwise, so
+  // without this a single bad page would keep showing the fallback after you navigated
+  // away. It wraps only the routed content — the header, nav, compare tray and footer
+  // stay alive and usable when a page blows up, which is the whole point.
+  const { pathname } = useLocation();
   return (
     <div className="flex min-h-full flex-col bg-page">
       <Header />
       <main className="flex-1">
         <div className={clsx(PAGE_CONTAINER, "py-8")}>
-          <Outlet />
+          <ErrorBoundary resetKey={pathname}>
+            {/* THE Suspense boundary for every lazy route (one, deliberately — see the
+                lazy() block above). Inside the shell so the chrome paints first, and
+                inside the ErrorBoundary so a chunk that fails to LOAD is caught too. */}
+            <Suspense fallback={<Loading className="py-24 text-sm" />}>
+              <Outlet />
+            </Suspense>
+          </ErrorBoundary>
         </div>
       </main>
       {/* Compare tray on every page (sticky above the footer; renders nothing when empty). */}

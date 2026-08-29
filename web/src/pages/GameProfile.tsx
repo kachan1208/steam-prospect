@@ -16,6 +16,8 @@ import { TooltipPanel, type TooltipRow } from "../components/charts/TooltipPanel
 import { GameTrendsChart } from "../components/charts/GameTrendsChart";
 import { NotableCoverageCard } from "../components/NotableCoverageCard";
 import { Badge } from "../components/ui/Badge";
+import { EmptyState } from "../components/ui/EmptyState";
+import { Loading } from "../components/ui/Loading";
 import { SocialLinks } from "../components/ui/SocialLinks";
 import { Meter, BulletMeter } from "../components/ui/Meter";
 import { ViewToggle } from "../components/ui/ViewToggle";
@@ -40,6 +42,7 @@ import { fmtAxisCompact, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtP
 import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { markerMonths } from "../lib/notable";
 import { CSS_VAR, MONO} from "../lib/palette";
+import { usePageTitle } from "../lib/usePageTitle";
 import { useDetailView } from "../lib/viewMode";
 
 const CONDENSED: CSSProperties = { fontFamily: '"Barlow Condensed", "Barlow", system-ui, sans-serif' };
@@ -421,8 +424,16 @@ export default function GameProfile() {
   const comparablesQ = useGameComparables(validAppid ? appid : null);
   const reviewsQ = useGameReviewsSummary(validAppid ? appid : null);
   const eventsQ = useGameEvents(validAppid ? appid : null);
-  const genreCurveQ = useLaunchCurve(profileQ.data?.primary_genre ?? "__all__");
+  // null until the profile RESOLVES — the genre isn't known before then, and passing
+  // "__all__" as a stand-in fired a throwaway catalog-wide /launch-curve on every mount
+  // that the real genre request immediately superseded. Once resolved, a game with no
+  // primary_genre still falls back to the catalog-wide cut, now as a deliberate choice
+  // (the panel labels it "These games") rather than an artifact of a pending query.
+  const genreCurveQ = useLaunchCurve(profileQ.data ? (profileQ.data.primary_genre ?? "__all__") : null);
   const benchmarksQ = useMarketBenchmarks();
+  // The game's own name once it lands; the app default holds until then (never
+  // "undefined — Prospect"), so a history entry reads as the game you looked at.
+  usePageTitle(profileQ.data?.name);
   const teardownQ = useGameTeardown(validAppid ? appid : null);
   const channelMixQ = useGameChannelMix(validAppid ? appid : null);
 
@@ -482,7 +493,7 @@ export default function GameProfile() {
   }
 
   if (profileQ.isLoading) {
-    return <div className="p-6 text-sm text-ink-muted">Loading game…</div>;
+    return <Loading label="Loading game…" className="p-6 text-sm" />;
   }
 
   if (profileQ.isError || !profile) {
@@ -692,7 +703,7 @@ export default function GameProfile() {
             action={<span className="kicker text-[11px] text-ink-muted">Monthly</span>}
           >
             {reviewsQ.isLoading && (
-              <div className="flex h-[150px] items-center justify-center text-xs text-ink-muted">Loading…</div>
+              <Loading className="h-[150px] text-xs" />
             )}
             {reviewsQ.data && <ReviewVelocityBars points={reviewsQ.data.timeline} events={eventsQ.data} />}
           </BlueprintPanel>
@@ -727,7 +738,7 @@ export default function GameProfile() {
               }
             >
               {teardownQ.isLoading && (
-                <div className="flex h-24 items-center justify-center text-xs text-ink-muted">Loading…</div>
+                <Loading className="h-24 text-xs" />
               )}
               {teardownQ.isError && (
                 <div className="text-xs text-verdict-serious">
@@ -948,7 +959,7 @@ export default function GameProfile() {
               subtitle="From the sampled reviews table (not Steam's full review count) — a recency-biased sample for older/popular titles"
             >
               {reviewsQ.isLoading && (
-                <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading…</div>
+                <Loading className="h-40 text-xs" />
               )}
               {reviewsQ.data && <ReviewsTimelineChart points={reviewsQ.data.timeline} appid={appid} />}
             </BlueprintPanel>
@@ -993,7 +1004,7 @@ export default function GameProfile() {
                   );
                 })()}
               {genreCurveQ.isLoading && (
-                <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading…</div>
+                <Loading className="h-40 text-xs" />
               )}
               {genreCurveQ.data && <LaunchShapeBars points={genreCurveQ.data.points} height={220} />}
               {genreCurveQ.data && (
@@ -1028,7 +1039,7 @@ export default function GameProfile() {
 
             <BlueprintPanel title="Language split" subtitle="Share of sampled reviews by language — a localization reference">
               {reviewsQ.isLoading && (
-                <div className="flex h-24 items-center justify-center text-xs text-ink-muted">Loading…</div>
+                <Loading className="h-24 text-xs" />
               )}
               {reviewsQ.data && <LanguageSplitChart data={reviewsQ.data.language_split} />}
             </BlueprintPanel>
@@ -1081,9 +1092,13 @@ export default function GameProfile() {
               : undefined
           }
         >
-          {comparablesQ.isLoading && <div className="text-xs text-ink-muted">Loading comparables…</div>}
+          {comparablesQ.isLoading && <Loading label="Loading comparables…" className="py-1 text-xs" />}
           {comparablesQ.data && comparablesQ.data.items.length === 0 && (
-            <div className="text-xs text-ink-muted">No comparable titles found in this genre/price band.</div>
+            <EmptyState
+              className="py-6"
+              title="No comparable titles"
+              description="Nothing in this genre/price band matched closely enough to rank."
+            />
           )}
           {comparablesQ.data && comparablesQ.data.items.length > 0 && (
             <div className="overflow-x-auto border border-chartborder">
@@ -1160,7 +1175,7 @@ export default function GameProfile() {
             }
           >
             {teardownQ.isLoading && (
-              <div className="flex h-32 items-center justify-center text-xs text-ink-muted">Loading…</div>
+              <Loading className="h-32 text-xs" />
             )}
             {teardownQ.data && teardownQ.data.press.total_mentions === 0 && (
               <div className="flex h-24 items-center justify-center text-xs text-ink-muted">

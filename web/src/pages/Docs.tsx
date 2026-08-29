@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 
 import { Card } from "../components/ui/Card";
 import { CSS_VAR } from "../lib/palette";
+import { usePageTitle } from "../lib/usePageTitle";
 
 // The live deployment. The MCP server is served from the same origin at /mcp/.
 // Derived, not hardcoded — a domain move must not silently break every copy-paste snippet.
@@ -276,6 +277,7 @@ function TableOfContents() {
 // ---- page -------------------------------------------------------------------------------
 
 export default function Docs() {
+  usePageTitle("Docs");
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-8 pb-20">
       {/* Header */}
