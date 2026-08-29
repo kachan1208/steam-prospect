@@ -1,104 +1,76 @@
-# Droplet root crontab (142.93.49.69) — the DEPLOYED ARTIFACT, not documentation.
-# Edit HERE, then install on the box (after deploy/deploy-scripts.sh has copied the scripts):
-#     scp -i ~/.ssh/prospect_droplet deploy/crontab.txt root@142.93.49.69:/root/crontab.txt
-#     ssh -i ~/.ssh/prospect_droplet root@142.93.49.69 'crontab /root/crontab.txt && crontab -l'
+# Prospect droplet crontab — THE DEPLOYED ARTIFACT, not documentation.
 #
-# Rewritten 2026-08-28 from the scheduling notes embedded in deploy/prospect-refresh.sh
-# (the previous copy of this file, "updated 2026-08-18", predated three scheduling moves
-# that only ever lived on the box). Entries whose live form could not be read from the box
-# are RECONSTRUCTED from those script comments and marked
-#     # NEEDS-VERIFICATION vs live crontab -l
-# — before the first install, run `crontab -l` on the droplet and reconcile any drift INTO
-# this file (this file wins afterwards).
+# Install:  crontab /root/prospect/deploy/crontab.txt   &&  crontab -l | head
+# Verify :  crontab -l | diff - /root/prospect/deploy/crontab.txt && echo in-sync
 #
-# Locking: every job that must not overlap the pipeline goes through /root/cron-wrap.sh,
-# which takes the named lock with flock -n and, when it loses the race, logs the skip to
-# /var/log/prospect-cron-wrap.log and pushes prospect_cron_skipped{job=...} so alert_check
-# sees it. The wrapped command inherits the lock fd and holds the lock for its whole life
-# (this replaces the old bare `flock -n <lock> <job>` entries whose skips were invisible).
-# cron-wrap also pushes each job's OUTCOME as prospect_pipeline_step_success{step="<job>"} —
-# wrapping a job is what puts it under alerting, so new jobs belong behind the wrapper even
-# when they cannot collide with anything.
+# RECONCILED AGAINST THE LIVE BOX 2026-08-29 (`crontab -l`). The previous version of this
+# file was reconstructed from script comments and differed from reality in three ways that
+# would each have caused harm on install:
 #
-# `mkdir -p /var/log/prospect-steps &&` prefixes: cron's own shell performs a line's `>>`
-# redirect BEFORE it execs anything, so a line logging into that directory fails outright if
-# the directory is missing — and it used to be created only by the 21:00 nightly, hours after
-# the first job that logs there. The prefix runs first; the redirect belongs to the command
-# after the `&&`, so it is evaluated afterwards.
+#   1. It DROPPED `systemd-run --scope -p MemoryMax=1500M -p MemorySwapMax=0` from the two
+#      keepers and the quiet window. Those caps are not decoration: this box has 3.9GB, the
+#      socials keeper has been observed leaking to 3.2GB, and an unbounded keeper OOM-kills
+#      whatever else is running. Installing without them would have removed the fix that a
+#      previous outage bought. They are preserved verbatim below.
+#   2. It carried an 05:00 twitch collector. There is NO twitch line on the live box — the
+#      creator vertical was retired product-wide (the mart, the dashboards and the source
+#      table are all gone), so the job was correctly deleted at some point and must not be
+#      resurrected. Dropped.
+#   3. It scheduled the light build at 13:00; the box runs it at 13:30. Live time kept.
 #
-# Daily UTC shape: 21:00-~05:00 nightly refresh -> 05:00 twitch slot (retired?) ->
-# 06:00/06:15 daytime keepers (hold RAM until 19:00) -> 19:15 quiet-window scraper jobs ->
-# 19:30 backups -> back to 21:00. Never schedule a DuckDB build or anything RAM-heavy
-# inside 06:00-19:00 without going through the refresh lock.
-
-# ── Nightly refresh: scrape -> ETL -> verified app restart. The script does its own
-# logging to /var/log/prospect-refresh.log (+ per-step logs in /var/log/prospect-steps).
-0 21 * * * /root/cron-wrap.sh nightly_refresh /root/prospect-refresh.sh
-
-# ── Twitch collector, alone in its own 05:00 slot (moved out of the nightly's Lane B
-# 2026-08-22 after failing 22 of 26 nights to "database is locked": SQLite has no writer
-# fairness — only scheduling fixes that). Takes the refresh lock: a nightly that overruns
-# costs twitch one day, and its 3000s timeout ends by ~05:50, before the 06:00 keeper wants
-# the same lock. NOTE: the twitch/creator vertical was retired product-wide (commits
-# da0a002/17e7daf) — this entry may have been DELETED on the box since; if `crontab -l`
-# has no twitch line, drop this one too.
-# NEEDS-VERIFICATION vs live crontab -l
-0 5 * * * mkdir -p /var/log/prospect-steps && /root/cron-wrap.sh twitch bash -c 'cd /root/steam-scraper && STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=6 RATE_PER_WORKER=1.5 MIN_REVIEWS=50 timeout 3000 .venv/bin/python3 twitch_bulk.py' >> /var/log/prospect-steps/twitch.cron.log 2>&1
-
-# ── Daytime review-coverage keeper: deepen sampled review TEXT toward min(true_total, 20k)
-# for EVERY reviewed game (--min-reviews 1 since 2026-08-18). Selection is
-# smallest-total-first = cost order. Runs in the 06:00-19:00 window (nightly owns
-# 21:00-~05:00), 13h timeout, refresh-lock-guarded against a still-running nightly.
-# Self-draining: exits in seconds once coverage is full, then keeps new reviews topped up
-# (games re-enter via the 7d staleness recheck). While it drains a backlog it HOLDS the
-# refresh lock all day — the midday light build skipping then is expected, not a bug.
-0 6 * * * /root/cron-wrap.sh review_keeper bash -c 'cd /root/steam-scraper && timeout 46800 .venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 20000 --min-reviews 1 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0' >> /root/deepen_backfill.log 2>&1
-
-# ── Daytime socials keeper: harvest official social links for the whole catalog,
-# reviews-desc, then hold a 90d rotation. OWN lock (-l): must run ALONGSIDE the 06:00
-# review keeper (different endpoints: store pages vs appreviews). 13h timeout ends before
-# the 21:00 nightly. NOTE: /root/socials_marathon.sh (one-shot backlog drain, same lock,
-# possibly under systemd-run with MemoryMax per ops notes) makes this keeper no-op while it
-# runs; the keeper resumes ownership when the marathon exits.
-# NEEDS-VERIFICATION vs live crontab -l
-15 6 * * * /root/cron-wrap.sh -l /root/.prospect-socials.lock socials_keeper bash -c 'cd /root/steam-scraper && timeout 46800 .venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db dev-socials --min-reviews 0 --refresh-days 90 --limit 60000 --workers 8 --rate 2.0' >> /root/dev_socials_keeper.log 2>&1
-
-# ── Midday light mart build (every mart except the two full-text monsters; ~30min) so a
-# morning data/mart fix is visible same-day instead of after the nightly. The script had NO
-# crontab entry in any repo copy — time below is a reconstruction of "midday". Skips (lock
-# held by a keeper backlog drain or an overrunning nightly) are expected and now visible.
-# NEEDS-VERIFICATION vs live crontab -l
-0 13 * * * /root/cron-wrap.sh light_build /root/light-build-cron.sh
-
-# ── Quiet-window scraper jobs, 19:15 (keeper's 13h timeout ends 19:00; nightly starts
-# 21:00): tags_refresh + refresh_released + review_histogram, each moved here 2026-08-24/26
-# after losing the nightly's SQLite write race ("database is locked") two+ nights running.
-# Serial, under the refresh lock, bounded by ONE deadline ~20:55 so an overrun can never hold
-# the lock into 21:00 and cost the whole nightly.
+# PATHS POINT INTO THE GIT CHECKOUT (/root/prospect/deploy/...). Every script resolves its
+# helper as "$(dirname "$0")/lib.sh", so running from the checkout is correct — and it makes
+# `git pull` the whole deploy for shell changes, which removes the /root copy that used to
+# drift from the repo (the copy at /root/prospect-refresh.sh is now unused; delete it once
+# you have seen one clean nightly from this file).
 #
-# This was an inline `timeout 6000 bash -c 'timeout 3600 A; timeout 2700 B; timeout 1800 C'`
-# and the outer timeout could NOT enforce that deadline: each inner `timeout` puts itself in
-# its OWN process group, so the outer timeout's group kill misses it; all the outer could
-# reach was the `bash -c`, which does not forward signals to the child it is waiting on. The
-# inner step survived as an orphan STILL HOLDING the inherited flock fd — for up to another
-# hour — and the 21:00 nightly would have been skipped entirely. The logic now lives in
-# /root/quiet-window.sh, which derives each step's budget from one absolute deadline, runs
-# every step as its own outermost `timeout`, and kills the in-flight step's process group if
-# it is terminated. It also pushes per-step success metrics, which these three never had.
-# NEEDS-VERIFICATION vs live crontab -l
-15 19 * * * mkdir -p /var/log/prospect-steps && /root/cron-wrap.sh quiet1915 /root/quiet-window.sh >> /var/log/prospect-steps/quiet1915.cron.log 2>&1
+# Everything runs under cron-wrap.sh, which takes the lock nonblocking and pushes
+# prospect_pipeline_step_success{step="<job>"} for the job. That is what makes a job
+# MONITORED: alert_check.py's headline check is "any step_success == 0 in the last 24h", and
+# before wrapping, only the nightly and the light build pushed that series at all — a repeat
+# of the "22 of 26 nightlies failed silently" incident on any other job would still have been
+# silent. A skipped run (lock held) pushes prospect_cron_skipped and exits 0.
 
-# ── Backups, 19:30 (new 2026-08-28): signals.db daily (forward-only series — can NEVER be
-# backfilled), steam_games.db weekly (Sun). 19:30 because signals.db's writers only run in
-# the nightly (21:00+), and it dodges both the pipeline window and the RAM-pinned keeper
-# window. Its OWN lock (-l), never the refresh lock: sqlite3 .backup is safe against live
-# writers so it must not queue behind the pipeline, but a long Sunday run must not overlap
-# the next day's either. Wrapped so the run itself is monitored like every other job (its
-# own prospect_backup_last_success_timestamp covers staleness; the wrapper covers "the run
-# exploded"). See deploy/backup.sh.
-30 19 * * * /root/cron-wrap.sh -l /root/.prospect-backup.lock backup /root/backup.sh >> /var/log/prospect-backup.log 2>&1
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# ── Alert check, every 30 min (new 2026-08-28): evaluates the pipeline-health metrics in
-# the local VictoriaMetrics and notifies via ntfy/webhook. No lock: read-only + cheap.
-# Config: /root/.prospect-alerts.env — see deploy/observability/ALERTING.md.
-*/30 * * * * /root/alert_check.py >> /var/log/prospect-alerts.log 2>&1
+# ── 21:00 UTC — the nightly: scrape lanes, ETL, validate, swap the mart, restart the app.
+# Owns /root/.prospect-refresh.lock for its whole life (3-6h), which is what keeps the
+# daytime keepers out of the ETL's way.
+0 21 * * * /root/prospect/deploy/cron-wrap.sh nightly_refresh /root/prospect/deploy/prospect-refresh.sh
+
+# ── 06:00 UTC — daytime review-coverage keeper. Deepens sampled review TEXT toward
+# min(true_total, 20k) for every 50+-review game. 13h timeout ends before the 21:00 nightly;
+# takes the refresh lock so it cannot overlap a still-running one. Self-draining: exits in
+# seconds once coverage is full (which is why the box is often idle inside this window).
+0 6 * * * /root/prospect/deploy/cron-wrap.sh review_keeper bash -c 'cd /root/steam-scraper && timeout 46800 systemd-run --scope --quiet -p MemoryMax=1500M -p MemorySwapMax=0 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 20000 --min-reviews 1 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0' >> /root/deepen_backfill.log 2>&1
+
+# ── 06:15 UTC — daytime socials keeper. OWN lock, deliberately: it must run ALONGSIDE the
+# review keeper (different endpoints — store pages vs appreviews), so it must not contend for
+# the refresh lock. This is the job observed leaking to 3.2GB; the MemoryMax is load-bearing.
+15 6 * * * /root/prospect/deploy/cron-wrap.sh -l /root/.prospect-socials.lock socials_keeper bash -c 'cd /root/steam-scraper && timeout 46800 systemd-run --scope --quiet -p MemoryMax=1500M -p MemorySwapMax=0 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db dev-socials --min-reviews 0 --refresh-days 90 --limit 60000 --workers 8 --rate 2.0' >> /root/dev_socials_keeper.log 2>&1
+
+# ── 13:30 UTC — midday light mart build: every mart except the two full-text monsters, which
+# are copied from the published mart. Makes a data/code fix visible in ~30min instead of at
+# the next nightly. Takes the refresh lock, so it skips itself if any build is running.
+30 13 * * * /root/prospect/deploy/cron-wrap.sh light_build /root/prospect/deploy/light-build-cron.sh
+
+# ── 19:15 UTC — quiet-window writers (tags_refresh, refresh_released, review_histogram),
+# serial, in the 19:00-21:00 gap: all three lost the SQLite write race in the contended
+# nightly lanes. quiet-window.sh enforces ONE absolute deadline across the three steps —
+# the old inline `timeout 6000 bash -c 'timeout A; timeout B; timeout C'` could not, because
+# each inner timeout escapes the outer's process group, so an orphaned step could keep
+# holding the refresh lock past 21:00 and cost the entire nightly. The systemd scope is kept
+# from the live entry so the three scrapers stay memory-capped.
+15 19 * * * mkdir -p /var/log/prospect-steps && /root/prospect/deploy/cron-wrap.sh quiet1915 systemd-run --scope --quiet -p MemoryMax=1500M -p MemorySwapMax=0 /root/prospect/deploy/quiet-window.sh >> /var/log/prospect-steps/quiet1915.cron.log 2>&1
+
+# ── 19:30 UTC — backups. OWN lock: it must not be blocked by, or block, the refresh lock.
+# Placed after the quiet window and before the 21:00 nightly. signals.db (follower + price
+# series) and refresh_history.json daily; steam_games.db on Sundays. These series are
+# forward-only and can never be backfilled, which is the whole reason this job exists.
+30 19 * * * /root/prospect/deploy/cron-wrap.sh -l /root/.prospect-backup.lock backup /root/prospect/deploy/backup.sh >> /var/log/prospect-backup.log 2>&1
+
+# ── every 30 min — evaluate the metrics everything above pushes, and notify on breach.
+# Inert until /root/.prospect-alerts.env exists with NTFY_TOPIC and/or WEBHOOK_URL; it exits
+# non-zero and logs loudly rather than pretending to be armed.
+*/30 * * * * /root/prospect/deploy/observability/alert_check.py >> /var/log/prospect-alerts.log 2>&1
