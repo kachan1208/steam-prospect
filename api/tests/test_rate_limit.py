@@ -66,6 +66,83 @@ def test_read_api_is_never_limited(client, monkeypatch):
         assert client.get("/api/health").status_code == 200
 
 
+# ---- client identity: only the hops OUR infrastructure wrote are believed ----------------
+def test_a_spoofed_left_most_forwarded_for_cannot_mint_new_buckets(client, monkeypatch):
+    """The killer bug: keying on the FIRST X-Forwarded-For hop let any client send a fresh
+    fake address per request and never hit the limit. Production has exactly one trusted
+    proxy (Caddy), which APPENDS the real peer — so only the last hop counts."""
+    monkeypatch.setattr(settings, "rate_limit_per_min", 2)
+    monkeypatch.setattr(settings, "trusted_proxy_hops", 1)
+    spoofs = ("1.1.1.1", "2.2.2.2", "3.3.3.3")
+    codes = [
+        client.post(
+            "/api/analytics/collect",
+            json=_BATCH,
+            headers={"X-Forwarded-For": f"{spoof}, 203.0.113.9"},  # ...Caddy's append
+        ).status_code
+        for spoof in spoofs
+    ]
+    assert codes == [204, 204, 429]
+    assert list(rate_limit._buckets) == ["203.0.113.9"]  # one client, one bucket
+
+
+def test_distinct_real_clients_still_get_their_own_window(client, monkeypatch):
+    monkeypatch.setattr(settings, "rate_limit_per_min", 1)
+    monkeypatch.setattr(settings, "trusted_proxy_hops", 1)
+    for ip in ("203.0.113.1", "203.0.113.2"):
+        r = client.post("/api/analytics/collect", json=_BATCH, headers={"X-Forwarded-For": ip})
+        assert r.status_code == 204
+    r = client.post(
+        "/api/analytics/collect", json=_BATCH, headers={"X-Forwarded-For": "203.0.113.1"}
+    )
+    assert r.status_code == 429
+
+
+def test_forwarded_for_is_ignored_without_a_trusted_proxy(client, monkeypatch):
+    """PROSPECT_TRUSTED_PROXY_HOPS=0 (plain uvicorn, local dev): the header is unverifiable,
+    so it is not read at all — every request buckets under the socket peer."""
+    monkeypatch.setattr(settings, "rate_limit_per_min", 1)
+    monkeypatch.setattr(settings, "trusted_proxy_hops", 0)
+    assert client.post(
+        "/api/analytics/collect", json=_BATCH, headers={"X-Forwarded-For": "9.9.9.9"}
+    ).status_code == 204
+    assert client.post(
+        "/api/analytics/collect", json=_BATCH, headers={"X-Forwarded-For": "8.8.8.8"}
+    ).status_code == 429
+    assert list(rate_limit._buckets) == ["testclient"]  # the TestClient's socket peer
+
+
+def test_a_chain_shorter_than_the_trusted_hops_falls_back_to_the_peer(client, monkeypatch):
+    """Header present but the request did NOT come through the expected proxy chain — the
+    only entry is the caller's own, so it is not trusted."""
+    monkeypatch.setattr(settings, "rate_limit_per_min", 5)
+    monkeypatch.setattr(settings, "trusted_proxy_hops", 2)
+    client.post("/api/analytics/collect", json=_BATCH, headers={"X-Forwarded-For": "9.9.9.9"})
+    assert list(rate_limit._buckets) == ["testclient"]
+
+
+def test_overflow_evicts_the_stalest_key_not_the_whole_table(client, monkeypatch):
+    """Clearing the table dropped every honest client's window — and lifted the limit for a
+    minute — whenever an attacker churned enough keys. Now the oldest key goes, one at a
+    time, and an active client's window survives the churn."""
+    monkeypatch.setattr(settings, "rate_limit_per_min", 100)
+    monkeypatch.setattr(settings, "trusted_proxy_hops", 1)
+    monkeypatch.setattr(rate_limit, "_MAX_TRACKED_IPS", 3)
+
+    victim = {"X-Forwarded-For": "203.0.113.7"}
+    assert client.post("/api/analytics/collect", json=_BATCH, headers=victim).status_code == 204
+    for i in range(20):  # attacker churns source addresses
+        client.post(
+            "/api/analytics/collect", json=_BATCH, headers={"X-Forwarded-For": f"198.51.100.{i}"}
+        )
+        client.post("/api/analytics/collect", json=_BATCH, headers=victim)  # stays warm
+
+    assert len(rate_limit._buckets) <= 3  # bounded
+    # The active client was never evicted and — the point — never lost its window: all 21
+    # of its requests are still counted. The old whole-table clear reset it on every churn.
+    assert len(rate_limit._buckets["203.0.113.7"]) == 21
+
+
 def test_429_still_carries_a_request_id(client, monkeypatch):
     """The limiter is registered inside RequestContextMiddleware — its rejections must
     still be observable (X-Request-ID + an access-log line)."""
