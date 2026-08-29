@@ -3,9 +3,16 @@
 # (deploy/crontab.txt); log: /var/log/prospect-backup.log (cron-line redirect).
 #
 # WHY THESE FILES:
-#   /root/steam-scraper/signals.db          DAILY. Forward-only follower/price time series —
+#   /root/prospect/data/signals.db          DAILY. Forward-only follower/price time series —
 #                                           a lost day is lost FOREVER (no endpoint replays
 #                                           history). The one truly unrecoverable file.
+#                                           PATH VERIFIED ON THE BOX 2026-08-29: it lives in
+#                                           prospect/data, NOT next to the scraper. This script
+#                                           originally pointed at /root/steam-scraper/signals.db,
+#                                           which does not exist — so the single file the whole
+#                                           job exists to protect was the one it never copied.
+#                                           The collectors' own default is the authority here
+#                                           (deploy/collectors/catalog_prices.py: SIGNALS_DB).
 #   /root/prospect/data/refresh_history.json DAILY. Small; the pipeline's run ledger.
 #   /root/steam-scraper/steam_games.db      WEEKLY (Sunday). 5.2GB. Recoverable in principle
 #                                           by re-scraping, but that is months of proxy-pool
@@ -45,8 +52,8 @@ fi
 
 STAGE=${PROSPECT_BACKUP_STAGE:-/root/backups}
 REMOTE=${PROSPECT_BACKUP_REMOTE:-prospect-backups:prospect}
-SIGNALS_DB=/root/steam-scraper/signals.db
-GAMES_DB=/root/steam-scraper/steam_games.db
+SIGNALS_DB=${PROSPECT_SIGNALS_DB:-/root/prospect/data/signals.db}
+GAMES_DB=${PROSPECT_GAMES_DB:-/root/steam-scraper/steam_games.db}
 HISTORY=/root/prospect/data/refresh_history.json
 DATE=$(date -u +%Y%m%d)
 # Bound the weekly 5.2GB .backup: it is the only step here that can run long, it shares the
