@@ -65,16 +65,19 @@ better problem than "annotate everything".
 
 **Start with the clock, not the chart.** Price/sale markers are the most valuable of the five —
 "reviews tripled the week it went 20% off" is the lesson a solo dev can actually reuse — and they
-are the only ones that cannot be backfilled. `game_snapshots` already has the right schema
-(`price_initial`, `price_final`, `discount_percent`, `ccu`); it is written only when the scraper
-happens to pass a game, which works out to roughly one row each, so there is nothing to diff.
-Every day without a scheduled capture is a day of price history that can never be recovered —
-Steam serves the current price and nothing else.
+are the only ones that cannot be backfilled. Every day without a scheduled capture is a day of
+price history that can never be recovered — Steam serves the current price and nothing else.
 
-So the first move is a cheap nightly snapshot step, independent of any chart work. It is the same
-shape as the two gaps already fixed this week (`sync-game-genres`, `enrich --refresh-unreleased`):
-the mechanism exists and simply nobody runs it on a schedule. The visual work can follow whenever;
-the history only starts accruing once the job does.
+**DONE (verified 2026-08-29): the price clock is running.** `deploy/collectors/catalog_prices.py`
+runs nightly from `prospect-refresh.sh` (`run_step_bg "prices"`), writing `price_snapshots` in
+`signals.db` and served at `/api/games/{appid}/price-history`. It is a keyed catalog diff, not a
+per-game poll: `IStoreService/GetAppList` returns `price_change_number` per app, so only apps whose
+counter moved get fetched. That means one row per unchanged game is the correct steady state, not a
+stalled job — do not "fix" it. `original_cents` is null whenever `discount_pct` is 0 (Valve omits it
+at full price); the list price is `final_cents` in that case, so nothing is lost.
+`deploy/collectors/followers_bulk.py` runs the same way for the follower series.
+
+The visual work (chart markers) is still open and can follow whenever — the history is accruing.
 
 ---
 
@@ -161,10 +164,12 @@ something no other source here carries.
 
 ### Needs a clock started (history accrues forward only)
 
-**4. Price history and lowest-ever price.** Already argued above under event markers — the schema
-exists in `game_snapshots`, nothing writes it on a schedule. SteamDB's version answers "should I
-buy"; ours answers "what discount depth do games in my niche run, and what does it do to their
-review velocity". Same data, a different and more useful question.
+**4. Price history and lowest-ever price. — CLOCK STARTED (verified 2026-08-29).** The nightly
+`prices` step has been accruing `price_snapshots` for a while; see the DONE note under event markers
+above for how the keyed diff works. What remains here is the *analysis*, not the capture: SteamDB's
+version answers "should I buy"; ours answers "what discount depth do games in my niche run, and what
+does it do to their review velocity". That question is still unbuilt, and gets more answerable with
+every week the series lengthens.
 
 **5. Wishlist/popularity rank for unreleased games.** Steam publishes a ranked "Popular Upcoming"
 list — 51,958 titles, ~1,040 requests for a full sweep, verified fetchable. Absolute wishlist
