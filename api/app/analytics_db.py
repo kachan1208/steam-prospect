@@ -25,10 +25,11 @@ from fastapi import HTTPException
 
 _conn: duckdb.DuckDBPyConnection | None = None
 _pool: "queue.Queue[duckdb.DuckDBPyConnection] | None" = None
-# mart_meta's mart_version, read ONCE at init (the DB is swapped atomically + the app
-# restarted on each nightly ETL, so a per-process value can't go stale). None when the DB
-# isn't initialised or the mart predates mart_meta — consumers treat None as "not cacheable".
-_mart_version: str | None = None
+# The whole mart_meta table (mart_version / built_at / source_db), read ONCE at init (the DB
+# is swapped atomically + the app restarted on each nightly ETL, so a per-process copy can't
+# go stale). Empty when the DB isn't initialised or the mart predates mart_meta. Cached
+# rather than re-queried so the liveness probe never has to touch the cursor pool.
+_mart_meta: dict[str, str] = {}
 
 # How long a request may wait for a free cursor before giving up with a 503. The pool is 4
 # cursors against a public concurrency that has been measured at 40 — without a timeout a
@@ -46,7 +47,7 @@ _POOL_BUSY_DETAIL = (
 
 
 def init(path: str, pool_size: int = 4) -> None:
-    global _conn, _pool, _mart_version
+    global _conn, _pool, _mart_meta
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(
@@ -58,16 +59,14 @@ def init(path: str, pool_size: int = 4) -> None:
     for _ in range(n):
         _pool.put(_conn.cursor())
     try:
-        row = _conn.execute(
-            "SELECT value FROM mart_meta WHERE key = 'mart_version'"
-        ).fetchone()
-        _mart_version = str(row[0]) if row and row[0] is not None else None
+        rows = _conn.execute("SELECT key, value FROM mart_meta").fetchall()
+        _mart_meta = {str(k): str(v) for k, v in rows if k is not None and v is not None}
     except duckdb.Error:  # mart predates mart_meta — nothing to key caches on
-        _mart_version = None
+        _mart_meta = {}
 
 
 def close() -> None:
-    global _conn, _pool, _mart_version
+    global _conn, _pool, _mart_meta
     if _pool is not None:
         while True:
             try:
@@ -78,17 +77,31 @@ def close() -> None:
     if _conn is not None:
         _conn.close()
         _conn = None
-    _mart_version = None
+    _mart_meta = {}
 
 
 def is_ready() -> bool:
     return _pool is not None
 
 
+def mart_meta() -> dict[str, str]:
+    """The loaded mart's mart_meta table as a dict, empty when the DB is absent / predates
+    mart_meta. Read once at init — see _mart_meta — so callers (notably the ALWAYS-200
+    liveness probe) never take a cursor to describe the mart."""
+    return dict(_mart_meta)
+
+
 def mart_version() -> str | None:
     """The loaded mart's version string (mart_meta.mart_version), or None when the DB is
-    absent / predates mart_meta. Read once at init — see _mart_version."""
-    return _mart_version
+    absent / predates mart_meta. Read once at init — see _mart_meta."""
+    return _mart_meta.get("mart_version")
+
+
+def built_at() -> str | None:
+    """When the loaded mart was BUILT (mart_meta.built_at), or None. mart_version is only
+    the build DATE, so two builds on one day (a light build + the nightly, or a rebuild
+    after a fix) share it — caches that must not mix them key on both."""
+    return _mart_meta.get("built_at")
 
 
 @contextmanager
