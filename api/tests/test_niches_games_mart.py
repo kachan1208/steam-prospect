@@ -455,3 +455,47 @@ def test_combined_rejects_an_unmaterialised_cut(niche_games_client):
     )
     assert r.status_code == 422
     assert "not materialised" in r.json()["detail"]
+
+
+# ---- `window` as an accepted alias for `win` (param-name consistency with the list) -----
+def test_games_window_is_an_alias_for_win(niche_games_client):
+    via_win = niche_games_client.get(
+        "/api/niches/tag/Roguelike/games", params={"win": "24m"}
+    ).json()
+    via_window = niche_games_client.get(
+        "/api/niches/tag/Roguelike/games", params={"window": "24m"}
+    ).json()
+    assert via_window == via_win
+    assert sorted(_appids(via_window)) == [5, 6, 8]  # the 24m cut, not the all cut
+
+
+def test_games_window_wins_when_both_are_sent(niche_games_client):
+    body = niche_games_client.get(
+        "/api/niches/tag/Roguelike/games", params={"win": "all", "window": "24m"}
+    ).json()
+    assert sorted(_appids(body)) == [5, 6, 8]
+
+
+def test_distribution_window_is_an_alias_for_win(niche_games_client):
+    params = {"metric": "price", "min_reviews": 50}
+    via_win = niche_games_client.get(
+        "/api/niches/tag/Roguelike/distribution", params={**params, "win": "24m"}
+    ).json()
+    via_window = niche_games_client.get(
+        "/api/niches/tag/Roguelike/distribution", params={**params, "window": "24m"}
+    ).json()
+    assert via_window == via_win
+    assert via_window["source"] == "computed"
+
+
+def test_combined_window_is_an_alias_for_win(niche_games_client):
+    params = {"niches": ["tag:Roguelike", "tag:Deckbuilding"], "limit": 100}
+    via_win = niche_games_client.get(
+        "/api/niches/combined", params={**params, "win": "all"}
+    ).json()
+    via_window = niche_games_client.get(
+        "/api/niches/combined", params={**params, "window": "all"}
+    ).json()
+    assert via_window == via_win
+    assert via_window["win"] == "all"
+    assert sorted(_appids(via_window)) == [4, 5, 6]  # the intersect on the all/50 cut

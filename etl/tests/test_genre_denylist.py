@@ -75,7 +75,7 @@ def main() -> int:
     con = duckdb.connect(":memory:")
     con.execute("CREATE SCHEMA src")
 
-    # ---- the six src tables create_staging() reads ------------------------------------
+    # ---- the src tables create_staging() reads ----------------------------------------
     con.execute(
         "CREATE TABLE src.games(appid INTEGER, name VARCHAR, type VARCHAR,"
         " release_date VARCHAR, price_initial INTEGER, is_free BOOLEAN,"
@@ -114,6 +114,16 @@ def main() -> int:
     con.execute(
         "CREATE TABLE src.review_summary(appid INTEGER, total_reviews INTEGER,"
         " total_positive INTEGER, total_negative INTEGER)"
+    )
+    # create_staging() also builds the shared press base (stg_press_base, 2026-08) from the
+    # articles corpus — empty tables are enough here (this test is about genres).
+    con.execute(
+        "CREATE TABLE src.articles(id BIGINT, source VARCHAR, author VARCHAR,"
+        " title VARCHAR, url VARCHAR, summary VARCHAR, published_at VARCHAR)"
+    )
+    con.execute(
+        "CREATE TABLE src.article_game_mentions(article_id BIGINT, appid INTEGER,"
+        " match_confidence DOUBLE)"
     )
 
     # ---- run the REAL staging (this is where the denylist lives) ----------------------

@@ -42,3 +42,6 @@ SELECT genre, language, n, share, rn AS lang_rank
 FROM ranked
 WHERE rn <= @LANG_TOP_N@
 ORDER BY genre, rn;
+
+-- Temp-table hygiene: file-local staging (nothing downstream reads it).
+DROP TABLE IF EXISTS _lang_elig_genres;

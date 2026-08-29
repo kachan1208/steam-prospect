@@ -18,23 +18,22 @@
 -- share_mentions / share_reach_weighted = this channel's measure / SUM(measure) across every
 -- channel for that genre (0-1, NULL if the genre's total is 0) — the pie/bar-ready share.
 --
--- Same confidence floor / genre-membership join as mart_creator_pitch.sql (creator side)
--- and mart_press.sql (press side); press's steam_news exclusion carried over unchanged.
--- Degrades gracefully: if the marketing source tables are absent/empty (see
--- create_marketing_staging() in build_marts.py), stg_game_creator_mention is empty, so every
--- genre's mix collapses to 100% press (still correct, never a crash) until channel
--- collectors run.
+-- Same confidence floor / genre-membership join as mart_press.sql; press's steam_news
+-- exclusion carried over unchanged. The creator/twitch vertical was decommissioned
+-- product-wide on 2026-08-25, so press is currently the only channel with rows — every
+-- genre's mix reads 100% press until another channel is (re)added as a _mix_all UNION arm.
 
 DROP TABLE IF EXISTS mart_channel_mix;
 
+-- Journalist mention rows come from the SHARED stg_press_base (create_staging in
+-- build_marts.py) — the same base every press mart counts, so the mix can't disagree
+-- with them about what a press mention is.
 CREATE TEMP TABLE _mix_press AS
 SELECT gm.genre, 'press' AS channel,
     COUNT(*) AS n_mentions,
     COUNT(*)::DOUBLE AS reach_weighted
-FROM src.article_game_mentions m
-JOIN src.articles a ON a.id = m.article_id
-JOIN stg_genre_membership gm ON gm.appid = m.appid
-WHERE a.source != 'steam_news' AND m.match_confidence >= @PRESS_MIN_CONFIDENCE@
+FROM stg_press_base pb
+JOIN stg_genre_membership gm ON gm.appid = pb.appid
 GROUP BY gm.genre;
 
 -- Creator platforms (twitch/youtube) removed 2026-08-25 — that vertical is decommissioned
@@ -55,3 +54,8 @@ SELECT mx.genre, mx.channel, mx.n_mentions, mx.reach_weighted,
 FROM _mix_all mx
 JOIN _mix_genre_totals t ON t.genre = mx.genre
 ORDER BY mx.genre, share_reach_weighted DESC NULLS LAST;
+
+-- Temp-table hygiene: file-local staging (nothing downstream reads these).
+DROP TABLE IF EXISTS _mix_press;
+DROP TABLE IF EXISTS _mix_all;
+DROP TABLE IF EXISTS _mix_genre_totals;

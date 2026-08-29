@@ -3,10 +3,13 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import clsx from "clsx";
 
 import { TagAutocomplete } from "../components/TagAutocomplete";
+import { EmptyState } from "../components/ui/EmptyState";
+import { Loading } from "../components/ui/Loading";
 import { useGameSearch, useGenres, type GameSearchRow, type GameSortKey } from "../lib/api";
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { fmtCompact, fmtInt, fmtPct, fmtRevenue, fmtUsd } from "../lib/format";
 import { useDebounced } from "../lib/useDebounced";
+import { usePageTitle } from "../lib/usePageTitle";
 
 const LIMIT = 25;
 
@@ -360,6 +363,7 @@ function CompareCell({ g }: { g: GameSearchRow }) {
 // ---- the page ------------------------------------------------------------------------------
 
 export default function GameSearch() {
+  usePageTitle("Games");
   const navigate = useNavigate();
   const genres = useGenres();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -694,14 +698,17 @@ export default function GameSearch() {
 
       {/* Result rows — hairline top rules, not cards (4e). */}
       <div className={clsx(isFetching && "opacity-90 transition-opacity")}>
-        {isLoading && <div className="py-6 text-sm text-ink-muted">Loading games…</div>}
+        {isLoading && <Loading label="Loading games…" className="py-6 text-sm" />}
         {isError && (
           <div className="py-6 text-sm text-verdict-serious">
             Failed to load games{error instanceof Error ? `: ${error.message}` : "."}
           </div>
         )}
         {data && data.items.length === 0 && (
-          <div className="py-6 text-sm text-ink-muted">No games match these filters.</div>
+          <EmptyState
+            title="No games match these filters"
+            description="Loosen a filter, widen the release window, or clear the search to see more of the catalog."
+          />
         )}
         {data && data.items.length > 0 && (
           <div className="border-b border-line-grid">

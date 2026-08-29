@@ -2,13 +2,15 @@
 
 Public, unauthenticated, and deliberately thin: it validates a small batch, increments bounded
 counters, and returns 204. Nothing is stored — the counters ARE the storage, scraped by
-VictoriaMetrics and charted in Grafana. Unknown routes/events are silently ignored (bounded
-cardinality), so the worst a bad client can do is inflate a known counter, never mint new series.
+VictoriaMetrics and charted in Grafana. Unknown routes are counted under route="unknown" and
+unknown events are ignored (bounded cardinality either way), so the worst a bad client can do
+is inflate a known counter, never mint new series.
 """
 from __future__ import annotations
 
 import hmac
 import json
+from collections import deque
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
@@ -58,13 +60,21 @@ def mcp_log(token: str = Query(""), limit: int = Query(100, ge=1, le=500)) -> di
     if path is None or not path.exists():
         return {"total": 0, "entries": []}
 
+    # Stream the file line-by-line, keeping only the last `limit` lines (deque with
+    # maxlen) — memory stays O(limit) instead of materializing every line the way
+    # readlines() did, while `total` keeps its exact meaning (lines in the live file;
+    # the write side rotates it at ~5MB so the scan is bounded too).
+    total = 0
+    tail: deque[str] = deque(maxlen=limit)
     with path.open(encoding="utf-8") as fh:
-        lines = fh.readlines()
+        for line in fh:
+            total += 1
+            tail.append(line)
     entries = []
-    for line in lines[-limit:]:
+    for line in tail:
         try:
             entries.append(json.loads(line))
         except ValueError:
             continue
     entries.reverse()  # newest first
-    return {"total": len(lines), "entries": entries}
+    return {"total": total, "entries": entries}

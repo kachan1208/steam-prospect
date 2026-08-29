@@ -4,3 +4,10 @@ dist-ssr
 *.local
 .env
 .env.local
+
+# tsc -b artifacts. A transpiled vite.config.js SHADOWS vite.config.ts (Vite resolves
+# .js first), so a stale one silently no-ops future .ts edits — never commit them.
+# Leading "/" scopes the config patterns to this directory only.
+*.tsbuildinfo
+/vite.config.js
+/vite.config.d.ts

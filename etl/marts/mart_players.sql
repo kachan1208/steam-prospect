@@ -386,3 +386,16 @@ SELECT dimension, key,
 FROM pop
 GROUP BY 1, 2
 HAVING COUNT(*) >= @LIFETIME_MIN_NICHE_GAMES@;
+
+-- ------------------------------------------------------------------------------------
+-- Temp-table hygiene: drop the file-local staging (the LOCF-filled daily panel _pl_filled
+-- is by far the biggest). DELIBERATELY KEPT ALIVE — cross-file handoffs this file exists
+-- to produce (each is dropped by its last consumer, or read after the mart loop):
+--   _game_players_summary, _game_lifetime  -> read + dropped by mart_game.sql
+--   _niche_players_now, _niche_lifetime    -> read + dropped by mart_niche.sql
+--   _pl_panel                              -> read by write_meta() AFTER all mart files
+-- ------------------------------------------------------------------------------------
+DROP TABLE IF EXISTS _pl_game_windows;
+DROP TABLE IF EXISTS _pl_dates;
+DROP TABLE IF EXISTS _pl_filled;
+DROP TABLE IF EXISTS _niche_player_current;

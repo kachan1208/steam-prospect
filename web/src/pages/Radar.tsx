@@ -1,10 +1,12 @@
-import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { useCallback, useMemo } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import clsx from "clsx";
 
 import { RadarBoard, type RadarBoardBlip, type RadarSector } from "../components/RadarBoard";
+import { Loading } from "../components/ui/Loading";
 import { useNiches, type NicheRow } from "../lib/api";
 import { SOLO_FRIENDLY_MIN, radarVerdictTrace } from "../lib/radarVerdict";
+import { usePageTitle } from "../lib/usePageTitle";
 
 /**
  * Radar — the index route. ONE INSTRUMENT, nothing below it (2026-08-27, user directive:
@@ -184,7 +186,10 @@ function RadarBoardSection({
             Verdict quadrants · last 24 months · {CLASS_KICKER[boardClass]}
             {soloOnly ? " · solo-friendly only" : ""}
           </div>
-          <h2 className="text-[26px] text-ink-primary sm:text-[30px]">Niche radar</h2>
+          {/* h1, not h2: this is the index route's only heading, and a page whose
+              document outline starts at h2 has no top level at all. Styled identically —
+              index.css gives every h1–h6 the same condensed face, so only the tag changed. */}
+          <h1 className="text-[26px] text-ink-primary sm:text-[30px]">Niche radar</h1>
         </div>
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 sm:ml-auto">
           <SegRow label="Class" options={CLASS_OPTIONS} value={boardClass} onChange={onBoardClass} />
@@ -201,7 +206,7 @@ function RadarBoardSection({
         </div>
       </div>
 
-      {loading && <div className="py-16 text-center text-sm text-ink-muted">Plotting the board…</div>}
+      {loading && <Loading label="Plotting the board…" className="py-16 text-sm" />}
       {bothFailed && (
         <div className="py-16 text-center text-sm text-status-serious">
           Failed to load the niche cuts{errorMessage ? `: ${errorMessage}` : "."}
@@ -272,14 +277,44 @@ function RadarBoardSection({
 }
 
 export default function Radar() {
+  usePageTitle("Radar");
   // ONE selection + ONE population toggle for the whole page: the board's two list
   // queries and the rail all hang off this state. Top-N and the class picker are
   // client-side display slices (see POPULATION_LIMIT), so only the solo toggle changes
   // what is fetched.
-  const [boardClass, setBoardClass] = useState<RadarSector>("micro");
-  const [soloOnly, setSoloOnly] = useState(true);
-  const [topN, setTopN] = useState(80);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  //
+  // ALL FOUR RIDE THE URL (2026-08-28) — the flagship page was the only surface whose
+  // view couldn't be linked or bookmarked, while six others already use useSearchParams.
+  // "Look at Roguelike Deckbuilder on the themes board" is now a URL you can send. Same
+  // contract as NicheDetail/NicheFinder: DEFAULTS ARE OMITTED (a pristine /radar stays a
+  // clean URL — only a non-default reading writes a param), unknown/garbage values fall
+  // back to the default rather than throwing, and writes `replace` so flipping chips
+  // doesn't bury the previous page under a dozen history entries.
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const rawClass = searchParams.get("class");
+  const boardClass: RadarSector = rawClass === "genre" || rawClass === "micro" || rawClass === "theme" ? rawClass : "micro";
+  const soloOnly = searchParams.get("solo") !== "off"; // default ON — the radar is solo-first
+  const rawTop = Number(searchParams.get("top"));
+  const topN = TOP_N_OPTIONS.some((o) => o.v === rawTop) ? rawTop : 80;
+  const selectedId = searchParams.get("niche");
+
+  /** One writer for all four params: null/default clears the key, anything else sets it. */
+  const setParams = useCallback(
+    (updates: Record<string, string | number | null>) => {
+      const next = new URLSearchParams(searchParams);
+      for (const [k, v] of Object.entries(updates)) {
+        if (v === null || v === "") next.delete(k);
+        else next.set(k, String(v));
+      }
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
+  const setBoardClass = useCallback((v: RadarSector) => setParams({ class: v === "micro" ? null : v }), [setParams]);
+  const setSoloOnly = useCallback((v: boolean) => setParams({ solo: v ? null : "off" }), [setParams]);
+  const setTopN = useCallback((v: number) => setParams({ top: v === 80 ? null : v }), [setParams]);
 
   // The board population: the two cuts that make up the three sectors. Each query asks
   // for the endpoint's max rows by opportunity_v2 — the full population the rail search
@@ -375,11 +410,17 @@ export default function Radar() {
    * classes on purpose); selecting it switches the picker to that class FIRST, so the
    * dossier opens over the board that actually contains the niche. */
   const handleSelect = (id: string | null) => {
+    // Both the class switch and the selection go in ONE param write — two setParams calls
+    // in a row would each read the same stale `searchParams` snapshot and the second
+    // would clobber the first.
     if (id !== null) {
       const row = pool.find((b) => `${b.dimension}:${b.key}` === id);
-      if (row && row.sector !== boardClass) setBoardClass(row.sector);
+      if (row && row.sector !== boardClass) {
+        setParams({ class: row.sector === "micro" ? null : row.sector, niche: id });
+        return;
+      }
     }
-    setSelectedId(id);
+    setParams({ niche: id });
   };
 
   const loading = genreQ.isLoading || tagQ.isLoading;

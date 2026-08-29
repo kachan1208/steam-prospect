@@ -19,7 +19,7 @@ import {
   type VerdictCheck,
 } from "../lib/radarVerdict";
 import { TooltipPanel } from "./charts/TooltipPanel";
-import { nicheDetailPath } from "../pages/NicheDetail";
+import { nicheDetailPath } from "../lib/nichePath";
 
 /**
  * RadarBoard — the XY QUADRANT plate (2026-08-27, user directive: "score them accordingly
@@ -988,7 +988,15 @@ export function RadarBoard({
   // is zoomed to and whose members the rail is filtered to. Entered by clicking a
   // region's empty area; exited by Esc, the rail chip's ✕, or a background click.
   const [zoom, setZoom] = useState<RadarRegion | null>(null);
-  const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
+  // TOOLTIP POSITION LIVES IN A REF, NOT IN STATE (2026-08-28 perf fix). Every dot has an
+  // onMouseMove, and setState-per-pointer-pixel re-rendered this whole ~1900-line board
+  // (all dots, the plate decor, the rail list) on every mouse move across a dot. Only
+  // tooltip VISIBILITY is state now — it flips at most twice per dot (enter/leave); the
+  // x/y ride a ref and are written straight onto the tooltip element's style, so pointer
+  // movement costs one style write instead of a full React render.
+  const tipRef = useRef<HTMLDivElement | null>(null);
+  const tipPos = useRef<{ x: number; y: number } | null>(null);
+  const [tipShown, setTipShown] = useState(false);
   // The rail's niche search. Local state deliberately: the query is a reading aid for
   // the list (like hover), not page state a card elsewhere needs to drive.
   const [query, setQuery] = useState("");
@@ -1130,13 +1138,30 @@ export function RadarBoard({
     }
   };
 
+  /** Write the recorded pointer position straight onto the tooltip element. Same clamping
+   * rule as before: flip LEFT of the cursor past the horizontal midline (keeps the right
+   * edge on the plate) and ABOVE it in the bottom band. No-ops when the tooltip isn't
+   * mounted yet — the callback ref below re-applies as soon as it is. */
+  const positionTip = () => {
+    const el = tipRef.current;
+    const p = tipPos.current;
+    if (!el || !p) return;
+    el.style.left = `${p.x}px`;
+    el.style.top = `${p.y}px`;
+    el.style.transform = `translate(${p.x > layout.geom.plateW / 2 ? "calc(-100% - 12px)" : "12px"}, ${
+      p.y > layout.vbH - 180 ? "calc(-100% - 12px)" : "12px"
+    })`;
+  };
   const moveTip = (e: React.MouseEvent) => {
     const rect = wrapRef.current?.getBoundingClientRect();
-    if (rect) setTip({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+    if (!rect) return;
+    tipPos.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    positionTip();
   };
   const clearHover = () => {
     setHoverId(null);
-    setTip(null);
+    setTipShown(false);
+    tipPos.current = null;
   };
 
   if (blips.length === 0) {
@@ -1193,9 +1218,6 @@ export function RadarBoard({
    * (1 viewBox unit = 1 px), so a 230px-wide plot can't fit the full wording — shorten
    * the labels and step the decor type down a notch instead of letting it collide. */
   const compact = plot.w < 420;
-  /** The plate's rendered height in CSS px — the tooltip's bottom-flip band needs it.
-   * One viewBox unit = one CSS px once measured, so this is simply the viewBox height. */
-  const plateHPx = layout.vbH;
 
   return (
     <div className="flex flex-col gap-5 lg:flex-row lg:items-stretch">
@@ -1566,8 +1588,11 @@ export function RadarBoard({
                   style={{ cursor: "pointer", transition: "opacity 120ms, cx 240ms, cy 240ms, r 240ms" }}
                   onMouseEnter={(e) => {
                     setHoverId(b.id);
+                    setTipShown(true);
                     moveTip(e);
                   }}
+                  // Records into a ref + mutates the tooltip's style directly — this fires
+                  // per pointer pixel and must never re-render the board (see tipPos).
                   onMouseMove={moveTip}
                   onMouseLeave={clearHover}
                   // A dot click opens the VERDICT DOSSIER in the rail (the analysis is
@@ -1671,16 +1696,18 @@ export function RadarBoard({
             Clamped to the plate: it flips to the LEFT of the cursor past the horizontal
             midline (keeps the right edge) and flips ABOVE the cursor in the bottom band
             (the plate's rendered height scales with its width via the viewBox). */}
-        {hovered && tip && (
+        {hovered && tipShown && (
           <div
-            className="pointer-events-none absolute z-10"
-            style={{
-              left: tip.x,
-              top: tip.y,
-              transform: `translate(${tip.x > geom.plateW / 2 ? "calc(-100% - 12px)" : "12px"}, ${
-                tip.y > plateHPx - 180 ? "calc(-100% - 12px)" : "12px"
-              })`,
+            // left/top/transform are deliberately NOT React-managed props: positionTip
+            // writes them imperatively so a mousemove costs a style write, not a render.
+            // The callback ref applies the recorded position the instant the element
+            // mounts (and on every re-render, since the inline ref re-runs), so there is
+            // no frame where the panel sits un-positioned at the plate's origin.
+            ref={(el) => {
+              tipRef.current = el;
+              positionTip();
             }}
+            className="pointer-events-none absolute z-10"
           >
             <TooltipPanel
               title={`${hovered.n}. ${hovered.key} — ${SECTOR_LABEL[hovered.sector]}`}

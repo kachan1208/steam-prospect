@@ -9,15 +9,25 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from ..config import settings
+from ..schemas import RefreshHistory
 
 router = APIRouter(tags=["refresh"])
 
+_DEFAULT_LIMIT = 60
 
-@router.get("/api/refresh/history")
-def refresh_history() -> dict:
+
+@router.get("/api/refresh/history", response_model=RefreshHistory)
+def refresh_history(
+    limit: int = Query(
+        _DEFAULT_LIMIT, ge=1, le=500,
+        description="How many of the most recent runs to return (newest first).",
+    ),
+) -> RefreshHistory:
+    """Newest-first run records. `limit` is honoured (it was accepted and silently ignored
+    until 2026-08-28 — every call returned the newest 60 regardless)."""
     path = Path(settings.refresh_history_path)
     runs: list[dict] = []
     if path.exists():
@@ -29,4 +39,4 @@ def refresh_history() -> dict:
         except (OSError, ValueError):
             runs = []
     runs.sort(key=lambda r: r.get("finished_at", ""), reverse=True)
-    return {"runs": runs[:60]}
+    return RefreshHistory(runs=runs[:limit], total=len(runs), limit=limit)

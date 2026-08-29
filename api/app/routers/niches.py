@@ -11,8 +11,8 @@ e777cb2) and upgraded for everything the marts have grown since:
   row, plus the per-niche daily series (mart_niche_players) in the detail response.
 - 24-month demand: reviews_24m / reviews_prev_24m / demand_trend_24m_pct on every LIST
   row (capability-gated like p90_rev; cut-independent in the mart — one value per
-  (dimension, key), stamped on every window/floor cut), so the Radar board rings every
-  blip on its own trend, not just the feed's top movers.
+  (dimension, key), stamped on every window/floor cut), so the Radar board can ring every
+  blip on its own trend client-side.
 - Review themes: mart_niche_themes' pooled praise/complaint aspects in the detail.
 
 Defaults mirror the MCP tool: window=24m (the market a new entrant faces),
@@ -31,8 +31,7 @@ import io
 from functools import lru_cache
 
 import duckdb
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Query, Response
 
 from .. import analytics_db
 from ..schemas import (
@@ -55,10 +54,6 @@ from ..schemas import (
     NichePressPoint,
     NicheRow,
     NicheTheme,
-    RadarFeed,
-    RadarHero,
-    RadarNicheCard,
-    RadarSparklinePoint,
     TrendPoint,
 )
 
@@ -66,13 +61,13 @@ router = APIRouter(prefix="/api/niches", tags=["niches"])
 
 _TIERS = {"micro", "theme", "umbrella", "meta"}
 
-# The radar's solo-friendliness bar: mart_niche.solo_viability (share of the cut's scored
-# games playable single-player; catalog norm ~0.9, below ~0.8 leans multiplayer) at or
-# above which a niche counts as solo-buildable. Applied server-side wherever the RADAR
-# consumes niches — the `solo_only` param on GET /api/niches (opt-in, default OFF: the
-# list is a shared surface and non-radar consumers must see the unfiltered population) and
-# on GET /api/niches/radar (default ON: the radar page is solo-first by user directive,
-# 2026-08-26; the board toggle can turn it off).
+# The Radar page's solo-friendliness bar: mart_niche.solo_viability (share of the cut's
+# scored games playable single-player; catalog norm ~0.9, below ~0.8 leans multiplayer) at
+# or above which a niche counts as solo-buildable. Applied server-side via the `solo_only`
+# param on GET /api/niches — opt-in, default OFF: the list is a shared surface (NicheFinder,
+# the CSV export) and non-radar consumers must see the unfiltered population. The Radar
+# board is the consumer that passes solo_only=1 (it is solo-first by user directive,
+# 2026-08-26; its own toggle turns the filter off).
 #
 # MUST stay in lockstep with SOLO_FRIENDLY_MIN in web/src/lib/radarVerdict.ts — the web
 # renders the same 0.8 bar in the board legend, the solo lens and the verdict dossier, so
@@ -86,13 +81,13 @@ _TIERS = {"micro", "theme", "umbrella", "meta"}
 RADAR_SOLO_FRIENDLY_MIN = 0.8
 
 _SOLO_ONLY_DESC = (
-    "Radar population rule: keep only solo-friendly niches "
+    "Solo population rule: keep only solo-friendly niches "
     f"(solo_viability >= {RADAR_SOLO_FRIENDLY_MIN}; NULL = unknown = excluded)."
 )
 
 
 def _apply_solo_only(where: str, params: list) -> tuple[str, list]:
-    """Append the radar's solo-friendliness filter. NULL solo_viability fails the >=
+    """Append the solo-friendliness filter. NULL solo_viability fails the >=
     (SQL three-valued logic) — exactly the intended 'unknown is not solo-friendly'
     reading; see RADAR_SOLO_FRIENDLY_MIN."""
     return where + " AND solo_viability >= ?", params + [RADAR_SOLO_FRIENDLY_MIN]
@@ -215,10 +210,10 @@ def _has_p90_trend() -> bool:
 
 @lru_cache(maxsize=1)
 def _has_demand24m() -> bool:
-    """reviews_24m / reviews_prev_24m / demand_trend_24m_pct — the whole ranking metric
-    behind the Radar feed and the board's verdict rings. 24-month windows REPLACED the
-    12-month ones outright (2026-08-26, user-directed: the radar's pinned membership cut
-    is 24m x min50, so the whole radar now speaks 24 months), which had themselves
+    """reviews_24m / reviews_prev_24m / demand_trend_24m_pct — the ranking metric behind
+    the Radar board's verdict rings. 24-month windows REPLACED the 12-month ones outright
+    (2026-08-26, user-directed: the radar's pinned membership cut is 24m x min50, so the
+    whole radar now speaks 24 months), which had themselves
     replaced the 90-day windows (quarter-over-quarter caught release spikes; a year-plus
     window reads structural growth, which is what "what should I build" needs) — so a
     mart carrying only the older 90d/12m columns still answers False here and degrades
@@ -322,9 +317,10 @@ def _require_cut(win: str, min_reviews: int) -> None:
 
 
 def _require_dimension(dimension: str) -> None:
-    """422 (not niche_detail's 400) on the drill-down surface: the frozen web contract calls
-    for FastAPI's own validation status on bad input, and the /combined `niches` specs are
-    validated by hand, so all three endpoints answer malformed input identically."""
+    """422 everywhere a path dimension is validated by hand (drill-down surface AND
+    niche_detail): FastAPI's own validation status for bad input, so all these endpoints
+    answer malformed input identically. (niche_detail used to answer 400 here; unified
+    2026-08-28 after confirming no web/src code branches on that 400.)"""
     if dimension not in ("tag", "genre"):
         raise HTTPException(status_code=422, detail="dimension must be tag or genre")
 
@@ -353,7 +349,23 @@ _GAME_SELECT = (
 # `total_reviews >= @MIN_REVIEWS_DEFAULT@` and carries no win/min_reviews columns).
 _HIST_CUT = ("all", 50)
 
+# The cut grid mart_niche materialises per (dimension, key) — mirrors etl/build_marts.py's
+# MIN_REVIEWS_LEVELS x its two windows. niche_detail's variants query is bounded by the
+# grid size (every cut of one niche, no more) instead of a magic row count.
+_MIN_REVIEWS_LEVELS = (0, 50, 100)
+_CUT_WINDOWS = ("all", "24m")
+_MAX_VARIANTS = len(_MIN_REVIEWS_LEVELS) * len(_CUT_WINDOWS)
+
 _MAX_COMBINED_NICHES = 8
+
+# Param-name consistency: the list surface (/api/niches, /api/market/distribution) calls
+# the cut window `window`, while the drill-down surface froze `win` into the web contract.
+# The drill-down endpoints accept `window` as an alias (it wins when both are sent — the
+# caller who spells it out gets what they asked for); `win` keeps working unchanged.
+_WINDOW_ALIAS_DESC = (
+    "Alias for `win` (the list endpoints call this `window`); takes precedence when both "
+    "are sent."
+)
 
 
 def _bucket_filters(
@@ -429,6 +441,47 @@ def _niche_query(
         ) from exc
 
 
+def _require_list_capabilities(sort: str, min_reviews: int) -> None:
+    """The list surface's shared input gates (list_niches AND export_csv — the CSV export
+    used to skip these, so e.g. sort=total_players_now on an older mart fell through to
+    _niche_query's misleading v2-columns 503 instead of the specific one below).
+
+    400 on an unknown sort (whitelist, prevents SQL injection); 503 with a rebuild hint
+    when the sort column / requested cut is real but the loaded mart predates it."""
+    if sort not in SORTABLE:
+        raise HTTPException(status_code=400, detail=f"sort must be one of {sorted(SORTABLE)}")
+    if sort in _PLAYERS_COLS and not _has_players():
+        raise HTTPException(
+            status_code=503,
+            detail="mart_niche predates the live-player columns — rebuild the marts (task etl).",
+        )
+    if sort in ("median_players_now", "players_top5_share") and not _has_players_dist():
+        raise HTTPException(
+            status_code=503,
+            detail="mart_niche predates the players-distribution columns — rebuild the marts (task etl).",
+        )
+    if sort in _LIFETIME_COLS and not _has_lifetime():
+        raise HTTPException(
+            status_code=503,
+            detail="mart_niche predates the lifetime columns — rebuild the marts (task etl).",
+        )
+    if sort == "p90_rev" and not _has_p90():
+        raise HTTPException(
+            status_code=503,
+            detail="mart_niche predates the p90_rev column — rebuild the marts (task etl).",
+        )
+    if sort in _DEMAND24M_COLS and not _has_demand24m():
+        raise HTTPException(
+            status_code=503,
+            detail="mart_niche predates the 24-month demand columns — rebuild the marts (task etl).",
+        )
+    if min_reviews == 0 and not _has_no_floor_cut():
+        raise HTTPException(
+            status_code=503,
+            detail="mart_niche predates the no-floor (min_reviews=0) cut — rebuild the marts (task etl).",
+        )
+
+
 def _build_filters(
     dimension: str,
     window: str,
@@ -486,38 +539,7 @@ def list_niches(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> NicheList:
-    if sort not in SORTABLE:
-        raise HTTPException(status_code=400, detail=f"sort must be one of {sorted(SORTABLE)}")
-    if sort in _PLAYERS_COLS and not _has_players():
-        raise HTTPException(
-            status_code=503,
-            detail="mart_niche predates the live-player columns — rebuild the marts (task etl).",
-        )
-    if sort in ("median_players_now", "players_top5_share") and not _has_players_dist():
-        raise HTTPException(
-            status_code=503,
-            detail="mart_niche predates the players-distribution columns — rebuild the marts (task etl).",
-        )
-    if sort in _LIFETIME_COLS and not _has_lifetime():
-        raise HTTPException(
-            status_code=503,
-            detail="mart_niche predates the lifetime columns — rebuild the marts (task etl).",
-        )
-    if sort == "p90_rev" and not _has_p90():
-        raise HTTPException(
-            status_code=503,
-            detail="mart_niche predates the p90_rev column — rebuild the marts (task etl).",
-        )
-    if sort in _DEMAND24M_COLS and not _has_demand24m():
-        raise HTTPException(
-            status_code=503,
-            detail="mart_niche predates the 24-month demand columns — rebuild the marts (task etl).",
-        )
-    if min_reviews == 0 and not _has_no_floor_cut():
-        raise HTTPException(
-            status_code=503,
-            detail="mart_niche predates the no-floor (min_reviews=0) cut — rebuild the marts (task etl).",
-        )
+    _require_list_capabilities(sort, min_reviews)
     tiers_arg = tiers if tiers else None  # "" (explicit empty) = no tier filter
     where, params = _build_filters(
         dimension, window, min_reviews, q, tiers_arg, min_total_players, min_total_owners
@@ -531,199 +553,6 @@ def list_niches(
         total=int(total or 0),
         limit=limit,
         offset=offset,
-    )
-
-
-# =========================================================================================
-# Radar feed (mockup 3a — the new opportunity-feed home). Registered here, before the
-# `/{dimension}/{key:path}` catch-all below, for the same route-ordering reason as `/combined`:
-# a bare `/radar` is a single path segment and (per the file's own load-bearing-order note on
-# that catch-all) must be declared first so FastAPI never gets a chance to try matching it as
-# dimension="radar" with no key.
-# =========================================================================================
-
-# Columns for the radar endpoint only — deliberately NOT folded into _cols()/_BASE_COLS: those
-# back the general /niches list (NicheRow, consumed by NicheFinder) and this endpoint's fields
-# are new/radar-specific. Keeping them separate means this feature can't accidentally change
-# that contract.
-_RADAR_BASE_COLS = [
-    "dimension", "key", "tier", "n_games", "opportunity_v2", "saturation_yoy",
-    "reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct",
-    "reviews_24m_new_share", "demand_emerging",
-    # The population-rule input (see RADAR_SOLO_FRIENDLY_MIN): served on every card so the
-    # client can show the score that gated the population. A required v2 column (in
-    # _BASE_COLS), so no capability gate — a mart without it predates v2 scoring entirely
-    # and never reaches this SELECT (the demand24m gate 503s first).
-    "solo_viability",
-]
-
-
-def _radar_cols() -> list[str]:
-    cols = list(_RADAR_BASE_COLS)
-    if _has_p90():
-        cols.append("p90_rev")
-    if _has_players():
-        cols.append("players_trend_7d_pct")
-    if _has_solo_evidence():
-        cols.extend(_SOLO_EVIDENCE_COLS)
-    return cols
-
-
-def _radar_card(r: dict, sparklines: dict[tuple[str, str], list[RadarSparklinePoint]]) -> RadarNicheCard:
-    return RadarNicheCard(
-        dimension=r["dimension"],
-        key=r["key"],
-        tier=r.get("tier"),
-        n_games=r["n_games"],
-        p90_rev=r.get("p90_rev"),
-        opportunity_v2=r.get("opportunity_v2"),
-        saturation_yoy=r.get("saturation_yoy"),
-        reviews_24m=int(r["reviews_24m"] or 0),
-        reviews_prev_24m=int(r["reviews_prev_24m"] or 0),
-        demand_trend_24m_pct=r["demand_trend_24m_pct"],
-        reviews_24m_new_share=r.get("reviews_24m_new_share"),
-        demand_emerging=bool(r.get("demand_emerging")),
-        solo_viability=r.get("solo_viability"),
-        # Solo-evidence trio (see _SOLO_EVIDENCE_COLS) — None on marts that predate it.
-        self_published_share=r.get("self_published_share"),
-        indie_share=r.get("indie_share"),
-        med_playtime_h=r.get("med_playtime_h"),
-        players_trend_7d_pct=r.get("players_trend_7d_pct"),
-        sparkline=sparklines.get((r["dimension"], r["key"]), []),
-    )
-
-
-def _radar_sparklines(keys: list[tuple[str, str]]) -> dict[tuple[str, str], list[RadarSparklinePoint]]:
-    """Real monthly player history (mart_niche_players_monthly) for each (dimension, key) — the
-    card sparkline's actual shape, not an invented curve (see RadarSparklinePoint). Degrades to
-    empty per-key lists, never a 500, when the table predates this mart (older than the CCU/
-    steamcharts marts) — same CatalogException convention as niche_detail()'s players.monthly."""
-    if not keys:
-        return {}
-    pair_sql = " OR ".join("(dimension = ? AND key = ?)" for _ in keys)
-    pair_params = [v for k in keys for v in k]
-    try:
-        rows = analytics_db.query(
-            "SELECT dimension, key, CAST(month AS VARCHAR) AS month, avg_players_sum "
-            f"FROM mart_niche_players_monthly WHERE ({pair_sql}) "
-            "ORDER BY dimension, key, month",
-            pair_params,
-        )
-    except duckdb.CatalogException:
-        return {}
-    out: dict[tuple[str, str], list[RadarSparklinePoint]] = {}
-    for r in rows:
-        out.setdefault((r["dimension"], r["key"]), []).append(
-            RadarSparklinePoint(month=r["month"], players=float(r["avg_players_sum"]))
-        )
-    # Cap to the most recent 24 months per niche: some niches carry 12+ years of steamcharts
-    # history (back to 2012), and the card only needs enough points for a 44px sparkline shape.
-    return {k: v[-24:] for k, v in out.items()}
-
-
-@router.get("/radar", response_model=RadarFeed)
-def radar_feed(
-    dimension: str = Query("tag", pattern="^(tag|genre)$"),
-    window: str = Query("24m", pattern="^(all|24m)$"),
-    min_reviews: int = Query(50, ge=0, le=100000),
-    # Default ON — the radar page is solo-first (user directive, 2026-08-26): hero, movers
-    # AND emerging all obey the same population rule; the board's "Solo-friendly only"
-    # toggle passes solo_only=0 to reveal the full population.
-    solo_only: bool = Query(True, description=_SOLO_ONLY_DESC + " Default on."),
-    limit: int = Query(6, ge=1, le=24),
-) -> RadarFeed:
-    """The Radar feed: the cut's biggest 24-month demand riser (hero) plus its biggest movers
-    in either direction ('Moving niches'), plus the cut's EMERGING niches as their own group.
-    Defaults mirror NicheFinder/mockup 3a's own caption — "last 24 months · micro + theme
-    tags" — dimension=tag, window=24m, min_reviews=50, tiers micro+theme; solo_only defaults
-    ON (see RADAR_SOLO_FRIENDLY_MIN — solo-friendly niches only, NULL = unknown = excluded).
-
-    EMERGING (demand_emerging, see mart_niche.sql): young Steam tags crystallize around new
-    games only — old ancestors never get re-voted into them — so their prior-window base is
-    near zero BY CONSTRUCTION and a raw +4,775% trend is noise, not demand growth. Those
-    niches are EXCLUDED from the trend-% ranking (hero and movers) and returned separately,
-    ranked by absolute 24-month review volume, where their real signal is.
-
-    503 when the mart predates demand_trend_24m_pct (see _has_demand24m — the state production
-    is genuinely in for hours after every deploy that adds a mart column, and always the FIRST
-    state a fresh deploy of this endpoint sees, since the API ships before the nightly rebuild
-    that materialises it). The client is expected to degrade honestly on that response, not
-    retry it into a spinner.
-    """
-    if not _has_demand24m():
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "mart_niche predates the 24-month demand trend columns (reviews_24m / "
-                "reviews_prev_24m / demand_trend_24m_pct) — rebuild the marts (task etl)."
-            ),
-        )
-
-    tiers_arg = "micro,theme" if dimension == "tag" else None
-    where, params = _build_filters(dimension, window, min_reviews, None, tiers_arg, None, None)
-    if solo_only:
-        # Applied BEFORE any group splits off, so hero, movers and emerging all read the
-        # same population — a team-scale niche must not sneak in through any of the three.
-        where, params = _apply_solo_only(where, params)
-    cols = ", ".join(_radar_cols())
-
-    # Emerging niches first (their own group, before the WHERE narrows to rankable rows):
-    # no trend-not-null requirement — a NULL trend (zero prior-window baseline) is the
-    # canonical emerging case — and ranked by reviews_24m DESC because absolute volume is
-    # the only number that means anything for them.
-    emerging_rows = analytics_db.query(
-        f"SELECT {cols} FROM mart_niche {where} AND demand_emerging "
-        "ORDER BY reviews_24m DESC, n_games DESC LIMIT ?",
-        params + [limit],
-    )
-
-    # NULL demand_trend_24m_pct means "no baseline to compare against" (the prior 24-month
-    # window had zero reviews), not "flat" — a brand-new niche must never surface here as an
-    # unchanged mover, so rows without a real trend value are excluded rather than sorted to
-    # the bottom. Emerging niches are excluded from the % ranking too: their base is near
-    # zero by construction, so their trend % is not representative (they surface in the
-    # `emerging` group above instead).
-    where += " AND demand_trend_24m_pct IS NOT NULL AND NOT demand_emerging"
-
-    hero_rows = analytics_db.query(
-        f"SELECT {cols} FROM mart_niche {where} "
-        "ORDER BY demand_trend_24m_pct DESC, n_games DESC LIMIT 1",
-        params,
-    )
-    if not hero_rows:
-        raise HTTPException(
-            status_code=404,
-            detail="No niches have a rankable 24-month demand trend in this cut yet — too few reviews in the prior 24-month window.",
-        )
-    hero_row = hero_rows[0]
-
-    extra = max(0, limit - 1)
-    mover_rows: list[dict] = []
-    if extra > 0:
-        mover_rows = analytics_db.query(
-            f"SELECT {cols} FROM mart_niche {where} AND key != ? "
-            "ORDER BY ABS(demand_trend_24m_pct) DESC, n_games DESC LIMIT ?",
-            params + [hero_row["key"], extra],
-        )
-
-    trend_cols = "year, n_releases, n_scored, median_rev" + (", p90_rev" if _has_p90_trend() else "")
-    trend_rows = analytics_db.query(
-        f"SELECT {trend_cols} FROM mart_niche_trend WHERE dimension = ? AND key = ? ORDER BY year",
-        [hero_row["dimension"], hero_row["key"]],
-    )
-
-    keys = [(hero_row["dimension"], hero_row["key"])] + [
-        (r["dimension"], r["key"]) for r in mover_rows + emerging_rows
-    ]
-    sparklines = _radar_sparklines(keys)
-
-    hero = RadarHero(**_radar_card(hero_row, sparklines).model_dump(), trend=[TrendPoint(**t) for t in trend_rows])
-    movers = [_radar_card(hero_row, sparklines)] + [_radar_card(r, sparklines) for r in mover_rows]
-    emerging = [_radar_card(r, sparklines) for r in emerging_rows]
-
-    return RadarFeed(
-        dimension=dimension, window=window, min_reviews=min_reviews,
-        hero=hero, movers=movers, emerging=emerging,
     )
 
 
@@ -747,6 +576,7 @@ def niches_combined(
     ),
     mode: str = Query("intersect", pattern="^(intersect|union)$"),
     win: str = Query("all", pattern="^(all|24m)$"),
+    window: str | None = Query(None, pattern="^(all|24m)$", description=_WINDOW_ALIAS_DESC),
     min_reviews: int = Query(50, ge=0, le=100000),
     sort: str = Query("revenue", pattern="^(revenue|price|reviews|release_year|name)$"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
@@ -764,6 +594,7 @@ def niches_combined(
     (quantile_cont over est_rev_reviews; median over price_initial with free games included)
     — averaging the per-niche marts would be flatly wrong for an intersection.
     """
+    win = window or win  # `window` is an accepted alias — see _WINDOW_ALIAS_DESC
     pairs = _parse_niche_specs(niches)  # 422s before any capability/DB work
     _require_niche_games()
     _require_cut(win, min_reviews)
@@ -883,6 +714,7 @@ def niche_games(
     dimension: str,
     key: str,
     win: str = Query("all", pattern="^(all|24m)$"),
+    window: str | None = Query(None, pattern="^(all|24m)$", description=_WINDOW_ALIAS_DESC),
     min_reviews: int = Query(50, ge=0, le=100000),
     sort: str = Query("revenue", pattern="^(revenue|price|reviews|release_year|name)$"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
@@ -904,6 +736,7 @@ def niche_games(
     niche can legitimately miss a cut that fell under the mart's MIN_NICHE_GAMES floor, and
     distinguishing that from a typo would cost another full scan.
     """
+    win = window or win  # `window` is an accepted alias — see _WINDOW_ALIAS_DESC
     _require_dimension(dimension)
     _require_niche_games()
     _require_cut(win, min_reviews)
@@ -934,6 +767,7 @@ def niche_distribution(
     key: str,
     metric: str = Query(..., pattern="^(revenue|price)$"),
     win: str = Query("all", pattern="^(all|24m)$"),
+    window: str | None = Query(None, pattern="^(all|24m)$", description=_WINDOW_ALIAS_DESC),
     min_reviews: int = Query(50, ge=0, le=100000),
 ) -> NicheDistribution:
     """Revenue or price histogram for one niche cut. See schemas.NicheDistribution for the
@@ -944,6 +778,7 @@ def niche_distribution(
     mart_niche_game — mart_niche_hist already ships it — so the charts light up the moment
     the API deploys, hours before the rebuild.
     """
+    win = window or win  # `window` is an accepted alias — see _WINDOW_ALIAS_DESC
     _require_dimension(dimension)
 
     if metric == "revenue":
@@ -1034,11 +869,15 @@ def niche_distribution(
 
 @router.get("/{dimension}/{key:path}", response_model=NicheDetail)
 def niche_detail(dimension: str, key: str) -> NicheDetail:
-    if dimension not in ("tag", "genre"):
-        raise HTTPException(status_code=400, detail="dimension must be tag or genre")
+    _require_dimension(dimension)
 
     variants = _niche_query(
-        "WHERE dimension = ? AND key = ?", [dimension, key], "min_reviews", "asc", 8, None
+        "WHERE dimension = ? AND key = ?",
+        [dimension, key],
+        "min_reviews",
+        "asc",
+        _MAX_VARIANTS,  # every cut of one niche (the levels x windows grid), no more
+        None,
     )
     if not variants:
         raise HTTPException(status_code=404, detail=f"niche not found: {dimension}/{key}")
@@ -1201,14 +1040,11 @@ def export_csv(
     q: str | None = Query(None),
     tiers: str | None = Query("micro,theme"),
     limit: int = Query(1000, ge=1, le=5000),
-):
-    if sort not in SORTABLE:
-        raise HTTPException(status_code=400, detail=f"sort must be one of {sorted(SORTABLE)}")
-    if min_reviews == 0 and not _has_no_floor_cut():
-        raise HTTPException(
-            status_code=503,
-            detail="mart_niche predates the no-floor (min_reviews=0) cut — rebuild the marts (task etl).",
-        )
+) -> Response:
+    # The SAME capability gates as list_niches — the export is the list in CSV clothes,
+    # so a request the list would answer with a specific 503 must not fall through to
+    # _niche_query's generic (and here misleading) v2-columns 503.
+    _require_list_capabilities(sort, min_reviews)
     tiers_arg = tiers if tiers else None
     where, params = _build_filters(dimension, window, min_reviews, q, tiers_arg, None, None)
     rows = _niche_query(where, params, sort, order, limit, None)
@@ -1221,10 +1057,12 @@ def export_csv(
         r = dict(r)
         r["window"] = r.pop("win")
         writer.writerow(r)
-    buf.seek(0)
     filename = f"niches_{dimension}_{window}_mr{min_reviews}.csv"
-    return StreamingResponse(
-        iter([buf.getvalue()]),
+    # A plain Response, not StreamingResponse: the payload is already fully buffered in
+    # `buf` (max 5000 small rows), so streaming a one-element iterator bought nothing and
+    # cost a correct Content-Length.
+    return Response(
+        buf.getvalue(),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

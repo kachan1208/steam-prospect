@@ -3,6 +3,34 @@ import type { Theme } from "./theme";
 /**
  * Prospect color tokens — mirrors web/src/index.css.
  *
+ * ─────────────────────────────────────────────────────────────────────────────────────
+ * SANCTIONED EXCEPTION — RADAR VERDICT RING COLORS (2026-08-27, reconciled here
+ * 2026-08-28). Read this BEFORE the mono-steel rule below, because the two used to
+ * contradict each other and this file was the one asserting a rule the app no longer
+ * follows everywhere.
+ *
+ * The radar board's five VERDICT rings are hue-coded on purpose (user directive: "add
+ * some colors so it's easy to understand where to focus"): green = enter, steel = watch,
+ * violet = emerging, amber = crowded, terracotta = declining. Tokens live in index.css
+ * (--verdict-enter/crowded/declining/emerging, both modes) and are consumed by
+ * RadarBoard.tsx's RING_FILL. The same amendment is recorded in
+ * design_handoff_prospect_dark_ui/README.md so the handoff and this file agree.
+ *
+ * The exception is NARROW and its guard-rails are what make it safe:
+ *   - Reinforcement only. Position on the plate, fill style (hollow = team-scale) and
+ *     the dashed emerging halo each carry the full meaning without color, and the
+ *     board's legend prints the verdict WORD beside every swatch — so the mapping
+ *     survives grayscale and any color-vision deficiency.
+ *   - Enter (green) and the warm crowded/declining family are separated by LIGHTNESS as
+ *     well as hue; alarm-red is deliberately avoided (crowded must read "caution", not
+ *     "error"); gold was tested for enter and rejected for colliding with amber under
+ *     deuteranopia.
+ *   - It applies to the radar's verdict vocabulary ONLY. Trend verdicts everywhere else
+ *     (▲/▼ + signed %) and aspect-sentiment bars stay mono steel — that rule below is
+ *     still in force for every other surface, and --verdict-up/--verdict-flat are
+ *     still the steel pair.
+ * ─────────────────────────────────────────────────────────────────────────────────────
+ *
  * design_handoff_prospect_dark_ui/README.md is explicit that trend verdicts and aspect
  * sentiment are MONO STEEL, never hue-coded ("Up = accent-300, down/flat = paper 55%.
  * Never red/green" · 4c: aspect bars "positive accent-300, negative paper 50%"). Two

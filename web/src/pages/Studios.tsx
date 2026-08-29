@@ -5,11 +5,13 @@ import clsx from "clsx";
 import { Badge } from "../components/ui/Badge";
 import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Loading } from "../components/ui/Loading";
 import { ApiError, useEntitySearch, type EntityRole, type EntitySearchRow } from "../lib/api";
 import { fmtInt, fmtPct, fmtUsd } from "../lib/format";
 import { genreTintStyle, heatDomain, heatStyle } from "../lib/heat";
 import { CSS_VAR, MONO} from "../lib/palette";
 import { useDebounced } from "../lib/useDebounced";
+import { usePageTitle } from "../lib/usePageTitle";
 
 const LIMIT = 50;
 // Browse floor: without a search term, only studios with 3+ scored games rank — a lone
@@ -39,6 +41,7 @@ function fmtYears(first: number | null, last: number | null): string {
  * page's reason to exist. Rows open the full career profile at /entity/:role?name=.
  */
 export default function Studios() {
+  usePageTitle("Studios");
   const navigate = useNavigate();
   const [role, setRole] = useState<EntityRole>("publisher");
   const [q, setQ] = useState("");
@@ -95,7 +98,7 @@ export default function Studios() {
       </Card>
 
       <Card className={clsx("!p-0", isFetching && "opacity-90 transition-opacity")}>
-        {isLoading && <div className="p-6 text-sm text-ink-muted">Loading studios…</div>}
+        {isLoading && <Loading label="Loading studios…" className="p-6 text-sm" />}
         {is503 && (
           <EmptyState
             title="Studio data is refreshing"

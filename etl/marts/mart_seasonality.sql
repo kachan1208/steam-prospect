@@ -69,3 +69,6 @@ SELECT 'year' AS grain, genre, year, CAST(NULL AS INTEGER), CAST(NULL AS INTEGER
 FROM _season_base
 WHERE year BETWEEN @TREND_START_YEAR@ AND @CUR_YEAR@
 GROUP BY genre, year;
+
+-- Temp-table hygiene: file-local staging (nothing downstream reads it).
+DROP TABLE IF EXISTS _season_base;

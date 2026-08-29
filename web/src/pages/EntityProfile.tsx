@@ -5,6 +5,7 @@ import { EntityReleaseBars } from "../components/charts/EntityReleaseBars";
 import { Badge } from "../components/ui/Badge";
 import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Loading } from "../components/ui/Loading";
 import { StatTile } from "../components/ui/StatTile";
 import {
   ApiError,
@@ -17,6 +18,7 @@ import clsx from "clsx";
 import { fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
 import { genreTintStyle, heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { CSS_VAR, MONO} from "../lib/palette";
+import { usePageTitle } from "../lib/usePageTitle";
 
 const ROLES: EntityRole[] = ["developer", "publisher"];
 
@@ -39,6 +41,8 @@ export default function EntityProfile() {
 
   const profileQ = useEntityProfile(role, name);
   const entity = profileQ.data?.entity;
+  // The studio/publisher name rides ?name=, so it titles the tab immediately.
+  usePageTitle(name);
 
   // Same-name entity in the OTHER role. Self-publishing devs exist under both roles with
   // different game sets (e.g. a dev with 4 titles who self-published only 2 — the publisher
@@ -65,7 +69,7 @@ export default function EntityProfile() {
   }
 
   if (profileQ.isLoading) {
-    return <div className="p-6 text-sm text-ink-muted">Loading {role}…</div>;
+    return <Loading label={`Loading ${role}…`} className="p-6 text-sm" />;
   }
 
   if (profileQ.isError || !entity) {

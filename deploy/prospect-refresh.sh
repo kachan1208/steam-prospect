@@ -19,7 +19,21 @@ export PROSPECT_DUCKDB_MEMORY_LIMIT=2500MB   # cap DuckDB on the 4GB box
 # Droplet-local secrets (STEAM_API_KEY, ...) — file lives only on the box, chmod 600,
 # never in git. Steps that can use a key pick it up from the environment; every keyless
 # path keeps working if the file is absent.
+# shellcheck disable=SC1091  # box-only file, intentionally not in the repo
 [ -f /root/.prospect-env ] && . /root/.prospect-env
+
+# Shared helpers (prospect_restart_verify / prospect_health_wait / prospect_push_metrics).
+# Lives next to this script both in the repo (deploy/lib.sh) and on the box (/root/lib.sh —
+# deploy/deploy-scripts.sh copies it). If it's missing (partial scp), degrade LOUDLY to a
+# blind restart rather than kill the whole nightly over a helper file.
+# shellcheck source=deploy/lib.sh
+if [ -f "$(dirname "$0")/lib.sh" ]; then
+    . "$(dirname "$0")/lib.sh"
+else
+    echo "WARN: $(dirname "$0")/lib.sh missing — restart verification DEGRADED to a blind" \
+         "restart; scp deploy/lib.sh to /root/ (deploy/deploy-scripts.sh does)"
+    prospect_restart_verify() { docker restart prospect && sleep 15; }
+fi
 # Unbuffered stdout for EVERY python step. Not cosmetic: a step killed by `timeout` never gets to
 # flush, so a buffered step that dies takes its whole output with it. The 2026-08-21 ETL ran four
 # hours, hit rc=124, and left ZERO lines to diagnose from — it prints per-mart timings the entire
@@ -67,6 +81,34 @@ STEP="starting"
 
 # Best-effort push of Prometheus-format metric lines to VictoriaMetrics (never fails the run).
 push() { curl -s -m 8 -X POST "$VM_IMPORT" --data-binary "$1" >/dev/null 2>&1 || true; }
+
+# ── Build hold ───────────────────────────────────────────────────────────────────────────
+# deploy/rollback.sh only repoints data/current.duckdb; the next build writes a fresh mart and
+# repoints it back, silently undoing the rollback — usually before anyone looks. rollback.sh
+# therefore leaves a hold file and every build checks it here, FIRST: before the EXIT trap is
+# installed and before any work, so a held night records nothing rather than a bogus FAILED.
+#
+# The hold AUTO-EXPIRES (default 48h). A hold that could freeze the pipeline indefinitely
+# would just be a new way to lose a week of data quietly — the failure mode this whole branch
+# exists to remove. prospect_build_hold_active is pushed either way, so alert_check.py can see
+# a hold that is still on and page about it.
+HOLD_FILE=${PROSPECT_BUILD_HOLD:-/root/.prospect-build-hold}
+HOLD_HOURS=${PROSPECT_BUILD_HOLD_HOURS:-48}
+if [ -f "$HOLD_FILE" ] && [ -z "$(find "$HOLD_FILE" -mmin +$(( HOLD_HOURS * 60 )) 2>/dev/null)" ]; then
+    {
+        echo "=================== refresh HELD: $(date -u) ==================="
+        echo "build hold active — $HOLD_FILE:"
+        sed 's/^/    /' "$HOLD_FILE"
+        echo "release it with: rm -f $HOLD_FILE   (it expires on its own after ${HOLD_HOURS}h)"
+    } >> "$LOG"
+    push "prospect_build_hold_active 1"
+    exit 0
+fi
+if [ -f "$HOLD_FILE" ]; then
+    echo "[hold] $HOLD_FILE is older than ${HOLD_HOURS}h — expired, removing it and building" >> "$LOG"
+    rm -f "$HOLD_FILE"
+fi
+push "prospect_build_hold_active 0"
 
 # run_step LABEL TIMEOUT_SECS "shell command" — time it, bound it with `timeout`, push per-step
 # duration + success(1/0) + last-run timestamp. Never aborts the run on a step failure.
@@ -377,12 +419,34 @@ timeout 21600 /root/prospect/etl/.venv/bin/python -u build_marts.py --source /ro
 grep -E '^\[etl\] ran ' "$ETL_LOG" 2>/dev/null | sort -t'(' -k2 -rn | head -8 | sed 's/^/[etl] slowest: /'
 ETL_DUR=$(( $(date -u +%s) - ETL_T0 ))
 if [ "$ETL_RC" -eq 0 ]; then
-    docker restart prospect
-    # Keep TWO marts, not three (2026-08-25). The full-review-text columns grew each mart to
-    # ~2.4GB; three of them is 7.3GB on a disk whose free space IS the ETL's spill ceiling —
-    # the 2026-08-24 nightly OOMed at a 20.2GiB cap that used to be 25+. Two marts = current
-    # + one rollback, which is all the rollback that has ever been used.
-    ls -t /root/prospect/data/prospect_*.duckdb 2>/dev/null | tail -n +3 | xargs -r rm -f
+    # Restart is now VERIFIED (2026-08-28). The old code ran `docker restart prospect` bare
+    # and then set RESULT="OK" unconditionally — a container that failed to come back (bad
+    # image, crash-loop on the fresh mart, OOM at boot) still reported the night a success.
+    # Poll /api/health for up to 120s; a restart that never turns healthy flips the run to
+    # FAILED at step "restart" so the failure record + alerting actually see it.
+    STEP="restart"; RESTART_T0=$(date -u +%s)
+    RESTART_OK=1
+    if ! prospect_restart_verify 120; then
+        RESTART_OK=0
+        echo "WARN: [restart] app did not answer /api/health within 120s of docker restart"
+    fi
+    RESTART_DUR=$(( $(date -u +%s) - RESTART_T0 ))
+    echo "restart $(( 1 - RESTART_OK )) $RESTART_DUR" >> "$STEP_RESULTS"
+    push "prospect_pipeline_step_duration_seconds{step=\"restart\"} $RESTART_DUR
+prospect_pipeline_step_success{step=\"restart\"} $RESTART_OK
+prospect_pipeline_step_last_run_timestamp{step=\"restart\"} $(date -u +%s)"
+    # Mart retention prune REMOVED here (2026-08-28): build_marts.py --keep owns retention
+    # now (a parallel change moved the sweep into _sweep_scratch and set --keep's default to
+    # 2 = current + one rollback). A second `ls -t | tail -n +3 | xargs rm` pruner here raced
+    # it and could double-delete the rollback mart. Do not re-add.
+    #
+    # VERIFIED 2026-08-29 against that branch: etl/build_marts.py's argparse has
+    # `--keep, type=int, default=2`, and this script invokes build_marts.py without --keep,
+    # so retention after both land is exactly 2 marts — which is also what rollback.sh's
+    # "at least 2 marts" precondition and this box's disk budget assume. If that default
+    # ever moves back to 3, three ~2.4GB marts is 7.3GB on a disk whose free space IS the
+    # ETL's spill ceiling; change it there, not by re-adding a pruner here.
+    #
     # Corrected globs: the scratch artifacts are named <version>.duckdb.building{,.wal,.tmp/},
     # so the old *.duckdb.tmp / *.duckdb.wal patterns matched NOTHING and every run's spill
     # (up to 18GB) leaked. The pre-build sweep above is the belt; this is the braces.
@@ -390,10 +454,17 @@ if [ "$ETL_RC" -eq 0 ]; then
            /root/prospect/data/prospect_*.duckdb.building.wal \
            /root/prospect/data/prospect_*.duckdb.building 2>/dev/null || true
     # Corpus metrics (Grafana "Prospect — Corpus" dashboard): sizes/coverage of what the
-    # fresh mart serves — pushed only on success so the series never describes a stale mart.
+    # fresh mart serves — pushed only on ETL success so the series never describes a stale
+    # mart (the mart IS swapped by build_marts even if the restart verification failed).
     run_step "metrics_export" 900 "/root/prospect/etl/.venv/bin/python /root/prospect/deploy/observability/export_metrics.py"
-    RESULT="OK"; STEP="done"
-    echo "[etl] OK ${ETL_DUR}s — app restarted"
+    if [ "$RESTART_OK" -eq 1 ]; then
+        RESULT="OK"; STEP="done"
+        echo "[etl] OK ${ETL_DUR}s — app restarted and health-verified"
+    else
+        RESULT="FAILED"; STEP="restart"
+        echo "[etl] built OK in ${ETL_DUR}s but the RESTART FAILED verification — mart is" \
+             "swapped, app is NOT confirmed healthy; check 'docker logs prospect'"
+    fi
 else
     echo "[etl] FAILED rc=$ETL_RC after ${ETL_DUR}s — kept previous mart, app not restarted"
     # Reclaim the spill. A dead build leaves its DuckDB scratch directory behind, and on this

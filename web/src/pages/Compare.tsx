@@ -5,10 +5,12 @@ import clsx from "clsx";
 
 import { CompareTrendsChart, compareSeriesColor } from "../components/charts/CompareTrendsChart";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Loading } from "../components/ui/Loading";
 import { gameProfileQueryOptions, type GameProfile } from "../lib/api";
 import { COMPARE_CAP, removeFromCompare, useCompareList } from "../lib/compareList";
 import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtRevenue } from "../lib/format";
 import { genreTintStyle } from "../lib/heat";
+import { usePageTitle } from "../lib/usePageTitle";
 
 /**
  * Side-by-side comparison for 2-6 games (mockup 4d). The ids ride the URL (?ids=1,2,3) so a
@@ -122,6 +124,7 @@ function Panel({ children, className }: { children: ReactNode; className?: strin
 }
 
 export default function Compare() {
+  usePageTitle("Compare");
   const [searchParams, setSearchParams] = useSearchParams();
   const stored = useCompareList();
 
@@ -259,7 +262,7 @@ export default function Compare() {
           </Panel>
 
           <Panel>
-            {anyLoading && <div className="p-6 text-sm text-ink-muted">Loading games…</div>}
+            {anyLoading && <Loading label="Loading games…" className="p-6 text-sm" />}
             {!anyLoading && (
               <div className="overflow-x-auto">
                 {/* `relative` matters: the sr-only "(best in this row)" spans are absolutely

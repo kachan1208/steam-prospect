@@ -12,6 +12,9 @@ import {
 import { SaturationTrend } from "../components/charts/SaturationTrend";
 import { TooltipPanel } from "../components/charts/TooltipPanel";
 import { Card } from "../components/ui/Card";
+import { EmptyState } from "../components/ui/EmptyState";
+import { KpiCell } from "../components/ui/KpiCell";
+import { Loading } from "../components/ui/Loading";
 import { BulletMeter } from "../components/ui/Meter";
 import { StatTile } from "../components/ui/StatTile";
 import { ViewToggle } from "../components/ui/ViewToggle";
@@ -38,8 +41,9 @@ import {
 import { fmtAxisCompact, fmtCompact, fmtInt, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtSigned, fmtUsd, titleCase } from "../lib/format";
 import { heatDomain, heatStyle } from "../lib/heat";
 import { CSS_VAR } from "../lib/palette";
+import { usePageTitle } from "../lib/usePageTitle";
 import { useDetailView } from "../lib/viewMode";
-import { nicheCombinedPath } from "./NicheCombined";
+import { nicheCombinedPath } from "../lib/nicheSelection";
 
 /** The condensed stack the foundation applies to h1–h6 and .kicker (index.css) — used inline
  * for KPI/panel numerals that aren't semantically headings, so they still read as the
@@ -58,8 +62,11 @@ const CONDENSED = '"Barlow Condensed", "Barlow", system-ui, sans-serif';
 
 // ---- route + URL contract ----------------------------------------------------------------
 
-/** The one place the route pattern is spelled; App.tsx and the round-trip test both use it. */
-export const NICHE_ROUTE_PATH = "/niches/:dimension/:key";
+// The route pattern + link builder moved to lib/nichePath.ts (eager modules — App's route
+// table, RadarBoard — must be able to link here without statically importing this whole
+// page module, or the route-level code splitting is defeated). Re-exported so the pages
+// and tests that always imported them from here keep working.
+export { NICHE_ROUTE_PATH, nicheDetailPath } from "../lib/nichePath";
 
 export const GAMES_PAGE_SIZE = 25;
 
@@ -82,28 +89,6 @@ function readNum(raw: string | null): number | undefined {
   if (raw === null || raw.trim() === "") return undefined;
   const n = Number(raw);
   return Number.isFinite(n) ? n : undefined;
-}
-
-/**
- * Canonical link to a niche page. Keys carry spaces AND slashes ("Action Roguelike",
- * "Massively Multiplayer/RPG"), so the key segment is always percent-encoded — React Router
- * decodes `:key` back (it un-escapes each segment and then restores %2F to "/"), so the
- * value handed to useParams is byte-for-byte the key we linked. See NicheDetail.test.tsx.
- */
-export function nicheDetailPath(
-  dimension: string,
-  key: string,
-  search?: Record<string, string | number | undefined | null>,
-): string {
-  const base = `/niches/${encodeURIComponent(dimension)}/${encodeURIComponent(key)}`;
-  if (!search) return base;
-  const sp = new URLSearchParams();
-  for (const [k, v] of Object.entries(search)) {
-    if (v === undefined || v === null || v === "") continue;
-    sp.set(k, String(v));
-  }
-  const s = sp.toString();
-  return s ? `${base}?${s}` : base;
 }
 
 /** A bucket brush is only a filter when BOTH bounds are present and ordered — a half-written
@@ -341,38 +326,6 @@ const TABS = [
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
 
-/** One cell of the KPI strip: condensed uppercase label -> 38px condensed value -> footnote,
- * matching §4b exactly. Not StatTile — that component's rounded tile doesn't carry this
- * grid's "gap colour IS the rule" layout or the 38px numeral, so this stays page-local.
- * Exported so NicheCombined's KPI row can reuse the same blueprint grid language. */
-export function KpiCell({
-  label,
-  value,
-  footnote,
-  valueClassName,
-}: {
-  label: string;
-  value: ReactNode;
-  footnote?: ReactNode;
-  valueClassName?: string;
-}) {
-  return (
-    <div className="bg-page px-5 py-4">
-      <div className="kicker text-[11px] text-ink-primary/55">{label}</div>
-      {/* Only one text-color utility ever applies: two same-specificity color classes race on
-          Tailwind's generated-CSS order, not className string order, so the default has to be
-          the FALLBACK (via ??), not a base class the override tries to beat. */}
-      <div
-        className={clsx("mt-1 truncate leading-none", valueClassName ?? "text-ink-primary")}
-        style={{ fontFamily: CONDENSED, fontWeight: 600, fontSize: 38 }}
-      >
-        {value}
-      </div>
-      {footnote && <div className="mt-1.5 truncate text-[11px] text-ink-primary/55">{footnote}</div>}
-    </div>
-  );
-}
-
 /** Sortable header for the games table — same click-to-sort/arrow affordance as the Niche
  * Finder's SortLabel, scaled down to this table's type ramp. */
 function GameSortLabel({
@@ -426,6 +379,8 @@ export default function NicheDetail() {
   // React Router has already decoded the segment (and restored an escaped "/"), so this is
   // the niche key exactly as the finder linked it.
   const nicheKey = keyParam ?? null;
+  // The niche key is in the route, so the title is right from the first paint.
+  usePageTitle(nicheKey);
   const watchlisted =
     dimension != null &&
     nicheKey != null &&
@@ -534,7 +489,7 @@ export default function NicheDetail() {
   }
 
   if (detailQ.isLoading) {
-    return <div className="p-6 text-sm text-ink-muted">Loading niche…</div>;
+    return <Loading label="Loading niche…" className="p-6 text-sm" />;
   }
 
   if (detailQ.isError || !detail || !activeVariant) {
@@ -1549,21 +1504,25 @@ export default function NicheDetail() {
             )}
 
             {!gamesUnavailable && gamesQ.data && gamesQ.data.items.length === 0 && (
-              <div className="flex flex-col items-center gap-2 py-6 text-center text-xs text-ink-muted">
-                <span>No games in this niche match the selected buckets.</span>
-                {hasSelection && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      patch(writeSelection(writeSelection(searchParams, "revenue", null), "price", null));
-                      trackEvent("niche_filter_apply");
-                    }}
-                    className="rounded-md border border-chartborder px-2.5 py-1 font-medium text-ink-secondary transition-colors hover:border-brand hover:text-brand"
-                  >
-                    Clear filters
-                  </button>
-                )}
-              </div>
+              <EmptyState
+                className="py-6"
+                title="No games match the selected buckets"
+                description="Every game in this niche falls outside the brushed revenue/price range."
+                action={
+                  hasSelection ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        patch(writeSelection(writeSelection(searchParams, "revenue", null), "price", null));
+                        trackEvent("niche_filter_apply");
+                      }}
+                      className="rounded-md border border-chartborder px-2.5 py-1 text-xs font-medium text-ink-secondary transition-colors hover:border-brand hover:text-brand"
+                    >
+                      Clear filters
+                    </button>
+                  ) : undefined
+                }
+              />
             )}
 
             {!gamesUnavailable && gamesQ.data && gamesQ.data.items.length > 0 && (

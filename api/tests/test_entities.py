@@ -146,3 +146,24 @@ def test_missing_entity_marts_surface_as_503(client, monkeypatch):
     assert r.status_code == 503
     assert "refreshing" in r.json()["detail"]
     assert entities_router._MARTS_MISSING_DETAIL == r.json()["detail"]
+
+
+def test_capability_probe_not_poisoned_by_pre_init_call(client, monkeypatch):
+    """_has_p90/_has_x_handle used to be lru_cached: one call while the DB was still down
+    froze False for the process lifetime, hiding the columns even after init. A pre-ready
+    call must answer False WITHOUT caching; the first post-ready call must really probe."""
+    from app.routers import entities
+
+    entities._reset_capability_cache()
+    try:
+        monkeypatch.setattr(entities.analytics_db, "is_ready", lambda: False)
+        assert entities._has_p90() is False
+        assert entities._has_x_handle() is False
+
+        # DB comes up carrying both columns: the probe must see them (no stale False).
+        monkeypatch.setattr(entities.analytics_db, "is_ready", lambda: True)
+        monkeypatch.setattr(entities.analytics_db, "query", lambda sql, params=None: [{"1": 1}])
+        assert entities._has_p90() is True
+        assert entities._has_x_handle() is True
+    finally:
+        entities._reset_capability_cache()  # the fixture mart has neither column
