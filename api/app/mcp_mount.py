@@ -13,6 +13,7 @@ the marts aren't present, this returns (None, None) and the API runs exactly as 
 from __future__ import annotations
 
 import importlib.util
+import os
 from typing import Any
 
 from .config import REPO_ROOT, settings
@@ -26,6 +27,50 @@ _loaded_module: Any | None = None
 # (overwritten each rollover) — bounds disk use at ~2x this figure without needing a
 # log-rotation daemon. Lines are capped at ~2KB (see _log_call), so 5MB is ~2.5K calls.
 _MAX_LOG_BYTES = 5 * 1024 * 1024
+
+# How many worker threads MCP tool calls may occupy at once. They get their OWN anyio
+# limiter rather than drawing on the process-wide default one (40 slots), which is the
+# same pool every sync FastAPI route handler runs in — otherwise a burst of slow MCP
+# calls could still drain it and freeze normal HTTP traffic, a weaker version of the
+# exact problem the off-loop offload exists to fix. 4 because: prospect_mcp serializes
+# ALL of its reads on one module-global connection lock, so extra threads only deepen a
+# queue that cannot go wider; it matches the REST side's 4-cursor DuckDB pool on this
+# 2-vCPU box; and it leaves 36 of the 40 shared slots for the API no matter what the MCP
+# is doing.
+_MCP_THREAD_LIMIT = 4
+
+
+def _rotate_log(path: str) -> None:
+    """Roll `path` to `path`.1 under an exclusive sidecar lock (best-effort).
+
+    Cross-process on purpose: both uvicorn workers append to this file. The lock holder
+    RE-CHECKS the size before replacing, so a worker that queued behind a peer's rotation
+    sees the fresh log and does nothing — without that re-check the two workers rotate
+    back-to-back and the second os.replace overwrites the full archive the first just
+    created with a near-empty file, destroying a whole 5MB generation. flock is dropped by
+    the kernel if a worker dies, so there is no stale-lock failure mode. Callers wrap this
+    in `except OSError` (missing file, unwritable dir); on a platform without fcntl it
+    degrades to the unguarded rotation.
+    """
+    archive = f"{path}.1"
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover — POSIX everywhere we run (Linux prod, macOS dev)
+        os.replace(path, archive)
+        return
+    lock_fd = os.open(f"{path}.lock", os.O_CREAT | os.O_WRONLY, 0o644)
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return  # a peer worker is rotating right now; it does the work, we just append
+        try:
+            if os.path.getsize(path) >= _MAX_LOG_BYTES:  # re-check under the lock
+                os.replace(path, archive)
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
 
 
 def close_prospect_mcp() -> None:
@@ -132,15 +177,14 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
                     ensure_ascii=False,
                 )
                 # Size-based rotation BEFORE the append: at the cap, the live file becomes
-                # the single .1 archive (os.replace overwrites the previous archive) and a
-                # fresh log starts — so an append-forever log can't eat the disk. Racing
-                # writers are benign: at worst two rotations happen back-to-back and a few
-                # lines land in the archive early.
-                import os
-
+                # the single .1 archive (overwriting the previous one) and a fresh log
+                # starts — so an append-forever log can't eat the disk. Both uvicorn
+                # workers write here, so the swap itself is serialized + size-re-checked
+                # inside _rotate_log; doing it unguarded lets the second worker overwrite
+                # the archive the first just made, losing a whole generation.
                 try:
                     if os.path.getsize(_log_path) >= _MAX_LOG_BYTES:
-                        os.replace(_log_path, f"{_log_path}.1")
+                        _rotate_log(_log_path)
                 except OSError:
                     pass  # first write (no file yet) or a racing worker already rotated
                 with open(_log_path, "a", encoding="utf-8") as fh:
@@ -149,6 +193,40 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
                 pass
 
         _orig_call = server._tool_manager.call_tool
+
+        # Self-enforcement of the offload's CONSTRAINT (see _observed_call): a tool taking
+        # a Context must stay on the SERVER event loop, because Context methods talk to
+        # the client session over it and cannot be driven from the worker thread's private
+        # loop. FastMCP records the Context argument's name on each Tool as `context_kwarg`,
+        # so this is an attribute scan at registration time rather than a comment nobody
+        # reads. The set is empty today; a future Context tool announces itself here and
+        # silently opts out of the offload instead of failing subtly at call time.
+        _ctx_tools = frozenset(
+            t.name for t in server._tool_manager.list_tools() if t.context_kwarg is not None
+        )
+        if _ctx_tools:
+            print(
+                "[api] MCP: WARNING — these tools take a Context, so they run ON the event "
+                f"loop (no thread offload; a slow one blocks HTTP): {sorted(_ctx_tools)}"
+            )
+
+        # One CapacityLimiter per running event loop (the mechanism anyio itself uses for
+        # its default thread limiter) so a limiter is never reused across loops — uvicorn
+        # workers get one each, and tests that spin a fresh loop per anyio.run() don't
+        # inherit one bound to a dead loop.
+        from anyio.lowlevel import RunVar as _RunVar
+
+        _limiter_var = _RunVar("prospect_mcp_thread_limiter")
+
+        def _mcp_limiter():
+            try:
+                return _limiter_var.get()
+            except LookupError:
+                import anyio
+
+                limiter = anyio.CapacityLimiter(_MCP_THREAD_LIMIT)
+                _limiter_var.set(limiter)
+                return limiter
 
         async def _observed_call(name, arguments, *a, **kw):
             if _tool_calls is not None:
@@ -171,13 +249,20 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
             # SDK's async plumbing (arg validation + result conversion — loop-independent
             # pure computation), and the blocking DuckDB read blocks only that thread.
             # Concurrent tool calls still serialize on prospect_mcp's module-global
-            # connection lock — correct, just not parallel. CONSTRAINT: this relies on no
-            # tool taking a Context parameter (none does today) — Context methods talk to
-            # the client session over the SERVER loop and must not be driven from the
-            # worker loop.
+            # connection lock — correct, just not parallel. The threads come from the MCP's
+            # OWN limiter (_MCP_THREAD_LIMIT), not anyio's shared default pool, so the MCP
+            # can never starve the sync FastAPI route handlers. CONSTRAINT: this relies on
+            # the tool not taking a Context parameter — Context methods talk to the client
+            # session over the SERVER loop and must not be driven from the worker loop;
+            # the _ctx_tools scan above enforces it, and those tools run inline instead.
             _bound = partial(_orig_call, name, arguments, *a, **kw)
             try:
-                result = await anyio.to_thread.run_sync(lambda: anyio.run(_bound))
+                if name in _ctx_tools:
+                    result = await _bound()
+                else:
+                    result = await anyio.to_thread.run_sync(
+                        lambda: anyio.run(_bound), limiter=_mcp_limiter()
+                    )
             except Exception:
                 _log_call(name, arguments, ok=False, ms=int((_time.monotonic() - t0) * 1000))
                 raise
@@ -185,7 +270,7 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
             return result
 
         server._tool_manager.call_tool = _observed_call
-        print(f"[api] MCP: tool-call observability on (metrics={'yes' if _tool_calls else 'no'}, log={_log_path or 'off'}); sync tools offloaded to worker threads.")
+        print(f"[api] MCP: tool-call observability on (metrics={'yes' if _tool_calls else 'no'}, log={_log_path or 'off'}); sync tools offloaded to a dedicated {_MCP_THREAD_LIMIT}-thread pool.")
         asgi_app = server.streamable_http_app()  # also lazily creates server.session_manager
 
         print("[api] MCP: mounted 'prospect-market-intel' at /mcp (Streamable HTTP, stateless).")

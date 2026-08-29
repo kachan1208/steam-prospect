@@ -1,12 +1,14 @@
 """The mounted MCP must not run tool bodies on the event loop (one slow DuckDB read
 would freeze every HTTP request on the worker), must keep logging calls, must rotate the
-call log at its size cap, must refuse to mount at all against a DB whose core marts are
-missing, and must close its DuckDB connection via the shutdown hook.
+call log at its size cap without two workers destroying each other's archive, must refuse to
+mount at all against a DB whose core marts are missing, and must close its DuckDB
+connection via the shutdown hook.
 
 Loads the real mcp/prospect_mcp.py through the real mount path, pointed at the committed
 CI smoke fixture (.github/fixtures/mcp_smoke_mart.db) — prospect_mcp reads the
 PROSPECT_ANALYTICS_DB_PATH env var at module-exec time, so monkeypatch.setenv is enough
-to redirect each fresh load.
+to redirect each fresh load. Tests that need a DB the fixture isn't build a
+throwaway DuckDB in tmp_path and load against that instead.
 """
 from __future__ import annotations
 
@@ -82,6 +84,35 @@ def test_tool_calls_run_off_the_event_loop_and_are_logged(mcp_server):
     assert isinstance(entry["ms"], int)
 
 
+def test_tool_calls_use_a_dedicated_thread_limiter(mcp_server, monkeypatch):
+    # Offloading to a thread is only half the fix: anyio's DEFAULT thread limiter is the
+    # same 40 slots every sync FastAPI route handler runs in, so MCP calls drawing on it
+    # could still starve normal HTTP traffic. They must use their own bounded limiter.
+    server, _ = mcp_server
+    import anyio.to_thread as to_thread
+
+    orig_run_sync = to_thread.run_sync
+    seen: dict = {}
+
+    async def spy_run_sync(fn, *args, **kwargs):
+        seen["limiter"] = kwargs.get("limiter")
+        seen["default"] = to_thread.current_default_thread_limiter()
+        return await orig_run_sync(fn, *args, **kwargs)
+
+    monkeypatch.setattr(to_thread, "run_sync", spy_run_sync)
+
+    async def drive():
+        return await server._tool_manager.call_tool("tag_suggest", {"q": ""})
+
+    anyio.run(drive)
+
+    assert seen.get("limiter") is not None, (
+        "MCP tool calls fell back to anyio's shared default thread pool"
+    )
+    assert seen["limiter"] is not seen["default"]
+    assert seen["limiter"].total_tokens == mcp_mount._MCP_THREAD_LIMIT
+
+
 def test_call_log_rotates_at_size_cap(mcp_server):
     server, log_path = mcp_server
 
@@ -102,6 +133,22 @@ def test_call_log_rotates_at_size_cap(mcp_server):
     lines = log_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1, "rotated live log should hold only the post-rotation entry"
     assert json.loads(lines[0])["tool"] == "tag_suggest"
+
+
+def test_rotation_does_not_clobber_the_archive_a_peer_worker_just_made(tmp_path):
+    # The two uvicorn workers share this file. Worker A rotates (5MB -> .1) and starts a
+    # fresh log; worker B, which saw the over-cap size a moment earlier, must NOT then
+    # replace the fresh log over A's archive. _rotate_log re-checks the size under its
+    # lock, so B is a no-op — this is worker B's call, post-rotation.
+    log_path = tmp_path / "mcp_calls.jsonl"
+    archive = tmp_path / "mcp_calls.jsonl.1"
+    archive.write_bytes(b"y" * LOG_CAP_BYTES)  # what worker A just rolled off
+    log_path.write_text("fresh line\n", encoding="utf-8")
+
+    mcp_mount._rotate_log(str(log_path))
+
+    assert archive.stat().st_size == LOG_CAP_BYTES, "a full archive generation was destroyed"
+    assert log_path.read_text(encoding="utf-8") == "fresh line\n"
 
 
 def test_missing_core_marts_refuses_to_mount(monkeypatch, tmp_path):
