@@ -8,13 +8,21 @@ name: CI
 # runs against a small, curated, REAL-data-derived fixture committed at
 # .github/fixtures/mcp_smoke_mart.db (see .github/fixtures/README.md).
 "on":
+  # `push:` used to be unfiltered, so a commit on a PR branch fired BOTH a push run and a
+  # pull_request run — the whole matrix, twice, for every push. Restricting push to the
+  # default branch is the actual dedupe: branch commits are covered by their PR run, and
+  # main still gets a run of its own after a merge.
   push:
+    branches: [main]
   pull_request:
 
-# push + pull_request both fire on a PR branch, so every push used to run the whole matrix
-# twice. Group per ref and cancel the in-flight run: only the newest commit's result matters.
+# Second half of the same fix. The old group was `${{ github.ref }}`, which does NOT dedupe
+# push vs pull_request: on a PR branch github.ref is `refs/heads/<branch>` for the push event
+# and `refs/pull/<n>/merge` for the pull_request event — two different groups, so both runs
+# survived. Key on the PR number when there is one, so every event for a PR shares one group
+# and only the newest commit's run stays alive.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -213,16 +221,38 @@ jobs:
           DOCKER_BUILDKIT: "1"   # the Dockerfile's `# syntax=` directive needs BuildKit
         run: docker build -t prospect:ci .
 
+      # THE regression this job exists for, asserted directly. `mcp>=1.2` resolving to 2.0.0
+      # on a routine rebuild dropped `mcp.server.fastmcp` — the module mcp/prospect_mcp.py
+      # imports — so load_prospect_mcp() caught ModuleNotFoundError, skipped the /mcp mount,
+      # and the app came up looking perfectly healthy with /mcp 404ing.
+      #
+      # It has to be asserted THIS way and not over HTTP: mcp/prospect_mcp.py raises
+      # FileNotFoundError at import time when there is no mart, so /mcp is legitimately
+      # unmounted in a dataless container and an HTTP probe of /mcp cannot tell "SDK broke"
+      # from "no data". Importing the module the SDK must provide can.
+      - name: Assert the image still has the MCP SDK module /mcp needs
+        run: docker run --rm --entrypoint python prospect:ci -c "import mcp.server.fastmcp"
+
       - name: Smoke the built image
         # Boots with no PROSPECT_DUCKDB_URL, which the entrypoint handles by design (degraded
         # mode: API up, data endpoints 503). Proves the image starts and serves HTTP — a
-        # build that succeeds but crash-loops on boot is still a broken deploy.
+        # build that succeeds but crash-loops on boot is still a broken deploy. It does NOT
+        # prove the app can serve data (there is no mart here on purpose — the ~557MB one is
+        # not in CI); that is the api job's synthetic-mart tests. So assert exactly what a
+        # dataless boot SHOULD produce — a well-formed health body reporting "degraded" — and
+        # not merely "something answered on port 8080".
         run: |
           set -euo pipefail
           docker run -d --name prospect-ci -p 8080:8080 prospect:ci
           for i in $(seq 1 30); do
-            if curl -sf -m 5 http://localhost:8080/api/health >/dev/null; then
-              echo "image is serving /api/health after ${i}s"; exit 0
+            if body=$(curl -sf -m 5 http://localhost:8080/api/health); then
+              echo "image is serving /api/health after ${i}s: $body"
+              echo "$body" | grep -q '"status":"degraded"' || {
+                echo "::error::unexpected /api/health body for a dataless boot: $body"
+                docker logs prospect-ci
+                exit 1
+              }
+              exit 0
             fi
             sleep 1
           done

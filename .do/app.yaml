@@ -23,7 +23,13 @@ services:
     # --- runtime ---
     http_port: 8080
     instance_count: 1
-    instance_size_slug: basic-xxs           # 512MB / ~$5/mo. Bump to a 1GB slug if it OOMs.
+    # 512MB / ~$5/mo — the cheapest slug, and the one the live App Platform app was created
+    # with (see .do/app.git.yaml). Whether it FITS has never been measured: production is the
+    # droplet, and this app is the legacy path (DEPLOY.md "Legacy appendix"). DuckDB streams
+    # the ~557MB mart off disk rather than loading it into RAM, so one worker is plausible
+    # here — but if the instance OOM-restarts, the remedy is to bump this to basic-xs (1GB).
+    # WEB_CONCURRENCY below is already at its minimum of 1 and cannot absorb it.
+    instance_size_slug: basic-xxs
     health_check:
       # /api/health/ready (NOT /api/health): readiness returns 503 until the mart is
       # actually loaded, so App Platform stops routing traffic to an instance that boots
@@ -35,8 +41,9 @@ services:
       initial_delay_seconds: 120
 
     envs:
-      # basic-xxs is 512MB and one DuckDB-loaded worker already exceeds that; the
-      # entrypoint's default of 2 (right for the 2-vCPU droplet) cannot fit here.
+      # The entrypoint defaults to 2 workers, which is right for the 2-vCPU droplet. Each
+      # uvicorn worker opens its OWN DuckDB connection + cursor pool, so on a 512MB instance
+      # one worker is the only setting with a chance of fitting.
       - key: WEB_CONCURRENCY
         scope: RUN_TIME
         value: "1"
