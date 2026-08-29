@@ -150,10 +150,12 @@ verify with `sqlite3 signals-… 'PRAGMA integrity_check'` → stop writers (col
 ## Alerting
 
 `deploy/observability/alert_check.py` runs every 30 min from cron and evaluates the
-pipeline-health metrics in the local VictoriaMetrics (step failures, stale runs, stale
-data, skipped crons, stale backups). One-time setup = create `/root/.prospect-alerts.env`
-with an ntfy topic or webhook URL — full instructions in
-`deploy/observability/ALERTING.md`.
+pipeline-health metrics in the local VictoriaMetrics (step failures — including every job
+run through `cron-wrap.sh` — stale runs, stale data, cron jobs falling behind, stale
+backups, an unreleased build hold). One-time setup = create `/root/.prospect-alerts.env`
+with an ntfy topic or webhook URL, **plus a `DEADMAN_URL`**: every other check runs on the
+droplet, so only an outbound heartbeat to an external service can tell you the box itself
+died. Full instructions in `deploy/observability/ALERTING.md`.
 
 ---
 

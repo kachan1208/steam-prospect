@@ -14,14 +14,36 @@ Checks (all against http://localhost:8428):
   b) time() - max(prospect_pipeline_last_success_timestamp) > 30h      (nightly is 21:00,
      so >30h means a whole night produced no successful run)
   c) prospect_data_freshness_hours > 48                                (per source)
-  d) prospect_cron_skipped fired within the last 24h                   (per job)
+  d) a cron job that is FALLING BEHIND — see below                     (per job)
   e) time() - prospect_backup_last_success_timestamp > 50h             (deploy/backup.sh)
   f) VictoriaMetrics itself unreachable (evaluated implicitly — it is a breach)
+  g) a build hold is still active (deploy/rollback.sh left one and nobody released it)
+
+(a) covers far more than it used to: cron-wrap.sh now pushes
+prospect_pipeline_step_success{step="<job>"} for EVERY job it wraps, so the twitch
+collector, the 19:15 quiet-window steps, the keepers and the backup are all evaluated here.
+Before that, the four steps most prone to the "database is locked" failure — the very
+incident this script was written for, 22 silent failures in 26 nights — pushed nothing at
+all, and a repeat would have been just as silent.
+
+(d) is deliberately NOT "any skip in 24h". Skips are a designed outcome: the midday light
+build is supposed to skip while the review keeper holds the refresh lock, and paging on that
+would have made this channel noise from day one — an alert channel nobody trusts is worse
+than no alert channel. What matters is whether a job is falling behind, so the check is on
+prospect_cron_last_success_timestamp{job=...} (pushed by cron-wrap on a successful run):
+breach when a known job has not COMPLETED in ALERT_JOB_STALE_HOURS (default 36h, i.e. a
+daily job missed more than one whole day), or when a job that is skipping has never
+completed at all. Persistent skipping therefore pages; a routine one does not.
 
 On any breach: ONE consolidated notification. Channels, configured in
 /root/.prospect-alerts.env (chmod 600, never in git — see ALERTING.md):
   NTFY_TOPIC   — zero-setup default: plain POST to https://ntfy.sh/<topic>
   WEBHOOK_URL  — generic JSON webhook: POST {"text": "<message>"} (Slack-compatible)
+  DEADMAN_URL  — outbound heartbeat, pinged after a run that completed AND got its alerts
+                 out. This is the ONLY check that survives the box dying: VictoriaMetrics,
+                 Grafana and this script all run ON the droplet, so a dead box or a wiped
+                 crontab silences the entire alerting stack and nobody hears anything. An
+                 external dead-man service notices the missing ping instead. Unset = off.
 Repeat suppression: each breach key re-alerts at most once per 12h (state in
 /root/.prospect-alert-state.json); a resolved breach is forgotten, so a re-fire after
 recovery alerts immediately.
@@ -78,9 +100,15 @@ def collect_breaches(cfg: dict[str, str]) -> dict[str, str]:
     breaches: dict[str, str] = {}
     now = time.time()
 
-    ignore_skips = {
-        j.strip() for j in cfg.get("ALERT_IGNORE_SKIPPED_JOBS", "").split(",") if j.strip()
+    # ALERT_IGNORE_SKIPPED_JOBS is the old name, kept working for an env file written
+    # against the previous behaviour; both mean "do not evaluate this job's health at all".
+    ignore_jobs = {
+        j.strip()
+        for key in ("ALERT_IGNORE_JOBS", "ALERT_IGNORE_SKIPPED_JOBS")
+        for j in cfg.get(key, "").split(",")
+        if j.strip()
     }
+    job_stale_h = float(cfg.get("ALERT_JOB_STALE_HOURS", "36"))
 
     try:
         # (a) any step failure in the last 24h. min_over_time == 0 means at least one
@@ -116,14 +144,30 @@ def collect_breaches(cfg: dict[str, str]) -> dict[str, str]:
                     f"data source '{src}' freshness is {v:.0f}h (threshold 48h)"
                 )
 
-        # (d) cron skips (pushed by cron-wrap.sh when flock -n loses the race).
+        # (d) cron jobs falling behind. Both series come from cron-wrap.sh: _skipped is
+        # pushed on every wrapped run (1 when flock -n lost the race, 0 when it ran) and
+        # _last_success_timestamp only on a clean exit. A single skip is not a breach — see
+        # the module docstring; what matters is a job that stops COMPLETING.
+        last_success = {
+            r["metric"].get("job", "?"): float(r["value"][1])
+            for r in vm_query("last_over_time(prospect_cron_last_success_timestamp[14d])")
+        }
+        for job, ts in sorted(last_success.items()):
+            if job in ignore_jobs:
+                continue
+            age_h = (now - ts) / HOUR
+            if age_h > job_stale_h:
+                breaches[f"cron_behind:{job}"] = (
+                    f"cron job '{job}' has not completed successfully in {age_h:.1f}h "
+                    f"(threshold {job_stale_h:.0f}h) — skipping, failing, or unscheduled"
+                )
+        # A job that is being skipped and has NEVER completed has no timestamp to age, so it
+        # would be invisible to the loop above — e.g. a job whose lock is permanently held.
         for r in vm_query("max_over_time(prospect_cron_skipped[24h])"):
-            if float(r["value"][1]) > 0:
-                job = r["metric"].get("job", "?")
-                if job in ignore_skips:
-                    continue
-                breaches[f"cron_skipped:{job}"] = (
-                    f"cron job '{job}' was skipped (lock held) within the last 24h"
+            job = r["metric"].get("job", "?")
+            if float(r["value"][1]) > 0 and job not in ignore_jobs and job not in last_success:
+                breaches[f"cron_never_completed:{job}"] = (
+                    f"cron job '{job}' was skipped (lock held) and has never completed a run"
                 )
 
         # (e) backups (pushed by deploy/backup.sh). 50h = one missed daily + slack.
@@ -139,6 +183,19 @@ def collect_breaches(cfg: dict[str, str]) -> dict[str, str]:
                 breaches["backup_stale"] = (
                     f"last successful backup was {age_h:.1f}h ago (threshold 50h)"
                 )
+
+        # (g) a build hold left by deploy/rollback.sh. Both build scripts push this on every
+        # run (1 = held and skipping, 0 = building normally), so the latest sample is the
+        # current state. A hold stops the pipeline, so it must never be quiet — it expires by
+        # itself after 48h, but "we lost two days of data because nobody removed a file" is
+        # exactly the class of silence this script exists to end.
+        res = vm_query("last_over_time(prospect_build_hold_active[7d])")
+        if res and float(res[0]["value"][1]) > 0:
+            breaches["build_hold"] = (
+                "a build hold is active (/root/.prospect-build-hold) — the nightly and the "
+                "midday light build are SKIPPING. Release it with `rm -f "
+                "/root/.prospect-build-hold` once the underlying fix is in."
+            )
     except (urllib.error.URLError, OSError, RuntimeError, ValueError) as exc:
         # (f) if VM is down we cannot evaluate anything — that is itself an alert, and the
         # notification channels don't depend on VM, so we can still send it.
@@ -194,6 +251,30 @@ def notify(cfg: dict[str, str], message: str) -> bool:
     return sent
 
 
+def ping_deadman(cfg: dict[str, str]) -> None:
+    """Outbound heartbeat to an EXTERNAL dead-man service (healthchecks.io, Cronitor, Better
+    Stack, …) — a plain GET of a URL that expects to be called on a schedule.
+
+    Every other check in this file is evaluated ON the droplet, against a VictoriaMetrics
+    that runs ON the droplet, by a cron entry ON the droplet. If the box is down, the disk is
+    full, cron is broken or this script was never installed, nothing here can fire and the
+    silence is indistinguishable from health. This ping is the only signal that inverts that:
+    the alert comes from the absence of a message, so it survives the box.
+
+    Called only after a run that both completed AND delivered whatever it had to deliver, so
+    "alerts cannot get out" (misconfigured or dead channels) also stops the heartbeat.
+    Unset DEADMAN_URL = feature off; never fails the run.
+    """
+    url = cfg.get("DEADMAN_URL")
+    if not url:
+        return
+    try:
+        with urllib.request.urlopen(url, timeout=10):
+            pass
+    except (urllib.error.URLError, OSError) as exc:
+        print(f"WARN: dead-man ping to {url} failed: {exc}", file=sys.stderr)
+
+
 def push_heartbeat() -> None:
     """Best-effort: the checker's own liveness, visible on the pipeline dashboard."""
     try:
@@ -221,6 +302,7 @@ def main() -> int:
 
     if not breaches:
         save_state(state)
+        ping_deadman(cfg)
         print(f"{time.strftime('%F %T')} ok — no breaches")
         return 0
 
@@ -232,6 +314,7 @@ def main() -> int:
 
     if not due:
         save_state(state)
+        ping_deadman(cfg)
         print("all current breaches were already notified within the suppression window")
         return 0
 
@@ -253,6 +336,7 @@ def main() -> int:
         for key in due:
             state[key] = now
         save_state(state)
+        ping_deadman(cfg)
         print(f"notified {len(due)} due condition(s)")
         return 0
     # Every channel failed: keep state untouched so the next run (30 min) retries.
