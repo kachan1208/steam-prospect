@@ -27,6 +27,7 @@ import os
 import sqlite3
 import sys
 import time
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -100,6 +101,31 @@ def build_source(path: Path) -> None:
                    f"http://ign/{appid}", "A fine roguelike.", "2025-06-01 10:00:00",
                    appid, "press"))
         c.execute("INSERT INTO article_game_mentions VALUES (?, ?, 0.9)", (appid, appid))
+    c.commit()
+    c.close()
+
+
+def add_optional_tables(path: Path) -> None:
+    """Add the guarded/optional source tables the base fixture leaves out, so a build can be
+    made to LOSE them again (the absent-source exemption case)."""
+    c = sqlite3.connect(str(path))
+    c.executescript(
+        """
+        CREATE TABLE player_counts(appid INTEGER, player_count INTEGER, captured_at TEXT);
+        CREATE TABLE review_histogram(appid INTEGER, period TEXT,
+            recommendations_up INTEGER, recommendations_down INTEGER);
+        """
+    )
+    today = date.today()
+    for appid in range(1, N_GAMES + 1):
+        for back in range(14):
+            day = today - timedelta(days=back)
+            c.execute("INSERT INTO player_counts VALUES (?,?,?)",
+                      (appid, 100 + appid + back, f"{day.isoformat()} 21:30:00"))
+        for year in (2024, 2025):
+            for month in range(1, 13):
+                c.execute("INSERT INTO review_histogram VALUES (?,?,?,?)",
+                          (appid, f"{year}-{month:02d}", 10, 3))
     c.commit()
     c.close()
 
@@ -301,6 +327,50 @@ def test_validation_gate_blocks_the_swap_on_a_gutted_source(built, monkeypatch):
         "current.duckdb was modified despite the validation failure"
     )
     assert not list(data.glob("*.building")), "the failed build must sweep its own scratch"
+
+
+def test_losing_an_optional_source_passes_the_gate_with_exemptions(tmp_path, monkeypatch,
+                                                                   capsys):
+    """End to end: build once WITH player_counts/review_histogram, then take them away. The
+    player/timing marts go empty exactly as documented — and the gate must let that through
+    (exemptions printed), not kill the nightly."""
+    monkeypatch.setattr(bm, "VALIDATE_MIN_ROWS", {})
+    src = tmp_path / "steam_games.db"
+    data = tmp_path / "data"
+    data.mkdir()
+    build_source(src)
+    add_optional_tables(src)
+    assert _run(["--source", str(src), "--data-dir", str(data)]) == 0
+
+    con = _open_current(data)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM mart_game_players_daily").fetchone()[0] > 0
+        assert con.execute("SELECT COUNT(*) FROM mart_timing_demand").fetchone()[0] > 0
+    finally:
+        con.close()
+
+    c = sqlite3.connect(str(src))
+    c.execute("DROP TABLE player_counts")
+    c.execute("DROP TABLE review_histogram")
+    c.commit()
+    c.close()
+
+    capsys.readouterr()
+    assert _run(["--source", str(src), "--data-dir", str(data)]) == 0, (
+        "a legitimately-absent OPTIONAL source must not fail the build"
+    )
+    out = capsys.readouterr().out
+    assert "EXEMPT" in out and "player_counts" in out and "review_histogram" in out
+
+    con = _open_current(data)
+    try:
+        # The swap happened and the guarded families are empty, as documented.
+        for tbl in ("mart_game_players_daily", "mart_niche_players", "mart_timing_demand"):
+            assert con.execute(f'SELECT COUNT(*) FROM "{tbl}"').fetchone()[0] == 0
+        meta = dict(con.execute("SELECT key, value FROM mart_meta").fetchall())
+        assert "player_counts" in meta["absent_sources"]
+    finally:
+        con.close()
 
 
 def test_skip_validation_lets_the_same_gutted_build_through(built, monkeypatch):

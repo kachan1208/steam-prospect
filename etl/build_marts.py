@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import sys
 import time
 from datetime import date, datetime, timezone
@@ -2285,6 +2286,41 @@ VALIDATE_MIN_ROWS: dict[str, int] = {
     "mart_game": 100_000,
     "mart_niche": 1_000,
 }
+# Deliberately NOT exempted by an absent source (below): neither table is derived from an
+# optional source table, so nothing can legitimately explain their falling under the floor.
+
+# Which mart tables draw their POPULATION from an OPTIONAL (guarded) source table. When
+# that source is genuinely absent, those tables coming out empty — or much smaller — is the
+# documented degraded mode (see GUARDED_SOURCE_TABLES and the create_*_staging functions),
+# recorded in mart_meta.absent_sources by write_meta(). The gate exempts exactly those
+# tables from the zero-row and max-drop checks, so a legitimately-absent optional source no
+# longer kills a nightly that did precisely what it is documented to do. The exemption is
+# keyed on the BUILD'S OWN recorded provenance: the same table emptying while its source is
+# PRESENT is unexplained, and still fails.
+#
+# game_socials is absent from this map on purpose: its absence only NULLs columns
+# (dev_x_handle/x_handle in mart_game), it never empties a table, so nothing needs exempting.
+ABSENT_SOURCE_EMPTY_MARTS: dict[str, tuple[str, ...]] = {
+    "player_counts": (
+        "mart_game_players_daily",     # the daily CCU panel itself
+        "mart_game_players_history",   # prospect_sample half of the all-sources history
+        "mart_niche_players",          # + everything rolled up from the panel
+        "mart_niche_players_hist",
+        "mart_niche_players_top",
+        "mart_game_trends",            # ccu-only months drop out of the (rev UNION ccu) spine
+    ),
+    "player_history_external": (
+        "mart_game_players_history",   # steamcharts half of the same table
+        "mart_niche_players_monthly",
+        "mart_market_lifetime",        # survival curve is steamcharts-monthly only
+    ),
+    "review_histogram": (
+        "mart_timing_demand",          # (mart_timing_congestion is NOT here: it is built from
+        "mart_timing_decay",           #  stg_game/genres and survives an absent histogram)
+        "mart_game_reviews_timeline",  # sample fallback only covers fully-sampled games
+        "mart_game_trends",            # falls back to the reviews sample -> far fewer months
+    ),
+}
 
 
 def _validate_max_drop_pct() -> float:
@@ -2311,6 +2347,36 @@ def _mart_row_counts(db_path: Path) -> dict[str, int]:
         con.close()
 
 
+def _recorded_absent_sources(db_path: Path) -> set[str]:
+    """The optional source tables THIS build recorded as absent (write_meta's
+    mart_meta.absent_sources). Read back out of the artifact rather than passed in, so the
+    gate reaches the same verdict when it is re-run by hand against a preserved .building
+    file. An unreadable/absent mart_meta yields no exemptions — refuse to explain away
+    emptiness we cannot prove was intended."""
+    try:
+        con = duckdb.connect(str(db_path), read_only=True)
+        try:
+            row = con.execute(
+                "SELECT value FROM mart_meta WHERE key = 'absent_sources'"
+            ).fetchone()
+        finally:
+            con.close()
+    except duckdb.Error:
+        return set()
+    if not row or not row[0]:
+        return set()
+    return {s.strip() for s in str(row[0]).split(",") if s.strip()}
+
+
+def _validation_exemptions(new_path: Path) -> dict[str, list[str]]:
+    """mart table -> the absent source table(s) that explain its emptiness this run."""
+    exempt: dict[str, list[str]] = {}
+    for src_tbl in sorted(_recorded_absent_sources(Path(new_path))):
+        for mart_tbl in ABSENT_SOURCE_EMPTY_MARTS.get(src_tbl, ()):
+            exempt.setdefault(mart_tbl, []).append(src_tbl)
+    return exempt
+
+
 def validate_mart(new_path: Path, prev_path: Path | None) -> list[str]:
     """The pre-swap gate. Prints a per-table old-vs-new comparison and returns the list of
     failures (empty = pass):
@@ -2318,6 +2384,13 @@ def validate_mart(new_path: Path, prev_path: Path | None) -> list[str]:
       - absolute floors (VALIDATE_MIN_ROWS) checked on every build, previous mart or not;
       - any table that had >0 rows in the previous mart and has 0 (or is gone) now;
       - any table that dropped more than the max-drop threshold vs the previous mart.
+
+    UNEXPLAINED emptiness/shrinkage only. A mart family whose optional source table is
+    genuinely absent this run is documented to build EMPTY (see ABSENT_SOURCE_EMPTY_MARTS
+    and mart_meta.absent_sources) — failing the whole nightly for doing exactly that is how
+    a gate gets switched off at 3am, so those tables are exempted from the empty/drop checks
+    and the report says which ones and why. The exemption reads the build's own provenance,
+    so the same table emptying with its source PRESENT still fails.
 
     First build (no previous mart) skips the comparison with a note — only the floors apply.
     A previous mart that exists but cannot be opened read-only (e.g. an exotic lock state)
@@ -2327,11 +2400,22 @@ def validate_mart(new_path: Path, prev_path: Path | None) -> list[str]:
     failures: list[str] = []
     new_counts = _mart_row_counts(Path(new_path))
     max_drop = _validate_max_drop_pct()
+    exempt = _validation_exemptions(Path(new_path))
 
+    # Floors stay unconditional: no VALIDATE_MIN_ROWS table is derived from an optional
+    # source, so an absent source can never explain one falling through its floor.
     for tbl, floor in VALIDATE_MIN_ROWS.items():
         n = new_counts.get(tbl, 0)
         if n < floor:
             failures.append(f"{tbl}: {n:,} rows is below the absolute sanity floor of {floor:,}")
+
+    if exempt:
+        absent = sorted({s for srcs in exempt.values() for s in srcs})
+        print(f"[etl] validation: optional source(s) absent this run "
+              f"(mart_meta.absent_sources: {', '.join(absent)}) — the tables below are "
+              f"built empty BY DESIGN and are EXEMPT from the empty/drop checks:")
+        for tbl in sorted(exempt):
+            print(f"        {tbl:32s} exempt: no {', '.join(exempt[tbl])}")
 
     prev_counts: dict[str, int] | None = None
     if prev_path is None or not Path(prev_path).exists():
@@ -2358,7 +2442,9 @@ def validate_mart(new_path: Path, prev_path: Path | None) -> list[str]:
                 continue
             pct = ((new_n - prev_n) * 100.0 / prev_n) if prev_n > 0 else 0.0
             flag = ""
-            if prev_n > 0 and new_n == 0:
+            if tbl in exempt:
+                flag = f"  EXEMPT ({', '.join(exempt[tbl])} absent)"
+            elif prev_n > 0 and new_n == 0:
                 flag = "  FAIL (was non-empty, now 0)"
                 failures.append(f"{tbl}: {prev_n:,} rows -> 0 (previously non-empty table is empty)")
             elif prev_n > 0 and -pct > max_drop:

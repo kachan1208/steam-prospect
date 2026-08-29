@@ -132,6 +132,97 @@ def test_mart_meta_is_exempt_from_comparison(tmp_path, no_floors):
     assert bm.validate_mart(new, prev) == []
 
 
+# ------------------------------------------------------------------------------------
+# Absent OPTIONAL sources: emptiness the build can EXPLAIN must not fail it
+# ------------------------------------------------------------------------------------
+def test_absent_optional_source_exempts_its_marts(tmp_path, no_floors, capsys):
+    """THE regression this exists for: the timing/players/socials families go empty BY
+    DESIGN when their optional source table is missing (that is what the guarded staging and
+    mart_meta.absent_sources exist to record). Failing the nightly for doing exactly what it
+    documents is how a gate gets switched off at 3am."""
+    prev = _make_mart(tmp_path / "prev.duckdb",
+                      {"mart_game": 100, "mart_timing_demand": 50, "mart_niche_players": 40})
+    new = _make_mart(tmp_path / "new.duckdb",
+                     {"mart_game": 100, "mart_timing_demand": 0, "mart_niche_players": 0},
+                     meta={"absent_sources": "player_counts,review_histogram"})
+
+    assert bm.validate_mart(new, prev) == []
+
+    # ...and the report has to SAY so — an unexplained pass is as bad as a wrong failure.
+    out = capsys.readouterr().out
+    assert "EXEMPT" in out
+    assert "mart_timing_demand" in out and "review_histogram" in out
+    assert "mart_niche_players" in out and "player_counts" in out
+
+
+def test_same_emptiness_still_fails_when_the_source_is_present(tmp_path, no_floors):
+    """The other half of the rule: the exemption is keyed on the build's OWN provenance, so
+    the identical empty table with no absent source recorded is unexplained -> fail."""
+    prev = _make_mart(tmp_path / "prev.duckdb", {"mart_game": 100, "mart_timing_demand": 50})
+    new = _make_mart(tmp_path / "new.duckdb", {"mart_game": 100, "mart_timing_demand": 0},
+                     meta={"absent_sources": ""})
+    failures = bm.validate_mart(new, prev)
+    assert len(failures) == 1 and "mart_timing_demand" in failures[0], failures
+
+
+def test_absent_source_exempts_a_large_drop_not_just_emptiness(tmp_path, no_floors):
+    """mart_game_trends does not empty without review_histogram — it falls back to the
+    recency-biased reviews sample and shrinks a lot. That is the same documented degradation
+    and must be exempt from the max-drop rule too."""
+    prev = _make_mart(tmp_path / "prev.duckdb", {"mart_game": 100, "mart_game_trends": 1000})
+    new = _make_mart(tmp_path / "new.duckdb", {"mart_game": 100, "mart_game_trends": 200},
+                     meta={"absent_sources": "review_histogram"})
+    assert bm.validate_mart(new, prev) == []
+
+
+def test_an_absent_source_only_exempts_its_own_marts(tmp_path, no_floors):
+    """The exemption must be scoped: player_counts going missing explains the player marts,
+    never an unrelated one."""
+    prev = _make_mart(tmp_path / "prev.duckdb", {"mart_game": 100, "mart_niche_press": 30})
+    new = _make_mart(tmp_path / "new.duckdb", {"mart_game": 100, "mart_niche_press": 0},
+                     meta={"absent_sources": "player_counts"})
+    failures = bm.validate_mart(new, prev)
+    assert len(failures) == 1 and "mart_niche_press" in failures[0], failures
+
+
+def test_absent_game_socials_exempts_nothing(tmp_path, no_floors):
+    """game_socials only NULLs columns (dev_x_handle/x_handle) — it never empties a table,
+    so it must not buy any table an exemption."""
+    assert bm.ABSENT_SOURCE_EMPTY_MARTS.get("game_socials") is None
+    prev = _make_mart(tmp_path / "prev.duckdb", {"mart_game": 100, "mart_niche_players": 40})
+    new = _make_mart(tmp_path / "new.duckdb", {"mart_game": 100, "mart_niche_players": 0},
+                     meta={"absent_sources": "game_socials"})
+    assert bm.validate_mart(new, prev), "game_socials cannot explain an empty player mart"
+
+
+def test_congestion_is_not_exempted_by_an_absent_histogram(tmp_path, no_floors):
+    """mart_timing_congestion is built from stg_game/stg_genre_membership, NOT from the
+    histogram — it survives an absent review_histogram, so it must keep failing when empty."""
+    assert "mart_timing_congestion" not in bm.ABSENT_SOURCE_EMPTY_MARTS["review_histogram"]
+    prev = _make_mart(tmp_path / "prev.duckdb",
+                      {"mart_game": 100, "mart_timing_congestion": 12})
+    new = _make_mart(tmp_path / "new.duckdb", {"mart_game": 100, "mart_timing_congestion": 0},
+                     meta={"absent_sources": "review_histogram"})
+    failures = bm.validate_mart(new, prev)
+    assert len(failures) == 1 and "mart_timing_congestion" in failures[0], failures
+
+
+def test_a_mart_without_meta_gets_no_exemptions(tmp_path, no_floors):
+    """Refuse to explain away emptiness we cannot prove was intended: no readable
+    mart_meta = no absent_sources record = no exemption."""
+    prev = _make_mart(tmp_path / "prev.duckdb", {"mart_game": 100, "mart_timing_demand": 50})
+    new = tmp_path / "new.duckdb"
+    con = duckdb.connect(str(new))
+    try:
+        con.execute("CREATE TABLE mart_game(appid INTEGER)")
+        con.execute("INSERT INTO mart_game SELECT * FROM range(100)")
+        con.execute("CREATE TABLE mart_timing_demand(appid INTEGER)")
+    finally:
+        con.close()
+    assert bm._recorded_absent_sources(new) == set()
+    assert bm.validate_mart(new, prev), "no provenance must mean no exemption"
+
+
 def test_absolute_floors_fail_without_any_previous_mart(tmp_path):
     """The floors are the safety net for the case a comparison cannot cover: the very first
     build, where a structurally broken mart has nothing to be compared against."""
