@@ -1,13 +1,13 @@
 """The mounted MCP must not run tool bodies on the event loop (one slow DuckDB read
 would freeze every HTTP request on the worker), must keep logging calls, must rotate the
-call log at its size cap without two workers destroying each other's archive, must refuse to
-mount at all against a DB whose core marts are missing, and must close its DuckDB
+call log at its size cap without two workers destroying each other's archive, must refuse
+to mount at all against a DB whose core marts are missing, and must close its DuckDB
 connection via the shutdown hook.
 
 Loads the real mcp/prospect_mcp.py through the real mount path, pointed at the committed
 CI smoke fixture (.github/fixtures/mcp_smoke_mart.db) — prospect_mcp reads the
 PROSPECT_ANALYTICS_DB_PATH env var at module-exec time, so monkeypatch.setenv is enough
-to redirect each fresh load. Tests that need a DB the fixture isn't build a
+to redirect each fresh load. Tests that need marts the fixture doesn't carry build a
 throwaway DuckDB in tmp_path and load against that instead.
 """
 from __future__ import annotations
@@ -62,7 +62,12 @@ def test_tool_calls_run_off_the_event_loop_and_are_logged(mcp_server):
     try:
         async def drive():
             seen["loop_thread"] = threading.get_ident()
-            return await server._tool_manager.call_tool("tag_suggest", {"q": "a"})
+            # EXACTLY how FastMCP.call_tool invokes the manager in production — the two
+            # keyword arguments are the part that has to survive partial() across the
+            # loop boundary, and convert_result changes the returned shape.
+            return await server._tool_manager.call_tool(
+                "tag_suggest", {"q": "a"}, context=server.get_context(), convert_result=True
+            )
 
         result = anyio.run(drive)
     finally:
@@ -73,7 +78,10 @@ def test_tool_calls_run_off_the_event_loop_and_are_logged(mcp_server):
         "sync tool executed ON the event loop thread — the anyio.to_thread offload in "
         "mcp_mount._observed_call is not taking effect"
     )
-    assert isinstance(result, dict) and "tags" in result
+    # convert_result=True must have been forwarded: the wrapper returns the CONVERTED
+    # content blocks the low-level server expects, not the tool's raw dict.
+    assert isinstance(result, list) and result, f"expected converted content blocks, got {result!r}"
+    assert json.loads(result[0].text)["q"] == "a"
 
     # The logging behavior of the wrapper must be preserved by the offload.
     lines = log_path.read_text(encoding="utf-8").splitlines()
@@ -102,7 +110,9 @@ def test_tool_calls_use_a_dedicated_thread_limiter(mcp_server, monkeypatch):
     monkeypatch.setattr(to_thread, "run_sync", spy_run_sync)
 
     async def drive():
-        return await server._tool_manager.call_tool("tag_suggest", {"q": ""})
+        return await server._tool_manager.call_tool(
+            "tag_suggest", {"q": ""}, context=server.get_context(), convert_result=True
+        )
 
     anyio.run(drive)
 
@@ -123,7 +133,9 @@ def test_call_log_rotates_at_size_cap(mcp_server):
     assert log_path.stat().st_size >= LOG_CAP_BYTES
 
     async def drive():
-        return await server._tool_manager.call_tool("tag_suggest", {"q": "a"})
+        return await server._tool_manager.call_tool(
+            "tag_suggest", {"q": "a"}, context=server.get_context(), convert_result=True
+        )
 
     anyio.run(drive)
 
@@ -165,6 +177,79 @@ def test_missing_core_marts_refuses_to_mount(monkeypatch, tmp_path):
     try:
         assert mcp_mount.load_prospect_mcp() == (None, None)
         assert mcp_mount._loaded_module is None, "the refused module's conn must be closed"
+    finally:
+        mcp_mount.close_prospect_mcp()
+
+
+def test_channel_buzz_lean_output_equals_full_output_minus_series(monkeypatch, tmp_path):
+    # The CI smoke fixture carries no channel marts, so the smoke test can only assert
+    # that channel_buzz degrades. Seed the two marts here to actually exercise the
+    # include_series=False rewrite (per-(term, channel) SUM in SQL) against the
+    # include_series=True path (Python roll-up of the per-period detail): the cheap path
+    # must produce exactly the expensive path minus the `series` field.
+    db = tmp_path / "channels.duckdb"
+    conn = duckdb.connect(str(db))
+    conn.execute("CREATE TABLE mart_game (appid INTEGER)")
+    conn.execute("INSERT INTO mart_game VALUES (1)")
+    conn.execute("CREATE TABLE mart_niche (dimension VARCHAR)")
+    conn.execute("INSERT INTO mart_niche VALUES ('tag')")
+    conn.execute(
+        "CREATE TABLE mart_channel_buzz_summary (term VARCHAR, direction VARCHAR, "
+        "total_mentions BIGINT, total_weighted DOUBLE, recent_avg_weighted DOUBLE, "
+        "prior_avg_weighted DOUBLE, slope_weighted DOUBLE)"
+    )
+    conn.execute(
+        "INSERT INTO mart_channel_buzz_summary VALUES "
+        "('cozy sim', 'rising', 30, 30.0, 7.5, 2.5, 5.0), "
+        "('deck builder', 'rising', 18, 18.0, 4.0, 2.0, 2.0)"
+    )
+    conn.execute(
+        "CREATE TABLE mart_channel_buzz (term VARCHAR, channel VARCHAR, period VARCHAR, "
+        "n_mentions BIGINT, reach_weighted_score DOUBLE)"
+    )
+    # Two channels x three periods per term, so both the per-channel totals and the
+    # per-period series are real roll-ups rather than one row passed through.
+    rows = []
+    for term, base in (("cozy sim", 3), ("deck builder", 2)):
+        for ch_i, channel in enumerate(("press", "youtube")):
+            for p_i, period in enumerate(("2026-05", "2026-06", "2026-07")):
+                n = base + ch_i + p_i
+                rows.append(f"('{term}', '{channel}', '{period}', {n}, {n}.5)")
+    conn.execute("INSERT INTO mart_channel_buzz VALUES " + ", ".join(rows))
+    conn.close()
+
+    monkeypatch.setenv("PROSPECT_ANALYTICS_DB_PATH", str(db))
+    monkeypatch.setattr(settings, "enable_mcp", True)
+    monkeypatch.setattr(settings, "mcp_call_log_path", str(tmp_path / "calls.jsonl"))
+    server, _ = mcp_mount.load_prospect_mcp()
+    assert server is not None
+    try:
+        module = mcp_mount._loaded_module
+        lean = module.channel_buzz("rising", limit=5)
+        full = module.channel_buzz("rising", limit=5, include_series=True)
+        assert "error" not in lean and "error" not in full
+        assert [t["term"] for t in lean["terms"]] == [t["term"] for t in full["terms"]] == [
+            "cozy sim",
+            "deck builder",
+        ]
+
+        def _norm(term: dict) -> dict:
+            # by_channel is ordered by reach, which ties are free to break either way in
+            # the two code paths; the VALUES are the invariant.
+            out = {k: v for k, v in term.items() if k != "series"}
+            out["by_channel"] = sorted(out["by_channel"], key=lambda c: c["channel"])
+            return out
+
+        for lean_t, full_t in zip(lean["terms"], full["terms"]):
+            assert "series" not in lean_t, "include_series=False must not ship the series"
+            assert full_t["series"], "include_series=True must attach a non-empty series"
+            assert _norm(lean_t) == _norm(full_t), (
+                f"channel_buzz(include_series=False) diverged from the full path for "
+                f"{lean_t['term']!r}: {_norm(lean_t)} != {_norm(full_t)}"
+            )
+        # Guard the roll-up itself: press over the three periods is 3+4+5 for 'cozy sim'.
+        press = next(c for c in lean["terms"][0]["by_channel"] if c["channel"] == "press")
+        assert press["n_mentions"] == 12 and press["reach_weighted_score"] == 13.5
     finally:
         mcp_mount.close_prospect_mcp()
 
