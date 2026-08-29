@@ -18,14 +18,35 @@ set -euo pipefail
 
 DATA_DIR=${PROSPECT_DATA_DIR:-/root/prospect/data}
 LINK="$DATA_DIR/current.duckdb"
+HOLD_FILE=${PROSPECT_BUILD_HOLD:-/root/.prospect-build-hold}
+HOLD_HOURS=${PROSPECT_BUILD_HOLD_HOURS:-48}
 
-# shellcheck source=deploy/lib.sh
-if [ -f "$(dirname "$0")/lib.sh" ]; then
-    . "$(dirname "$0")/lib.sh"
-else
-    echo "WARN: $(dirname "$0")/lib.sh missing — restart verification degraded to a blind restart" >&2
-    prospect_restart_verify() { docker restart prospect && sleep 15; }
+# lib.sh is a HARD requirement here, unlike in the nightly (which degrades loudly rather than
+# lose a whole night over a helper file). This script's entire value is "the app is verified
+# healthy on the old mart"; the fallback it used to define — `docker restart && sleep 15` —
+# reported health that was never checked, which is precisely the bug the verification exists
+# to prevent, in the one script an operator runs while production is already broken.
+if [ ! -f "$(dirname "$0")/lib.sh" ]; then
+    echo "ERROR: $(dirname "$0")/lib.sh is missing — refusing to run." >&2
+    echo "       Without it this script cannot verify the app came back, and a rollback that" >&2
+    echo "       reports success without checking is worse than no rollback." >&2
+    echo "       Fix: deploy/deploy-scripts.sh --execute  (or scp deploy/lib.sh to /root/)." >&2
+    exit 1
 fi
+# shellcheck source=deploy/lib.sh
+. "$(dirname "$0")/lib.sh"
+
+# Atomic symlink swap. `ln -sfn` unlinks the existing symlink and then creates the new one, so
+# between those two syscalls $LINK DOES NOT EXIST — and both uvicorn workers, a concurrent
+# build and any operator command can look exactly then and find nothing. Create the link under
+# a temp name in the same directory and rename(2) it over the target instead: a reader sees
+# either the old mart or the new one, never a missing file.
+atomic_relink() {
+    local target="$1" link="$2" tmp
+    tmp="${link}.rollback.$$"
+    ln -sn "$target" "$tmp" || return 1
+    mv -Tf "$tmp" "$link" || { rm -f "$tmp"; return 1; }
+}
 
 shopt -s nullglob
 marts=("$DATA_DIR"/prospect_*.duckdb)   # glob sort = chronological (YYYYMMDD names)
@@ -75,18 +96,32 @@ if [ "$target" = "$current" ]; then
 fi
 
 echo "rollback: current.duckdb  ${current:-NONE}  ->  $target"
-ln -sfn "$target" "$LINK"
+atomic_relink "$target" "$LINK" || { echo "ERROR: could not repoint $LINK" >&2; exit 1; }
 
-echo "restarting the app and waiting for /api/health (up to 120s) ..."
+echo "restarting the app and waiting for readiness (up to 120s) ..."
 if prospect_restart_verify 120; then
     echo "OK: app is healthy and serving $target (was: ${current:-NONE})"
+    # A rollback only moves a symlink. The next scheduled build (nightly 21:00, light build
+    # 13:00) writes a NEW mart and repoints current.duckdb at it — silently undoing this,
+    # usually before anyone looks. Leave a hold that every build checks first.
+    {
+        echo "held_at=$(date -u '+%F %T')Z"
+        echo "reason=rollback.sh repointed current.duckdb ${current:-NONE} -> $target"
+        echo "expires_after_hours=$HOLD_HOURS"
+    } > "$HOLD_FILE"
+    echo
+    echo "BUILD HOLD placed at $HOLD_FILE — the nightly and the midday light build will SKIP"
+    echo "  (and push prospect_build_hold_active, which alert_check.py pages on) until you"
+    echo "  release it. It AUTO-EXPIRES after ${HOLD_HOURS}h so a forgotten hold cannot freeze"
+    echo "  the pipeline; a hold is not a fix, it is time to find one."
+    echo "  Release with:  rm -f $HOLD_FILE"
     exit 0
 fi
 
-echo "ERROR: app failed /api/health on $target" >&2
+echo "ERROR: app is not ready on $target" >&2
 if [ -n "$current" ] && [ -f "$DATA_DIR/$current" ]; then
     echo "reverting symlink to $current and restarting again ..." >&2
-    ln -sfn "$current" "$LINK"
+    atomic_relink "$current" "$LINK" || echo "ERROR: could not revert $LINK" >&2
     if prospect_restart_verify 120; then
         echo "reverted: app is healthy again on $current — rollback ABORTED" >&2
     else

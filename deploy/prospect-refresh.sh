@@ -82,6 +82,34 @@ STEP="starting"
 # Best-effort push of Prometheus-format metric lines to VictoriaMetrics (never fails the run).
 push() { curl -s -m 8 -X POST "$VM_IMPORT" --data-binary "$1" >/dev/null 2>&1 || true; }
 
+# ── Build hold ───────────────────────────────────────────────────────────────────────────
+# deploy/rollback.sh only repoints data/current.duckdb; the next build writes a fresh mart and
+# repoints it back, silently undoing the rollback — usually before anyone looks. rollback.sh
+# therefore leaves a hold file and every build checks it here, FIRST: before the EXIT trap is
+# installed and before any work, so a held night records nothing rather than a bogus FAILED.
+#
+# The hold AUTO-EXPIRES (default 48h). A hold that could freeze the pipeline indefinitely
+# would just be a new way to lose a week of data quietly — the failure mode this whole branch
+# exists to remove. prospect_build_hold_active is pushed either way, so alert_check.py can see
+# a hold that is still on and page about it.
+HOLD_FILE=${PROSPECT_BUILD_HOLD:-/root/.prospect-build-hold}
+HOLD_HOURS=${PROSPECT_BUILD_HOLD_HOURS:-48}
+if [ -f "$HOLD_FILE" ] && [ -z "$(find "$HOLD_FILE" -mmin +$(( HOLD_HOURS * 60 )) 2>/dev/null)" ]; then
+    {
+        echo "=================== refresh HELD: $(date -u) ==================="
+        echo "build hold active — $HOLD_FILE:"
+        sed 's/^/    /' "$HOLD_FILE"
+        echo "release it with: rm -f $HOLD_FILE   (it expires on its own after ${HOLD_HOURS}h)"
+    } >> "$LOG"
+    push "prospect_build_hold_active 1"
+    exit 0
+fi
+if [ -f "$HOLD_FILE" ]; then
+    echo "[hold] $HOLD_FILE is older than ${HOLD_HOURS}h — expired, removing it and building" >> "$LOG"
+    rm -f "$HOLD_FILE"
+fi
+push "prospect_build_hold_active 0"
+
 # run_step LABEL TIMEOUT_SECS "shell command" — time it, bound it with `timeout`, push per-step
 # duration + success(1/0) + last-run timestamp. Never aborts the run on a step failure.
 # explain_failure LABEL RC LOGFILE — put the reason INTO the main log, next to the WARN that
@@ -411,6 +439,13 @@ prospect_pipeline_step_last_run_timestamp{step=\"restart\"} $(date -u +%s)"
     # now (a parallel change moved the sweep into _sweep_scratch and set --keep's default to
     # 2 = current + one rollback). A second `ls -t | tail -n +3 | xargs rm` pruner here raced
     # it and could double-delete the rollback mart. Do not re-add.
+    #
+    # VERIFIED 2026-08-29 against that branch: etl/build_marts.py's argparse has
+    # `--keep, type=int, default=2`, and this script invokes build_marts.py without --keep,
+    # so retention after both land is exactly 2 marts — which is also what rollback.sh's
+    # "at least 2 marts" precondition and this box's disk budget assume. If that default
+    # ever moves back to 3, three ~2.4GB marts is 7.3GB on a disk whose free space IS the
+    # ETL's spill ceiling; change it there, not by re-adding a pruner here.
     #
     # Corrected globs: the scratch artifacts are named <version>.duckdb.building{,.wal,.tmp/},
     # so the old *.duckdb.tmp / *.duckdb.wal patterns matched NOTHING and every run's spill

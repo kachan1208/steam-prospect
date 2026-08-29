@@ -98,11 +98,27 @@ resolves on both sides of the mount).
 ```bash
 /root/rollback.sh --list      # show versions + which is live
 /root/rollback.sh             # repoint current.duckdb at the previous mart, restart,
-                              # verify /api/health; auto-reverts if the app comes up sick
+                              # verify readiness; auto-reverts if the app comes up sick
 /root/rollback.sh 20260827    # or a specific version
 ```
 
 Refuses to run when only one mart exists. Source: `deploy/rollback.sh`.
+
+**A rollback is temporary.** It only moves the `current.duckdb` symlink; the next scheduled
+build (nightly 21:00, light build 13:00) writes a new mart and repoints the symlink at it,
+silently undoing the rollback. So a successful rollback drops a **build hold** at
+`/root/.prospect-build-hold`, which both build scripts check before doing any work:
+
+```bash
+cat /root/.prospect-build-hold        # who placed it, when, and why
+rm -f /root/.prospect-build-hold      # release it — do this as soon as the fix is in
+```
+
+While the hold is on, the nightly and the light build log a "HELD" line and exit without
+building, and push `prospect_build_hold_active 1` so the alert check pages about it — a hold
+that stops the pipeline must never be quiet. It **auto-expires after 48 h**
+(`PROSPECT_BUILD_HOLD_HOURS`), because a forgotten hold would be a new way to lose a week of
+data silently. A hold buys time to find the fix; it is not the fix.
 
 ## Backups
 
@@ -112,12 +128,16 @@ nightly; justification in the script header):
 - **daily**: sqlite3 online `.backup` of `signals.db` (**the forward-only series — a lost
   day is unrecoverable, this file is the whole reason backups exist**) + a copy of
   `refresh_history.json`;
-- **weekly** (Sunday): `.backup` of the 5.2GB `steam_games.db` (staged copy deleted right
-  after upload — free disk is the ETL's spill ceiling);
+- **weekly** (Sunday): `.backup` of the 5.2GB `steam_games.db`, refused unless the disk has
+  its size + 15 % free, bounded by a timeout, and the staged copy is deleted on **every**
+  exit path — free disk is the ETL's spill ceiling;
 - sync to the rclone remote `prospect-backups:`, pruning remote dailies >30d and
-  weeklies >8w;
-- pushes `prospect_backup_last_success_timestamp`; the alert check fires when it goes
-  >50h stale — so an unconfigured remote nags you by itself.
+  weeklies >8w — the prune is **skipped** when an upload failed, so a bad run can never
+  delete the copies it failed to replace;
+- pushes `prospect_backup_last_success_timestamp` when the **backup** succeeded (a failed
+  prune is logged and sets the exit code, but does not withhold the metric — that produced
+  false "backup is stale" pages); the alert check fires when it goes >50h stale, so an
+  unconfigured remote nags you by itself.
 
 **NEEDS-SETUP (one-time, on the droplet):** install rclone and create the remote —
 `apt-get install -y rclone && rclone config` → name it exactly `prospect-backups`, any

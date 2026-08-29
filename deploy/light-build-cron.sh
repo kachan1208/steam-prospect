@@ -31,16 +31,47 @@ else
     prospect_push_metrics() { :; }
 fi
 
+# Every redirect below writes here. cron-wrap.sh also creates it, but this script is run by
+# hand often enough that it should not depend on its launcher.
+mkdir -p /var/log/prospect-steps 2>/dev/null || true
+
+# Build hold (deploy/rollback.sh) — same contract as the nightly's, see prospect-refresh.sh:
+# a rollback is undone by the next build unless a build checks for the hold first. Auto-expires
+# so it cannot freeze the pipeline; prospect_build_hold_active feeds alert_check.py.
+HOLD_FILE=${PROSPECT_BUILD_HOLD:-/root/.prospect-build-hold}
+HOLD_HOURS=${PROSPECT_BUILD_HOLD_HOURS:-48}
+if [ -f "$HOLD_FILE" ] && [ -z "$(find "$HOLD_FILE" -mmin +$(( HOLD_HOURS * 60 )) 2>/dev/null)" ]; then
+    {
+        echo "[light build $(date -u '+%F %T')] SKIPPED — build hold active ($HOLD_FILE):"
+        sed 's/^/    /' "$HOLD_FILE"
+        echo "    release with: rm -f $HOLD_FILE (expires on its own after ${HOLD_HOURS}h)"
+    } >> /var/log/prospect-steps/light-build.cron.log
+    prospect_push_metrics "prospect_build_hold_active 1"
+    exit 0
+fi
+
 pgrep -f "[b]uild_marts" >/dev/null && exit 0
 
-# Stale-scratch sweep, scoped to EXCLUDE today's version (2026-08-28). The old bare
+# Stale-scratch sweep. The old bare
 #     rm -rf /root/prospect/data/*.duckdb.building*
 # trusted the pgrep above, but pgrep-then-rm is a TOCTOU: a build that starts between the
 # check and the rm (or one whose cmdline doesn't match) would have its ~18GB spill deleted
-# mid-build. Mirror the nightly's careful pattern instead: only sweep artifacts that do NOT
-# belong to a build started today — those are orphans from a killed/OOMed run by definition.
+# mid-build. So the sweep only removes artifacts that cannot belong to a LIVE build.
+#
+# Excluding "today's version" alone was not that test (2026-08-29): this runs at 13:00, and
+# the build most likely to still be running is the NIGHTLY that started at 21:00 — whose
+# scratch is named for YESTERDAY once it crosses midnight. The old exclusion protected the
+# one date that was never at risk and swept the one that was.
+#
+# Three conditions now, any one of which spares a file:
+#   * named for today's version   — a manual/midday build started since 00:00 UTC
+#   * named for yesterday's       — an overrunning nightly
+#   * touched in the last 2h      — the real liveness test; a running DuckDB build writes to
+#                                   its spill constantly, an orphan from a killed run does not
 find /root/prospect/data -maxdepth 1 -name 'prospect_*.duckdb.building*' \
-     ! -name "prospect_$(date -u +%Y%m%d).duckdb.building*" -exec rm -rf {} + 2>/dev/null || true
+     ! -name "prospect_$(date -u +%Y%m%d).duckdb.building*" \
+     ! -name "prospect_$(date -u -d yesterday +%Y%m%d).duckdb.building*" \
+     -mmin +120 -exec rm -rf {} + 2>/dev/null || true
 
 cd /root/prospect/etl || exit 1
 if PROSPECT_DUCKDB_MEMORY_LIMIT=1700MB PYTHONUNBUFFERED=1 \
