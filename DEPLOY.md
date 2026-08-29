@@ -10,14 +10,18 @@ the App Platform app described at the bottom is a **legacy leftover**, not the d
 │                                                                                 │
 │  /root/steam-scraper/            scraper code + venv                            │
 │      steam_games.db  (5.2GB)     source-of-truth SQLite (games/reviews/…)       │
-│      signals.db                  forward-only follower/price series —           │
-│                                  CAN NEVER BE BACKFILLED (see Backups)          │
 │  /root/prospect/                 this repo (git clone; deploys pull here)       │
 │      data/prospect_YYYYMMDD.duckdb   nightly marts (build_marts.py --keep 2)    │
 │      data/current.duckdb         RELATIVE symlink -> the live mart              │
 │      data/refresh_history.json   nightly run ledger                             │
-│  /root/*.sh, /root/alert_check.py    ops scripts, scp'd flat from deploy/       │
-│                                  (deploy/deploy-scripts.sh does the copying)    │
+│      data/signals.db             forward-only follower/price series —           │
+│                                  CAN NEVER BE BACKFILLED (see Backups).         │
+│                                  HERE, not next to the scraper: the collectors' │
+│                                  default (collectors/catalog_prices.py) is the  │
+│                                  authority, and backup.sh guessed wrong once.   │
+│  cron runs scripts FROM THE CHECKOUT (/root/prospect/deploy/…), so `git pull`   │
+│  is the whole deploy for shell changes — no scp, nothing to drift. The older    │
+│  flat copies at /root/*.sh are unused; delete after one clean nightly.          │
 │                                                                                 │
 │  docker container `prospect`     built from the repo Dockerfile; serves SPA +   │
 │                                  /api + /mcp from the mart, port 8080 inside    │
