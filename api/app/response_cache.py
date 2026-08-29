@@ -6,17 +6,23 @@ mart itself only changes when the nightly ETL swaps the whole DuckDB file in and
 restarts, so within one process their answers are constants. Computing them per request
 is pure waste (timing/overview alone is three queries plus a 12-month scoring pass).
 
-Every entry is keyed by `analytics_db.mart_version()` alongside the handler name and its
-parameters, so:
-  * a process serving an older mart can never hand back a newer mart's numbers, and
-  * the entries a swapped-in DB invalidates are simply never read again (no explicit
-    invalidation pass, and no chance of a stale hit if the DB IS re-opened live).
+Every entry is keyed by the loaded mart's IDENTITY — `analytics_db.mart_version()` AND
+`analytics_db.built_at()` — alongside the handler name and its parameters, so a process
+serving an older mart can never hand back a newer mart's numbers. Both halves are needed:
+mart_version is only the build DATE, so a light build and the nightly build of the same day
+(or a rebuild after a fix) share it; built_at is the build timestamp and separates them. In
+the deployment the app restarts on every swap, so entries are simply never read again after
+one; the pair is what makes the key safe if the DB is ever re-opened live instead.
 When the mart carries no version (pre-mart_meta build, or the DB isn't open at all) the
 result is computed and NOT cached — an unversioned answer has nothing safe to key on.
 
-Bounded like the rate limiter: `genre` is a free-form query param, so an adversarial
-client could otherwise mint entries forever. Past _MAX_ENTRIES the whole table is dropped
-(cheap, and the working set is a handful of real genres that immediately repopulates).
+Bounded like the rate limiter: `genre` is a free-form query param, so an adversarial client
+could otherwise mint entries forever. Two defenses: handlers pass `cache_if` so an answer
+for an unrecognized key (an unknown genre reads as an EMPTY payload, not a 404) is computed
+but never stored, and past _MAX_ENTRIES the OLDEST entries are evicted one at a time rather
+than the table being cleared wholesale. Eviction is by insertion order, not by recency — no
+bookkeeping on the read path (which stays a single dict lookup other threads cannot race),
+and the real working set is a handful of genres that repopulate on their next request.
 
 These same handlers send `Cache-Control: public, max-age=3600` (see CACHE_CONTROL): the
 data is public, identical for everyone, and at most a day old — an hour of browser/CDN
@@ -36,6 +42,8 @@ _MAX_ENTRIES = 256
 
 _cache: dict[tuple, Any] = {}
 
+_MISS = object()
+
 T = TypeVar("T")
 
 
@@ -48,19 +56,37 @@ def size() -> int:
     return len(_cache)
 
 
-def get_or_compute(name: str, params: tuple, compute: Callable[[], T]) -> T:
-    """Return the cached response for (mart_version, name, params), computing it on a miss.
+def get_or_compute(
+    name: str,
+    params: tuple,
+    compute: Callable[[], T],
+    cache_if: Callable[[T], bool] | None = None,
+) -> T:
+    """Return the cached response for (mart identity, name, params), computing it on a miss.
 
     `compute` raising (a 404 for an unknown genre, a 503 for a missing mart) propagates and
-    stores nothing — only successful answers are remembered."""
+    stores nothing — only successful answers are remembered. `cache_if`, when given, gets the
+    computed answer and vetoes storing it: handlers whose unknown-key answer is a successful
+    but EMPTY payload use it so enumerating keys can't fill the cache."""
     version = analytics_db.mart_version()
     if version is None:  # unversioned mart / DB not open: nothing safe to key on
         return compute()
-    key = (version, name, params)
-    if key in _cache:
-        return _cache[key]
+    key = (version, analytics_db.built_at(), name, params)
+    # One atomic lookup: `key in _cache` followed by `_cache[key]` could KeyError against a
+    # concurrent clear() (the test hook, and a live DB swap would use it too).
+    hit = _cache.get(key, _MISS)
+    if hit is not _MISS:
+        return hit
     value = compute()
-    if len(_cache) >= _MAX_ENTRIES:
-        _cache.clear()  # bounded: `genre` is caller-supplied and unbounded in principle
+    if cache_if is not None and not cache_if(value):
+        return value
+    while len(_cache) >= _MAX_ENTRIES:
+        # Bounded: `genre` is caller-supplied and unbounded in principle. Drop the oldest
+        # entry, not the whole table — a full clear threw away every real genre's answer
+        # (and the mart-pure handlers' whole reason to exist) on one adversarial burst.
+        try:
+            del _cache[next(iter(_cache))]
+        except (StopIteration, KeyError, RuntimeError):  # emptied under us — nothing to do
+            break
     _cache[key] = value
     return value

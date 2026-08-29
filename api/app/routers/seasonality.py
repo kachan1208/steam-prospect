@@ -19,9 +19,18 @@ def seasonality(
     genre: str = Query("__all__"),
 ) -> Seasonality:
     """A pure function of the mart for a given genre — cached in-process keyed by the mart
-    version, and sent with an hour of public cache (see response_cache)."""
+    identity, and sent with an hour of public cache (see response_cache).
+
+    An unknown genre is not an error here, it is an empty grid — and an empty grid is NOT
+    cached (`cache_if`), so enumerating genre names can't push the real ones out."""
     response.headers["Cache-Control"] = response_cache.CACHE_CONTROL
-    return response_cache.get_or_compute("seasonality", (genre,), lambda: _seasonality(genre))
+    return response_cache.get_or_compute(
+        "seasonality", (genre,), lambda: _seasonality(genre), cache_if=_has_seasonality
+    )
+
+
+def _has_seasonality(s: Seasonality) -> bool:
+    return bool(s.month_weekday or s.month or s.weekday or s.year)
 
 
 def _seasonality(genre: str) -> Seasonality:
@@ -46,9 +55,12 @@ def launch_curve(
     response: Response,
     genre: str = Query("__all__"),
 ) -> LaunchCurve:
-    """Cached + Cache-Control'd for the same reason as /api/seasonality above."""
+    """Cached + Cache-Control'd for the same reason as /api/seasonality above, including
+    not caching the empty answer an unknown genre produces."""
     response.headers["Cache-Control"] = response_cache.CACHE_CONTROL
-    return response_cache.get_or_compute("launch_curve", (genre,), lambda: _launch_curve(genre))
+    return response_cache.get_or_compute(
+        "launch_curve", (genre,), lambda: _launch_curve(genre), cache_if=lambda c: bool(c.points)
+    )
 
 
 def _launch_curve(genre: str) -> LaunchCurve:

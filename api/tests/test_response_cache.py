@@ -75,6 +75,47 @@ def test_unversioned_mart_is_never_cached(client, monkeypatch):
     assert response_cache.size() == 0
 
 
+def test_cache_is_keyed_by_the_mart_build_time_too(client, monkeypatch):
+    """mart_version is only the build DATE, so the midday light build and the nightly build
+    of the same day share it. built_at is in the key as well, so a process that re-opened a
+    same-day rebuild can't serve the previous build's numbers."""
+    client.get("/api/market/benchmarks")
+    assert response_cache.size() == 1
+
+    monkeypatch.setattr(analytics_db, "built_at", lambda: "2026-01-01T13:00:00+00:00")
+    assert client.get("/api/market/benchmarks").status_code == 200
+    assert response_cache.size() == 2  # same version, different build -> different entry
+
+
+def test_unknown_keys_that_return_200_are_not_cached(client):
+    """An unknown genre isn't a 404 for these two — it is an empty payload — so caching it
+    let anyone enumerate genre names to fill the table and evict the real entries."""
+    for path in ("/api/seasonality", "/api/launch-curve"):
+        for genre in ("NoSuchGenre", "AlsoNotAGenre"):
+            r = client.get(path, params={"genre": genre})
+            assert r.status_code == 200, (path, genre)
+    assert response_cache.size() == 0
+
+    # A genre with real data is still cached (launch-curve's fixture only has '__all__').
+    assert client.get("/api/seasonality", params={"genre": "Roguelike"}).status_code == 200
+    assert response_cache.size() == 1
+
+
+def test_overflow_evicts_the_oldest_entry_not_the_whole_table(client, monkeypatch):
+    monkeypatch.setattr(response_cache, "_MAX_ENTRIES", 2)
+    client.get("/api/market/benchmarks")
+    client.get("/api/seasonality")
+    assert response_cache.size() == 2
+    client.get("/api/seasonality", params={"genre": "Roguelike"})  # third entry: one must go
+    assert response_cache.size() == 2
+    # The OLDEST went; the entry cached just before is still warm (a whole-table clear would
+    # have thrown that away too, and re-queried the mart here).
+    monkeypatch.setattr(
+        analytics_db, "query", lambda *a, **k: pytest.fail("served a cleared entry")
+    )
+    assert client.get("/api/seasonality").status_code == 200
+
+
 def test_errors_are_not_cached(client):
     """timing/overview 404s on a genre with no rows. If that were cached, a genre whose
     marts land in the next rebuild would 404 for the rest of the process lifetime."""
