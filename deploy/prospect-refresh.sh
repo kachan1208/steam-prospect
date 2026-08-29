@@ -325,7 +325,8 @@ run_step "steam_scrape"     3600 "./run_full.sh"
 # it hit "database is locked" two nights running while Lane B wrote alongside it. Its data
 # (unreleased-cohort metadata) is a rotation, not a dependency of the steps below; fetching
 # it at 19:15 instead of ~22:30 costs nothing.
-run_step "review_refresh"   3600 "python3 -m steam_scraper.scraper --db steam_games.db review-summary --workers 16 --rate 12.0 --refresh-older-than-days 7 --limit 25000"
+# review_refresh MOVED behind the Lane B barrier (2026-08-29) — see [7a] below. It ran here,
+# concurrent with Lane B, and lost the SQLite write race every night.
 # review_histogram MOVED to the 19:15 quiet-window cron (2026-08-26) — third mover after
 # tags_refresh/refresh_released: it lost the SQLite write race two nights running here.
 # Histograms are also what the Radar demand trend reads, so the quiet window doubles as the
@@ -336,6 +337,30 @@ run_step "review_refresh"   3600 "python3 -m steam_scraper.scraper --db steam_ga
 echo "[lane-b] waiting for background service steps to finish before review_deepen ..."
 wait_bg
 echo "[lane-b] background service steps complete."
+
+# [7a] Review SUMMARY refresh — total/positive/negative per game, the counts every revenue
+# estimate in the product is derived from.
+#
+# MOVED HERE FROM BEFORE THE BARRIER (2026-08-29), where it ran concurrently with Lane B and
+# lost the SQLite write race EVERY NIGHT: rc=1 at ~25% (6168/25000) on
+# "sqlite3.OperationalError: database is locked" in _upsert_review_summary. It was the third
+# casualty of the 2026-08-24 run noted above — tags_refresh and refresh_released were moved to
+# the 19:15 quiet window that day and review_histogram followed on 08-26, but this one was left
+# behind in the contended window and has been failing silently ever since. Found on 2026-08-29
+# by the new alert_check.py, minutes after it was first armed; nothing had surfaced it before,
+# because the nightly's own step_summary printed an EMPTY log excerpt for it.
+#
+# The fix is placement, not a timeout bump: it already commits per game (the 2026-08-19 remedy),
+# so it is a VICTIM of peers holding the single writer slot, not a cause. Behind the barrier
+# there are no peer writers left, which is the same reasoning that fixed the other three — with
+# the bonus that it needs no new cron slot and no quiet-window budget (that window is already
+# capped at 6000s across three steps and could not absorb this one's ~40min).
+#
+# Cost: Lane B was deliberately "hidden under steam_scrape/review_refresh" so the barrier cost
+# no wall time. With only steam_scrape in front of it the barrier may now wait a few minutes for
+# Lane B's tail. That is a good trade for a step that currently produces NOTHING, and it stacks
+# no memory: this finishes before review_deepen's 16 workers start, exactly as designed.
+run_step "review_refresh"   3600 "python3 -m steam_scraper.scraper --db steam_games.db review-summary --workers 16 --rate 12.0 --refresh-older-than-days 7 --limit 25000"
 
 # [7b] Review DEEPEN — nightly TOP-UP only (2026-08-18): the 06:00 UTC daytime coverage keeper
 # (see crontab) owns the backlog with a 13h window and 15k/day budget, so the nightly pass just
