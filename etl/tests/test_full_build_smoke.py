@@ -441,6 +441,160 @@ def test_skip_validation_lets_the_same_gutted_build_through(built, monkeypatch):
         con.close()
 
 
+def _seed_sentiment_cache(data: Path) -> Path:
+    """A populated cross-run sentiment cache, keyed to the CURRENT config hash — i.e. the
+    16M-row cache the droplet actually carries, in miniature."""
+    cache = data / bm.SENTIMENT_CACHE_DB_NAME
+    for p in (cache, Path(str(cache) + ".wal")):
+        p.unlink(missing_ok=True)
+    con = duckdb.connect(str(cache))
+    try:
+        con.execute("CREATE TABLE aspect_mention(recommendationid VARCHAR, aspect VARCHAR, "
+                    "compound DOUBLE, clf_aspect VARCHAR, clf_sentiment VARCHAR, "
+                    "clf_margin DOUBLE)")
+        con.execute("INSERT INTO aspect_mention VALUES ('r1','combat',0.5,'combat','praise',2.0)")
+        con.execute("CREATE TABLE press_article(article_id BIGINT, compound DOUBLE)")
+        con.execute("INSERT INTO press_article VALUES (1, 0.25)")
+        con.execute("CREATE TABLE scored_review(recommendationid VARCHAR)")
+        con.execute("INSERT INTO scored_review VALUES ('r1')")
+        con.execute("CREATE TABLE meta(key VARCHAR, value VARCHAR)")
+        con.execute("INSERT INTO meta VALUES ('config_hash', ?)", [bm._sentiment_config_hash()])
+    finally:
+        con.close()
+    return cache
+
+
+def _cache_state(cache: Path) -> tuple[int, int, int, str]:
+    con = duckdb.connect(str(cache), read_only=True)
+    try:
+        return (
+            con.execute("SELECT COUNT(*) FROM aspect_mention").fetchone()[0],
+            con.execute("SELECT COUNT(*) FROM press_article").fetchone()[0],
+            con.execute("SELECT COUNT(*) FROM scored_review").fetchone()[0],
+            con.execute("SELECT value FROM meta WHERE key='config_hash'").fetchone()[0],
+        )
+    finally:
+        con.close()
+
+
+def test_a_missing_model_aborts_before_the_sentiment_cache_is_touched(tmp_path, monkeypatch):
+    """The fatal-missing-classifier check used to be LAZY: by the time it fired,
+    create_staging had run and _refresh_sentiment_cache had already wiped the 16M-row cache
+    (a missing model changes the config hash, and that change IS the wipe) — so a clean
+    abort became a multi-hour rescore on the next run."""
+    monkeypatch.setattr(bm, "VALIDATE_MIN_ROWS", {})
+    monkeypatch.setenv("PROSPECT_SENTIMENT_CACHE", "on")
+    monkeypatch.delenv("PROSPECT_ALLOW_NO_CLASSIFIER", raising=False)
+    monkeypatch.setattr(bm, "_CLF", None)
+    monkeypatch.setattr(bm, "_CLF_ABSENT", False)
+
+    src = tmp_path / "steam_games.db"
+    data = tmp_path / "data"
+    data.mkdir()
+    build_source(src)
+    cache = _seed_sentiment_cache(data)
+    before = _cache_state(cache)
+
+    monkeypatch.setattr(bm.aspect_classifier, "load_default", lambda _d: None)
+    assert _run(["--source", str(src), "--data-dir", str(data)]) == 2, (
+        "a missing aspect model must abort the build"
+    )
+
+    assert _cache_state(cache) == before, (
+        "the cache was mutated before the fatal check fired — that is the multi-hour "
+        "rescore this abort exists to prevent"
+    )
+    assert not list(data.glob("*.building*")), (
+        "the abort must happen before any scratch is written"
+    )
+
+
+def test_a_light_build_with_no_model_also_aborts_instead_of_wiping_the_cache(tmp_path,
+                                                                            monkeypatch):
+    """--light is the nastier half: it skips aspect scoring entirely and so never reached
+    _get_classifier() at all — it wiped the cache through compute_press_sentiment (whose
+    config hash also carries the model fingerprint) and exited 0, leaving the multi-hour
+    bill for the NEXT full build."""
+    monkeypatch.setattr(bm, "VALIDATE_MIN_ROWS", {})
+    monkeypatch.setenv("PROSPECT_SENTIMENT_CACHE", "on")
+    monkeypatch.delenv("PROSPECT_ALLOW_NO_CLASSIFIER", raising=False)
+    monkeypatch.setattr(bm, "_CLF", None)
+    monkeypatch.setattr(bm, "_CLF_ABSENT", False)
+
+    src = tmp_path / "steam_games.db"
+    data = tmp_path / "data"
+    data.mkdir()
+    build_source(src)
+    # --light needs a published mart to copy the heavy tables from, so do a real build
+    # first; the same-day full build is then renamed away so --light is allowed to run.
+    assert _run(["--source", str(src), "--data-dir", str(data)]) == 0
+    versioned = (data / "current.duckdb").resolve()
+    versioned.rename(data / "prospect_20000101.duckdb")
+    (data / "current.duckdb").unlink()
+    (data / "current.duckdb").symlink_to("prospect_20000101.duckdb")
+
+    cache = _seed_sentiment_cache(data)
+    before = _cache_state(cache)
+
+    monkeypatch.setattr(bm.aspect_classifier, "load_default", lambda _d: None)
+    monkeypatch.setattr(bm, "_CLF", None)
+    monkeypatch.setattr(bm, "_CLF_ABSENT", False)
+    assert _run(["--source", str(src), "--data-dir", str(data), "--light"]) == 2
+    assert _cache_state(cache) == before, "the light build wiped the cache on its way out"
+
+
+def test_the_probe_does_not_hold_the_model_through_the_build(monkeypatch):
+    """The probe loads ~150MB; holding it across create_staging on a 2.5GB droplet is a
+    memory budget we do not have to spend, and the sentiment phase reloads it anyway."""
+    monkeypatch.setattr(bm, "_CLF", None)
+    monkeypatch.setattr(bm, "_CLF_ABSENT", False)
+    monkeypatch.delenv("PROSPECT_ALLOW_NO_CLASSIFIER", raising=False)
+
+    bm._probe_classifier()            # the real shipped model
+    assert bm._CLF is None, "the probe must release the model it loaded"
+    assert bm._CLF_ABSENT is False
+    assert bm._get_classifier() is not None, "...and the lazy load must still work after it"
+    bm._CLF = None
+
+
+def test_the_probe_keeps_the_degraded_escape_hatch(monkeypatch):
+    monkeypatch.setattr(bm, "_CLF", None)
+    monkeypatch.setattr(bm, "_CLF_ABSENT", False)
+    monkeypatch.setenv("PROSPECT_ALLOW_NO_CLASSIFIER", "1")
+    monkeypatch.setattr(bm.aspect_classifier, "load_default", lambda _d: None)
+
+    bm._probe_classifier()            # must not raise
+    assert bm._CLF_ABSENT is True, (
+        "the degraded marker must survive the probe — write_meta records it as "
+        "sentiment_classifier=absent"
+    )
+    bm._CLF_ABSENT = False
+
+
+def test_degraded_mode_still_builds_and_stamps_its_provenance(tmp_path, monkeypatch):
+    """PROSPECT_ALLOW_NO_CLASSIFIER=1 has to remain a working escape hatch end to end."""
+    monkeypatch.setattr(bm, "VALIDATE_MIN_ROWS", {})
+    monkeypatch.setenv("PROSPECT_ALLOW_NO_CLASSIFIER", "1")
+    monkeypatch.setattr(bm, "_CLF", None)
+    monkeypatch.setattr(bm, "_CLF_ABSENT", False)
+    monkeypatch.setattr(bm.aspect_classifier, "load_default", lambda _d: None)
+
+    src = tmp_path / "steam_games.db"
+    data = tmp_path / "data"
+    data.mkdir()
+    build_source(src)
+    try:
+        assert _run(["--source", str(src), "--data-dir", str(data)]) == 0
+        con = _open_current(data)
+        try:
+            meta = dict(con.execute("SELECT key, value FROM mart_meta").fetchall())
+        finally:
+            con.close()
+        assert meta["sentiment_classifier"] == "absent"
+    finally:
+        bm._CLF, bm._CLF_ABSENT = None, False
+
+
 def test_light_build_refuses_to_replace_the_full_build(published):
     """--light writes the same prospect_<date>.duckdb filename with STALE copied teardown
     tables; against a same-day full build it must refuse before doing any work. (Safe on the

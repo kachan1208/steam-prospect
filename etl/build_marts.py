@@ -1804,6 +1804,30 @@ def _get_classifier():
     return _CLF
 
 
+def _probe_classifier() -> None:
+    """Fail-fast presence/loadability check, run at the TOP of main().
+
+    The fatal check above is LAZY — it first fires from inside compute_aspect_sentiment,
+    which is reached only after create_staging() has run for an hour AND after
+    _refresh_sentiment_cache() has already WIPED the 16M-row sentiment cache. (A missing
+    model makes _aspect_model_fingerprint() return "absent"; that changes the sentiment
+    config hash; that change IS the wipe.) So "fail fast" failed slow and took the cache
+    with it, turning a clean abort into a multi-hour rescore on the next run. Worse in
+    --light mode, which never calls _get_classifier() at all: it wiped the cache via
+    compute_press_sentiment and exited 0, and the NEXT full build paid for the rescore.
+
+    Probing here costs ~0.2s and aborts before staging, before the cache is attached, before
+    any scratch is written. The model is dropped again immediately afterwards: it is ~150MB
+    resident and there is no reason to hold it through staging on a 2.5GB droplet — the
+    sentiment phase reloads it lazily, from the same cached-global path as before.
+    PROSPECT_ALLOW_NO_CLASSIFIER=1 is unaffected: _get_classifier() sets _CLF_ABSENT and
+    returns None, and that flag is deliberately NOT reset, so write_meta() still records
+    sentiment_classifier=absent on the degraded build."""
+    global _CLF
+    _get_classifier()
+    _CLF = None
+
+
 def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> int:
     """Precompute per-(appid, aspect) VADER text sentiment for the Game Teardown (see the
     ASPECT_LEXICON block above for the what/why). Runs BEFORE the mart SQL loop so
@@ -2620,6 +2644,16 @@ def main() -> int:
     source_db = str(Path(args.source).resolve())
     if not Path(source_db).exists():
         print(f"ERROR: source DB not found: {source_db}", file=sys.stderr)
+        return 2
+
+    # A missing/unloadable aspect model is fatal — but the check has to happen HERE, before
+    # create_staging() and before anything attaches (and invalidates) the sentiment cache.
+    # See _probe_classifier: left lazy, the fatal check fired hours in, AFTER the 16M-row
+    # cache had already been wiped by the very absence it was about to abort on.
+    try:
+        _probe_classifier()
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
         return 2
 
     data_dir = Path(args.data_dir).resolve()
