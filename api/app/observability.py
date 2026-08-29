@@ -34,6 +34,7 @@ from typing import Any
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from . import analytics_db
 from .config import settings
 
 _JSON_LOG_CONFIGURED = False
@@ -90,6 +91,11 @@ class RequestContextMiddleware:
     a streamed response (SSE, chunked downloads) can't tolerate. No current route
     streams (the old chat SSE router is gone), but the raw-ASGI form costs nothing and
     keeps that door open.
+
+    Also opens analytics_db.request_budget() for the request: it is the one place every
+    HTTP request passes through, so it is where a request gets its single deadline for
+    waiting on the DuckDB cursor pool (see analytics_db — a per-QUERY bound alone lets a
+    12-query handler hang on for 12x the bound).
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -114,7 +120,8 @@ class RequestContextMiddleware:
             await send(message)
 
         try:
-            await self.app(scope, receive, send_wrapper)
+            with analytics_db.request_budget():
+                await self.app(scope, receive, send_wrapper)
         except Exception:
             self._log(scope, request_id, status_holder["status"] or 500, start)
             raise
