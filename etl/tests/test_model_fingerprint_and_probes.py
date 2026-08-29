@@ -86,6 +86,84 @@ def test_config_hash_folds_in_the_model_and_is_stable():
 
 
 # ------------------------------------------------------------------------------------
+# 1b. The one-time re-key: switching fingerprints must not cost a 16M-row rescore
+# ------------------------------------------------------------------------------------
+def _cache_con(config_hash: str | None) -> duckdb.DuckDBPyConnection:
+    """An attached-shaped sentiment cache with one row in each table, so a wipe is visible."""
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE SCHEMA cache")
+    con.execute("CREATE TABLE cache.aspect_mention(recommendationid VARCHAR, aspect VARCHAR, "
+                "compound DOUBLE, clf_aspect VARCHAR, clf_sentiment VARCHAR, clf_margin DOUBLE)")
+    con.execute("INSERT INTO cache.aspect_mention VALUES ('r1','combat',0.5,'combat','praise',2.0)")
+    con.execute("CREATE TABLE cache.press_article(article_id BIGINT, compound DOUBLE)")
+    con.execute("INSERT INTO cache.press_article VALUES (1, 0.25)")
+    con.execute("CREATE TABLE cache.scored_review(recommendationid VARCHAR)")
+    con.execute("INSERT INTO cache.scored_review VALUES ('r1')")
+    con.execute("CREATE TABLE cache.meta(key VARCHAR, value VARCHAR)")
+    if config_hash is not None:
+        con.execute("INSERT INTO cache.meta VALUES ('config_hash', ?)", [config_hash])
+    return con
+
+
+def _cache_rows(con) -> tuple[int, int, int]:
+    return tuple(
+        con.execute(f"SELECT COUNT(*) FROM cache.{t}").fetchone()[0]
+        for t in ("aspect_mention", "press_article", "scored_review")
+    )
+
+
+def test_legacy_fingerprint_reproduces_the_old_size_mtime_form(tmp_path):
+    model = tmp_path / "aspect_model.json.gz"
+    model.write_bytes(b"0123456789")
+    st = os.stat(model)
+    assert bm._legacy_aspect_model_fingerprint(str(model)) == f"{st.st_size}:{int(st.st_mtime)}"
+    assert bm._legacy_aspect_model_fingerprint(str(tmp_path / "nope")) == "absent"
+
+
+def test_the_fingerprint_switch_re_keys_the_cache_instead_of_wiping_it():
+    """The one-time cost the fingerprint change would otherwise impose: the FIRST build after
+    it lands would see a different config hash and burn a multi-hour rescore of 16M rows. A
+    cache carrying the hash the OLD fingerprint produced for the model file sitting there
+    right now was scored under this same model — re-key it, keep the rows."""
+    legacy = bm._sentiment_config_hash(bm._legacy_aspect_model_fingerprint())
+    assert legacy != bm._sentiment_config_hash(), "the switch does change the hash (that is why)"
+
+    con = _cache_con(legacy)
+    try:
+        assert bm._refresh_sentiment_cache(con) is False, "a re-key is not an invalidation"
+        assert _cache_rows(con) == (1, 1, 1), "the cache must survive the fingerprint switch"
+        stored = con.execute("SELECT value FROM cache.meta WHERE key='config_hash'").fetchone()[0]
+        assert stored == bm._sentiment_config_hash(), "...re-keyed to the content hash"
+        # Idempotent: the second run is a plain hit, not another migration.
+        assert bm._refresh_sentiment_cache(con) is False
+    finally:
+        con.close()
+
+
+def test_a_real_config_change_still_wipes(monkeypatch):
+    """The re-key must not become a way for a genuine config edit to keep serving old scores."""
+    con = _cache_con("some-hash-from-a-different-lexicon")
+    try:
+        assert bm._refresh_sentiment_cache(con) is True
+        assert _cache_rows(con) == (0, 0, 0)
+    finally:
+        con.close()
+
+
+def test_a_changed_model_still_wipes_even_under_the_legacy_key(tmp_path, monkeypatch):
+    """A cache whose stored hash was built from a DIFFERENT model's size:mtime must not be
+    re-keyed — the migration is 'same model, new fingerprint scheme', nothing else."""
+    other_legacy = bm._sentiment_config_hash("999999:1")
+    assert other_legacy != bm._sentiment_config_hash(bm._legacy_aspect_model_fingerprint())
+    con = _cache_con(other_legacy)
+    try:
+        assert bm._refresh_sentiment_cache(con) is True
+        assert _cache_rows(con) == (0, 0, 0)
+    finally:
+        con.close()
+
+
+# ------------------------------------------------------------------------------------
 # 2. Missing classifier is fatal by default
 # ------------------------------------------------------------------------------------
 @pytest.fixture

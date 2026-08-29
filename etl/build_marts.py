@@ -10,6 +10,29 @@ SQLite lacks. The SQLite source is opened READ_ONLY and never mutated.
 
 Run:  python build_marts.py            (paths default relative to this file)
       python build_marts.py --source /path/to/steam_games.db --data-dir /path/to/data
+
+Exit codes (deploy/prospect-refresh.sh treats any non-zero as "keep the previous mart"):
+  0  built, validated and swapped
+  1  the build FINISHED but the pre-swap validation gate refused the swap. current.duckdb is
+     untouched and the finished artifact is KEPT at data/prospect_<version>.duckdb.building
+     (its spill dir is not) — see the remedy the run prints; none of the options need a rebuild.
+  2  refused before doing any work (missing source DB, missing aspect model, --light guard).
+
+DEPLOY NOTE — the first build after the model-fingerprint change (2026-08). The sentiment
+cache is keyed on a hash of the scoring config, which includes a fingerprint of
+etl/aspect_model.json.gz. That fingerprint moved from size:mtime to a SHA-256 of the file's
+CONTENT (see _aspect_model_fingerprint: an scp/checkout of the identical file used to wipe the
+16M-row cache for nothing). Changing the fingerprint scheme changes the config hash's value
+once, which would itself have forced a full ~16M-row rescore — hours — on the first build
+after deploy. _refresh_sentiment_cache() therefore RE-KEYS a cache that still carries the old
+size:mtime hash instead of wiping it; the run logs "sentiment cache: re-keyed ...". The re-key
+only fires when the model file's size and integer mtime are still what they were at the last
+build, so:
+  * deploy the code with the model file untouched, or copy it with `scp -p`, and the first
+    build is a normal incremental one;
+  * if the model's mtime HAS moved (a plain `scp`/checkout of it), the re-key misses, the
+    cache is wiped as it would be today, and the first build pays for one full rescore. That
+    is a planned multi-hour run, not a surprise — schedule it, don't discover it at 03:00.
 """
 from __future__ import annotations
 
@@ -1647,6 +1670,11 @@ def _aspect_model_fingerprint(path: str | None = None) -> str:
     nothing (real incident; see the `scp -p` workaround it forced). Hashing the 6MB file takes
     milliseconds and only ever changes when the model's bytes actually change.
 
+    Switching to a content hash necessarily changes the fingerprint's VALUE once, which would
+    have wiped the cache on the first build after this shipped — the very thing it exists to
+    prevent. _legacy_aspect_model_fingerprint() + the migration in _refresh_sentiment_cache()
+    carry the existing entries over to the new key instead. See both for the safety argument.
+
     `path` is a test seam; production callers use the default (next to the ETL code)."""
     if path is None:
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), aspect_classifier.MODEL_FILENAME)
@@ -1660,7 +1688,20 @@ def _aspect_model_fingerprint(path: str | None = None) -> str:
     return h.hexdigest()
 
 
-def _sentiment_config_hash() -> str:
+def _legacy_aspect_model_fingerprint(path: str | None = None) -> str:
+    """The PRE-2026-08 fingerprint, byte-for-byte: f"{st_size}:{int(st_mtime)}". Kept for one
+    purpose only — recomputing the config hash a cache written by the old code would carry, so
+    _refresh_sentiment_cache() can re-key those entries instead of wiping 16M rows."""
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), aspect_classifier.MODEL_FILENAME)
+    try:
+        st = os.stat(path)
+        return f"{st.st_size}:{int(st.st_mtime)}"
+    except OSError:
+        return "absent"
+
+
+def _sentiment_config_hash(model_fingerprint: str | None = None) -> str:
     """Hash of every knob that can change what a cached score's VALUE would be: the aspect keyword
     lexicon, the gaming-domain VADER overrides applied in _get_analyzer(), the sentence/window
     sizing, the pos/neg classification thresholds, plus a manually-bumpable version escape hatch.
@@ -1671,10 +1712,14 @@ def _sentiment_config_hash() -> str:
     Deliberately NOT hashed: TEARDOWN_MIN_REVIEWS and the other eligibility floors that decide
     which reviews/articles are IN SCOPE this run — those don't change what an already-scored
     mention's compound IS, and _sent_pool/_press_score_set are recomputed fresh every run
-    regardless of the cache, so a floor change is picked up automatically."""
+    regardless of the cache, so a floor change is picked up automatically.
+
+    `model_fingerprint` overrides only the model component (the migration below passes the old
+    size:mtime form to reconstruct what a pre-2026-08 cache stored); everything else is the
+    live config, so the reconstruction only matches when nothing ELSE changed either."""
     payload = "\n".join([
         f"version={SENTIMENT_CACHE_VERSION}",
-        f"aspect_model={_aspect_model_fingerprint()}",
+        f"aspect_model={_aspect_model_fingerprint() if model_fingerprint is None else model_fingerprint}",
         f"aspect_lexicon={ASPECT_LEXICON!r}",
         f"gaming_overrides={sorted(GAMING_LEXICON_OVERRIDES.items())!r}",
         f"sentence_chars={ASPECT_SENTENCE_CHARS!r}",
@@ -1745,10 +1790,28 @@ def _refresh_sentiment_cache(con: duckdb.DuckDBPyConnection) -> bool:
     """Wipe both cache tables when the scoring config changed since they were last populated (or
     when they're empty/newly created) — makes a lexicon/window/threshold edit, or a
     SENTIMENT_CACHE_VERSION bump, force a full rescore instead of silently serving stale scores
-    computed under a different config. Returns True iff it invalidated (callers log that)."""
+    computed under a different config. Returns True iff it invalidated (callers log that).
+
+    ONE-TIME MIGRATION (2026-08): the model fingerprint moved from size:mtime to a content hash
+    (see _aspect_model_fingerprint). That is a strict improvement, but it changes the config
+    hash's value once, so the first build after the change would wipe the 16M-row cache and pay
+    for a multi-hour rescore — exactly the cost the change exists to avoid. If the stored hash
+    is the one the OLD fingerprint would have produced for the model file sitting there right
+    now, the entries were scored under this same model and this same config, and the hash is
+    simply re-keyed instead of wiped. Safety: the migration only fires when every other hashed
+    knob already matches, so the sole risk is a DIFFERENT model with byte-identical size AND the
+    same integer mtime — which nothing short of deliberate forgery produces. If the model's mtime
+    HAS moved since the last build (an scp without -p), the reconstruction misses and the normal
+    wipe happens, exactly as it does today."""
     current = _sentiment_config_hash()
     row = con.execute("SELECT value FROM cache.meta WHERE key = 'config_hash'").fetchone()
     if row is not None and row[0] == current:
+        return False
+    if row is not None and row[0] == _sentiment_config_hash(_legacy_aspect_model_fingerprint()):
+        con.execute("DELETE FROM cache.meta WHERE key = 'config_hash'")
+        con.execute("INSERT INTO cache.meta VALUES ('config_hash', ?)", [current])
+        print("[etl] sentiment cache: re-keyed from the old size:mtime model fingerprint to "
+              "the content hash — same model, same config, cache KEPT (one-time migration)")
         return False
     con.execute("DELETE FROM cache.aspect_mention")
     con.execute("DELETE FROM cache.press_article")
