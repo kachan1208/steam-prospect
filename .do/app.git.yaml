@@ -19,11 +19,21 @@ services:
     source_dir: /
     http_port: 8080
     instance_count: 1
+    # 512MB / ~$5/mo. Never measured under load — see the longer note on the same field in
+    # .do/app.yaml; if the instance OOM-restarts the remedy is basic-xs (1GB), not a lower
+    # WEB_CONCURRENCY (already 1, the minimum).
     instance_size_slug: basic-xxs
     health_check:
-      http_path: /api/health
-      initial_delay_seconds: 45
+      # Readiness (503 until the mart is loaded), not liveness — see .do/app.yaml for the
+      # reasoning. DEPENDENCY: /api/health/ready ships with the API branch adding it.
+      http_path: /api/health/ready
+      initial_delay_seconds: 120        # ~557MB mart download on boot; 45s crash-looped
     envs:
+      # The entrypoint defaults to 2 workers (right for the 2-vCPU droplet); each opens its
+      # own DuckDB connection + cursor pool, so 512MB gets exactly one. Same note as app.yaml.
+      - key: WEB_CONCURRENCY
+        scope: RUN_TIME
+        value: "1"
       - key: PROSPECT_DUCKDB_URL
         scope: RUN_TIME
         value: https://github.com/kachan1208/steam-prospect/releases/download/data-latest/current.duckdb

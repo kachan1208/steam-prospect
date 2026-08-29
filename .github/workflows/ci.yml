@@ -1,16 +1,29 @@
 name: CI
 
-# Track O2 (prospect-production-and-marketing-plan.md): stop shipping blind. Four
-# independent jobs (disjoint concerns, same split the codebase itself uses: web / api /
-# etl / mcp) so a failure in one doesn't hide the others' signal. Nothing here needs the real
-# ~176MB data/current.duckdb or the 4GB source catalog: api/tests/conftest.py builds its
-# own tiny synthetic mart at test time, and mcp/smoke_test.py runs against a small,
-# curated, REAL-data-derived fixture committed at .github/fixtures/mcp_smoke_mart.db (see
-# .github/scripts/build_mcp_fixture.py for how it was produced and why it's real rows,
-# not synthetic ones).
+# Track O2 (prospect-production-and-marketing-plan.md): stop shipping blind. Independent
+# jobs (disjoint concerns, same split the codebase itself uses: web / api / etl / mcp, plus
+# the deploy + image checks) so a failure in one doesn't hide the others' signal. Nothing
+# here needs the real ~557MB data/current.duckdb or the 5.2GB source catalog:
+# api/tests/conftest.py builds its own tiny synthetic mart at test time, and mcp/smoke_test.py
+# runs against a small, curated, REAL-data-derived fixture committed at
+# .github/fixtures/mcp_smoke_mart.db (see .github/fixtures/README.md).
 "on":
+  # `push:` used to be unfiltered, so a commit on a PR branch fired BOTH a push run and a
+  # pull_request run — the whole matrix, twice, for every push. Restricting push to the
+  # default branch is the actual dedupe: branch commits are covered by their PR run, and
+  # main still gets a run of its own after a merge.
   push:
+    branches: [main]
   pull_request:
+
+# Second half of the same fix. The old group was `${{ github.ref }}`, which does NOT dedupe
+# push vs pull_request: on a PR branch github.ref is `refs/heads/<branch>` for the push event
+# and `refs/pull/<n>/merge` for the pull_request event — two different groups, so both runs
+# survived. Key on the PR number when there is one, so every event for a PR shares one group
+# and only the newest commit's run stays alive.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   web:
@@ -29,21 +42,11 @@ jobs:
         working-directory: web
         run: npm ci
 
+      # Was continue-on-error while tsconfig.node.json (a composite referenced project with
+      # no explicit `noEmit`) made `tsc -b --noEmit` fail with TS6310. That tsconfig fix
+      # landed separately, so this is blocking again — the whole point of the job.
       - name: Typecheck (tsc -b --noEmit)
         working-directory: web
-        # KNOWN PRE-EXISTING FAILURE, unrelated to this workflow: tsconfig.node.json is a
-        # composite referenced project with no explicit `noEmit`, and `tsc -b --noEmit`
-        # (TS6310) refuses to build a referenced project that "may not disable emit" in
-        # that combination. Verified present on main before this CI existed (`tsc -b`
-        # WITHOUT --noEmit — i.e. the first half of `npm run build`, below — already
-        # type-checks the whole project successfully, so this is specifically a
-        # --noEmit + project-references interaction, not a real type error). Fix is one
-        # line in tsconfig.node.json (add `"noEmit": false`) or dropping --noEmit from the
-        # `typecheck` script — both out of this change's ownership scope (api/tests/,
-        # web/src/**/*.test.*, vitest.config.*, .github/, + additive deps only). Left
-        # non-blocking (continue-on-error) so this one known issue doesn't hide the rest
-        # of CI's signal; unset continue-on-error here once it's fixed.
-        continue-on-error: true
         run: npm run typecheck
 
       - name: Build (tsc -b + vite build)
@@ -64,9 +67,16 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install API dependencies
+      # Install the PINNED set the image installs, so CI tests what production runs.
+      - name: Install API dependencies (locked)
         working-directory: api
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.lock
+
+      # Test-only extras live in requirements-dev.txt, which arrives with a separate branch;
+      # guarded so this workflow is green both before and after that lands.
+      - name: Install API dev dependencies (if present)
+        working-directory: api
+        run: if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
 
       - name: Run pytest
         working-directory: api
@@ -75,6 +85,64 @@ jobs:
         # module docstring for the full ordering story (env vars + fixture mart must exist
         # before app.main is ever imported).
         run: python -m pytest tests/ -v
+
+  locks:
+    name: Dependency locks in sync
+    runs-on: ubuntu-latest
+    # A lock that has drifted from its requirements.txt is worse than no lock: the image
+    # silently keeps installing the old pins while the source file claims otherwise.
+    # Recompile all three and fail on any diff.
+    #
+    # mcp/ is checked too (added 2026-08-29): `mcp>=1.2` resolving to 2.0.0 on a rebuild is
+    # the outage this whole job exists for, and mcp/requirements.txt was the one file with
+    # that dependency still unlocked.
+    #
+    # STABILITY — this check must only ever go red for the reason it claims (the committed
+    # lock does not match the committed requirements.txt). Two things used to break that:
+    #   * uv itself was unpinned, so a uv release that changed output formatting would fail
+    #     every unrelated PR.  -> UV_VERSION below.
+    #   * the resolution ran against LIVE PyPI, so a transitive dependency publishing a new
+    #     release turned every unrelated PR red.  -> EXCLUDE_NEWER below, which freezes the
+    #     resolver's view of the index at the instant the committed locks were generated.
+    # Bump both and regenerate the locks in the SAME commit; never one without the other.
+    env:
+      UV_VERSION: "0.12.7"
+      EXCLUDE_NEWER: "2026-08-29T00:00:00Z"
+      LOCK_ARGS: "--python-version 3.14 --python-platform x86_64-unknown-linux-gnu"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv (pinned)
+        run: pip install "uv==${UV_VERSION}"
+
+      - name: Recompile and diff
+        run: |
+          set -euo pipefail
+          for d in api etl mcp; do
+            # uv stamps its VERBATIM command line — INCLUDING `-o <target>` — into the lock's
+            # header comment. This job compiles to /tmp/$d.lock and diffs against the committed
+            # $d/requirements.lock, so that header line always differed and `diff -u` always
+            # exited 1: the job could never pass, and its own "regenerate with -o
+            # $d/requirements.lock" advice reproduced the committed header, so following it
+            # could not help either. UV_CUSTOM_COMPILE_COMMAND overrides that header with the
+            # canonical regenerate command, which makes it independent of where CI writes the
+            # file AND makes the header a copy-pasteable, byte-exact reproduction recipe.
+            cmd="uv pip compile $d/requirements.txt -o $d/requirements.lock $LOCK_ARGS --exclude-newer $EXCLUDE_NEWER"
+            # shellcheck disable=SC2086  # LOCK_ARGS is a deliberate word-split argument list
+            UV_CUSTOM_COMPILE_COMMAND="$cmd" uv pip compile "$d/requirements.txt" -o "/tmp/$d.lock" \
+              $LOCK_ARGS --exclude-newer "$EXCLUDE_NEWER" --quiet
+            if ! diff -u "$d/requirements.lock" "/tmp/$d.lock"; then
+              echo "::error::$d/requirements.lock is out of date — regenerate it with uv $UV_VERSION:"
+              echo "  pip install uv==$UV_VERSION"
+              echo "  UV_CUSTOM_COMPILE_COMMAND='$cmd' $cmd"
+              echo "  (that command is also line 2 of $d/requirements.lock)"
+              exit 1
+            fi
+          done
 
   etl:
     name: ETL (mart invariants)
@@ -89,9 +157,10 @@ jobs:
       # pytest is NOT in etl/requirements.txt on purpose: that file describes what the droplet's
       # ETL venv installs, and it is kept deliberately thin (the aspect classifier is
       # dependency-free for exactly this reason). Test-only tooling belongs here, not there.
-      - name: Install ETL dependencies
+      # The lock is CI's pinned view of that same file; the droplet venv is managed separately.
+      - name: Install ETL dependencies (locked)
         working-directory: etl
-        run: pip install -r requirements.txt pytest
+        run: pip install -r requirements.lock pytest
 
       - name: Run mart invariant tests
         working-directory: etl
@@ -110,12 +179,83 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install MCP dependencies
+      # From the LOCK, like the api/etl jobs: the whole point of locking mcp/ is that CI
+      # exercises the same resolved SDK the image would get, not whatever PyPI serves today.
+      - name: Install MCP dependencies (locked)
         working-directory: mcp
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.lock
 
       - name: Run MCP smoke test
         working-directory: mcp
         env:
           PROSPECT_ANALYTICS_DB_PATH: ${{ github.workspace }}/.github/fixtures/mcp_smoke_mart.db
         run: python smoke_test.py
+
+  shellcheck:
+    name: Shellcheck (deploy scripts)
+    runs-on: ubuntu-latest
+    # These scripts ARE production: the nightly pipeline, the cron lock wrapper, backups and
+    # rollback all run from /root/ on the droplet, where a typo is discovered at 21:00 UTC by
+    # a missing mart. -x follows the sourced deploy/lib.sh.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run shellcheck
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --version
+          shellcheck -x deploy/*.sh
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    # The Dockerfile had never been built in CI, and an unpinned dependency resolving
+    # differently on a rebuild (mcp>=1.2 -> 2.0) already took /mcp down in production once.
+    # Build only — nothing is pushed; the droplet builds its own image on deploy.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        env:
+          DOCKER_BUILDKIT: "1"   # the Dockerfile's `# syntax=` directive needs BuildKit
+        run: docker build -t prospect:ci .
+
+      # THE regression this job exists for, asserted directly. `mcp>=1.2` resolving to 2.0.0
+      # on a routine rebuild dropped `mcp.server.fastmcp` — the module mcp/prospect_mcp.py
+      # imports — so load_prospect_mcp() caught ModuleNotFoundError, skipped the /mcp mount,
+      # and the app came up looking perfectly healthy with /mcp 404ing.
+      #
+      # It has to be asserted THIS way and not over HTTP: mcp/prospect_mcp.py raises
+      # FileNotFoundError at import time when there is no mart, so /mcp is legitimately
+      # unmounted in a dataless container and an HTTP probe of /mcp cannot tell "SDK broke"
+      # from "no data". Importing the module the SDK must provide can.
+      - name: Assert the image still has the MCP SDK module /mcp needs
+        run: docker run --rm --entrypoint python prospect:ci -c "import mcp.server.fastmcp"
+
+      - name: Smoke the built image
+        # Boots with no PROSPECT_DUCKDB_URL, which the entrypoint handles by design (degraded
+        # mode: API up, data endpoints 503). Proves the image starts and serves HTTP — a
+        # build that succeeds but crash-loops on boot is still a broken deploy. It does NOT
+        # prove the app can serve data (there is no mart here on purpose — the ~557MB one is
+        # not in CI); that is the api job's synthetic-mart tests. So assert exactly what a
+        # dataless boot SHOULD produce — a well-formed health body reporting "degraded" — and
+        # not merely "something answered on port 8080".
+        run: |
+          set -euo pipefail
+          docker run -d --name prospect-ci -p 8080:8080 prospect:ci
+          for i in $(seq 1 30); do
+            if body=$(curl -sf -m 5 http://localhost:8080/api/health); then
+              echo "image is serving /api/health after ${i}s: $body"
+              echo "$body" | grep -q '"status":"degraded"' || {
+                echo "::error::unexpected /api/health body for a dataless boot: $body"
+                docker logs prospect-ci
+                exit 1
+              }
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::image never answered /api/health"
+          docker logs prospect-ci
+          exit 1

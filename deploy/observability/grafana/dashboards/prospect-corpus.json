@@ -321,67 +321,6 @@
    ]
   },
   {
-   "type": "stat",
-   "title": "Twitch watchers",
-   "gridPos": {
-    "h": 4,
-    "w": 4,
-    "x": 20,
-    "y": 0
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "victoriametrics"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "color": {
-      "mode": "thresholds"
-     },
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "blue",
-        "value": null
-       }
-      ]
-     },
-     "unit": "short"
-    },
-    "overrides": []
-   },
-   "options": {
-    "colorMode": "value",
-    "graphMode": "area",
-    "justifyMode": "auto",
-    "orientation": "auto",
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ],
-     "fields": "",
-     "values": false
-    },
-    "textMode": "auto"
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "victoriametrics"
-     },
-     "editorMode": "code",
-     "expr": "last_over_time(prospect_corpus_twitch_viewers_total[7d])",
-     "legendFormat": "",
-     "refId": "A",
-     "instant": true,
-     "range": false
-    }
-   ]
-  },
-  {
    "type": "timeseries",
    "title": "Catalog growth",
    "gridPos": {
@@ -1043,17 +982,6 @@
      "legendFormat": "games with a CCU sample",
      "refId": "B",
      "range": true
-    },
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "victoriametrics"
-     },
-     "editorMode": "code",
-     "expr": "prospect_corpus_twitch_viewers_total",
-     "legendFormat": "twitch viewers",
-     "refId": "C",
-     "range": true
     }
    ]
   },
@@ -1164,118 +1092,6 @@
      "editorMode": "code",
      "expr": "prospect_corpus_tag_rows_total",
      "legendFormat": "tag rows",
-     "refId": "D",
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "timeseries",
-   "title": "Creator mentions by platform",
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 0,
-    "y": 36
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "victoriametrics"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "color": {
-      "mode": "palette-classic"
-     },
-     "custom": {
-      "axisBorderShow": false,
-      "axisCenteredZero": false,
-      "axisColorMode": "text",
-      "axisLabel": "",
-      "axisPlacement": "auto",
-      "drawStyle": "line",
-      "fillOpacity": 12,
-      "gradientMode": "none",
-      "lineInterpolation": "smooth",
-      "lineWidth": 2,
-      "pointSize": 6,
-      "showPoints": "always",
-      "spanNulls": true,
-      "stacking": {
-       "group": "A",
-       "mode": "none"
-      }
-     },
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "green",
-        "value": null
-       }
-      ]
-     },
-     "unit": "short"
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "calcs": [
-      "lastNotNull"
-     ],
-     "displayMode": "list",
-     "placement": "bottom",
-     "showLegend": true
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "victoriametrics"
-     },
-     "editorMode": "code",
-     "expr": "prospect_corpus_creator_mentions_total{platform=\"twitch\"}",
-     "legendFormat": "twitch",
-     "refId": "A",
-     "range": true
-    },
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "victoriametrics"
-     },
-     "editorMode": "code",
-     "expr": "prospect_corpus_creator_mentions_total{platform=\"youtube\"}",
-     "legendFormat": "youtube",
-     "refId": "B",
-     "range": true
-    },
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "victoriametrics"
-     },
-     "editorMode": "code",
-     "expr": "prospect_corpus_creator_mentions_total{platform=\"reddit\"}",
-     "legendFormat": "reddit",
-     "refId": "C",
-     "range": true
-    },
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "victoriametrics"
-     },
-     "editorMode": "code",
-     "expr": "prospect_data_rows{table=\"mentions\"}",
-     "legendFormat": "all mentions (legacy series)",
      "refId": "D",
      "range": true
     }
