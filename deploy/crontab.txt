@@ -64,11 +64,17 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # from the live entry so the three scrapers stay memory-capped.
 15 19 * * * mkdir -p /var/log/prospect-steps && /root/prospect/deploy/cron-wrap.sh quiet1915 systemd-run --scope --quiet -p MemoryMax=1500M -p MemorySwapMax=0 /root/prospect/deploy/quiet-window.sh >> /var/log/prospect-steps/quiet1915.cron.log 2>&1
 
-# ── 19:30 UTC — backups. OWN lock: it must not be blocked by, or block, the refresh lock.
-# Placed after the quiet window and before the 21:00 nightly. signals.db (follower + price
-# series) and refresh_history.json daily; steam_games.db on Sundays. These series are
-# forward-only and can never be backfilled, which is the whole reason this job exists.
-30 19 * * * /root/prospect/deploy/cron-wrap.sh -l /root/.prospect-backup.lock backup /root/prospect/deploy/backup.sh >> /var/log/prospect-backup.log 2>&1
+# ── 19:30 UTC — backups: NOT SCHEDULED, by operator decision (2026-08-29).
+# deploy/backup.sh is kept and works (verified: sqlite3 online .backup of signals.db,
+# integrity ok, 172,429 price rows matching live) — it simply is not run. The matching
+# alert is disabled with ALERT_CHECK_BACKUPS=0 in /root/.prospect-alerts.env, because a
+# check that is permanently red trains you to ignore the channel.
+# THE CONSEQUENCE, recorded so it is not rediscovered the hard way: data/signals.db is the
+# forward-only follower and price series. Steam serves the CURRENT price and nothing else,
+# so a day lost there is lost permanently — unlike steam_games.db, which is re-scrapeable
+# (expensively) and the marts, which are rebuilt nightly from it.
+# To turn it back on: restore the line below and drop ALERT_CHECK_BACKUPS from the env file.
+#30 19 * * * /root/prospect/deploy/cron-wrap.sh -l /root/.prospect-backup.lock backup /root/prospect/deploy/backup.sh >> /var/log/prospect-backup.log 2>&1
 
 # ── every 30 min — evaluate the metrics everything above pushes, and notify on breach.
 # Inert until /root/.prospect-alerts.env exists with NTFY_TOPIC and/or WEBHOOK_URL; it exits

@@ -171,18 +171,27 @@ def collect_breaches(cfg: dict[str, str]) -> dict[str, str]:
                 )
 
         # (e) backups (pushed by deploy/backup.sh). 50h = one missed daily + slack.
-        res = vm_query("max(last_over_time(prospect_backup_last_success_timestamp[14d]))")
-        if not res:
-            breaches["backup_never"] = (
-                "no successful backup recorded in 14 days — backup.sh not running "
-                "or rclone remote not configured (see DEPLOY.md 'Backups')"
-            )
-        else:
-            age_h = (now - float(res[0]["value"][1])) / HOUR
-            if age_h > 50:
-                breaches["backup_stale"] = (
-                    f"last successful backup was {age_h:.1f}h ago (threshold 50h)"
+        # ALERT_CHECK_BACKUPS=0 turns this off for an installation that deliberately runs no
+        # backup job. Without the switch the only ways to silence it were to leave a permanent
+        # false alarm or to delete the check — and a channel that always has one red line in it
+        # is a channel people stop reading, which is the failure this whole script exists to
+        # avoid. Turning it off is a real decision with a real consequence (signals.db holds
+        # forward-only follower/price history that no endpoint can replay), so it is opt-out,
+        # not a default.
+        if cfg.get("ALERT_CHECK_BACKUPS", "1").strip().lower() not in ("0", "false", "no", "off"):
+            res = vm_query("max(last_over_time(prospect_backup_last_success_timestamp[14d]))")
+            if not res:
+                breaches["backup_never"] = (
+                    "no successful backup recorded in 14 days — backup.sh not running "
+                    "or rclone remote not configured (see DEPLOY.md 'Backups'). "
+                    "Set ALERT_CHECK_BACKUPS=0 if this box deliberately keeps no backups."
                 )
+            else:
+                age_h = (now - float(res[0]["value"][1])) / HOUR
+                if age_h > 50:
+                    breaches["backup_stale"] = (
+                        f"last successful backup was {age_h:.1f}h ago (threshold 50h)"
+                    )
 
         # (g) a build hold left by deploy/rollback.sh. Both build scripts push this on every
         # run (1 = held and skipping, 0 = building normally), so the latest sample is the
