@@ -34,9 +34,10 @@ WORKDIR /app
 # `mcp>=1.2` silently became 2.0.0 on a routine rebuild, dropped the module
 # prospect_mcp.py imports, and took /mcp down in production with one line in the log.
 #
-# Regenerate after editing requirements.txt (CI fails if they drift):
-#   uv pip compile api/requirements.txt -o api/requirements.lock \
-#       --python-version 3.14 --python-platform x86_64-unknown-linux-gnu
+# Regenerate after editing requirements.txt (CI's `locks` job fails if they drift). The
+# exact command is line 2 of api/requirements.lock itself — it carries the --exclude-newer
+# stamp that makes the resolution reproducible. Run it with the uv version pinned in the
+# `locks` job of .github/workflows/ci.yml and the result is byte-identical.
 COPY api/requirements.txt api/requirements.lock ./api/
 RUN pip install --no-cache-dir -r api/requirements.lock
 

@@ -83,7 +83,24 @@ jobs:
     runs-on: ubuntu-latest
     # A lock that has drifted from its requirements.txt is worse than no lock: the image
     # silently keeps installing the old pins while the source file claims otherwise.
-    # Recompile both and fail on any diff.
+    # Recompile all three and fail on any diff.
+    #
+    # mcp/ is checked too (added 2026-08-29): `mcp>=1.2` resolving to 2.0.0 on a rebuild is
+    # the outage this whole job exists for, and mcp/requirements.txt was the one file with
+    # that dependency still unlocked.
+    #
+    # STABILITY — this check must only ever go red for the reason it claims (the committed
+    # lock does not match the committed requirements.txt). Two things used to break that:
+    #   * uv itself was unpinned, so a uv release that changed output formatting would fail
+    #     every unrelated PR.  -> UV_VERSION below.
+    #   * the resolution ran against LIVE PyPI, so a transitive dependency publishing a new
+    #     release turned every unrelated PR red.  -> EXCLUDE_NEWER below, which freezes the
+    #     resolver's view of the index at the instant the committed locks were generated.
+    # Bump both and regenerate the locks in the SAME commit; never one without the other.
+    env:
+      UV_VERSION: "0.12.7"
+      EXCLUDE_NEWER: "2026-08-29T00:00:00Z"
+      LOCK_ARGS: "--python-version 3.14 --python-platform x86_64-unknown-linux-gnu"
     steps:
       - uses: actions/checkout@v4
 
@@ -91,19 +108,30 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install uv
-        run: pip install uv
+      - name: Install uv (pinned)
+        run: pip install "uv==${UV_VERSION}"
 
       - name: Recompile and diff
         run: |
           set -euo pipefail
-          for d in api etl; do
-            uv pip compile "$d/requirements.txt" -o "/tmp/$d.lock" \
-              --python-version 3.14 --python-platform x86_64-unknown-linux-gnu --quiet
+          for d in api etl mcp; do
+            # uv stamps its VERBATIM command line — INCLUDING `-o <target>` — into the lock's
+            # header comment. This job compiles to /tmp/$d.lock and diffs against the committed
+            # $d/requirements.lock, so that header line always differed and `diff -u` always
+            # exited 1: the job could never pass, and its own "regenerate with -o
+            # $d/requirements.lock" advice reproduced the committed header, so following it
+            # could not help either. UV_CUSTOM_COMPILE_COMMAND overrides that header with the
+            # canonical regenerate command, which makes it independent of where CI writes the
+            # file AND makes the header a copy-pasteable, byte-exact reproduction recipe.
+            cmd="uv pip compile $d/requirements.txt -o $d/requirements.lock $LOCK_ARGS --exclude-newer $EXCLUDE_NEWER"
+            # shellcheck disable=SC2086  # LOCK_ARGS is a deliberate word-split argument list
+            UV_CUSTOM_COMPILE_COMMAND="$cmd" uv pip compile "$d/requirements.txt" -o "/tmp/$d.lock" \
+              $LOCK_ARGS --exclude-newer "$EXCLUDE_NEWER" --quiet
             if ! diff -u "$d/requirements.lock" "/tmp/$d.lock"; then
-              echo "::error::$d/requirements.lock is out of date — regenerate it:"
-              echo "  uv pip compile $d/requirements.txt -o $d/requirements.lock \\"
-              echo "      --python-version 3.14 --python-platform x86_64-unknown-linux-gnu"
+              echo "::error::$d/requirements.lock is out of date — regenerate it with uv $UV_VERSION:"
+              echo "  pip install uv==$UV_VERSION"
+              echo "  UV_CUSTOM_COMPILE_COMMAND='$cmd' $cmd"
+              echo "  (that command is also line 2 of $d/requirements.lock)"
               exit 1
             fi
           done
@@ -143,9 +171,11 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install MCP dependencies
+      # From the LOCK, like the api/etl jobs: the whole point of locking mcp/ is that CI
+      # exercises the same resolved SDK the image would get, not whatever PyPI serves today.
+      - name: Install MCP dependencies (locked)
         working-directory: mcp
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.lock
 
       - name: Run MCP smoke test
         working-directory: mcp
