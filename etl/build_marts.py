@@ -2484,37 +2484,104 @@ def _light_overwrite_error(versioned: Path) -> str | None:
     return None
 
 
-def _sweep_scratch(data_dir: Path, exclude_version: str | None = None) -> None:
-    """Remove build scratch the ETL itself created: `prospect_*.duckdb.building` (a dead
-    partial build), its `.wal`, and the `.building.tmp/` DuckDB spill directory (documented
-    to reach 18GB on the droplet — the scarcest resource there is disk, so a failed build
-    must not leave it behind; the log, not the dead .building file, carries the
-    diagnostics). Called pre-build (stale leftovers from crashed runs) and in main()'s
-    try/finally (a failed build cleans up after itself; on success only the .wal/.tmp
-    leftovers still match — the .building file has already been os.replace()d away).
+# --------------------------------------------------------------------------------------
+# Build scratch: `prospect_<version>.duckdb.building` (the in-progress build), its `.wal`,
+# and the `.building.tmp/` DuckDB spill directory (documented to reach 18GB on the droplet).
+# Disk is the droplet's scarcest resource, so a dead build must not leave any of it behind —
+# but the globs used to be UNSCOPED, so a run's pre-build sweep deleted EVERY version's
+# scratch, including the live 18GB spill of a concurrent build (the midday --light run vs a
+# nightly that overran, both writing the same-day version). Sweeping is now scoped to this
+# run's version plus other versions' provably-dead leftovers, and never touches scratch that
+# was written recently enough to belong to a build still in flight.
+# --------------------------------------------------------------------------------------
+SCRATCH_STALE_HOURS = 12.0      # another version's scratch older than this is provably dead
+                                # (no build here has ever run longer than ~10h)
+SCRATCH_ACTIVE_SECONDS = 3600   # anything written more recently than this may belong to a
+                                # RUNNING build — never delete it, whatever version it is.
+                                # Generous on purpose: the cost of guessing "dead" wrongly is
+                                # a destroyed multi-hour build + its 18GB spill; the cost of
+                                # guessing "alive" wrongly is that we build into an existing
+                                # scratch file (every mart file DROPs before it CREATEs).
+_SCRATCH_RE = re.compile(r"^prospect_(.+?)\.duckdb\.building(\.wal|\.tmp)?$")
 
-    `exclude_version` spares that version's scratch (for use while a build is in flight);
-    both call sites in main() pass None. Never touches prospect_*.duckdb, current.duckdb,
-    or the sentiment cache — the patterns only match .building artifacts."""
+
+def _scratch_paths(data_dir: Path) -> dict[str, list[Path]]:
+    """Every build-scratch path in data_dir, grouped by the mart version it belongs to.
+    Never matches prospect_*.duckdb, current.duckdb or the sentiment cache."""
+    groups: dict[str, list[Path]] = {}
+    for p in sorted(data_dir.glob("prospect_*.duckdb.building*")):
+        m = _SCRATCH_RE.match(p.name)
+        if m:
+            groups.setdefault(m.group(1), []).append(p)
+    return groups
+
+
+def _scratch_age_seconds(paths: list[Path]) -> float:
+    """Seconds since the newest write anywhere in this version's scratch. The spill dir is
+    checked one level deep: DuckDB writes its temp blocks INSIDE it, and on some filesystems
+    that never touches the directory's own mtime — reading only the dir would make a
+    furiously-spilling build look idle."""
+    newest = 0.0
+    for p in paths:
+        try:
+            newest = max(newest, p.stat().st_mtime)
+            if p.is_dir():
+                for child in p.iterdir():
+                    newest = max(newest, child.stat().st_mtime)
+        except OSError:
+            continue
+    return (time.time() - newest) if newest else float("inf")
+
+
+def _remove_scratch(paths: list[Path], keep_artifact: bool = False) -> None:
+    """Delete the given scratch paths. `keep_artifact` spares the finished `.building` file
+    and its `.wal` — a validation failure keeps the artifact so it can be inspected or
+    landed without a 3-6 hour rebuild — but still removes the `.building.tmp/` spill dir,
+    which is up to 18GB nobody can do anything with."""
     import shutil
 
-    def _excluded(p: Path) -> bool:
-        return exclude_version is not None and p.name.startswith(f"prospect_{exclude_version}.")
-
-    for pattern in ("prospect_*.duckdb.building", "prospect_*.duckdb.building.wal"):
-        for p in sorted(data_dir.glob(pattern)):
-            if _excluded(p) or not p.is_file():
-                continue
-            try:
+    for p in sorted(paths):
+        is_spill = p.name.endswith(".building.tmp")
+        if keep_artifact and not is_spill:
+            print(f"[etl] kept scratch {p.name} (validation failed — see the remedy above)")
+            continue
+        try:
+            if is_spill and p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+                print(f"[etl] swept scratch dir {p.name}/")
+            elif p.is_file():
                 p.unlink()
                 print(f"[etl] swept scratch {p.name}")
-            except OSError as e:
-                print(f"[etl] WARNING: could not remove scratch {p.name}: {e}")
-    for p in sorted(data_dir.glob("prospect_*.duckdb.building.tmp")):
-        if _excluded(p) or not p.is_dir():
+        except OSError as e:
+            print(f"[etl] WARNING: could not remove scratch {p.name}: {e}")
+
+
+def _sweep_stale_scratch(data_dir: Path, version: str) -> None:
+    """PRE-BUILD sweep. Removes this run's own leftovers (a crashed earlier run of the same
+    version) plus any OTHER version's scratch that is provably dead, and leaves everything
+    else strictly alone. A version whose scratch was touched within SCRATCH_ACTIVE_SECONDS
+    is treated as a build in flight and skipped loudly — if it really is running, DuckDB's
+    own file lock stops us from opening it a moment later, which is the correct outcome."""
+    for v, paths in sorted(_scratch_paths(data_dir).items()):
+        age = _scratch_age_seconds(paths)
+        if age < SCRATCH_ACTIVE_SECONDS:
+            print(f"[etl] NOT sweeping prospect_{v}.duckdb.building* — written "
+                  f"{age / 60:.0f} min ago, a build may still be using it "
+                  f"(remove it by hand if you know it is dead)")
             continue
-        shutil.rmtree(p, ignore_errors=True)
-        print(f"[etl] swept scratch dir {p.name}/")
+        if v != version and age < SCRATCH_STALE_HOURS * 3600:
+            print(f"[etl] NOT sweeping prospect_{v}.duckdb.building* — another version's "
+                  f"scratch, only {age / 3600:.1f}h old (stale threshold "
+                  f"{SCRATCH_STALE_HOURS:.0f}h)")
+            continue
+        _remove_scratch(paths)
+
+
+def _sweep_own_scratch(data_dir: Path, version: str, keep_artifact: bool = False) -> None:
+    """POST-BUILD sweep (main()'s finally): only THIS run's scratch, which is unambiguously
+    ours to clean up. On success only the `.wal`/`.tmp` leftovers still exist — the
+    `.building` file has already been os.replace()d into place."""
+    _remove_scratch(_scratch_paths(data_dir).get(version, []), keep_artifact=keep_artifact)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -2577,8 +2644,9 @@ def main() -> int:
     # nightly never hits this only because each day gets a fresh filename; this makes
     # reruns safe regardless of restart timing. A failed/killed run leaves stale .building
     # scratch (the file, its .wal, an up-to-18GB .tmp spill dir) — swept here before the
-    # build and again in the try/finally below, so a failed run cleans up after itself.
-    _sweep_scratch(data_dir)
+    # build (scoped: this version plus provably-dead leftovers, never a live build's spill)
+    # and again in the try/finally below, so a failed run cleans up after itself.
+    _sweep_stale_scratch(data_dir, mart_version)
     building = data_dir / f"prospect_{mart_version}.duckdb.building"
 
     params = build_params()
@@ -2586,6 +2654,10 @@ def main() -> int:
     print(f"[etl] output     : {versioned}")
     t0 = time.perf_counter()
 
+    # Set only when the BUILD SUCCEEDED and the validation gate refused the swap: the
+    # finished artifact is then kept on disk (see the remedy printed below). Every other
+    # exit — success, crash, source error — cleans its scratch up as before.
+    validation_failed = False
     try:
       con = duckdb.connect(str(building))
       try:
@@ -2705,11 +2777,28 @@ def main() -> int:
           prev_mart = current.resolve() if current.exists() else None
           failures = validate_mart(building, prev_mart)
           if failures:
+              # The build itself SUCCEEDED — only the gate objected. Sweeping the finished
+              # file here would make every remedy cost a fresh 3-6 hour build and leave the
+              # operator nothing to inspect, which is how "--skip-validation" turns into a
+              # habit. Keep the artifact (the .tmp spill dir still goes) and print exactly
+              # what is on disk and what each option actually costs.
+              validation_failed = True
               print(f"\n[etl] VALIDATION FAILED — {len(failures)} problem(s); "
                     f"current.duckdb is NOT being swapped:", file=sys.stderr)
               for f in failures:
                   print(f"        - {f}", file=sys.stderr)
-              print("        (re-run with --skip-validation to swap anyway)", file=sys.stderr)
+              print(
+                  f"\n        The finished build is KEPT for inspection (only its spill dir\n"
+                  f"        was removed):  {building}\n"
+                  f"        Nothing was swapped — current.duckdb still serves the previous mart.\n"
+                  f"        None of these need a rebuild:\n"
+                  f"          inspect : duckdb -readonly {building}\n"
+                  f"          ship it : mv {building} {versioned} && \\\n"
+                  f"                    ln -sfn {versioned.name} {current}\n"
+                  f"          discard : rm -rf {building} {building}.wal\n"
+                  f"        (--skip-validation swaps unconditionally but REBUILDS from scratch;\n"
+                  f"         the next build of version {mart_version} sweeps this file.)",
+                  file=sys.stderr)
               return 1
 
       # Land the finished build atomically over the versioned name (see the .building
@@ -2736,8 +2825,10 @@ def main() -> int:
         # Scratch is owned by the tool: a failed/aborted build removes its own .building
         # file, .wal, and spill dir (disk beats post-mortem artifacts — the log has the
         # diagnostics); on success this only sweeps the .wal/.tmp leftovers, since the
-        # .building file itself was just os.replace()d into place.
-        _sweep_scratch(data_dir)
+        # .building file itself was just os.replace()d into place. The ONE exception is a
+        # validation failure, where the build finished and only the gate objected: the
+        # artifact is worth 3-6 hours and is kept (its spill dir is not).
+        _sweep_own_scratch(data_dir, mart_version, keep_artifact=validation_failed)
 
     print(f"[etl] done in {time.perf_counter() - t0:.1f}s  (version {mart_version})")
     return 0

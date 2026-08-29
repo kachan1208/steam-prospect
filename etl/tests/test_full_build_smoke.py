@@ -308,6 +308,14 @@ def test_second_build_passes_the_validation_gate(built, monkeypatch):
     assert _run(["--source", str(src), "--data-dir", str(data)]) == 0
 
 
+def _gut_source(src: Path) -> None:
+    c = sqlite3.connect(str(src))
+    c.execute(f"DELETE FROM games WHERE appid > {N_GAMES // 10}")   # -90% of the catalog
+    c.execute(f"DELETE FROM analysis_games WHERE appid > {N_GAMES // 10}")
+    c.commit()
+    c.close()
+
+
 def test_validation_gate_blocks_the_swap_on_a_gutted_source(built, monkeypatch):
     """The real defect, end to end: a source that lost most of its data must NOT reach
     current.duckdb."""
@@ -315,18 +323,58 @@ def test_validation_gate_blocks_the_swap_on_a_gutted_source(built, monkeypatch):
     monkeypatch.setattr(bm, "VALIDATE_MIN_ROWS", {})
     before = (data / "current.duckdb").resolve().read_bytes()
 
-    c = sqlite3.connect(str(src))
-    c.execute(f"DELETE FROM games WHERE appid > {N_GAMES // 10}")   # -90% of the catalog
-    c.execute(f"DELETE FROM analysis_games WHERE appid > {N_GAMES // 10}")
-    c.commit()
-    c.close()
+    _gut_source(src)
 
     rc = _run(["--source", str(src), "--data-dir", str(data)])
     assert rc == 1, "a 90% catalog loss must fail the build"
     assert (data / "current.duckdb").resolve().read_bytes() == before, (
         "current.duckdb was modified despite the validation failure"
     )
-    assert not list(data.glob("*.building")), "the failed build must sweep its own scratch"
+
+
+def test_validation_failure_keeps_the_finished_build_but_not_its_spill(built, monkeypatch,
+                                                                      capsys):
+    """A validation failure is the one exit where the BUILD succeeded — deleting the
+    finished file made the printed '--skip-validation' remedy cost a fresh 3-6 hour build
+    and left nothing to inspect. The artifact survives; the 18GB spill dir does not."""
+    src, data = built
+    monkeypatch.setattr(bm, "VALIDATE_MIN_ROWS", {})
+    _gut_source(src)
+
+    assert _run(["--source", str(src), "--data-dir", str(data)]) == 1
+    kept = list(data.glob("*.duckdb.building"))
+    assert len(kept) == 1, f"the finished build must be preserved, found {kept}"
+    assert not list(data.glob("*.building.tmp")), "the spill dir must still be swept"
+
+    # It is a real, openable mart — the point of keeping it is that it can be inspected...
+    con = duckdb.connect(str(kept[0]), read_only=True)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM mart_game").fetchone()[0] == N_GAMES // 10
+    finally:
+        con.close()
+
+    # ...and the remedy has to name it, and the previous mart it did NOT replace.
+    err = capsys.readouterr().err
+    assert kept[0].name in err and "KEPT" in err
+    assert "REBUILDS from scratch" in err, "the remedy must be honest about what a rerun costs"
+
+
+def test_a_genuine_build_failure_still_sweeps_everything(built, monkeypatch):
+    """The preservation is scoped to validation ONLY: a build that dies mid-flight still
+    owns its scratch (disk is the droplet's scarcest resource; the log has the diagnostics)."""
+    src, data = built
+    monkeypatch.setattr(bm, "VALIDATE_MIN_ROWS", {})
+
+    boom = RuntimeError("mart SQL blew up")
+
+    def explode(*_a, **_k):
+        raise boom
+
+    monkeypatch.setattr(bm, "write_meta", explode)
+    with pytest.raises(RuntimeError):
+        _run(["--source", str(src), "--data-dir", str(data)])
+    assert not list(data.glob("*.building")), "a crashed build must sweep its own scratch"
+    assert not list(data.glob("*.building.tmp"))
 
 
 def test_losing_an_optional_source_passes_the_gate_with_exemptions(tmp_path, monkeypatch,
