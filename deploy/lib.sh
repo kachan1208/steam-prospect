@@ -23,27 +23,75 @@ prospect_push_metrics() {
     return 0
 }
 
-# prospect_health_wait [TIMEOUT_S] — poll the app's /api/health until it answers or the
-# budget (default 120s) runs out. Probes INSIDE the container first (docker exec + the
-# image's own curl against the container port 8080 — immune to whatever host port mapping
-# `docker run` used, which is not recorded in this repo), then falls back to the host port.
+# prospect_http_code PATH — echo the HTTP status of PATH ("000" if nothing answered).
+# Probes INSIDE the container first (docker exec + the image's own curl against the container
+# port 8080 — immune to whatever host port mapping `docker run` used, which is not recorded in
+# this repo), then falls back to the host port.
 # NEEDS-VERIFICATION: the host-port fallback assumes -p 8080:8080; confirm with
 # `docker port prospect` on the droplet and export PROSPECT_HEALTH_HOST_PORT if different.
+prospect_http_code() {
+    local path="$1" code=""
+    code=$(docker exec prospect curl -s -o /dev/null -m 5 -w '%{http_code}' \
+               "http://localhost:8080${path}" 2>/dev/null) || code=""
+    if [ -z "$code" ] || [ "$code" = "000" ]; then
+        code=$(curl -s -o /dev/null -m 5 -w '%{http_code}' \
+                   "http://localhost:${PROSPECT_HEALTH_HOST_PORT:-8080}${path}" 2>/dev/null) || code=""
+    fi
+    echo "${code:-000}"
+}
+
+# prospect_health_body_ok — the legacy path, for an image that predates /api/health/ready.
+# /api/health is LIVENESS: it returns 200 even when the mart failed to load, with a body of
+# {"status":"degraded"}. So parse the status field instead of trusting the 200 — otherwise a
+# restart that comes back serving NO DATA is reported as verified, which is exactly the
+# failure the restart verification was added to catch.
+prospect_health_body_ok() {
+    local body=""
+    body=$(docker exec prospect curl -s -m 5 "http://localhost:8080/api/health" 2>/dev/null) || body=""
+    if [ -z "$body" ]; then
+        body=$(curl -s -m 5 "http://localhost:${PROSPECT_HEALTH_HOST_PORT:-8080}/api/health" 2>/dev/null) || body=""
+    fi
+    case "$body" in
+        *'"status":"ok"'*|*'"status": "ok"'*) return 0 ;;
+    esac
+    return 1
+}
+
+# prospect_health_wait [TIMEOUT_S] — poll until the app is READY to serve data, or the budget
+# (default 120s) runs out.
+#
+# READY, not merely answering: the probe is /api/health/ready, which is 200 only once the
+# analytics DB is open and 503 until then. /api/health is a liveness probe that returns 200
+# with status "degraded" when the mart failed to load — polling that reported "verified" for
+# a restart that serves nothing.
+#
+# 404 means the running image predates /api/health/ready (it ships with the API branch that
+# adds it), NOT that the app is unhealthy — fall back to parsing /api/health's status field,
+# which is the same question asked of an older contract. Anything else (503 not-ready, 000
+# nothing listening) keeps polling until the deadline.
 prospect_health_wait() {
-    local budget="${1:-120}" deadline
+    local budget="${1:-120}" deadline code legacy_noted=0
     deadline=$(( $(date -u +%s) + budget ))
     while :; do
-        if docker exec prospect curl -sf -m 5 "http://localhost:8080/api/health" >/dev/null 2>&1 \
-           || curl -sf -m 5 "http://localhost:${PROSPECT_HEALTH_HOST_PORT:-8080}/api/health" >/dev/null 2>&1; then
-            return 0
-        fi
+        code=$(prospect_http_code /api/health/ready)
+        case "$code" in
+            200) return 0 ;;
+            404)
+                if [ "$legacy_noted" -eq 0 ]; then
+                    echo "note: [lib] /api/health/ready is absent (pre-readiness image) —" \
+                         "verifying via /api/health's status field instead" >&2
+                    legacy_noted=1
+                fi
+                prospect_health_body_ok && return 0
+                ;;
+        esac
         [ "$(date -u +%s)" -ge "$deadline" ] && return 1
         sleep 5
     done
 }
 
-# prospect_restart_verify [TIMEOUT_S] — docker restart + health poll. Nonzero if the restart
-# command failed OR the app never answered /api/health. `docker restart` exiting 0 only
+# prospect_restart_verify [TIMEOUT_S] — docker restart + readiness poll. Nonzero if the
+# restart command failed OR the app never became ready. `docker restart` exiting 0 only
 # means dockerd accepted the request — a container that crash-loops on boot still
 # "restarted" successfully as far as that exit code is concerned, which is exactly how a
 # failed nightly restart used to report OK.
