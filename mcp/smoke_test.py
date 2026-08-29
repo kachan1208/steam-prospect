@@ -306,18 +306,42 @@ def main() -> None:
         assert "error" in bad_aspect and "aspect must be one of" in bad_aspect["error"]
         print("\n[OK] aspect_reviews rejects unknown aspects")
 
-    # 15. tag_suggest — works on any mart (reads mart_game.top_tags); the second call must
-    # hit the in-process frequency cache and agree with the first.
-    sugg = srv.tag_suggest("rogue", limit=5)
-    show("tag_suggest('rogue')", sugg)
+    # 15. tag_suggest — works on any mart (reads mart_game.top_tags). The needle is DERIVED
+    # from a tag this mart actually carries: a hardcoded "rogue" matches nothing on a small
+    # fixture, and every assertion below would then pass over an empty list without testing
+    # anything. Asserting a known-present tag comes back is what makes the filter real.
+    all_tags = srv.tag_suggest("", limit=5)
+    show("tag_suggest('')  # most common tags", all_tags)
+    assert all_tags["tags"], "mart_game.top_tags yielded no tags at all"
+    assert all_tags["n_returned"] <= 5
+    probe = all_tags["tags"][0]["tag"]
+    needle = probe[: max(3, len(probe) // 2)].lower()
+    sugg = srv.tag_suggest(needle, limit=50)
+    show(f"tag_suggest({needle!r})", sugg)
     assert isinstance(sugg["tags"], list) and sugg["n_returned"] == len(sugg["tags"])
+    assert any(t["tag"] == probe for t in sugg["tags"]), (
+        f"tag_suggest({needle!r}) lost {probe!r}, which this mart definitely has"
+    )
     for t in sugg["tags"]:
-        assert "tag" in t and "n_games" in t
-        assert "rogue" in t["tag"].lower()
-    assert srv.tag_suggest("rogue", limit=5) == sugg, "tag_suggest must be deterministic (cached)"
-    top_tags = srv.tag_suggest("", limit=3)
-    assert top_tags["n_returned"] <= 3
-    print(f"\n[OK] tag_suggest: {sugg['n_returned']} matches for 'rogue', cache consistent")
+        assert "tag" in t and "n_games" in t and t["n_games"] > 0
+        assert needle in t["tag"].lower()
+    # The rewrite's actual invariant: the distinct-tag list is scanned ONCE and every later
+    # call filters it in memory. Spy on query() to prove the repeat call touches no DB.
+    _orig_query, seen_sql = srv.query, []
+
+    def _spy_query(sql, params=None):
+        seen_sql.append(sql)
+        return _orig_query(sql, params)
+
+    srv.query = _spy_query
+    try:
+        again = srv.tag_suggest(needle, limit=50)
+    finally:
+        srv.query = _orig_query
+    assert not seen_sql, f"tag_suggest re-queried the DB instead of using its cache: {seen_sql}"
+    assert again == sugg, "tag_suggest must be deterministic (cached)"
+    print(f"\n[OK] tag_suggest: {sugg['n_returned']} matches for {needle!r} (incl. {probe!r}), "
+          "repeat call served entirely from the in-process cache")
 
     # 16. channel_mix + channel_buzz — tolerant: the channel marts are additive (and
     # press-only since 2026-08-25); absence must yield the tools' clear error dict.
@@ -334,15 +358,37 @@ def main() -> None:
     show("channel_buzz('rising')", cb)
     if "error" in cb:
         assert "mart_channel_buzz" in cb["error"], f"unexpected channel_buzz error: {cb['error']!r}"
-        print("\n[OK] channel_buzz degraded cleanly (marts not built yet — run `task etl`)")
+        # Say so loudly: on a mart without these tables the include_series invariant below
+        # is UNVERIFIED here, not verified-and-passing. (api/tests/test_mcp_mount.py
+        # ::test_channel_buzz_lean_output_equals_full_output_minus_series seeds the marts
+        # and covers it in CI, which this fixture-less path cannot.)
+        print("\n[SKIP] channel_buzz: marts not in this DB — degraded cleanly, but the "
+              "include_series invariant was NOT exercised (run `task etl`)")
     else:
         assert isinstance(cb["terms"], list) and cb["n_returned"] == len(cb["terms"])
-        for term in cb["terms"]:
-            assert "by_channel" in term and "series" not in term  # series only when asked
-        cb_series = srv.channel_buzz("rising", limit=2, include_series=True)
-        assert all("series" in t and "by_channel" in t for t in cb_series["terms"])
-        print(f"\n[OK] channel_buzz: {cb['n_returned']} terms, by_channel always attached, "
-              "series only with include_series=True")
+        assert cb["terms"], "channel_buzz found the marts but returned no rising terms"
+        # The invariant of the include_series=False rewrite (per-(term, channel) SUM in
+        # SQL instead of rolling up the shipped per-period detail in Python): the cheap
+        # path must equal the expensive path MINUS the series field, same limit both times.
+        cb_series = srv.channel_buzz("rising", limit=5, include_series=True)
+        assert [t["term"] for t in cb_series["terms"]] == [t["term"] for t in cb["terms"]]
+
+        def _norm(term: dict) -> dict:
+            # by_channel is ordered by reach; ties are free to break either way across the
+            # two code paths, so compare the VALUES, not that ordering.
+            out = {k: v for k, v in term.items() if k != "series"}
+            out["by_channel"] = sorted(out["by_channel"], key=lambda c: c["channel"])
+            return out
+
+        for lean, full in zip(cb["terms"], cb_series["terms"]):
+            assert "series" not in lean, "include_series=False must not ship the series"
+            assert full["series"], "include_series=True must attach a non-empty series"
+            assert _norm(lean) == _norm(full), (
+                f"include_series=False diverged from the full path for {lean['term']!r}: "
+                f"{_norm(lean)} != {_norm(full)}"
+            )
+        print(f"\n[OK] channel_buzz: {cb['n_returned']} terms, include_series=False output "
+              "== include_series=True output minus `series`")
 
     print("\nALL SMOKE TESTS PASSED")
 

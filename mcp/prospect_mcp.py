@@ -240,6 +240,43 @@ _NO_FLOOR_MISSING = (
     "build). Use min_reviews=50 or 100, or re-run the ETL (`task etl`) and retry."
 )
 
+# The two marts EVERY tool path ultimately reads. Not a capability probe: their absence is
+# not a degradable feature gap, it is a broken analytics DB.
+_CORE_MARTS = ("mart_game", "mart_niche")
+
+
+def missing_core_marts() -> list[str]:
+    """Names from _CORE_MARTS this DB does not carry as a NON-EMPTY table ([] = healthy).
+
+    The deliberate exception to the laziness above, and the one query this module runs
+    before a tool is called. The hosted API (api/app/mcp_mount.py) calls it once at load
+    time and refuses to mount /mcp when it returns anything: with every capability probe
+    lazy, a mart-less or half-built current.duckdb (failed/OOM-killed nightly ETL) would
+    otherwise import cleanly, advertise all 25 tools, and then raise raw
+    duckdb.CatalogException inside every connected Claude client with nothing in the
+    startup log to say the MCP was broken. Two cheap queries (catalog lookup + COUNT).
+    Standalone stdio runs never call it — a human running `python prospect_mcp.py`
+    against a broken DB sees the CatalogException directly, which is the right answer
+    there.
+    """
+    marks = ", ".join("?" for _ in _CORE_MARTS)
+    present = {
+        r["table_name"]
+        for r in query(
+            f"SELECT table_name FROM information_schema.tables WHERE table_name IN ({marks})",
+            list(_CORE_MARTS),
+        )
+    }
+    missing = [t for t in _CORE_MARTS if t not in present]
+    if missing:
+        return missing
+    # Table names are this module's own literals, never caller input — safe to inline.
+    counts = query_one(
+        "SELECT " + ", ".join(f'(SELECT COUNT(*) FROM {t}) AS "{t}"' for t in _CORE_MARTS)
+    ) or {}
+    return [t for t in _CORE_MARTS if not counts.get(t)]
+
+
 # Shared caveats for every players/CCU read — the two ways these series lie if unstated.
 _PLAYERS_POINT_SAMPLE_CAVEAT = (
     "players values are nightly point samples (one capture per game per day, ~21-22:00 UTC "

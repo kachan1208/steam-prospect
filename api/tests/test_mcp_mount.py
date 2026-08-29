@@ -1,6 +1,7 @@
 """The mounted MCP must not run tool bodies on the event loop (one slow DuckDB read
 would freeze every HTTP request on the worker), must keep logging calls, must rotate the
-call log at its size cap, and must close its DuckDB connection via the shutdown hook.
+call log at its size cap, must refuse to mount at all against a DB whose core marts are
+missing, and must close its DuckDB connection via the shutdown hook.
 
 Loads the real mcp/prospect_mcp.py through the real mount path, pointed at the committed
 CI smoke fixture (.github/fixtures/mcp_smoke_mart.db) — prospect_mcp reads the
@@ -13,6 +14,7 @@ import json
 import threading
 
 import anyio
+import duckdb
 import pytest
 
 from app import mcp_mount
@@ -100,6 +102,24 @@ def test_call_log_rotates_at_size_cap(mcp_server):
     lines = log_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1, "rotated live log should hold only the post-rotation entry"
     assert json.loads(lines[0])["tool"] == "tag_suggest"
+
+
+def test_missing_core_marts_refuses_to_mount(monkeypatch, tmp_path):
+    # With every capability probe lazy, nothing else queries the DB before a tool call —
+    # so without the eager core-mart check the mount would succeed here and all 25 tools
+    # would raise raw CatalogException inside the client. Contract: (None, None).
+    empty_db = tmp_path / "martless.duckdb"
+    conn = duckdb.connect(str(empty_db))
+    conn.execute("CREATE TABLE junk (a INTEGER)")
+    conn.close()
+    monkeypatch.setenv("PROSPECT_ANALYTICS_DB_PATH", str(empty_db))
+    monkeypatch.setattr(settings, "enable_mcp", True)
+    monkeypatch.setattr(settings, "mcp_call_log_path", str(tmp_path / "calls.jsonl"))
+    try:
+        assert mcp_mount.load_prospect_mcp() == (None, None)
+        assert mcp_mount._loaded_module is None, "the refused module's conn must be closed"
+    finally:
+        mcp_mount.close_prospect_mcp()
 
 
 def test_close_hook_closes_module_connection(mcp_server):

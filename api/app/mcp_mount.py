@@ -60,9 +60,29 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
             print("[api] MCP: could not create import spec; skipping /mcp mount.")
             return None, None
         module = importlib.util.module_from_spec(spec)
+        # Re-load counterpart to close_prospect_mcp(): exec_module opens a NEW read-only
+        # DuckDB connection, so release whatever a previous load left behind first —
+        # otherwise a second load in this process (tests, a reload hook) leaks the old one.
+        close_prospect_mcp()
         spec.loader.exec_module(module)  # defines the tools; guarded __main__ won't run
         global _loaded_module
         _loaded_module = module  # conn is open from here on — track it for shutdown close
+
+        # The one EAGER check, and the reason this module's "no marts -> (None, None)"
+        # contract still holds now that prospect_mcp's capability probes are all lazy:
+        # nothing else queries the DB before a tool is called, so a mart-less or
+        # half-built current.duckdb (the failed / OOM-killed nightly ETL) would import
+        # fine, mount /mcp, advertise all 25 tools, and then raise raw CatalogException
+        # inside every connected Claude client — with no startup line saying so.
+        missing = module.missing_core_marts()
+        if missing:
+            print(
+                f"[api] MCP: ERROR — analytics DB {module.DB_PATH} is missing or has empty "
+                f"core marts {missing}; NOT mounting /mcp (the tools would all fail at call "
+                "time). Re-run the ETL and restart."
+            )
+            close_prospect_mcp()
+            return None, None
 
         server = module.mcp
         # Stateless: each request is independent — right for many unrelated Claude clients
