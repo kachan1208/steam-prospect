@@ -2108,16 +2108,40 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
 
             # Full in-scope set, read back from the cache (untouched old rows + just-inserted new
             # ones alike). Same shape/columns as the uncached branch above.
+            #
+            # BUILT IN HASH BUCKETS (2026-08-31), not one statement. This materialises the whole
+            # scored corpus — 21,679,495 mention rows in, 17,441,773 out, and growing by ~1M a
+            # night since review_refresh started working. As one statement it spilled past every
+            # budget it was given and killed two consecutive nightlies:
+            #   08-30: failed to offload data block (20.6 GiB/20.6 GiB used)  [= all free disk]
+            #   08-31: failed to offload data block (14.9 GiB/15.0 GiB used)  [= the new cap]
+            # Neither preserve_insertion_order=false nor swapping the dedup window for a hash
+            # aggregate was enough on its own: the output is ~17.4M rows no matter how it is
+            # computed, and 2500MB of memory cannot hold the intermediates for that in one go.
+            #
+            # Bucketing on hash(recommendationid) is SAFE because recommendationid is part of the
+            # grouping key — every row of a given (appid, recommendationid, aspect) group lands in
+            # the same bucket, so no group is ever split and each bucket's aggregate is final.
+            # Peak memory is one bucket's worth; the cost is N scans of the cache instead of one.
+            _n_buckets = max(1, int(os.environ.get("PROSPECT_SENTIMENT_BUCKETS", "8")))
             con.execute(
-                f"""
-                CREATE TEMP TABLE stg_aspect_mention_sentiment AS
+                """
+                CREATE TEMP TABLE stg_aspect_mention_sentiment(
+                    appid INTEGER, recommendationid VARCHAR, aspect VARCHAR,
+                    kw_aspect VARCHAR, compound DOUBLE, text_sentiment VARCHAR)
+                """
+            )
+            for _b in range(_n_buckets):
+                con.execute(
+                    f"""
+                INSERT INTO stg_aspect_mention_sentiment
                 -- The keyword arm only nominated this window; the classifier decides what it is
                 -- ABOUT. Rows it reads as NONE are dropped outright — that class alone is 22% of
                 -- keyword matches, and the regex had no way to express it. Fall back to the
                 -- keyword aspect only when no verdict exists (model absent at scoring time).
-                -- QUALIFY keeps one row per (review, aspect): several keyword arms of the same
-                -- review routinely resolve to the same true aspect, and without this the winner
-                -- would be counted two or three times.
+                -- The aggregate below keeps one row per (review, aspect): several keyword arms of
+                -- the same review routinely resolve to the same true aspect, and without that the
+                -- winner would be counted two or three times.
                 SELECT appid, recommendationid, aspect, kw_aspect, compound,
                        -- Praise/complaint now comes from the model's sentiment head, not VADER's
                        -- compound. On a blind 120-window sample VADER agreed with a human read
@@ -2139,9 +2163,12 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
                     -- growing — to keep one row per group. That sort is what killed the 08-30
                     -- and 08-31 builds: "failed to offload data block (20.6 GiB/20.6 GiB used)",
                     -- i.e. it spilled until the disk was gone, 5.35h in, with nothing built.
-                    -- arg_max is the same pick (highest clf_margin in the group) done as a
-                    -- streaming hash aggregate, so peak spill is bounded by the number of
-                    -- GROUPS rather than by the number of rows.
+                    -- arg_max is the same pick (highest clf_margin in the group) done as a hash
+                    -- aggregate, which avoids the global sort. On its own that was NOT enough —
+                    -- measured, not assumed: the 08-31 run still hit the cap, because the groups
+                    -- here are nearly as numerous as the rows (17.4M groups from 21.7M rows, since
+                    -- most reviews mention an aspect once). The bucketing above is what actually
+                    -- bounds it; this just removes a sort that bought nothing.
                     --
                     -- COALESCE(clf_margin, -1e30) reproduces NULLS LAST exactly: arg_max
                     -- ignores rows whose ordering value is NULL, so a group whose margins are
@@ -2169,11 +2196,12 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
                     -- the delta materialized (see above); this join only needs appid + id.
                     FROM cache.aspect_mention m
                     JOIN _sent_pool_meta p ON p.recommendationid = m.recommendationid
-                    WHERE m.clf_aspect IS NULL OR m.clf_aspect <> 'NONE'
+                    WHERE (m.clf_aspect IS NULL OR m.clf_aspect <> 'NONE')
+                      AND hash(m.recommendationid) % {_n_buckets} = {_b}
                     GROUP BY p.appid, m.recommendationid, COALESCE(m.clf_aspect, m.aspect)
                 )
                 """
-            )
+                )
             n_scored = con.execute("SELECT COUNT(*) FROM stg_aspect_mention_sentiment").fetchone()[0]
             print(f"[etl] aspect sentiment cache: {n_new_reviews:,} new review(s) scored "
                   f"({n_new_mentions:,} new mention rows); {n_scored:,} mention rows in scope total")

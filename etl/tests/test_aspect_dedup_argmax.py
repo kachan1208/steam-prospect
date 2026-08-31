@@ -79,3 +79,34 @@ assert old == new, "CONTENT DIFFERS"
 # The r3 group (all-NULL margins) is the one a naive arg_max would silently drop.
 assert any(r[1] == "r3" for r in new), "r3 (all-NULL margins) was DROPPED — sentinel failed"
 print("\nIDENTICAL — including the all-NULL-margin group that a naive arg_max would drop")
+
+
+# --- bucketing: splitting the build by hash(recommendationid) must change nothing -----------
+# The grouping key CONTAINS recommendationid, so every row of a group hashes to the same
+# bucket and each bucket's aggregate is final. If that reasoning were wrong, a group split
+# across buckets would emit one row per bucket instead of one row total — which this catches.
+def _bucketed(n_buckets: int) -> list:
+    con.execute("DROP TABLE IF EXISTS out_b")
+    con.execute("""CREATE TABLE out_b(appid INTEGER, recommendationid VARCHAR, aspect VARCHAR,
+                                      kw_aspect VARCHAR, compound DOUBLE, clf_sentiment VARCHAR)""")
+    for b in range(n_buckets):
+        con.execute(f"""
+        INSERT INTO out_b
+        SELECT appid, recommendationid, aspect, kw_aspect, compound, clf_sentiment FROM (
+            SELECT p.appid, m.recommendationid, COALESCE(m.clf_aspect, m.aspect) AS aspect,
+                   arg_max(m.clf_sentiment, COALESCE(m.clf_margin, -1e30)) AS clf_sentiment,
+                   arg_max(m.aspect,        COALESCE(m.clf_margin, -1e30)) AS kw_aspect,
+                   arg_max(m.compound,      COALESCE(m.clf_margin, -1e30)) AS compound
+            FROM m JOIN p ON p.recommendationid = m.recommendationid
+            WHERE (m.clf_aspect IS NULL OR m.clf_aspect <> 'NONE')
+              AND hash(m.recommendationid) % {n_buckets} = {b}
+            GROUP BY p.appid, m.recommendationid, COALESCE(m.clf_aspect, m.aspect)
+        )""")
+    return con.execute("SELECT * FROM out_b ORDER BY appid, recommendationid, aspect").fetchall()
+
+
+for nb in (1, 2, 3, 8, 16):
+    got = _bucketed(nb)
+    assert got == old, f"bucketing with n={nb} changed the result:\n  want={old}\n   got={got}"
+    print(f"buckets={nb:>2}: identical ({len(got)} rows)")
+print("bucketing is order-invariant and splits no group")
