@@ -2131,28 +2131,47 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
                                      WHEN compound <= {SENTIMENT_NEG_THRESHOLD} THEN 'complaint'
                                      ELSE 'neutral' END) AS text_sentiment
                 FROM (
+                    -- ONE ROW PER (appid, review, aspect), by hash aggregate rather than a
+                    -- window (2026-08-31). This was:
+                    --     row_number() OVER (PARTITION BY ... ORDER BY clf_margin DESC NULLS LAST)
+                    --     ... WHERE rn = 1
+                    -- which makes DuckDB SORT the entire in-scope cache — 15,051,784 rows and
+                    -- growing — to keep one row per group. That sort is what killed the 08-30
+                    -- and 08-31 builds: "failed to offload data block (20.6 GiB/20.6 GiB used)",
+                    -- i.e. it spilled until the disk was gone, 5.35h in, with nothing built.
+                    -- arg_max is the same pick (highest clf_margin in the group) done as a
+                    -- streaming hash aggregate, so peak spill is bounded by the number of
+                    -- GROUPS rather than by the number of rows.
+                    --
+                    -- COALESCE(clf_margin, -1e30) reproduces NULLS LAST exactly: arg_max
+                    -- ignores rows whose ordering value is NULL, so a group whose margins are
+                    -- ALL NULL (no classifier verdict — the documented model-absent path)
+                    -- would otherwise vanish from the mart entirely instead of falling back to
+                    -- the VADER band below. The sentinel keeps those groups and still ranks
+                    -- them behind any real margin.
+                    --
+                    -- Ties are resolved arbitrarily, exactly as row_number() did — same
+                    -- semantics, and nothing downstream depends on which tied row wins because
+                    -- the tied rows agree on the aspect that keys the group.
                     SELECT p.appid,
                            m.recommendationid,
                            COALESCE(m.clf_aspect, m.aspect) AS aspect,
-                           m.clf_sentiment,
+                           arg_max(m.clf_sentiment, COALESCE(m.clf_margin, -1e30)) AS clf_sentiment,
                            -- The arm whose regex CUT this window, kept alongside the verdict.
                            -- mart_game_aspect_reviews re-extracts the excerpt text with one
                            -- aspect's keyword regex, and after reassignment the displayed aspect
                            -- is no longer the one that matched — extracting by it yields '' and
                            -- the user sees an empty excerpt. Extracting by kw_aspect returns the
                            -- exact window the classifier actually judged.
-                           m.aspect AS kw_aspect,
-                           m.compound,
-                           row_number() OVER (
-                               PARTITION BY p.appid, m.recommendationid, COALESCE(m.clf_aspect, m.aspect)
-                               ORDER BY m.clf_margin DESC NULLS LAST
-                           ) AS rn
+                           arg_max(m.aspect, COALESCE(m.clf_margin, -1e30)) AS kw_aspect,
+                           arg_max(m.compound, COALESCE(m.clf_margin, -1e30)) AS compound
                     -- _sent_pool_meta, not _sent_pool: the pool's text was shed right after
                     -- the delta materialized (see above); this join only needs appid + id.
                     FROM cache.aspect_mention m
                     JOIN _sent_pool_meta p ON p.recommendationid = m.recommendationid
                     WHERE m.clf_aspect IS NULL OR m.clf_aspect <> 'NONE'
-                ) WHERE rn = 1
+                    GROUP BY p.appid, m.recommendationid, COALESCE(m.clf_aspect, m.aspect)
+                )
                 """
             )
             n_scored = con.execute("SELECT COUNT(*) FROM stg_aspect_mention_sentiment").fetchone()[0]
