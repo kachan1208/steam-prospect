@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 
 import type { Dimension } from "./api";
+import { OPP_WATCH_SCORE } from "./radarVerdict";
 
 /**
  * The watchlist — a localStorage-backed store of niches and games the user wants to keep an
@@ -84,7 +85,12 @@ export const METRIC_META: Record<
   }
 > = {
   players_trend_7d_pct: { label: "Players 7d", unit: "percent", defaultComparator: "gt", defaultThreshold: 20 },
-  opportunity_v2: { label: "Opp v2", unit: "score", defaultComparator: "gt", defaultThreshold: 80 },
+  // Default 80 -> OPP_WATCH_SCORE (2026-08-31). 80 was unreachable: the OLD score's
+  // catalog maximum was 63.7, so this alert could never fire for any niche. The rebuilt
+  // score reaches 86.7, and OPP_WATCH_SCORE is the Radar's own "scores like an enter" bar
+  // — the same constant the board and NicheFinder use, so a saved alert means the same
+  // thing everywhere.
+  opportunity_v2: { label: "Opp v2", unit: "score", defaultComparator: "gt", defaultThreshold: OPP_WATCH_SCORE },
   saturation_yoy: { label: "Saturation YoY", unit: "fraction_percent", defaultComparator: "gt", defaultThreshold: 0 },
   price_initial: { label: "Price", unit: "usd", defaultComparator: "lt", defaultThreshold: 14.99 },
 };

@@ -17,6 +17,9 @@ import {
   type Window,
 } from "../lib/api";
 import { fmtCompact, fmtInt, fmtMonths, fmtPct, fmtSigned, fmtUsd } from "../lib/format";
+// The "strong score" bar and the supply bars are the Radar's own — one set of constants,
+// so the table, the board and the mart cannot disagree about what they mean.
+import { ENTRANT_RATIO_CATALOG_NORM, OPP_WATCH_SCORE, SAT_FLOOD_YOY } from "../lib/radarVerdict";
 import { useDebounced } from "../lib/useDebounced";
 import { usePageTitle } from "../lib/usePageTitle";
 // From the leaf module, NEVER from pages/NicheCombined (which is where these lived until
@@ -406,7 +409,7 @@ export default function NicheFinder() {
       columnHelper.accessor("opportunity_v2", {
         header: () => (
           <SortLabel
-            label="Opp v2" help="The headline score. Calculated: 0.5×demand − 0.35×competition + 0.3×quality gap, floored at 0, then × the decline gate (0.5–1.0; shrinks when the release pipeline contracts or newcomers earn under the back catalog). '0.0 floored' = the formula went negative: crowding outweighed demand + quality — a real verdict, not missing data."
+            label="Opp v2" help="The headline score, and the same model the Radar board rings on: a weighted blend of momentum (demand growth — 50 at flat, 88 at the radar's +40%/24m 'enter' bar), market pull (typical revenue + audience size), revenue spread (50 exactly at the 0.85 winner-take-most bar) and quality gap, then multiplied by the supply brake (0.35–1.0; bites when the release pipeline outgrows demand, or when newcomers earn under the catalog norm). A missing input is skipped, never counted as zero."
             col="opportunity_v2"
             active={sort === "opportunity_v2"}
             order={order}
@@ -416,22 +419,37 @@ export default function NicheFinder() {
         cell: (info) => {
           const v = info.getValue();
           const row = info.row.original;
-          const gate = row.decline_gate;
-          const floored = v === 0;
-          const strong = v != null && v >= 70;
-          // The row's REAL numbers substituted into the formula, so the hover answers
-          // "why is it this value" without leaving the table.
-          const d = row.demand, c = row.competition, q = row.quality_gap;
-          const raw = d != null && c != null && q != null ? 0.5 * d - 0.35 * c + 0.3 * q : null;
+          const brake = row.supply_brake;
+          // >= OPP_WATCH_SCORE is the "scores like a niche the radar would say enter" bar
+          // (median of the enter ring on the live catalog) — one constant, shared with the
+          // board, so the table and the radar can't disagree about what "strong" means.
+          const strong = v != null && v >= OPP_WATCH_SCORE;
+          // The row's REAL sub-scores substituted into the formula, so the hover answers
+          // "why is it this value" without leaving the table. Absent on marts that predate
+          // the 2026-08-31 rebuild — then the generic explanation stands in.
+          const terms: [string, number | null | undefined, number][] = [
+            ["momentum", row.momentum, 0.4],
+            ["market", row.market_pull, 0.22],
+            ["spread", row.revenue_spread, 0.2],
+            ["quality", row.quality_gap, 0.18],
+          ];
+          const live = terms.filter(([, n]) => n != null);
+          // The blend RENORMALISES over the terms that exist, so the printed equation has
+          // to show the divisor — otherwise the products visibly don't reach the score
+          // whenever a sub-score is null (an emerging niche has no momentum).
+          const liveWeight = live.reduce((a, [, , w]) => a + w, 0);
+          const skipped = terms.filter(([, n]) => n == null).map(([label]) => label);
           const calc =
-            raw != null
-              ? `0.5×${d!.toFixed(1)} − 0.35×${c!.toFixed(1)} + 0.3×${q!.toFixed(1)} = ${raw >= 0 ? "+" : ""}${raw.toFixed(1)}` +
-                (raw < 0 ? " → floored to 0" : "") +
-                (gate != null ? ` → × gate ${gate.toFixed(2)} = ${v != null ? v.toFixed(1) : "—"}` : "")
+            live.length > 0 && brake != null
+              ? `${live.map(([label, n, w]) => `${label} ${n!.toFixed(0)}×${w.toFixed(2)}`).join(" + ")}` +
+                (skipped.length > 0
+                  ? ` ÷ ${liveWeight.toFixed(2)} (${skipped.join(" + ")} unknown — skipped, never counted as 0)`
+                  : "") +
+                ` → × supply brake ${brake.toFixed(2)} = ${v != null ? v.toFixed(1) : "—"}`
               : null;
-          const title = floored
-            ? `${calc}\n\nThe competition penalty (C ${c?.toFixed(0)}) outweighs demand (D ${d?.toFixed(0)}) + quality gap (Q ${q?.toFixed(0)}): a crowded niche whose typical game earns little. Big audience ≠ good entry.`
-            : calc ?? "0.5×demand − 0.35×competition + 0.3×quality gap, × the decline gate";
+          const title =
+            calc ??
+            "Blend of momentum + market pull + revenue spread + quality gap, × the supply brake";
           return (
             <div className="flex items-baseline gap-1.5" title={title}>
               <span
@@ -440,21 +458,50 @@ export default function NicheFinder() {
               >
                 {v != null ? v.toFixed(1) : "—"}
               </span>
-              {gate != null && gate < 0.995 && (
+              {brake != null && brake < 0.995 && (
                 <span
                   className="tabular"
                   style={{ fontSize: 10, color: PAPER_50 }}
                   title={(() => {
-                    const satSev = Math.min(1, Math.max(0, -(row.saturation_yoy ?? 0) / 0.3));
-                    const entSev = Math.min(1, Math.max(0, (1 - (row.entrant_ratio ?? 1)) / 0.5));
-                    const driver =
-                      satSev >= entSev
-                        ? `releases ${((row.saturation_yoy ?? 0) * 100).toFixed(1)}%/yr (severity ${satSev.toFixed(2)})`
-                        : `newcomers earn ${(row.entrant_ratio ?? 1).toFixed(2)}× the back catalog (severity ${entSev.toFixed(2)})`;
-                    return `Decline gate ×${gate.toFixed(2)} = 1 − 0.5×max(pipeline, entrants severity) — driven by ${driver}`;
+                    // supply_room = MIN(flood_room, entrant_room), so the driver is
+                    // whichever of the two is LOWER — not whichever raw signal looks bad.
+                    // Naming it from `saturation_yoy > SAT_FLOOD_YOY` alone gets it wrong
+                    // exactly when the score most needs explaining: a niche whose demand
+                    // is outrunning a fast pipeline has flood_room 100 and is braked by
+                    // its entrants, and vice versa. Both sub-scores are recomputed here
+                    // from the row's own raw columns (same formula as mart_niche.sql).
+                    const sat = row.saturation_yoy;
+                    const er = row.entrant_ratio;
+                    const trend = row.demand_trend_24m_pct;
+                    const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+                    const demandG = trend == null ? 0 : Math.log(Math.max(1 + trend / 100, 0.001)) / 2;
+                    const floodRoom =
+                      sat == null
+                        ? null
+                        : 100 *
+                          (1 -
+                            clamp01(
+                              (Math.log(Math.max(1 + sat, 0.001)) - demandG) /
+                                (2 * Math.log(1 + SAT_FLOOD_YOY)),
+                            ));
+                    const entrantRoom =
+                      er == null
+                        ? null
+                        : 100 * clamp01((er - 0.5) / (ENTRANT_RATIO_CATALOG_NORM - 0.5));
+                    const floodDriver =
+                      sat != null &&
+                      (entrantRoom == null || (floodRoom != null && floodRoom <= entrantRoom));
+                    const driver = floodDriver
+                      ? `the release pipeline is growing ${((sat ?? 0) * 100).toFixed(0)}%/yr — faster than demand${
+                          trend != null ? ` (${trend >= 0 ? "+" : ""}${trend.toFixed(0)}% / 24m)` : ""
+                        }`
+                      : er != null
+                        ? `newcomers earn ${er.toFixed(2)}× the back catalog, under the ~${ENTRANT_RATIO_CATALOG_NORM} catalog norm`
+                        : "supply is outrunning demand";
+                    return `Supply brake ×${brake.toFixed(2)} — ${driver}. The brake takes the WORSE of the two supply reads, so either alone can sink the score.`;
                   })()}
                 >
-                  ×{gate.toFixed(2)}
+                  ×{brake.toFixed(2)}
                 </span>
               )}
             </div>

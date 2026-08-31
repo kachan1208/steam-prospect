@@ -58,8 +58,39 @@
  *     1.15 recent/prior RATIO form would express.
  *   - winner_concentration is a 0..1 share; > 0.85 is the winner-take-most flag the
  *     MCP guidance already uses.
- *   - opportunity_v2 is the 0..100 v2 score; >= 60 is "notable" (NicheFinder bolds
- *     at >= 70 = "strong").
+ *   - opportunity_v2 is the 0..100 v2 score. REBUILT 2026-08-31 out of this file's own
+ *     thresholds — see ONE MODEL, TWO VIEWS below. >= OPP_WATCH_SCORE is "notable".
+ *
+ * ONE MODEL, TWO VIEWS (2026-08-31). Until this rebuild the board and the score were two
+ * gradings that disagreed: measured on 219 live niches (tag / 24m / min50 — this board's
+ * pinned cut), median opportunity_v2 by ring ran enter 17.6 < hold 17.8 < crowded 20.9 <
+ * declining 23.4. The score ranked BACKWARDS against the rings it sat next to, and
+ * corr(score, demand_trend_24m_pct) was -0.047 — no relationship at all to this file's
+ * primary axis. The cause was on the mart side (the old score's `competition` term was
+ * 60% percentile(n_recent), which on the 24m cut is a pure niche-SIZE penalty), so the
+ * fix is there too: etl/marts/mart_niche.sql now blends four 0..100 sub-scores whose
+ * anchor points ARE the constants in this file, then multiplies by a supply brake:
+ *
+ *   BLENDED (weights 0.40 / 0.22 / 0.20 / 0.18):
+ *     momentum        50 at flat demand, MOMENTUM_ENTER (88.1) at DEMAND_ENTER_PCT,
+ *                     MOMENTUM_DECLINE (10.7) at DEMAND_DECLINE_PCT
+ *     market_pull     the money/size percentiles, demoted to a supporting weight
+ *     revenue_spread  50 exactly at WC_WINNER_TAKE_MOST
+ *     quality_gap     unchanged (percentile of the beatable-incumbent share)
+ *   MULTIPLIER (not part of the blend):
+ *     supply_brake    driven by supply_room = MIN(flood_room, entrant_room), where
+ *                     flood_room hits 50 when supply outgrows DEMAND by exactly
+ *                     SAT_FLOOD_YOY, and entrant_room hits 100 at the catalog norm
+ *                     ENTRANT_RATIO_CATALOG_NORM. Either signal alone can sink a score.
+ *
+ * So the ring rules and the number now read the SAME axes against the SAME bars — the
+ * ring says which side of a bar a niche falls on, the score says by how much and blends
+ * in the money. After the rebuild the same 219 niches read enter 67.6 > hold 50.2 >
+ * crowded 39.1 > declining 19.5. The ring rules themselves are unchanged: they encode
+ * distinct failure MODES (crowded and declining are different problems, not different
+ * amounts of one problem) and a scalar cannot express that. Changing any threshold here
+ * therefore moves the score too — keep them in lockstep with build_marts.py's OPP_*
+ * constants (etl/tests/test_opportunity_ordering.py asserts the equivalence both ways).
  *
  * DEGRADATION (any field may be null/undefined/NaN — treated identically as "unknown"):
  *   - demand_emerging unknown/absent (older mart) -> the emerging ring is unreachable;
@@ -79,9 +110,25 @@
  * a one-line diff with the tests updated alongside.
  *
  * SOLO VIABILITY IS A LENS, NOT A RING — deliberately. mart_niche.solo_viability is the
- * niche's SINGLEPLAYER SHARE: the share of the cut's scored games playable single-player
- * (catalog norm ~0.9; below ~0.8 leans multiplayer/team-scale — the same reading the MCP
- * guidance uses). Named honestly everywhere it renders (2026-08-27): it is a NO-NETCODE
+ * niche's SINGLEPLAYER SHARE: the share of the cut's scored games playable single-player.
+ *
+ * AND IT IS A FLAG, NOT A SCALE (2026-08-31, user-reported: "solo scoring isn't working at
+ * all"). MEASURED on the same 219-niche cut this board pins:
+ *     min 0.353 | p05 0.853 | p10 0.913 | p25 0.953 | MEDIAN 0.975 | p75 0.990 | max 1.000
+ *     below 0.90: 7.8%     below 0.80: 3.2%
+ * Three quarters of the catalog sits inside a 0.047-wide band, so the number cannot rank
+ * the options a solo dev is choosing between — it can only spot the ~3% that are inherently
+ * multiplayer, which it does perfectly: Social Deduction 0.353, MMORPG 0.449, Party Game
+ * 0.500, Party 0.636, Battle Royale 0.700, Extraction Shooter 0.705, eSports 0.788. That
+ * compression is a true fact about the world (most genres really are solo-buildable), not a
+ * defect, so nothing here rescales it and the SOLO_FRIENDLY_MIN pass bar is unchanged — the
+ * distribution says 0.80 is already the right cut. What WAS wrong was the documentation:
+ * this file and the MCP instructions both called ~0.9 "the catalog norm" when 0.9 is the
+ * 10th percentile. The norm is 0.975. Anyone calibrating on the old sentence was reading a
+ * bottom-decile value as typical. Corrected here, in the MCP server instructions, and in
+ * mart_niche.sql (which now also publishes solo_tier: 'solo' | 'mixed' | 'team').
+ *
+ * Named honestly everywhere it renders (2026-08-27): it is a NO-NETCODE
  * proxy, not a production-scope measure — "Souls-like 0.98" says its games skip netcode,
  * not that a Souls-like is a small build. It never feeds the ring decision: a ring
  * answers "is this market worth entering", which holds regardless of team size, while
@@ -152,10 +199,56 @@ export const DEMAND_HOLD_PCT = -10;
 /** saturation_yoy (signed fraction) above which the release pipeline counts as
  * flooding — +0.15 == +15% more releases YoY == a 1.15x recent/prior ratio. */
 export const SAT_FLOOD_YOY = 0.15;
-/** winner_concentration share above which the niche is winner-take-most. */
+/** winner_concentration share above which the niche is winner-take-most. Also the exact
+ * point where the mart's revenue_spread sub-score crosses 50. */
 export const WC_WINNER_TAKE_MOST = 0.85;
-/** opportunity_v2 score at or above which a trend-less niche still earns "watch". */
-export const OPP_WATCH_SCORE = 60;
+/**
+ * opportunity_v2 score at or above which a trend-less niche still earns "watch" — and the
+ * board's general "this scores like somewhere you'd enter" bar.
+ *
+ * RECALIBRATED 60 -> 65 (2026-08-31) with the score rebuild. The old bar was unreachable:
+ * on the live catalog (219 niches, tag / 24m / min50) only 2 niches — 0.9% — ever reached
+ * 60, and the catalog maximum was 63.7, so the ring this constant guards was dead by
+ * construction. The rebuilt score spans p50 47.6 / p75 59.6 / p90 68.0 / max 86.7, and 65
+ * is the median score of the niches the board actually rings "enter" (67.6, and 64.6 /
+ * 66.8 on the win='all' and min_reviews=100 cuts). So the bar now means something
+ * checkable — "this scores like a niche the radar would tell you to enter" — and selects
+ * 15.5% of the catalog rather than 0.9%.
+ *
+ * CAVEAT, stated rather than hidden: the fraction it selects is cut-dependent (15.5% on
+ * 24m/min50, 17.4% on 24m/min100, 11.6% on all/min50, but only 1.8% on min_reviews=0).
+ * That is not miscalibration — with no review floor the median niche's
+ * winner_concentration is 0.920 and 75% of niches are winner-take-most, so the board
+ * itself rings 64% of that population "crowded". Both gradings collapse together on that
+ * cut, which is the coherence working, not failing. This bar is calibrated for the cut
+ * the board pins (24m x min50).
+ */
+export const OPP_WATCH_SCORE = 65;
+
+// ---- sub-score anchors (the bars above, in mart sub-score units) -------------------------
+//
+// These are DERIVED, not chosen: momentum = 50 + 50*tanh(g / g_enter) where g is the
+// niche's annualised continuous demand growth ln(1 + trend/100)/2. Substituting the demand
+// bars above gives the two constants below. They exist so a reader can move between the
+// board's units (percent per 24 months) and the score's units (0..100 sub-score) without
+// re-deriving the algebra, and so a threshold change here is visibly a score change.
+
+/** momentum in sub-score units for a niche whose 24-month demand trend is `trendPct`.
+ * The mart's formula (etl/marts/mart_niche.sql's `subscores` CTE) with the /2
+ * annualisation cancelling out of the ratio. Exported so the anchors below are DERIVED
+ * from the demand bars rather than transcribed — a bar change moves them automatically. */
+function momentumAt(trendPct: number): number {
+  return 50 + 50 * Math.tanh(Math.log(1 + trendPct / 100) / Math.log(1 + DEMAND_ENTER_PCT / 100));
+}
+
+/** momentum at DEMAND_ENTER_PCT — 50 + 50*tanh(1) = 88.08. At or above this, the niche's
+ * demand cleared the enter bar. */
+export const MOMENTUM_ENTER = momentumAt(DEMAND_ENTER_PCT);
+/** momentum at DEMAND_DECLINE_PCT — 10.72. At or below this, demand cleared the decline
+ * bar downward. */
+export const MOMENTUM_DECLINE = momentumAt(DEMAND_DECLINE_PCT);
+/** momentum at flat demand (0%/24m) — 50. The sub-score's neutral point. */
+export const MOMENTUM_FLAT = momentumAt(0);
 /** entrant_ratio at or above which recent entrants earn at least the niche median. A
  * falsification TELL, not a ring input (below 1.0 = recent entrants underearn — the same
  * check the MCP guidance runs before recommending a niche). Dossier-only. */
@@ -293,11 +386,19 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
     indie !== null ? `${Math.round(indie * 100)}% indie` : null,
     medH !== null ? `median ${medH.toFixed(1)}h content` : null,
   ].filter((p): p is string => p !== null);
+  // The share is a FLAG, not a scale (module doc): the catalog median is 0.975 and 75% of
+  // niches sit inside a 0.047-wide band, so the only honest reads are "unremarkable",
+  // "has a real multiplayer minority" and "multiplayer-dependent". The middle band —
+  // passes SOLO_FRIENDLY_MIN but sits under SOLO_MIXED_MIN, i.e. the catalog's bottom
+  // decile — used to render identically to a 1.00, which flattered it.
+  const soloMixed = solo !== null && soloPass === true && solo < SOLO_MIXED_MIN;
   const soloNote =
     soloPass === null
       ? "share unknown — never counted as solo-friendly (lens, not a ring input)"
       : soloPass
-        ? "mostly singleplayer members — a no-netcode proxy, not a scope claim (lens — never moves a ring)"
+        ? soloMixed
+          ? "clears the bar, but a real multiplayer minority — bottom decile of the catalog (lens — never moves a ring)"
+          : "mostly singleplayer members — a no-netcode proxy, not a scope claim (lens — never moves a ring)"
         : "leans multiplayer/team-scale (lens — never moves a ring)";
   const soloCheck: VerdictCheck = {
     id: "solo",
@@ -480,13 +581,26 @@ export function radarVerdict(input: RadarVerdictInput): RadarVerdict {
 
 // ---- solo-viability lens (NOT part of the verdict — see module doc) ---------------------
 
-/** solo_viability at or above which a niche counts as solo-buildable. The catalog norm is
- * ~0.9; below 0.8 the MCP guidance flags meaningful multiplayer/team-scale dependence.
+/** solo_viability at or above which a niche counts as solo-buildable. MEASURED (2026-08-31,
+ * 219-niche live cut): the catalog MEDIAN is 0.975 and only 3.2% of niches fall below this
+ * bar — which is what makes 0.8 the right cut, not a compromise. (The previous comment here
+ * said "the catalog norm is ~0.9"; 0.9 is the 10th percentile, not the norm. See the
+ * module doc's SOLO VIABILITY IS A FLAG block.)
  * MUST stay in lockstep with RADAR_SOLO_FRIENDLY_MIN in api/app/routers/niches.py — the
  * server filters the radar population (`solo_only`, the board's default-on toggle) on the
  * SAME bar this module renders in the legend, tooltip and dossier; a drift would make the
  * legend lie about what the server filtered. */
 export const SOLO_FRIENDLY_MIN = 0.8;
+
+/** solo_viability at or above which a niche is unremarkably solo-buildable — the catalog's
+ * 10th percentile (p10 = 0.913), so ~92% of niches clear it. Between this and
+ * SOLO_FRIENDLY_MIN is the 'mixed' band: passes the solo-only filter, but has a real
+ * multiplayer minority among its members (Hero Shooter 0.800, Minigames 0.805, Escape Room
+ * 0.836, Class-Based 0.851, Football (Soccer) 0.853). DISPLAY ONLY — it sharpens the
+ * dossier's note and never changes the row's pass/fail, let alone a ring. Mirrors
+ * SOLO_TIER_SOLO_MIN in etl/build_marts.py, which cuts mart_niche.solo_tier at the same
+ * two bars. */
+export const SOLO_MIXED_MIN = 0.9;
 
 /** med_playtime_h above which the dossier's solo row carries the neutral caution
  * "heavy content scope for a solo build" — a median member offering 20+ hours of

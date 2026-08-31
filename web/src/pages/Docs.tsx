@@ -108,10 +108,19 @@ function Pre({ children }: { children: ReactNode }) {
 // The score guide is deliberately visual-first: the formula as a flow of weighted blocks,
 // the worked example as signed contribution bars — prose demoted to captions.
 
+// The four terms mart_niche blends into opportunity_v2, in weight order. These ARE the
+// Radar board's axes read on the Radar board's thresholds (see web/src/lib/radarVerdict.ts's
+// "ONE MODEL, TWO VIEWS" block) — which is why the score and the ring now agree.
+// All four share CSS_VAR.demand deliberately, per palette.ts's two-tone rule: colour
+// encodes POLARITY, not identity, and after the rebuild every blended term is positive
+// (higher = better for the score). Crowding no longer arrives as a negative bar — it
+// arrives as the supply brake, which is the only "downside" mark here and carries the
+// muted paper tone. Labels tell the four apart; the tone tells you which way they push.
 const SCORE_PARTS = [
-  { key: "demand", label: "Demand", weight: "+0.5×", color: CSS_VAR.demand, hint: "what the typical game earns" },
-  { key: "competition", label: "Competition", weight: "−0.35×", color: CSS_VAR.competition, hint: "how crowded it is" },
-  { key: "quality", label: "Quality gap", weight: "+0.3×", color: CSS_VAR.qualityGap, hint: "how beatable the field is" },
+  { key: "momentum", label: "Momentum", weight: "0.40×", color: CSS_VAR.demand, hint: "is demand growing (50 = flat, 88 = the radar's “enter” bar)" },
+  { key: "market", label: "Market pull", weight: "0.22×", color: CSS_VAR.demand, hint: "what the typical game earns × how big the pie is" },
+  { key: "spread", label: "Revenue spread", weight: "0.20×", color: CSS_VAR.demand, hint: "50 = winner-take-most; higher = money spread around" },
+  { key: "quality", label: "Quality gap", weight: "0.18×", color: CSS_VAR.demand, hint: "how beatable the field is" },
 ];
 
 function FormulaFlow() {
@@ -119,7 +128,7 @@ function FormulaFlow() {
     <div className="flex flex-wrap items-stretch gap-2">
       {SCORE_PARTS.map((p, i) => (
         <div key={p.key} className="flex items-center gap-2">
-          {i > 0 && <span aria-hidden className="text-lg text-ink-muted">{i === 1 ? "−" : "+"}</span>}
+          {i > 0 && <span aria-hidden className="text-lg text-ink-muted">+</span>}
           <div className="rounded-card border border-chartborder bg-surface px-3 py-2 text-center">
             <div className="flex items-center justify-center gap-1.5">
               <span className="h-2 w-2 rounded-full" style={{ backgroundColor: p.color }} />
@@ -128,19 +137,20 @@ function FormulaFlow() {
             <div className="tabular mt-0.5 text-[11px] font-semibold" style={{ color: p.color }}>
               {p.weight} <span className="text-ink-muted">(0–100)</span>
             </div>
-            <div className="mt-0.5 text-[10px] text-ink-muted">{p.hint}</div>
+            <div className="mt-0.5 max-w-[13rem] text-[10px] text-ink-muted">{p.hint}</div>
           </div>
         </div>
       ))}
-      <span aria-hidden className="self-center text-lg text-ink-muted">→</span>
-      <div className="self-center rounded-card border border-chartborder bg-surface2/60 px-3 py-2 text-center">
-        <div className="text-xs font-semibold text-ink-primary">floored at 0</div>
-        <div className="mt-0.5 text-[10px] text-ink-muted">negative = shown as 0.0</div>
-      </div>
       <span aria-hidden className="self-center text-lg text-ink-muted">×</span>
       <div className="self-center rounded-card border border-chartborder bg-surface2/60 px-3 py-2 text-center">
-        <div className="text-xs font-semibold text-ink-primary">decline gate 0.5–1.0</div>
-        <div className="mt-0.5 text-[10px] text-ink-muted">shrinking pipeline / underearning newcomers</div>
+        <div className="flex items-center justify-center gap-1.5">
+          <span className="h-2 w-2 rounded-full" style={{ backgroundColor: CSS_VAR.competition }} />
+          <span className="text-xs font-semibold text-ink-primary">supply brake 0.35–1.0</span>
+        </div>
+        <div className="mt-0.5 max-w-[15rem] text-[10px] text-ink-muted">
+          bites when releases outgrow demand, or newcomers earn under the catalog norm — either one alone can sink
+          the score
+        </div>
       </div>
       <span aria-hidden className="self-center text-lg text-ink-muted">=</span>
       <div className="self-center rounded-card border border-brand bg-brand-tint px-3 py-2 text-center">
@@ -150,32 +160,39 @@ function FormulaFlow() {
   );
 }
 
-/** One niche's score, decomposed into signed contribution bars around a zero axis.
- * Bar length is |contribution| / SCALE of the half-width, so the two example cards are
- * directly comparable at a glance. */
+/** One niche's score, decomposed into its four weighted sub-score contributions plus the
+ * supply brake. Bar length is contribution / SCALE, so the two example cards are directly
+ * comparable at a glance. All four terms are positive by construction — crowding no longer
+ * arrives as a negative term, it arrives as the multiplier at the bottom. */
 function ScoreWaterfall({
   name,
-  d,
-  c,
-  q,
-  gate,
+  momentum,
+  market,
+  spread,
+  quality,
+  brake,
   final,
+  note,
 }: {
   name: string;
-  d: number;
-  c: number;
-  q: number;
-  gate: number;
+  momentum: number;
+  market: number;
+  spread: number;
+  quality: number;
+  brake: number;
   final: number;
+  note: string;
 }) {
+  // One tone for all four: see SCORE_PARTS — colour is polarity, and every blended term
+  // now pushes the same way. The brake, printed below, is the downside mark.
   const parts = [
-    { label: "Demand", v: 0.5 * d, detail: `0.5 × ${d.toFixed(1)}`, color: CSS_VAR.demand },
-    { label: "Competition", v: -0.35 * c, detail: `−0.35 × ${c.toFixed(1)}`, color: CSS_VAR.competition },
-    { label: "Quality gap", v: 0.3 * q, detail: `0.3 × ${q.toFixed(1)}`, color: CSS_VAR.qualityGap },
+    { label: "Momentum", v: 0.4 * momentum, detail: `0.40 × ${momentum.toFixed(1)}`, color: CSS_VAR.demand },
+    { label: "Market pull", v: 0.22 * market, detail: `0.22 × ${market.toFixed(1)}`, color: CSS_VAR.demand },
+    { label: "Revenue spread", v: 0.2 * spread, detail: `0.20 × ${spread.toFixed(1)}`, color: CSS_VAR.demand },
+    { label: "Quality gap", v: 0.18 * quality, detail: `0.18 × ${quality.toFixed(1)}`, color: CSS_VAR.demand },
   ];
-  const raw = parts.reduce((a, p) => a + p.v, 0);
-  const SCALE = 32; // max |contribution| the half-width represents
-  const floored = raw < 0;
+  const core = parts.reduce((a, p) => a + p.v, 0);
+  const SCALE = 40; // max contribution the full width represents
   return (
     <div className="flex-1 rounded-card border border-chartborder bg-surface p-3">
       <div className="mb-2 flex items-baseline justify-between gap-2">
@@ -183,36 +200,26 @@ function ScoreWaterfall({
         <span className="tabular text-lg font-bold text-ink-primary">{final.toFixed(1)}</span>
       </div>
       <div className="flex flex-col gap-1.5">
-        {parts.map((p) => {
-          const pct = Math.min(100, (Math.abs(p.v) / SCALE) * 100) / 2;
-          return (
-            <div key={p.label} className="flex items-center gap-2">
-              <span className="w-20 shrink-0 text-[10px] text-ink-muted">{p.label}</span>
-              <div className="relative h-3.5 flex-1 overflow-hidden rounded bg-surface2">
-                <span aria-hidden className="absolute inset-y-0 left-1/2 w-px bg-[var(--baseline)]" />
-                <span
-                  className="absolute inset-y-0.5 rounded-sm"
-                  style={
-                    p.v >= 0
-                      ? { left: "50%", width: `${pct}%`, backgroundColor: p.color }
-                      : { right: "50%", width: `${pct}%`, backgroundColor: p.color, opacity: 0.85 }
-                  }
-                />
-              </div>
-              <span className="tabular w-24 shrink-0 text-right text-[10px] text-ink-secondary">
-                {p.detail} = {p.v >= 0 ? "+" : ""}
-                {p.v.toFixed(1)}
-              </span>
+        {parts.map((p) => (
+          <div key={p.label} className="flex items-center gap-2">
+            <span className="w-24 shrink-0 text-[10px] text-ink-muted">{p.label}</span>
+            <div className="relative h-3.5 flex-1 overflow-hidden rounded bg-surface2">
+              <span
+                className="absolute inset-y-0.5 left-0 rounded-sm"
+                style={{ width: `${Math.min(100, (p.v / SCALE) * 100)}%`, backgroundColor: p.color }}
+              />
             </div>
-          );
-        })}
+            <span className="tabular w-24 shrink-0 text-right text-[10px] text-ink-secondary">
+              {p.detail} = {p.v.toFixed(1)}
+            </span>
+          </div>
+        ))}
       </div>
       <div className="tabular mt-2 border-t border-chartborder pt-1.5 text-right text-[11px] text-ink-secondary">
-        raw {raw >= 0 ? "+" : ""}
-        {raw.toFixed(1)}
-        {floored && <span className="text-verdict-serious"> → floored to 0</span>} → × gate {gate.toFixed(2)} ={" "}
+        core {core.toFixed(1)} → × supply brake {brake.toFixed(2)} ={" "}
         <span className="font-semibold text-ink-primary">{final.toFixed(1)}</span>
       </div>
+      <div className="mt-1 text-[10px] leading-snug text-ink-muted">{note}</div>
     </div>
   );
 }
@@ -442,32 +449,52 @@ export default function Docs() {
         <Card>
           <div className="flex flex-col gap-4 text-sm leading-relaxed text-ink-secondary">
             <p className="text-xs text-ink-muted">
-              Three 0–100 percentiles (each niche ranked against all others in the same cut), combined with fixed
-              weights — hover any ⓘ in the finder for the same math with that row's real numbers.
+              Four 0–100 sub-scores, blended with fixed weights, then multiplied by the supply brake. The score reads
+              the same evidence the <span className="text-ink-primary">Radar rings</span> read, against the same
+              thresholds — so a high score means “the radar would tell you to enter”, and the two can't disagree about
+              direction. Hover any ⓘ in the finder for the same math with that row's real numbers.
             </p>
             <FormulaFlow />
             <div>
               <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-muted">
-                Why a niche can score 0.0 while millions play it — a real example (Aug 2026)
+                Why a well-off niche can still score badly — a real example (Aug 2026)
               </div>
               <div className="flex flex-col gap-3 sm:flex-row">
-                <ScoreWaterfall name="Psychological Horror" d={17.6} c={87.5} q={39.1} gate={0.86} final={0} />
-                <ScoreWaterfall name="Survival Horror" d={38.2} c={80.9} q={78.5} gate={0.86} final={12.4} />
+                <ScoreWaterfall
+                  name="Colony Sim"
+                  momentum={38.8}
+                  market={74.4}
+                  spread={100}
+                  quality={89.2}
+                  brake={0.35}
+                  final={23.8}
+                  note="Demand −7% / 24m while releases grew +37% YoY — the pipeline is filling faster than the audience."
+                />
+                <ScoreWaterfall
+                  name="Action RTS"
+                  momentum={96.4}
+                  market={57.2}
+                  spread={100}
+                  quality={86.5}
+                  brake={1.0}
+                  final={86.7}
+                  note="Demand +74% / 24m while releases fell −7% YoY — growing audience, thinning competition."
+                />
               </div>
               <p className="mt-2 text-xs text-ink-muted">
-                Same genre family, opposite verdicts: Survival Horror's typical game earns{" "}
-                <span className="text-ink-primary">$52K vs $33K</span>, twice the share of its incumbents are beatable,
-                and it has under half the recent releases (466 vs 1,026). Psychological Horror's 407K live players and
-                53M owners don't rescue it —{" "}
-                <span className="font-semibold text-ink-primary">a big audience means people play the hits, not that a
-                new entrant gets players.</span>
+                Colony Sim wins on <span className="text-ink-primary">every static measure</span> — its typical game
+                earns more ($150K vs $124K), its field is more beatable, its revenue is just as spread out. It still
+                scores a third as much, because{" "}
+                <span className="font-semibold text-ink-primary">a market being flooded faster than it grows is a
+                worse place to start a 2-year build than a smaller one that's pulling away.</span>{" "}
+                Momentum and the supply brake carry that; the money terms deliberately can't outvote them.
               </p>
             </div>
             <ReadBox>
               A high score is a <span className="text-ink-primary">screening result, not a verdict</span> — open the
               deep dive and let the “Read this first” flags argue with it (shrinking pipeline, underearning newcomers,
-              winner-take-most, low solo-viability). A 0.0 doesn't forbid building there; it says the bet needs a
-              reason the median doesn't apply to you.
+              winner-take-most, multiplayer dependence). A low score doesn't forbid building there; it says the bet
+              needs a reason the median doesn't apply to you.
             </ReadBox>
           </div>
         </Card>

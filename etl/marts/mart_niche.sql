@@ -49,18 +49,146 @@
 --                   build_marts.py; unmapped tags: all-time n_games (win='all',
 --                   min_reviews=@MIN_REVIEWS_DEFAULT@ cut) >= @UMBRELLA_N_GAMES@ ->
 --                   'umbrella', else 'micro'.
---   decline_gate    the growth gate itself, exposed for inspectability, in
+--   decline_gate    A FALSIFICATION TELL, NOT A SCORE FACTOR (since 2026-08-31 — it used
+--                   to multiply opportunity_v2; see the REBUILD block below). It answers
+--                   one question: "did everyone STOP entering this niche?" — which is the
+--                   MCP's falsification rule #1 and stays worth inspecting. In
 --                   [@GATE_FLOOR@, 1]:
 --                     sat_severity     = clamp(-saturation_yoy / @GATE_SAT_FULL_DECLINE@, 0, 1)
 --                     entrant_severity = clamp((1 - entrant_ratio) / (1 - @GATE_ENTRANT_FULL@), 0, 1)
 --                     gate = 1 - (1 - @GATE_FLOOR@) * GREATEST(sat_severity, entrant_severity)
---                   MAX (OR) semantics on purpose — either decline signal alone cuts the
---                   score, because entrant_ratio >= 1 is the catalog NORM (see above) and
---                   must not excuse a collapsing release pipeline (Naval er~1.5, Fighting
---                   er~3.1 would sail through an AND gate). NULL signals count as "no
---                   evidence of decline" (COALESCE to the neutral value), never as decline.
---   opportunity_v2  opportunity * decline_gate — the growth-gated headline score. The
---                   original `opportunity` is kept unchanged alongside it.
+--                   MAX (OR) semantics on purpose — either decline signal alone counts,
+--                   because entrant_ratio >= 1 is the catalog NORM (see above) and must not
+--                   excuse a collapsing release pipeline (Naval er~1.5, Fighting er~3.1
+--                   would sail through an AND gate). NULL signals count as "no evidence of
+--                   decline" (COALESCE to the neutral value), never as decline.
+--   solo_tier       'solo' | 'mixed' | 'team' — the coarse read of solo_viability, NULL
+--                   when the share is NULL. See the SOLO VIABILITY IS A FLAG block below.
+--
+-- ======================================================================================
+-- opportunity_v2 REBUILT (2026-08-31) — the score and the Radar's ring are now ONE model
+-- ======================================================================================
+-- WHAT WAS WRONG (measured on 219 live niches, the tag / win=24m / min_reviews=50 cut
+-- that the Radar board, MCP find_niches and NicheFinder all default to):
+--
+--   1. INVERTED. Median opportunity_v2 by the Radar's own ring:
+--        enter 17.6 | hold 17.8 | crowded 20.9 | declining 23.4
+--      The niches the board told you to ENTER scored LOWER than the ones it warned you
+--      off. Two gradings ranking in opposite directions.
+--   2. DEAD RING. The board's "watch" ring is `opportunity_v2 >= OPP_WATCH_SCORE`, then
+--      60. Exactly 2 of 219 niches (0.9%) reached it; the catalog max was 63.7. That
+--      constant was recalibrated 60 -> 65 with this rebuild (web/src/lib/radarVerdict.ts):
+--      65 is the median score of the niches the board rings "enter", and it selects ~16%
+--      of the default cut instead of ~1%.
+--   3. STRUCTURAL CAUSE. corr(opportunity_v2, demand_trend_24m_pct) = -0.047 — the
+--      headline score had NO relationship to the axis the Radar grades on. It blended
+--      demand LEVEL percentiles (median_rev / median_owners / recent_velocity) against a
+--      `competition` term that is 60% percentile(n_recent) — and on the win='24m' cut
+--      n_recent IS n_games, so most of the "competition" penalty was a pure NICHE-SIZE
+--      penalty. Metroidvania (177 recent games, demand +65%/24m) scored 0.0. Naval (34
+--      games, demand -11.8%/24m) scored 63.7 and ranked #1.
+--      NOTE the diagnosis that the numbers actually support: decline_gate was NOT the
+--      culprit (its median was 1.000 — near-inert). The base `opportunity` was.
+--
+-- THE MODEL NOW. Four inspectable 0..100 sub-scores, blended, then braked by supply
+-- pressure. Every anchor below IS a threshold web/src/lib/radarVerdict.ts rings on, which
+-- is precisely what makes the number and the ring two views of one model:
+--
+--   momentum        demand FLOW, the headline term. 50 + 50*tanh(g / g_enter) where
+--                   g = ln(1 + demand_trend_24m_pct/100)/2 is the niche's annualised
+--                   continuous demand growth and g_enter is the same for @OPP_ENTER_PCT@.
+--                     flat demand (0%/24m)        -> 50.0
+--                     Radar enter bar (+40%/24m)  -> 88.1   [DEMAND_ENTER_PCT]
+--                     Radar hold bar  (-10%/24m)  -> 34.8   [DEMAND_HOLD_PCT]
+--                     Radar decline bar (-30%/24m)-> 10.7   [DEMAND_DECLINE_PCT]
+--                   tanh rather than a clamp because 61 of 219 niches clear the enter
+--                   bar: a hard cap would flatten 28% of the catalog onto one value.
+--   supply_room     supply FLOW + newcomer economics — the WEAKER (LEAST) of two reads,
+--                   so either one alone can sink the score:
+--                     flood_room   100 while demand outgrows supply; 50 when supply
+--                                  outgrows demand by exactly @OPP_FLOOD_YOY@ (the Radar's
+--                                  SAT_FLOOD_YOY); 0 at twice that.
+--                     entrant_room 0 at entrant_ratio @OPP_ENTRANT_FULL@, 100 at the
+--                                  CATALOG NORM @OPP_ENTRANT_NORM@ — read against the norm,
+--                                  not against 1.0 (see entrant_ratio's caveat above), and
+--                                  CAPPED there: above the norm is a survivor-cohort
+--                                  artifact (Hero Shooter er 3.32), not evidence, so it
+--                                  earns no bonus.
+--   revenue_spread  revenue STRUCTURE from winner_concentration. 50 sits exactly on the
+--                   Radar's WC_WINNER_TAKE_MOST bar (@OPP_WINNER_TAKE_MOST@); 100 at 0.70,
+--                   0 at 1.00.
+--   market_pull     the LEVEL terms, deliberately demoted to a supporting role:
+--                   @OPP_MARKET_MEDIAN_W@*demand + (1-w)*market_size — "does a typical game
+--                   here earn" blended with "how big is the pie".
+--
+--   opp_core       = weighted mean of the four (@W2_MOMENTUM@ / @W2_MARKET@ / @W2_SPREAD@ /
+--                    @W2_QUALITY@), RENORMALISED over the sub-scores that exist.
+--   supply_brake   = @SUPPLY_BRAKE_FLOOR@ + (1-floor)*supply_room/100; 1.0 when neither
+--                    supply signal is available.
+--   opportunity_v2 = clamp(opp_core * supply_brake, 0, 100).
+--
+-- WHY ADDITIVE MOMENTUM x MULTIPLICATIVE SUPPLY. Momentum had to be a first-class POSITIVE
+-- term (the old decline_gate could only ever subtract, so a big stagnant niche beat a small
+-- surging one by construction), while supply pressure had to be able to sink a score ON ITS
+-- OWN. An additive term cannot sink — it can only remove its own weight; a multiplier
+-- cannot reward. So momentum is additive and the largest weight, and supply is a multiplier
+-- with a floor low enough to bite (a fully-flooded niche keeps 35% of its core).
+--
+-- WHY saturation_yoy IS READ AGAINST DEMAND. This column is the exact point where the two
+-- old systems contradicted each other: decline_gate penalised saturation_yoy BELOW 0
+-- (pipeline shrinking = decline) while the Radar penalises it ABOVE +0.15 (pipeline
+-- flooding = crowding). Both readings are right; the disambiguator is demand. A pipeline
+-- shrinking while demand holds is a supply GAP; a pipeline shrinking alongside demand is a
+-- market dying. Differencing the two annualised growth rates resolves that structurally
+-- instead of by fiat, and the death spiral earns no reward because momentum has already
+-- scored the demand half. flood_room is ONE-SIDED (capped at 100 once demand outpaces
+-- supply) on purpose: a collapsing pipeline is at best "calm", never a bonus — rewarding it
+-- is exactly the Naval/Transportation failure mode that motivated v2 in the first place.
+--
+-- NULL-HONESTY. A missing input does not vote and is never read as 0: the blend divides by
+-- the weights of the sub-scores that exist. market_pull and quality_gap are percentiles and
+-- always exist, so opportunity_v2 is never NULL. An unknown supply signal leaves the brake
+-- at 1.0 — "no evidence of pressure", the same NULL policy decline_gate always used.
+--
+-- EMERGING NICHES. When demand_emerging is set, the niche's prior 24-month window is near
+-- zero BY CONSTRUCTION, so its trend %, its saturation read AND its entrant_ratio are all
+-- artifacts of the label's age (a young tag's 24m and all-time medians are the same games,
+-- which pins entrant_ratio at ~1.00). All three flow sub-scores go NULL — the same
+-- refusal-to-claim the Radar's precedence-0 emerging ring makes — and the niche is scored
+-- on market_pull / revenue_spread / quality_gap alone.
+--
+-- MEASURED RESULT (same 219 niches, same rings), before -> after:
+--     enter 17.6 -> 67.6 | hold 17.8 -> 50.2 | crowded 20.9 -> 39.1 | declining 23.4 -> 19.5
+-- enter > hold > crowded > declining now holds, and holds on the min_reviews=0,
+-- min_reviews=100 and win='all' cuts (pinned by etl/tests/test_opportunity_ordering.py).
+-- Per-niche cross-cut rank agreement went UP: Spearman min50-vs-min0 0.553 -> 0.663,
+-- 24m-vs-all 0.915 -> 0.955. That is not luck — momentum and flood_room are built from
+-- demand_trend_24m_pct and saturation_yoy, which are ONE VALUE PER (dimension, key), so
+-- they are identical on every cut by construction. Stronger comparability than the
+-- percent_rank partitioning gives, not weaker.
+--
+-- ======================================================================================
+-- SOLO VIABILITY IS A FLAG, NOT A SCALE (2026-08-31)
+-- ======================================================================================
+-- MEASURED over the same 219-niche cut:
+--   min 0.353 | p05 0.853 | p10 0.913 | p25 0.953 | MEDIAN 0.975 | p75 0.990 | max 1.000
+--   below 0.90: 7.8%    below 0.80: 3.2%   (stable across cuts: median 0.969-0.976)
+-- Three quarters of the catalog sits inside a 0.047-wide band, so solo_viability is an
+-- excellent binary multiplayer detector and a useless ranking scale. The seven niches under
+-- 0.80 are the ones you would name by hand: Social Deduction 0.353, MMORPG 0.449, Party
+-- Game 0.500, Party 0.636, Battle Royale 0.700, Extraction Shooter 0.705, eSports 0.788.
+-- That compression is a TRUE FACT about the world — most genres really are solo-buildable —
+-- not a defect to normalise away, so nothing rescales it. The raw share is published
+-- unchanged and gains solo_tier beside it:
+--   'team'  solo_viability <  @SOLO_TIER_TEAM_MAX@   multiplayer-dependent (~3%)
+--   'mixed' in between                               passes the solo-only filter but has a
+--                                                    real multiplayer minority (~5%)
+--   'solo'  solo_viability >= @SOLO_TIER_SOLO_MIN@   the 10th percentile up (~92%)
+-- The 0.80 pass bar is UNCHANGED (RADAR_SOLO_FRIENDLY_MIN / SOLO_FRIENDLY_MIN) — the
+-- distribution says it is already the right cut. solo_viability is NOT an input to
+-- opportunity_v2 and never was: solo-buildability is a property of the READER, not the
+-- market (radarVerdict.ts argues this at length), and with 75% of niches inside a
+-- 0.047-wide band it carries almost no ranking information anyway.
 --
 -- Live-player columns (2026-08, additive — from mart_players.sql's _niche_players_now;
 -- ONE value per (dimension, key), stamped on all 4 cut rows like entrant_ratio; population
@@ -343,9 +471,9 @@ enriched AS (
             OVER (PARTITION BY dimension, key) AS n_games_alltime
     FROM scored
 ),
--- v2 decline gate (full rationale in the header + build_marts.py): either decline signal
--- alone shrinks the gate linearly toward @GATE_FLOOR@; NULL signals are neutral, never
--- treated as decline.
+-- decline gate — a FALSIFICATION TELL, no longer a score factor (full rationale in the
+-- header + build_marts.py): either decline signal alone shrinks it linearly toward
+-- @GATE_FLOOR@; NULL signals are neutral, never treated as decline.
 gated AS (
     SELECT *,
         1.0 - (1.0 - @GATE_FLOOR@) * GREATEST(
@@ -355,6 +483,118 @@ gated AS (
                 (1.0 - COALESCE(entrant_ratio, 1.0)) / (1.0 - @GATE_ENTRANT_FULL@)))
         ) AS decline_gate
     FROM enriched
+),
+-- ======================================================================================
+-- opportunity_v2's inputs. The 24-month demand columns are joined HERE rather than in the
+-- final SELECT (where they used to live) because the score is built on them: momentum and
+-- flood_room ARE demand_trend_24m_pct and saturation_yoy, read on the Radar's own bars.
+-- The join stays cut-independent — one row per (dimension, key) stamped on every cut.
+-- ======================================================================================
+flows AS (
+    SELECT g.*,
+        d.reviews_24m, d.reviews_prev_24m, d.reviews_24m_new_share,
+        COALESCE(d.demand_emerging, FALSE) AS demand_emerging,
+        -- NULL, not 0, when the prior window is empty: "no baseline to compare against"
+        -- and "no change" are different answers, and a niche whose first reviews all
+        -- landed inside the last 24 months would otherwise read as flat instead of new.
+        CASE WHEN COALESCE(d.reviews_prev_24m, 0) = 0 THEN NULL
+             ELSE round(100.0 * (d.reviews_24m - d.reviews_prev_24m) / d.reviews_prev_24m, 1)
+        END AS demand_trend_24m_pct
+    FROM gated g
+    LEFT JOIN _niche_demand24m d
+           ON d.dimension = g.dimension AND d.key = g.key
+),
+-- Annualised CONTINUOUS growth rates, so the demand trend (a 24-month ratio) and the
+-- saturation trend (a 12-month ratio) are commensurable and can be differenced. The
+-- GREATEST(..., 0.001) floors keep ln() finite at the degenerate ends (trend = -100% when
+-- a niche's recent window is empty; saturation_yoy = -1 when a release year is empty) —
+-- both already clamp to the worst sub-score, so the floor changes no published value.
+-- Both go NULL for emerging niches: their windows are not comparable (see header).
+rates AS (
+    SELECT f.*,
+        CASE WHEN f.demand_trend_24m_pct IS NULL OR f.demand_emerging THEN NULL
+             ELSE ln(GREATEST(1.0 + f.demand_trend_24m_pct / 100.0, 0.001)) / 2.0
+        END AS demand_growth,
+        CASE WHEN f.saturation_yoy IS NULL OR f.demand_emerging THEN NULL
+             ELSE ln(GREATEST(1.0 + f.saturation_yoy, 0.001))
+        END AS supply_growth
+    FROM flows f
+),
+-- The four sub-scores, each 0..100 and each anchored on a Radar ring threshold.
+subscores AS (
+    SELECT r.*,
+        -- 50 at flat demand, 88.1 at the Radar's enter bar, 10.7 at its decline bar.
+        CASE WHEN r.demand_growth IS NULL THEN NULL
+             ELSE 50.0 + 50.0 * tanh(
+                    r.demand_growth / (ln(1.0 + @OPP_ENTER_PCT@ / 100.0) / 2.0))
+        END AS momentum,
+        -- Supply growth measured AGAINST demand growth. One-sided: no credit for a
+        -- pipeline collapsing on its own.
+        -- The COALESCE(demand_growth, 0) is DEFENSIVE, not load-bearing, and the
+        -- difference matters — do not read it as radarVerdict.ts's "demand unknown does
+        -- not rescue a flooding niche" rule. In this mart demand_growth is NULL only when
+        -- demand_emerging is set (a NULL trend means reviews_prev_24m = 0, which is under
+        -- @DEMAND_MIN_BASE@, which sets the flag), and that same flag already NULLs
+        -- supply_growth — so the CASE returns NULL first and the COALESCE never fires.
+        -- The mart's ACTUAL behaviour for an unknown demand base is therefore
+        -- supply_room NULL -> supply_brake 1.0: no penalty. That is the deliberate
+        -- choice (an emerging niche's saturation read is an artifact of the label's age,
+        -- so penalising on it would be inventing evidence); the board's stricter rule
+        -- applies to its own ring decision, which is a different question.
+        CASE WHEN r.supply_growth IS NULL THEN NULL
+             ELSE 100.0 * (1.0 - LEAST(1.0, GREATEST(0.0,
+                    (r.supply_growth - COALESCE(r.demand_growth, 0.0))
+                    / (2.0 * ln(1.0 + @OPP_FLOOD_YOY@)))))
+        END AS flood_room,
+        -- Read against the CATALOG NORM and capped there (see header).
+        CASE WHEN r.entrant_ratio IS NULL OR r.demand_emerging THEN NULL
+             ELSE 100.0 * LEAST(1.0, GREATEST(0.0,
+                    (r.entrant_ratio - @OPP_ENTRANT_FULL@)
+                    / (@OPP_ENTRANT_NORM@ - @OPP_ENTRANT_FULL@)))
+        END AS entrant_room,
+        -- 50 sits exactly on the winner-take-most bar.
+        CASE WHEN r.winner_concentration IS NULL THEN NULL
+             ELSE 100.0 * LEAST(1.0, GREATEST(0.0,
+                    (1.0 - r.winner_concentration)
+                    / (2.0 * (1.0 - @OPP_WINNER_TAKE_MOST@))))
+        END AS revenue_spread,
+        -- Level terms, demoted to a supporting role. Never NULL: both are percentiles.
+        @OPP_MARKET_MEDIAN_W@ * r.demand
+            + (1.0 - @OPP_MARKET_MEDIAN_W@) * r.market_size AS market_pull
+    FROM rates r
+),
+-- The weaker of the two supply reads wins (LEAST = OR-severity, the same either-signal
+-- semantics decline_gate used). Written out rather than leaning on DuckDB's NULL-skipping
+-- LEAST(), so the NULL policy is visible instead of implied.
+supply AS (
+    SELECT s.*,
+        CASE WHEN s.flood_room IS NULL THEN s.entrant_room
+             WHEN s.entrant_room IS NULL THEN s.flood_room
+             ELSE LEAST(s.flood_room, s.entrant_room)
+        END AS supply_room
+    FROM subscores s
+),
+-- The blend. NULL-honest by renormalisation: a missing sub-score drops out of BOTH the
+-- numerator and the denominator, so it neither helps nor hurts — it is never read as 0.
+-- market_pull and quality_gap always exist, so the denominator is never 0.
+scored_v2 AS (
+    SELECT b.*,
+        (   @W2_MOMENTUM@ * COALESCE(b.momentum, 0.0)
+          + @W2_MARKET@   * b.market_pull
+          + @W2_SPREAD@   * COALESCE(b.revenue_spread, 0.0)
+          + @W2_QUALITY@  * b.quality_gap
+        ) / (
+            CASE WHEN b.momentum IS NULL THEN 0.0 ELSE @W2_MOMENTUM@ END
+          + @W2_MARKET@
+          + CASE WHEN b.revenue_spread IS NULL THEN 0.0 ELSE @W2_SPREAD@ END
+          + @W2_QUALITY@
+        ) AS opp_core,
+        -- Unknown supply = no evidence of pressure = no brake (never a penalty).
+        CASE WHEN b.supply_room IS NULL THEN 1.0
+             ELSE @SUPPLY_BRAKE_FLOOR@
+                  + (1.0 - @SUPPLY_BRAKE_FLOOR@) * b.supply_room / 100.0
+        END AS supply_brake
+    FROM supply b
 )
 SELECT
     g.dimension, g.key, g.win, g.min_reviews,
@@ -381,6 +621,14 @@ SELECT
     -- v2 columns (additive; see header).
     g.entrant_ratio,
     g.solo_viability,
+    -- solo_tier: the coarse read of solo_viability. A FLAG, not a scale — see the
+    -- SOLO VIABILITY IS A FLAG header block. NULL share stays NULL ("unknown" is its own
+    -- answer and is never counted as solo-friendly).
+    CASE WHEN g.solo_viability IS NULL THEN NULL
+         WHEN g.solo_viability < @SOLO_TIER_TEAM_MAX@ THEN 'team'
+         WHEN g.solo_viability >= @SOLO_TIER_SOLO_MIN@ THEN 'solo'
+         ELSE 'mixed'
+    END AS solo_tier,
     -- Solo-evidence trio (additive; see header). self_published_share IS self_pub_share
     -- under the evidence name the radar consumers probe for — one computation, aliased,
     -- so the two names can never disagree. med_playtime_h converts mart_game's minutes
@@ -394,9 +642,15 @@ SELECT
                             THEN 'umbrella' ELSE 'micro' END)
     END AS tier,
     round(g.decline_gate, 4) AS decline_gate,
-    round(GREATEST(0, LEAST(100,
-        @W_DEMAND@ * g.demand - @W_COMPETITION@ * g.competition + @W_QUALITY@ * g.quality_gap))
-        * g.decline_gate, 2) AS opportunity_v2,
+    -- The v2 sub-scores, published so every score can be taken apart into the four claims
+    -- it makes. NULL is preserved all the way out: a NULL sub-score means "this niche has
+    -- no comparable reading here", which the blend honoured by renormalising.
+    round(g.momentum, 2) AS momentum,
+    round(g.supply_room, 2) AS supply_room,
+    round(g.revenue_spread, 2) AS revenue_spread,
+    round(g.market_pull, 2) AS market_pull,
+    round(g.supply_brake, 4) AS supply_brake,
+    round(GREATEST(0, LEAST(100, g.opp_core * g.supply_brake)), 2) AS opportunity_v2,
     -- Live-player columns (additive; see header — one value per key across all cuts).
     np.total_players_now,
     round(np.players_trend_7d_pct, 2) AS players_trend_7d_pct,
@@ -408,26 +662,23 @@ SELECT
     nl.lifetime_n_games,
     nl.lifetime_survival_12m,
     nl.lifetime_median_dead_months,
-    d.reviews_24m,
-    d.reviews_prev_24m,
-    -- NULL, not 0, when the prior window is empty: "no baseline to compare against" and
-    -- "no change" are different answers, and a niche whose first reviews all landed
-    -- inside the last 24 months would otherwise read as flat instead of brand new.
-    CASE WHEN COALESCE(d.reviews_prev_24m, 0) = 0 THEN NULL
-         ELSE round(100.0 * (d.reviews_24m - d.reviews_prev_24m) / d.reviews_prev_24m, 1)
-    END AS demand_trend_24m_pct,
+    -- 24-month demand. Joined upstream in the `flows` CTE (the score is built on these),
+    -- so they are carried through here rather than re-joined — one computation, no way for
+    -- the published trend and the trend the score used to disagree. Still cut-independent
+    -- (see _niche_demand24m's header): every (win, min_reviews) cut of a (dimension, key)
+    -- carries the SAME demand numbers.
+    g.reviews_24m,
+    g.reviews_prev_24m,
+    g.demand_trend_24m_pct,
     -- Emerging pair (see _niche_demand24m's EMERGING header). The trend above stays
-    -- computed for emerging niches — clients decide not to headline it.
-    d.reviews_24m_new_share,
-    d.demand_emerging
-FROM gated g
+    -- computed for emerging niches — clients decide not to headline it, and the score
+    -- declines to read it (momentum goes NULL there).
+    g.reviews_24m_new_share,
+    g.demand_emerging
+FROM scored_v2 g
 LEFT JOIN tag_tier tt ON g.dimension = 'tag' AND tt.tag = g.key
 LEFT JOIN _niche_players_now np ON np.dimension = g.dimension AND np.key = g.key
-LEFT JOIN _niche_lifetime nl ON nl.dimension = g.dimension AND nl.key = g.key
--- Cut-independent on purpose (see _niche_demand24m's header): every (win, min_reviews)
--- cut of a (dimension, key) carries the SAME demand numbers.
-LEFT JOIN _niche_demand24m d
-       ON d.dimension = g.dimension AND d.key = g.key;
+LEFT JOIN _niche_lifetime nl ON nl.dimension = g.dimension AND nl.key = g.key;
 
 CREATE TABLE mart_niche_top AS
 WITH membership AS (

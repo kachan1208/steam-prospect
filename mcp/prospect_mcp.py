@@ -212,6 +212,22 @@ def _has_demand24m() -> bool:
     omitted."""
     return _has_column("mart_niche", "demand_trend_24m_pct")
 
+
+def _has_v2_parts() -> bool:
+    """opportunity_v2's sub-scores (momentum / supply_room / revenue_spread / market_pull
+    / supply_brake) plus solo_tier — the 2026-08-31 score rebuild, one ETL build, one
+    probe. opportunity_v2 ITSELF is served by every mart; what an older one cannot serve
+    is the breakdown, so these columns are simply omitted from the row rather than
+    erroring. Beware when they are absent: the score that mart carries is the OLD formula,
+    which ranked the opposite way to the Radar's rings (see the data dictionary)."""
+    return _has_column("mart_niche", "supply_brake")
+
+
+_V2_PARTS_SELECT = (
+    ",\n                   momentum, supply_room, revenue_spread, market_pull,"
+    " supply_brake, solo_tier"
+)
+
 _PLAYERS_MISSING = (
     "this analytics DB predates the live-player (CCU) marts (mart_game_players_daily / "
     "mart_niche_players and the players_* columns on mart_game/mart_niche) — it was built "
@@ -382,9 +398,18 @@ mcp = FastMCP(
         "(everyone stopped entering), not an opportunity — check entrant_ratio "
         "(catalog-median tag ~1.08; <1 = recent entrants underearn) before recommending; "
         "winner_concentration > 0.85 means winner-take-most (judge by the median, not "
-        "the hits); and for solo devs check solo_viability (~0.9 is the norm; below ~0.8 "
-        "leans multiplayer — e.g. Extraction Shooter — and is not solo-buildable without "
-        "flagging it). "
+        "the hits); and for solo devs check solo_viability, which is a FLAG, NOT A SCALE "
+        "— the catalog MEDIAN is 0.975 and 75% of niches sit between 0.95 and 1.00, so "
+        "the number ranks nothing; only the ~3% below 0.80 mean anything (Social "
+        "Deduction 0.35, MMORPG 0.45, Party Game 0.50, Battle Royale 0.70, Extraction "
+        "Shooter 0.71, eSports 0.79 — multiplayer-dependent, not solo-buildable without "
+        "flagging it). Use solo_tier ('team' | 'mixed' | 'solo') when the mart serves it. "
+        "opportunity_v2 itself (rebuilt 2026-08-31) now reads the same axes as the Radar "
+        "board's rings: high = demand growing faster than supply, revenue spread across "
+        "the field, newcomers getting paid. Its four blended terms ride every row — "
+        "momentum, market_pull, revenue_spread, quality_gap — plus supply_room, which "
+        "feeds the multiplier rather than the blend. Say WHICH one carried a "
+        "recommendation rather than quoting the total. "
         "For 'is this niche HOT right now' questions use the live-player lens: "
         "find_niches sort=total_players_now (where the players are) or "
         "players_trend_7d_pct (what's heating up), then niche_player_history / "
@@ -432,16 +457,50 @@ really", not for revenue conclusions:
   The ORIGINAL score, kept for continuity. KNOWN FAILURE MODE: it rewards low
   competition without asking WHY it's low — a niche everyone abandoned scores like an
   open market.
-- **opportunity_v2** = opportunity x decline_gate. `find_niches`' default ranking
-  metric. The gate (returned as `decline_gate`, in [0.5, 1]) shrinks linearly with the
-  WORSE of two decline signals and never penalizes on missing data:
-  - sat_severity = clamp(−saturation_yoy / 0.30, 0, 1) — full penalty at a −30%/yr
-    release-pipeline decline.
-  - entrant_severity = clamp((1 − entrant_ratio) / 0.5, 0, 1) — full penalty at
-    entrant_ratio 0.5.
-  - decline_gate = 1 − 0.5 x max(sat_severity, entrant_severity).
-  MAX (either-signal) semantics on purpose: entrant_ratio >= 1 is the catalog NORM (see
-  below), so it must not excuse a collapsing release pipeline.
+- **opportunity_v2** = `find_niches`' default ranking metric. REBUILT 2026-08-31 — it is
+  NO LONGER `opportunity x decline_gate`. The old form ranked BACKWARDS against the
+  Radar board's ring verdicts (measured on 219 live niches: median score by ring ran
+  enter 17.6 < hold 17.8 < crowded 20.9 < declining 23.4) because its `competition` term
+  was 60% percentile(n_recent) — on the 24m cut that is a pure niche-SIZE penalty, so
+  big growing niches scored 0 and small shrinking ones ranked #1. It now reads the SAME
+  axes, against the SAME thresholds, as the Radar's rings:
+
+      opportunity_v2 = opp_core x supply_brake
+
+  where opp_core is the weighted mean of four 0-100 sub-scores (returned on every row) —
+  renormalised over whichever ones exist, so a missing input never counts as 0:
+
+  - **momentum** (weight 0.40) — DEMAND FLOW, the headline term. 50 at flat demand, 88.1
+    at +40%/24m (the Radar's "enter" bar), 10.7 at −30%/24m (its "declining" bar). NULL
+    for emerging niches: their prior window is near zero by construction, so no honest
+    trend claim exists in either direction.
+  - **market_pull** (0.22) — 0.6 x demand + 0.4 x market_size. The money LEVEL, kept as a
+    supporting term rather than the headline.
+  - **revenue_spread** (0.20) — from winner_concentration; exactly 50 at the 0.85
+    winner-take-most bar, 100 at 0.70, 0 at 1.00.
+  - **quality_gap** (0.18) — unchanged.
+
+  and **supply_brake** = 0.35 + 0.65 x supply_room/100 (1.0 when unknown — missing data
+  is never a penalty). **supply_room** is the WORSE of two supply reads, so either alone
+  can sink a score: the release pipeline's growth measured AGAINST demand growth (50 when
+  supply outgrows demand by the Radar's +15%/yr flooding bar), and entrant_room (0 at
+  entrant_ratio 0.5, 100 at the catalog norm 1.08, capped there).
+
+  READ THE PARTS, NOT JUST THE TOTAL: "Deckbuilding 71.9" is momentum 99 + supply_room
+  100 (demand +119%/24m outrunning a +36% release pipeline), while "Hunting 77.2" is
+  momentum 92 + market_pull 86 but revenue_spread 17 (winner-take-most: expect the
+  median outcome, not the hits). Those are different recommendations.
+
+  NOTE saturation_yoy is now read AGAINST demand rather than on its own. A shrinking
+  pipeline earns no credit by itself (that was the Naval/Transportation failure mode);
+  it only shows up as room when demand is holding while supply leaves.
+- **decline_gate** = 1 − 0.5 x max(sat_severity, entrant_severity), where
+  sat_severity = clamp(−saturation_yoy / 0.30, 0, 1) and
+  entrant_severity = clamp((1 − entrant_ratio) / 0.5, 0, 1). A FALSIFICATION TELL, NOT A
+  SCORE FACTOR since 2026-08-31 (it used to multiply opportunity_v2). Still the cleanest
+  single answer to "did everyone STOP entering this niche?" — near 1.0 means neither
+  decline signal fired. MAX (either-signal) semantics on purpose: entrant_ratio >= 1 is
+  the catalog NORM (see below), so it must not excuse a collapsing release pipeline.
 
 ### Niche-score v2 fields (mart_niche, additive)
 
@@ -457,10 +516,27 @@ really", not for revenue conclusions:
   self-selected survivors) is not health. NULL = no 24m cut or a zero/missing all-time
   median (treated as no evidence, not as decline).
 - **solo_viability** = share of the cut's scored games playable single-player (Steam's
-  own `categories` field, community-tag fallback), computed per cut. Catalog norm ~0.9;
-  below ~0.8 the niche leans multiplayer (Extraction Shooter ~0.6, MMORPG ~0.35) — a
-  multiplayer-dependent niche is NOT solo-buildable without netcode/servers/live
-  player-base plans, flag it for solo devs.
+  own `categories` field, community-tag fallback), computed per cut. **A FLAG, NOT A
+  SCALE.** MEASURED over 219 live niches (tag / 24m / min50):
+
+      min 0.353 | p05 0.853 | p10 0.913 | p25 0.953 | MEDIAN 0.975 | p75 0.990 | max 1.000
+      below 0.90: 7.8%     below 0.80: 3.2%
+
+  Three quarters of the catalog sits inside a 0.047-wide band, so this number CANNOT
+  rank the options a solo dev is choosing between — comparing 0.98 with 0.96 is noise.
+  What it does perfectly is spot the ~3% that are inherently multiplayer: Social
+  Deduction 0.35, MMORPG 0.45, Party Game 0.50, Party 0.64, Battle Royale 0.70,
+  Extraction Shooter 0.71, eSports 0.79. Those are NOT solo-buildable without
+  netcode/servers/live player-base plans — flag them. That compression is a true fact
+  about the world (most genres really are solo-buildable), not a scale to be normalised.
+  (CORRECTION: this dictionary previously said "catalog norm ~0.9". 0.9 is the 10th
+  PERCENTILE, not the norm — anyone calibrating on it was reading a bottom-decile value
+  as typical.)
+- **solo_tier** = the same signal as a flag: `'team'` (< 0.80, multiplayer-dependent,
+  ~3%), `'mixed'` (0.80-0.90 — clears the bar but has a real multiplayer minority: Hero
+  Shooter 0.800, Minigames 0.805, Escape Room 0.836, Class-Based 0.851, ~5%), `'solo'`
+  (>= 0.90, ~92%). Prefer this over the raw share when answering a solo dev. NULL on
+  marts built before 2026-08-31.
 - **tier** (tags; genre rows get 'genre') = 'micro' (buildable game concept: Colony Sim,
   Souls-like), 'theme' (setting/aesthetic you attach TO a game: Vikings, Pixel
   Graphics), 'umbrella' (genre/mechanic/mode container: Open World, Sandbox, Turn-Based
@@ -469,14 +545,22 @@ really", not for revenue conclusions:
   etl/build_marts.py. `find_niches` EXCLUDES umbrella/meta by default because
   recommending them was a real, user-rejected failure mode; a 'theme' answer still needs
   a micro-genre attached to be an actionable recommendation.
-- **decline_gate** — the opportunity_v2 multiplier itself, exposed so every score is
-  inspectable.
-
 Interpretation playbook for "what should I build": keep the 24m default window (that IS
-the market a new entrant faces), require the decline gate near 1.0 or understand exactly
-why it isn't, verify recent entrants get paid (24m median_rev, hit_rate_200k, n_recent),
-check winner_concentration (> 0.85 = winner-take-most: expect the median outcome, not
-the hits), and check solo_viability when the asker builds solo.
+the market a new entrant faces), read WHICH sub-score carried the score (momentum vs
+market_pull is the difference between "this is growing" and "this is already big"),
+require the decline gate near 1.0 or understand exactly why it isn't, verify recent
+entrants get paid (24m median_rev, hit_rate_200k, n_recent), check winner_concentration
+(> 0.85 = winner-take-most: expect the median outcome, not the hits), and check
+solo_tier when the asker builds solo.
+
+NOTE the score and the Radar board's rings are ONE model since 2026-08-31 — a high
+opportunity_v2 means "the board would ring this enter". On the live catalog the score's
+median by ring is enter 67.6 > hold 50.2 > crowded 39.1 > declining 19.5, and >= 65 is
+the "scores like an enter" bar (~16% of the catalog on the default cut). They are still
+not interchangeable: the rings encode distinct failure MODES (crowded and declining are
+different problems), while the score also weighs how much money is in the niche — so a
+winner-take-most niche with surging demand can score well AND ring "crowded". When they
+disagree, say which one you are quoting.
 
 ### Absolute market size (the "pie") — separate from `demand`
 
@@ -671,6 +755,9 @@ _NICHE_SORTABLE = {
     "n_games", "n_recent", "hit_rate_200k", "hit_rate_500k",
     "beatable_share", "saturation_yoy", "self_pub_share", "winner_concentration",
     "entrant_ratio", "solo_viability",
+    # opportunity_v2's sub-scores (2026-08-31 rebuild) — sortable so "which niches have
+    # the most demand momentum" is one call rather than a client-side scan.
+    "momentum", "supply_room", "revenue_spread", "market_pull", "supply_brake",
     "total_players_now", "players_trend_7d_pct", "players_coverage",
     "median_players_now", "players_top5_share",
     "lifetime_survival_12m", "lifetime_median_dead_months",
@@ -682,6 +769,20 @@ _NICHE_PLAYERS_COLS = {"total_players_now", "players_trend_7d_pct", "players_cov
 _NICHE_PLAYERS_DIST_COLS = {"median_players_now", "players_top5_share"}
 _NICHE_LIFETIME_COLS = {"lifetime_survival_12m", "lifetime_median_dead_months"}
 _NICHE_DEMAND24M_COLS = {"reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct"}
+# The opportunity_v2 sub-scores (2026-08-31 rebuild). Gated like every other optional
+# family: without this, sorting on one against an older mart falls through to the generic
+# "missing the v2 columns" BinderException message, which names five columns that DO exist
+# on that mart — a misleading diagnostic, the exact failure the API side already fixed.
+_NICHE_V2_PARTS_COLS = {
+    "momentum", "supply_room", "revenue_spread", "market_pull", "supply_brake",
+}
+_V2_PARTS_MISSING = (
+    "This mart predates the opportunity_v2 sub-scores (momentum / supply_room / "
+    "revenue_spread / market_pull / supply_brake — the 2026-08-31 score rebuild). "
+    "opportunity_v2 itself is still sortable, but on that mart it carries the OLD formula, "
+    "which ranked opposite to the Radar's rings. Re-run the ETL (`task etl` in the main "
+    "prospect checkout) and retry."
+)
 _DEMAND24M_MISSING = (
     "This mart predates the 24-month demand columns (reviews_24m / reviews_prev_24m / "
     "demand_trend_24m_pct, an older ETL build). Re-run the ETL (`task etl` in the main "
@@ -716,10 +817,10 @@ def find_niches(
     sort: str = "opportunity_v2",
     limit: int = 15,
 ) -> dict:
-    """Rank niches (Steam community tags, or Steam genres) by growth-gated opportunity.
+    """Rank niches (Steam community tags, or Steam genres) by demand-momentum opportunity.
     THE headline tool — start here for "what should I build" questions. Defaults are
     tuned for exactly that question: window="24m" (the market a new entrant actually
-    faces), sort="opportunity_v2" (decline-gated), include_tiers=["micro","theme"]
+    faces), sort="opportunity_v2", include_tiers=["micro","theme"]
     (buildable concepts only). min_reviews=0 is the NO-FLOOR cut: n_games = the honest
     full tag size (unreviewed releases included) — use for "how big is this tag really",
     not for revenue conclusions; requires a mart built after 2026-08-17.
@@ -729,20 +830,41 @@ def find_niches(
     THE SCORES
       - opportunity = 0.5*demand − 0.35*competition + 0.3*quality_gap, clamped [0,100]
         (all three are 0-100 percentiles vs other niches in the same cut — exact formulas
-        in the prospect-data-dictionary resource). KNOWN FAILURE MODE: it rewards LOW
-        competition without asking WHY competition is low.
-      - opportunity_v2 = opportunity * decline_gate, where decline_gate (in [0.5, 1],
-        returned per row) shrinks linearly with the WORSE of two decline signals:
-        saturation_yoy below 0 (release pipeline shrinking; full penalty at −30%/yr) and
-        entrant_ratio below 1 (recent entrants underearn the niche's history; full
-        penalty at 0.5). Sort by this, not by raw opportunity, for build decisions.
+        in the prospect-data-dictionary resource). The ORIGINAL score, frozen and kept for
+        continuity. TWO KNOWN FAILURE MODES: it rewards LOW competition without asking WHY
+        competition is low, and 60% of its `competition` term is percentile(n_recent),
+        which on the 24m cut is just niche SIZE — so it punishes big growing markets.
+        Do not sort by it.
+      - opportunity_v2 = opp_core * supply_brake. REBUILT 2026-08-31; it is no longer
+        `opportunity * decline_gate`. Sort by this for build decisions. opp_core is the
+        weighted mean of four 0-100 sub-scores returned on every row (renormalised over
+        whichever exist, so a missing input is never read as 0):
+          momentum 0.40        demand FLOW — 50 at flat, 88.1 at +40%/24m, 10.7 at −30%.
+                               NULL for emerging niches (no comparable base).
+          market_pull 0.22     0.6*demand + 0.4*market_size — the money LEVEL.
+          revenue_spread 0.20  from winner_concentration; exactly 50 at the 0.85 bar.
+          quality_gap 0.18     unchanged.
+        supply_brake = 0.35 + 0.65*supply_room/100 (1.0 when unknown — missing data never
+        penalises), and supply_room is the WORSE of "release pipeline growth measured
+        AGAINST demand growth" and "entrant_room" (0 at entrant_ratio 0.5, 100 at the
+        catalog norm 1.08, capped). Either supply signal alone can sink a score.
+        REPORT WHICH SUB-SCORE CARRIED THE SCORE. "Deckbuilding 71.9" (momentum 99,
+        supply_room 100) and "Hunting 77.2" (momentum 92, market_pull 86, but
+        revenue_spread 17 — winner-take-most) are different recommendations.
+        The score now agrees with the Radar board's ring verdicts because it reads the
+        same axes against the same bars: on the live catalog its median by ring is
+        enter 67.6 > hold 50.2 > crowded 39.1 > declining 19.5, and >= 65 is the "scores
+        like a niche the radar would say enter" bar (~16% of the default cut).
 
     FALSIFICATION RULES — run these before recommending a niche:
       1. Low competition + negative saturation_yoy usually means a market in DECLINE —
          everyone STOPPED entering — not a cracked-open opportunity. Check entrant_ratio
          and the niche_detail saturation_trend before recommending. (This exact failure
          put Naval/Transportation/Diplomacy — new releases shrinking 15-37%/yr — at the
-         top of the old raw-opportunity ranking.)
+         top of the old raw-opportunity ranking.) STILL YOUR JOB even though the score
+         no longer rewards a shrinking pipeline on its own: a niche whose demand AND
+         supply are both falling nets out neutral on supply_room, and only momentum
+         catches it — so read momentum, not just the total.
       2. entrant_ratio reads AGAINST THE NORM, not against 1.0: the catalog-median tag
          sits at ~1.08 (price inflation + the review floor filters recent releases
          harder), so ~1.0-1.3 is unremarkable and <1 is a real warning that newcomers
@@ -754,11 +876,17 @@ def find_niches(
       4. winner_concentration > 0.85 = winner-take-most: the niche's revenue lives in a
          few hits, so the MEDIAN outcome (not the visible winners) is what a new entrant
          should expect. Check the revenue_histogram in niche_detail.
-      5. If the asker is a solo dev, check solo_viability (share of the niche's scored
-         games playable single-player; catalog norm ~0.9). Below ~0.8 the niche leans
-         multiplayer (e.g. Extraction Shooter ~0.6): a multiplayer-dependent game needs
-         netcode, servers, and a live player base a solo dev usually can't fund — do not
-         recommend it for solo builds without flagging that.
+      5. If the asker is a solo dev, read solo_viability AS A FLAG, NOT A SCALE. MEASURED
+         over 219 live niches: median 0.975, p25 0.953, p10 0.913 — 75% of the catalog
+         sits inside a 0.047-wide band, so 0.98 vs 0.96 is noise and ranking on it is
+         meaningless. Only the ~3% below 0.80 carry information: Social Deduction 0.35,
+         MMORPG 0.45, Party Game 0.50, Party 0.64, Battle Royale 0.70, Extraction Shooter
+         0.71, eSports 0.79. Those need netcode, servers and a live player base a solo dev
+         usually can't fund — never recommend them for solo builds without flagging it.
+         Prefer solo_tier ('team' | 'mixed' | 'solo') where the mart serves it; 'mixed'
+         (0.80-0.90) clears the bar but has a real multiplayer minority.
+         (An older version of this rule said "catalog norm ~0.9" — 0.9 is the 10th
+         percentile, not the norm. Do not calibrate on that figure.)
       6. tier: rows are 'micro' (buildable game concept), 'theme' (setting/aesthetic you
          attach TO a game), 'umbrella' (genre/mechanic container — NOT buildable: "build
          an Open World game" is not a plan), 'meta' (reception tags like Great
@@ -849,6 +977,8 @@ def find_niches(
         return {"error": _LIFETIME_MISSING}
     if not _has_demand24m() and sort in _NICHE_DEMAND24M_COLS:
         return {"error": _DEMAND24M_MISSING}
+    if not _has_v2_parts() and sort in _NICHE_V2_PARTS_COLS:
+        return {"error": _V2_PARTS_MISSING}
     if min_reviews == 0 and not _has_no_floor_cut():
         return {"error": _NO_FLOOR_MISSING}
     if include_tiers is not None:
@@ -900,6 +1030,7 @@ def find_niches(
         if _has_demand24m()
         else ""
     )
+    v2_parts = _V2_PARTS_SELECT if _has_v2_parts() else ""
     try:
         rows = query(
             f"""
@@ -908,7 +1039,7 @@ def find_niches(
                    market_size, total_owners, total_rev, total_reviews,
                    median_rev, median_reviews, median_price, median_positive_ratio,
                    median_owners, recent_velocity, hit_rate_200k, hit_rate_500k,
-                   saturation_yoy, winner_concentration{pct_cols}{players_cols}{lifetime_cols}{demand_cols}
+                   saturation_yoy, winner_concentration{pct_cols}{players_cols}{lifetime_cols}{demand_cols}{v2_parts}
             FROM mart_niche
             WHERE {" AND ".join(where)}
             ORDER BY {sort} DESC NULLS LAST, n_games DESC
@@ -939,9 +1070,13 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
         precomputed cuts — (all|24m) x (min_reviews 0|50|100; the 0 rows exist only on
         marts built after the no-floor cut landed) — including entrant_ratio
         (24m-vs-all-time median revenue; catalog-median tag is ~1.08, so <1 means recent
-        entrants genuinely underearn), solo_viability (share of scored games playable
-        single-player; ~0.9 is the catalog norm, below ~0.8 leans multiplayer — a red
-        flag for solo devs), and decline_gate (the opportunity_v2 multiplier, 0.5-1.0).
+        entrants genuinely underearn), solo_viability + solo_tier (share of scored games
+        playable single-player — a FLAG, not a scale: catalog median 0.975, so only the
+        ~3% below 0.80 mean anything, and those lean multiplayer — a red flag for solo
+        devs), decline_gate (a falsification tell, 0.5-1.0: near 1.0 = neither decline
+        signal fired; it stopped multiplying the score on 2026-08-31), and the
+        opportunity_v2 sub-scores momentum / supply_room / revenue_spread / market_pull /
+        supply_brake, which say WHY the score is what it is.
       - saturation_trend: yearly release counts + median revenue, oldest-first — is this
         niche heating up or cooling off? A shrinking n_releases pipeline is DECLINE even
         when competition looks invitingly low.
@@ -1007,6 +1142,7 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
         if _has_demand24m()
         else ""
     )
+    v2_parts = _V2_PARTS_SELECT if _has_v2_parts() else ""
     try:
         variants = query(
             f"""
@@ -1015,7 +1151,7 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
                    competition, quality_gap, market_size, total_owners, total_rev,
                    total_reviews, median_rev, median_reviews, median_price,
                    median_positive_ratio, median_owners, recent_velocity, hit_rate_200k,
-                   hit_rate_500k, beatable_share, saturation_yoy, winner_concentration{pct_cols}{players_cols}{lifetime_cols}{demand_cols}
+                   hit_rate_500k, beatable_share, saturation_yoy, winner_concentration{pct_cols}{players_cols}{lifetime_cols}{demand_cols}{v2_parts}
             FROM mart_niche WHERE dimension = ? AND key = ? ORDER BY win, min_reviews
             """,
             [dimension, key],

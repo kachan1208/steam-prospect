@@ -75,6 +75,12 @@ export type SortKey =
   | "decline_gate"
   | "entrant_ratio"
   | "solo_viability"
+  // opportunity_v2's sub-scores (2026-08-31 rebuild).
+  | "momentum"
+  | "supply_room"
+  | "revenue_spread"
+  | "market_pull"
+  | "supply_brake"
   | "demand"
   | "competition"
   | "quality_gap"
@@ -166,10 +172,27 @@ export interface NicheRow {
   competition: number | null;
   quality_gap: number | null;
   opportunity: number | null;
+  // REBUILT 2026-08-31 (etl/marts/mart_niche.sql): a renormalised blend of momentum /
+  // market_pull / revenue_spread / quality_gap, times supply_brake, read off the SAME
+  // axes and bars as the Radar's ring verdicts. It used to rank the opposite way.
   opportunity_v2: number | null;
+  // The sub-scores — absent (undefined) on marts that predate the rebuild, so the UI
+  // omits the breakdown. null (present but empty) means "no comparable reading here",
+  // which the blend honoured by renormalising rather than reading as 0.
+  // THE FOUR BLENDED TERMS are momentum, market_pull, revenue_spread and quality_gap
+  // (declared above). supply_room is NOT blended — it is the brake's input.
+  momentum?: number | null; // weight 0.40; demand FLOW, 50 flat, 88.1 at DEMAND_ENTER_PCT
+  market_pull?: number | null; // weight 0.22; 0.6*demand + 0.4*market_size
+  revenue_spread?: number | null; // weight 0.20; 50 exactly at WC_WINNER_TAKE_MOST
+  supply_room?: number | null; // NOT weighted — min(flood_room, entrant_room)
+  supply_brake?: number | null; // the multiplier, [0.35, 1]
+  // A falsification tell, not a score factor since the rebuild.
   decline_gate: number | null;
   entrant_ratio: number | null;
   solo_viability: number | null;
+  // solo_viability as a FLAG: "solo" | "mixed" | "team". The raw share is compressed
+  // (catalog median 0.975) so it ranks nothing — see radarVerdict.ts's module doc.
+  solo_tier?: string | null;
   // Solo-evidence trio — the member profile behind solo_viability (the SINGLEPLAYER
   // SHARE, a no-netcode proxy, not a production-scope measure). Same per-cut population
   // as the share; absent (undefined) on marts that predate it — the UI then omits the

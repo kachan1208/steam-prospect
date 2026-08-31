@@ -84,8 +84,8 @@ def _build(path: Path) -> None:
 _PROBES = (
     niches._has_players, niches._has_players_dist, niches._has_lifetime,
     niches._has_no_floor_cut, niches._has_p90, niches._has_p90_trend,
-    niches._has_demand24m, niches._has_solo_evidence, niches._has_niche_games,
-    niches._niche_game_cuts,
+    niches._has_demand24m, niches._has_solo_evidence, niches._has_v2_parts,
+    niches._has_niche_games, niches._niche_game_cuts,
 )
 
 
