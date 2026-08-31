@@ -676,7 +676,21 @@ export default function NicheDetail() {
               ? `${activeVariant.saturation_yoy >= 0 ? "▲" : "▼"} ${fmtSigned(activeVariant.saturation_yoy, 0)}`
               : "—"
           }
-          footnote={`${fmtInt(activeVariant.n_recent)} released in the last 24m`}
+          // The footnote must state THIS number's own basis. It used to read
+          // "<n_recent> released in the last 24m", which is a different figure entirely:
+          // n_recent counts the rolling 24 months AND applies the min-reviews cut, while
+          // saturation_yoy compares two FULL CALENDAR YEARS over every member of the niche
+          // with no review floor (mart_niche.sql's `sat` CTE). Trading Card Game showed
+          // "▲ +4% / 38 released in the last 24m" — but the +4% is 124 in the last full year
+          // against 119 the year before, a 243-game base. Reading it as "38 games, up 4%"
+          // makes a solid number look like noise, and on a genuinely small niche it would
+          // make noise look solid.
+          footnote={
+            activeVariant.n_recent_year != null && activeVariant.n_prior_year != null
+              ? `${fmtInt(activeVariant.n_recent_year)} released last full year vs ` +
+                `${fmtInt(activeVariant.n_prior_year)} the year before`
+              : "year-over-year release counts unavailable"
+          }
         />
       </div>
 
