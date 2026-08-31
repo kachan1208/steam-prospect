@@ -5,7 +5,7 @@
 --
 --   mart_game_review_aspects    per (appid, aspect): praise/complaint mention counts +
 --                                pos_share, for games with >= @TEARDOWN_MIN_REVIEWS@
---                                sampled English reviews (stg_review_text — itself a
+--                                sampled English reviews (stg_review_key — itself a
 --                                per-game SAMPLE of the `reviews` table, recency-biased
 --                                for older/popular titles; see stg_review's caveat).
 --                                pos_share is VOTE-based: the share of reviews mentioning the
@@ -48,11 +48,26 @@
 -- The floor trims the noisiest, most-diluted matches; it does not guarantee precision.
 -- Placeholder tokens are substituted by build_marts.py.
 --
--- NOTE: the 10 keyword regexes below (_review_aspect_flags) are NO LONGER hand-duplicated —
--- they render from the single source of truth ASPECT_LEXICON in etl/build_marts.py via the
--- @RX_*@ placeholders, which is ALSO where the text-sentiment windows are matched and where
--- mart_game_aspect_reviews.sql gets its copy. Change a keyword set in ONE place (build_marts.py)
--- and the vote flags, the sentiment windows, and the drill-down excerpts all move together.
+-- NO SECOND REGEX PASS (2026-08-31). This file used to build _review_aspect_flags: ten
+-- `regexp_matches(review_text, '@RX_*@', 'i')` columns over stg_review_text, i.e. a SECOND
+-- scan of every English review's text with the SAME ten regexes compute_aspect_sentiment had
+-- already run — and the only reason full review text had to exist for all 24,864,726 of them
+-- (8.45GB, held as a TEMP table from staging until the DROP at the bottom of this file). Eight
+-- consecutive nightlies died on that: the box has ~29GB of headroom and the build wanted ~30GB.
+--
+-- The counts now come from stg_aspect_keyword_votes, aggregated in build_marts.py straight out
+-- of the persistent sentiment cache (cache.aspect_mention), which stores exactly one row per
+-- (review, keyword arm) written by the identical `regexp_matches(review_text, rx, 'i')`
+-- predicate. NOT an approximation — see _build_aspect_keyword_votes() for the four properties
+-- that make it the same number (one row per review per arm, the raw keyword arm rather than
+-- the classifier's verdict, NONE-classified rows retained, identical population and floor),
+-- and etl/tests/test_teardown_counts_from_cache.py for the invariant pinned on a fixture.
+--
+-- The @RX_*@ placeholders are gone from this file with the flags. They still render from the
+-- single source of truth ASPECT_LEXICON in etl/build_marts.py into the sentiment windows and
+-- into mart_game_aspect_reviews.sql's excerpt window; @ASPECT_LABEL_VALUES@ below renders the
+-- matching aspect LABELS from that same list, so adding an aspect still means editing exactly
+-- one place.
 
 DROP TABLE IF EXISTS mart_game_review_aspects;
 DROP TABLE IF EXISTS mart_genre_aspect_baseline;
@@ -62,65 +77,40 @@ DROP TABLE IF EXISTS mart_game_press_timeline;
 DROP TABLE IF EXISTS mart_game_press_notable;
 
 -- ------------------------------------------------------------------------------------
--- Review-aspect mining — fixed keyword lexicon, 10 aspects, scanned once per review.
+-- Review-aspect mining — fixed keyword lexicon, 10 aspects, scanned once per review
+-- (in build_marts.py's compute_aspect_sentiment, and only ever ONCE per review EVER:
+-- the result is cached across runs and this file reads the cache).
 -- ------------------------------------------------------------------------------------
+-- Counted off the LEAN key table (appid, recommendationid, voted_up — no text), which has
+-- exactly the rows the old text-carrying stg_review_text had, so the floor selects the same
+-- games it always did.
 CREATE TEMP TABLE _teardown_elig AS
 SELECT appid, COUNT(*) AS n_reviews_sampled
-FROM stg_review_text
+FROM stg_review_key
 GROUP BY appid
 HAVING COUNT(*) >= @TEARDOWN_MIN_REVIEWS@;
 
--- One boolean column per aspect (computed once per review) rather than a cross join
--- against an aspects table — 10 regex evaluations per row either way, but this avoids
--- a 10x row-count blowup before the aggregate.
-CREATE TEMP TABLE _review_aspect_flags AS
-SELECT
-    rt.appid,
-    rt.voted_up,
-    regexp_matches(rt.review_text, '@RX_COMBAT@', 'i') AS combat,
-    regexp_matches(rt.review_text, '@RX_WORLD@', 'i') AS world,
-    regexp_matches(rt.review_text, '@RX_ART@', 'i') AS art,
-    regexp_matches(rt.review_text, '@RX_MUSIC@', 'i') AS music,
-    regexp_matches(rt.review_text, '@RX_STORY@', 'i') AS story,
-    regexp_matches(rt.review_text, '@RX_DIFFICULTY@', 'i') AS difficulty,
-    regexp_matches(rt.review_text, '@RX_CONTROLS@', 'i') AS controls,
-    regexp_matches(rt.review_text, '@RX_MAPNAV@', 'i') AS mapnav,
-    regexp_matches(rt.review_text, '@RX_CONTENT@', 'i') AS content,
-    regexp_matches(rt.review_text, '@RX_PRICEVALUE@', 'i') AS pricevalue
-FROM stg_review_text rt
-JOIN _teardown_elig e ON e.appid = rt.appid;
-
--- COALESCE every arm to 0: SUM(...) FILTER(...) returns NULL (not 0) when a game has
--- zero reviews on that side of voted_up for the aspect (e.g. an aspect never mentioned
--- in any negative review) — without the COALESCE, total_mentions/pos_share downstream
--- would go NULL for a real, present aspect instead of reading as "0 on that side."
-CREATE TEMP TABLE _aspect_agg AS
-SELECT appid,
-    COALESCE(SUM(combat::INT) FILTER (WHERE voted_up = 1), 0) AS combat_pos, COALESCE(SUM(combat::INT) FILTER (WHERE voted_up = 0), 0) AS combat_neg,
-    COALESCE(SUM(world::INT) FILTER (WHERE voted_up = 1), 0) AS world_pos, COALESCE(SUM(world::INT) FILTER (WHERE voted_up = 0), 0) AS world_neg,
-    COALESCE(SUM(art::INT) FILTER (WHERE voted_up = 1), 0) AS art_pos, COALESCE(SUM(art::INT) FILTER (WHERE voted_up = 0), 0) AS art_neg,
-    COALESCE(SUM(music::INT) FILTER (WHERE voted_up = 1), 0) AS music_pos, COALESCE(SUM(music::INT) FILTER (WHERE voted_up = 0), 0) AS music_neg,
-    COALESCE(SUM(story::INT) FILTER (WHERE voted_up = 1), 0) AS story_pos, COALESCE(SUM(story::INT) FILTER (WHERE voted_up = 0), 0) AS story_neg,
-    COALESCE(SUM(difficulty::INT) FILTER (WHERE voted_up = 1), 0) AS difficulty_pos, COALESCE(SUM(difficulty::INT) FILTER (WHERE voted_up = 0), 0) AS difficulty_neg,
-    COALESCE(SUM(controls::INT) FILTER (WHERE voted_up = 1), 0) AS controls_pos, COALESCE(SUM(controls::INT) FILTER (WHERE voted_up = 0), 0) AS controls_neg,
-    COALESCE(SUM(mapnav::INT) FILTER (WHERE voted_up = 1), 0) AS mapnav_pos, COALESCE(SUM(mapnav::INT) FILTER (WHERE voted_up = 0), 0) AS mapnav_neg,
-    COALESCE(SUM(content::INT) FILTER (WHERE voted_up = 1), 0) AS content_pos, COALESCE(SUM(content::INT) FILTER (WHERE voted_up = 0), 0) AS content_neg,
-    COALESCE(SUM(pricevalue::INT) FILTER (WHERE voted_up = 1), 0) AS pricevalue_pos, COALESCE(SUM(pricevalue::INT) FILTER (WHERE voted_up = 0), 0) AS pricevalue_neg
-FROM _review_aspect_flags
-GROUP BY appid;
-
 CREATE TABLE mart_game_review_aspects AS
 WITH long AS (
-    SELECT appid, 'Combat & Bosses' AS aspect, combat_pos AS n_pos_mentions, combat_neg AS n_neg_mentions FROM _aspect_agg
-    UNION ALL SELECT appid, 'World & Exploration', world_pos, world_neg FROM _aspect_agg
-    UNION ALL SELECT appid, 'Art & Visuals', art_pos, art_neg FROM _aspect_agg
-    UNION ALL SELECT appid, 'Music & Audio', music_pos, music_neg FROM _aspect_agg
-    UNION ALL SELECT appid, 'Story & Writing', story_pos, story_neg FROM _aspect_agg
-    UNION ALL SELECT appid, 'Difficulty', difficulty_pos, difficulty_neg FROM _aspect_agg
-    UNION ALL SELECT appid, 'Controls & Performance', controls_pos, controls_neg FROM _aspect_agg
-    UNION ALL SELECT appid, 'Map & Navigation / Backtracking', mapnav_pos, mapnav_neg FROM _aspect_agg
-    UNION ALL SELECT appid, 'Content & Length', content_pos, content_neg FROM _aspect_agg
-    UNION ALL SELECT appid, 'Price & Value', pricevalue_pos, pricevalue_neg FROM _aspect_agg
+    -- CROSS JOIN, then LEFT JOIN the counts: every eligible game gets a row for all ten
+    -- aspects, including ones it never mentions. That is what the old ten-arm UNION ALL over
+    -- _aspect_agg produced (its source had a row per eligible review, so every eligible appid
+    -- appeared, with zeros in the arms nobody mentioned) and mart_genre_aspect_baseline's
+    -- COUNT(DISTINCT appid) per genre depends on it.
+    --
+    -- COALESCE every arm to 0 for the same reason it always was: SUM(...) FILTER(...) returns
+    -- NULL, not 0, when a game has no rows on that side of voted_up for the aspect — without
+    -- it, total_mentions/pos_share would go NULL for a real, present aspect instead of reading
+    -- as "0 on that side." Reviews with a NULL voted_up match neither FILTER, exactly as the
+    -- boolean-flag aggregate treated them.
+    SELECT e.appid, a.aspect,
+        COALESCE(SUM(v.n_mentions) FILTER (WHERE v.voted_up = 1), 0) AS n_pos_mentions,
+        COALESCE(SUM(v.n_mentions) FILTER (WHERE v.voted_up = 0), 0) AS n_neg_mentions
+    FROM _teardown_elig e
+    CROSS JOIN (VALUES @ASPECT_LABEL_VALUES@) AS a(aspect)
+    LEFT JOIN stg_aspect_keyword_votes v
+           ON v.appid = e.appid AND v.aspect = a.aspect
+    GROUP BY e.appid, a.aspect
 )
 SELECT l.appid, l.aspect,
     l.n_pos_mentions, l.n_neg_mentions,
@@ -265,19 +255,16 @@ FROM ranked
 WHERE conf_rank <= @PRESS_NOTABLE_N@ OR date_rank = 1
 ORDER BY appid, published_at ASC NULLS LAST;
 
--- OPTIMIZATION (2026-07-28): stg_review_text (staging's ~0.8GB english review-text copy) is used
--- ONLY by this teardown mart. Drop it here so it doesn't sit in memory alongside
--- mart_game_aspect_reviews' own eligible review-text pool, which builds next — two ~0.8GB text
--- copies coexisting was a big part of the ETL's memory peak once the review corpus doubled.
--- Recreated by create_staging() on the next run.
-DROP TABLE IF EXISTS stg_review_text;
-
--- Temp-table hygiene: this file's remaining staging is file-local too — in particular
--- _review_aspect_flags (one row per eligible english review, 10 regex-flag columns) is the
--- biggest temp in the whole build after the text pools. _teardown_elig is safe to drop:
--- mart_game_aspect_reviews.sql derives its own identical-population _aspectrev_elig rather
--- than reading this one (verified — its only mention there is a comment).
+-- Temp-table hygiene. stg_review_key and stg_aspect_keyword_votes are used ONLY by this file
+-- (stg_review_key also by compute_aspect_sentiment, which has already run and dropped its own
+-- derived tables), so drop them here rather than carrying them through the marts that follow.
+-- Both are lean now — the ~8.45GB text column that used to make this DROP urgent is gone from
+-- the build entirely — but mart_game_aspect_reviews.sql builds next and is the step with the
+-- remaining memory peak, so it still gets the room.
+-- _teardown_elig is safe to drop: mart_game_aspect_reviews.sql derives its own
+-- identical-population _aspectrev_elig rather than reading this one (verified — its only
+-- mention there is a comment).
+DROP TABLE IF EXISTS stg_review_key;
+DROP TABLE IF EXISTS stg_aspect_keyword_votes;
 DROP TABLE IF EXISTS _teardown_elig;
-DROP TABLE IF EXISTS _review_aspect_flags;
-DROP TABLE IF EXISTS _aspect_agg;
 DROP TABLE IF EXISTS _press_base;

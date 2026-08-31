@@ -951,6 +951,13 @@ def build_params() -> dict[str, str]:
     lexicon = {placeholder: rx for (_label, placeholder, rx) in ASPECT_LEXICON}
     return {
         **lexicon,
+        # The 10 aspect LABELS as a SQL VALUES list. mart_game_teardown.sql cross-joins it
+        # with the eligible games so every (game, aspect) pair gets a row even when the aspect
+        # was never mentioned — the shape the hand-written 10-arm UNION ALL used to produce.
+        # Rendered from ASPECT_LEXICON for the same reason the regexes are: adding an aspect
+        # must not require editing a list of labels in a second file.
+        "ASPECT_LABEL_VALUES": ", ".join(
+            "('" + label.replace("'", "''") + "')" for (label, _p, _rx) in ASPECT_LEXICON),
         "ASPECT_SENTENCE_CHARS": ASPECT_SENTENCE_CHARS,
         "ASPECT_WINDOW_SLICE_BEFORE": ASPECT_WINDOW_SLICE_BEFORE,
         "ASPECT_WINDOW_SLICE_CHARS": ASPECT_WINDOW_SLICE_CHARS,
@@ -1431,17 +1438,37 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         JOIN stg_game g ON g.appid = r.appid
         WHERE r.timestamp_created IS NOT NULL;
 
-        -- Phase 3 (Game Teardown): English review text for aspect-lexicon mining.
-        -- Scoped to language='english' + non-empty review_text to keep the text payload
-        -- bounded (~1.5M of 3.1M total reviews) — aspect mining is English-only by
-        -- design (the fixed keyword lexicon is English). Not joined to stg_game /
-        -- release date since aspect mining doesn't need days-since-release.
-        CREATE TEMP TABLE stg_review_text AS
-        -- recommendationid added 2026-08-24 so compute_aspect_sentiment can key off THIS
-        -- table instead of materializing _sent_pool — a byte-for-byte duplicate of the same
-        -- ~7GB of review text. Both copies living in the temp directory at once is what kept
-        -- pushing the build past DuckDB's disk-spill cap (three OOM-failed builds in a row).
-        SELECT r.appid, r.recommendationid, r.voted_up, r.review_text
+        -- Phase 3 (Game Teardown): the English review KEY SET for aspect mining — and
+        -- NO REVIEW TEXT. Scoped to language='english' + non-empty review_text because
+        -- aspect mining is English-only by design (the fixed keyword lexicon is English);
+        -- not joined to stg_game / release date since aspect mining doesn't need
+        -- days-since-release.
+        --
+        -- NO TEXT (2026-08-31). This table used to be stg_review_text and carried
+        -- review_text for the whole population, held as a TEMP table from staging until
+        -- mart_game_teardown.sql dropped it, so it also ate the spill budget of every query
+        -- that ran in between. That is what put eight consecutive nightlies over the box's
+        -- headroom (~29GB free, ~30GB needed). Measured on the live source, both shapes
+        -- materialised for the full population:
+        --     BEFORE  24,864,168 rows, 8.45GB of review_text (avg 340 chars/review)
+        --     AFTER   the same rows at 282MB on disk                          -> 30x smaller
+        -- (recommendationid averages 8.6 chars, so the key set compresses hard; the text
+        -- does not.)
+        --
+        -- It existed for exactly two readers, and NEITHER needs the whole corpus's text:
+        --   * mart_game_teardown.sql re-derived per-(appid, aspect, voted_up) keyword
+        --     counts by running the SAME 10 aspect regexes a SECOND time over every
+        --     review — facts compute_aspect_sentiment had already computed and cached in
+        --     cache.aspect_mention. It now reads those counts (stg_aspect_keyword_votes)
+        --     and this table's (appid, voted_up) keys instead. See that file's header.
+        --   * compute_aspect_sentiment needs text only for the NIGHTLY DELTA — reviews not
+        --     yet in cache.scored_review — and now reads that delta's text straight from
+        --     src.reviews at the point of use (_sent_new), which is the only place in the
+        --     build that materialises review text at all.
+        -- Everything else about the population is unchanged, so the teardown's eligibility
+        -- floor (COUNT(*) >= TEARDOWN_MIN_REVIEWS) counts exactly the same rows it did.
+        CREATE TEMP TABLE stg_review_key AS
+        SELECT r.appid, r.recommendationid, r.voted_up
         FROM src.reviews r
         WHERE r.language = 'english'
           AND r.review_text IS NOT NULL
@@ -2063,6 +2090,104 @@ def _probe_classifier() -> None:
     _CLF = None
 
 
+def _build_aspect_keyword_votes(con: duckdb.DuckDBPyConnection, mention_table: str,
+                                n_buckets: int = 1) -> None:
+    """Build stg_aspect_keyword_votes: per (appid, keyword aspect, voted_up), how many reviews
+    matched that aspect's keyword regex. This is mart_game_review_aspects'
+    n_pos_mentions / n_neg_mentions, and it is the ONLY thing mart_game_teardown.sql used to
+    need full review text for.
+
+    WHY THIS IS THE SAME NUMBER the 10-arm regex scan produced (the whole point of the change):
+
+      * ONE ROW PER (review, keyword arm). Both mention sources are written by
+        _aspect_window_sql, whose per-arm SELECT filters the pool with
+        `WHERE regexp_matches(review_text, '<rx>', 'i')` — the identical predicate, from the
+        identical ASPECT_LEXICON entry, that mart_game_teardown.sql's _review_aspect_flags
+        evaluated as a boolean column. It emits a row per MATCHING REVIEW, not per keyword
+        occurrence, so a review naming "combat" five times contributes exactly 1, exactly as
+        the boolean flag did. Verified on the live cache 2026-08-31: 21,679,495 rows, ZERO
+        duplicate (recommendationid, aspect) pairs, so COUNT(*) here needs no DISTINCT (and a
+        DISTINCT would reintroduce the 21.7M-row sort/aggregate that killed two nightlies).
+      * `aspect` IS THE KEYWORD ARM, not the classifier's verdict. clf_aspect is stored
+        alongside it precisely so the raw arm survives reassignment, and rows the classifier
+        read as NONE are STORED, not discarded (2,450,174 of them today). There is deliberately
+        NO clf filter here: these are the vote-split bars, which count keyword matches. The
+        NONE-drop and the reassignment belong to the TEXT-sentiment columns, which come from
+        stg_aspect_sentiment.
+      * SAME POPULATION, SAME FLOOR. _sent_pool_meta is stg_review_key (english + non-empty
+        text) narrowed by the same COUNT(*) >= TEARDOWN_MIN_REVIEWS floor _teardown_elig
+        applies, and compute_aspect_sentiment scores every pool review not already in
+        cache.scored_review BEFORE the mart loop runs — so by the time the teardown reads this,
+        every in-scope review has been scanned. A game below the floor is scored by neither
+        path; a game that crosses the floor gets its whole back-catalogue scored on the run it
+        crosses, because the anti-join is against scored_review, not against the appid.
+      * Reviews that match NOTHING contribute no rows on either side (they were `false` in all
+        ten flag columns), and are still recorded in scored_review so they are never rescanned.
+
+    Empirically diffed against the raw-regex path per (appid, aspect, voted_up) — see the
+    equivalence run in the commit message and test_teardown_counts_from_cache.py.
+
+    KNOWN GAP IN THE LIVE CACHE FILE — a DATA defect, not a defect in the argument above, but
+    read this before trusting the numbers on the current droplet. Diffed over 316,485 reviews /
+    600 games on 2026-08-31: the cache produced ZERO rows the raw regex does not reproduce
+    (it is a strict subset, so nothing is over-counted), but 1,962 of 314,626 raw mentions
+    (0.62%, in 118 of 9,404 cells, touching 73 of 600 games) were MISSING from it. Every single
+    missing row is in the last two arms of _aspect_window_sql's UNION ALL — 1,902 Price & Value
+    (arm 10) and 60 Content & Length (arm 9), zero in arms 1-8 — and every affected review has a
+    cached arm set that is a clean PREFIX of the arms its text matches. That is the fingerprint
+    of a scoring stream cut off mid-corpus by one of the OOM-killed builds, back when the delta
+    was "not in aspect_mention" and a partially-scored review therefore looked finished; the
+    2026-08-22 scored_review seed migration (`INSERT ... SELECT DISTINCT recommendationid FROM
+    aspect_mention`) then froze that state in. The CURRENT code cannot create new holes:
+    scored_review is written last, after every mention row, and a crash before it leaves the
+    review out so the next run DELETEs its partial rows and rescans.
+    The gap is not reachable from the cache alone (an incomplete arm set is indistinguishable
+    from a review that genuinely mentions nothing else without re-reading the text), so the only
+    repair is one full rescore: bump SENTIMENT_CACHE_VERSION, which makes
+    _refresh_sentiment_cache wipe and refill. Note this change makes that rescore ~half the
+    memory it used to be — the wipe path's full-pool _sent_new is now the only text in the
+    build, where before it sat next to staging's identical 8.45GB stg_review_text.
+    Until it is done, the same rows are already missing from the TEXT-sentiment columns and the
+    drill-down excerpts, which have read this cache since 2026-07; this change makes the
+    vote-split bars agree with them rather than introducing a new discrepancy.
+
+    `n_buckets` > 1 splits the scan on hash(recommendationid) — used for the 21.7M-row cache,
+    where a single hash join against the 24.4M-row pool would not fit the box's memory budget.
+    Bucketing is safe for a SUM: recommendationid is not part of the output grouping key, so a
+    group's rows may land in several buckets, and the per-bucket partials are summed at the end.
+    """
+    con.execute("DROP TABLE IF EXISTS _kw_votes_part")
+    con.execute(
+        "CREATE TEMP TABLE _kw_votes_part("
+        "appid INTEGER, aspect VARCHAR, voted_up BIGINT, n BIGINT)"
+    )
+    for b in range(n_buckets):
+        # The bucket predicate is applied to BOTH sides. On p it is redundant by the equijoin
+        # (equal ids hash equally), but stating it lets DuckDB shrink the join's build side
+        # with the bucket instead of hashing all 24.4M pool rows once per bucket.
+        bucket = (f"WHERE hash(m.recommendationid) % {n_buckets} = {b} "
+                  f"AND hash(p.recommendationid) % {n_buckets} = {b}") if n_buckets > 1 else ""
+        con.execute(
+            f"""
+            INSERT INTO _kw_votes_part
+            SELECT p.appid, m.aspect, p.voted_up, COUNT(*)
+            FROM {mention_table} m
+            JOIN _sent_pool_meta p ON p.recommendationid = m.recommendationid
+            {bucket}
+            GROUP BY p.appid, m.aspect, p.voted_up
+            """
+        )
+    con.execute(
+        """
+        CREATE TEMP TABLE stg_aspect_keyword_votes AS
+        SELECT appid, aspect, voted_up, SUM(n) AS n_mentions
+        FROM _kw_votes_part
+        GROUP BY appid, aspect, voted_up
+        """
+    )
+    con.execute("DROP TABLE IF EXISTS _kw_votes_part")
+
+
 def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> int:
     """Precompute per-(appid, aspect) VADER text sentiment for the Game Teardown (see the
     ASPECT_LEXICON block above for the what/why). Runs BEFORE the mart SQL loop so
@@ -2097,21 +2222,24 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
     con.execute("DROP TABLE IF EXISTS stg_aspect_sentiment")
     con.execute("DROP TABLE IF EXISTS _sent_pool")
     con.execute("DROP TABLE IF EXISTS _sent_pool_meta")
-    # The eligible pool is stg_review_text (built by create_staging, same filters) plus the
-    # per-game floor. The LEAN meta table carries only (appid, recommendationid) — DuckDB's
-    # columnar scan never touches the text column for it — and is what every id-keyed step
-    # below reads. Review TEXT is never copied out of stg_review_text in the cached path:
-    # a second ~7GB text table (_sent_pool, removed 2026-08-24) next to it in the temp dir is
-    # what pushed three consecutive builds past the disk-spill cap.
+    con.execute("DROP TABLE IF EXISTS stg_aspect_keyword_votes")
+    # The eligible pool is stg_review_key (built by create_staging, same filters as the old
+    # stg_review_text minus the text column) plus the per-game floor. This meta table is what
+    # every id-keyed step below reads.
+    #
+    # voted_up rides along (2026-08-31) so stg_aspect_keyword_votes can be aggregated here,
+    # while the cache is attached, without a second pass over anything. It is one byte a row
+    # and it is what lets mart_game_teardown.sql stop re-running the 10 aspect regexes over
+    # 24.8M reviews to recover a fact this function already knows.
     con.execute(
         f"""
         CREATE TEMP TABLE _sent_pool_meta AS
         WITH elig AS (
-            SELECT appid FROM stg_review_text
+            SELECT appid FROM stg_review_key
             GROUP BY appid HAVING COUNT(*) >= {TEARDOWN_MIN_REVIEWS}
         )
-        SELECT t.appid, t.recommendationid
-        FROM stg_review_text t
+        SELECT t.appid, t.recommendationid, t.voted_up
+        FROM stg_review_key t
         JOIN elig e ON e.appid = t.appid
         """
     )
@@ -2122,12 +2250,14 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
         # and 10 re-executions of a join-view cost far more than one copy (measured on the
         # cached path, 2026-08-23: 9.7h and a 22.7GiB spill). Acceptable here because the
         # uncached path is the explicit PROSPECT_SENTIMENT_CACHE=off fallback, not the nightly.
+        # Text comes from src.reviews directly (the same filters staging applies) — there is no
+        # corpus-wide text table in the build any more for it to copy from.
         con.execute(
             """
             CREATE TEMP TABLE _sent_pool AS
-            SELECT t.appid, t.recommendationid, t.review_text
-            FROM stg_review_text t
-            JOIN (SELECT DISTINCT appid FROM _sent_pool_meta) e ON e.appid = t.appid
+            SELECT p.appid, p.recommendationid, r.review_text
+            FROM _sent_pool_meta p
+            JOIN src.reviews r ON r.recommendationid = p.recommendationid
             """
         )
         con.execute("DROP TABLE IF EXISTS _sent_windows")
@@ -2184,6 +2314,14 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             """
         )
         n_scored = con.execute("SELECT COUNT(*) FROM stg_aspect_mention_sentiment").fetchone()[0]
+        # The teardown's RAW keyword counts, off the same rows the cached branch reads out of
+        # cache.aspect_mention — _sent_raw is one row per (review, keyword arm) too, and it is
+        # written from the identical `WHERE regexp_matches(review_text, rx, 'i')` filter. NO
+        # clf_aspect filter here on purpose: mart_game_review_aspects' n_pos/n_neg_mentions
+        # count KEYWORD matches, which is what the 10-arm scan it replaces counted. (The
+        # classifier's NONE-drop and its aspect reassignment apply to the TEXT-sentiment
+        # columns only — those come from stg_aspect_sentiment, built below.)
+        _build_aspect_keyword_votes(con, "_sent_raw")
         con.execute("DROP TABLE IF EXISTS _sent_raw")
         con.execute("DROP TABLE IF EXISTS _sent_windows")
     else:
@@ -2202,18 +2340,20 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             # scored_review only in the same run that inserted ALL the aspect rows it matches, so
             # membership there always means "fully represented in aspect_mention".
             # The anti-join runs over the LEAN meta table (~30 bytes/row) — never over text.
-            # History of this block, because three builds in a row died here in three ways:
+            # History of this block, because four builds in a row died here in four ways:
             # a text-carrying NOT IN CTAS (25.3GiB spill), then a view whose ids-to-pool join
             # _aspect_window_sql's 10-arm UNION re-executed ten times (22.7GiB / a 9.7h phase),
             # then a delta CTAS off a second full text pool (22.5GiB — cumulative: staging's
-            # stg_review_text AND _sent_pool both held the same ~7GB of text). The invariant
-            # that survived all three: review text exists ONCE, in stg_review_text; ids live
-            # in lean tables; the only text ever copied is the delta's own rows, below.
+            # stg_review_text AND _sent_pool both held the same ~7GB of text), and finally the
+            # single remaining corpus-wide copy on its own (8.45GB / 24.8M rows) once review
+            # volume doubled. The invariant that survived all four, and that is now absolute:
+            # ids live in lean tables, and the ONLY review text the build ever materialises is
+            # the delta's own rows, below.
             con.execute("DROP TABLE IF EXISTS _sent_new_ids")
             con.execute(
                 """
                 CREATE TEMP TABLE _sent_new_ids AS
-                SELECT p.recommendationid
+                SELECT p.appid, p.recommendationid
                 FROM _sent_pool_meta p
                 WHERE NOT EXISTS (
                     SELECT 1 FROM cache.scored_review s
@@ -2224,17 +2364,24 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             n_new_reviews = con.execute("SELECT COUNT(*) FROM _sent_new_ids").fetchone()[0]
             con.execute("DROP VIEW IF EXISTS _sent_new")
             con.execute("DROP TABLE IF EXISTS _sent_new")
-            # A TABLE, not a VIEW, so the 10-arm window scan reads it without re-running the
-            # join per arm. In steady state this is the nightly delta (~1-2M reviews, well
-            # under 1GB of text); on a config-wipe rescore it is the whole pool for the
-            # duration of the sentiment phase — the one remaining full-copy case, accepted
-            # because wipes are rare and deliberate.
+            # THE ONLY REVIEW TEXT THIS BUILD MATERIALISES. Scope is the nightly delta and
+            # nothing else: pool reviews with no cache.scored_review record, i.e. reviews
+            # nobody has ever run the aspect regexes over. In steady state that is ~1-2M
+            # reviews / a few hundred MB against a 24.8M-row / 8.45GB corpus; on a config-wipe
+            # rescore it is the whole pool for the duration of the sentiment phase — the one
+            # remaining full-copy case, accepted because wipes are rare and deliberate.
+            #
+            # Text is read straight from src.reviews (sqlite) rather than from a staging copy:
+            # there is no corpus-wide text table any more, and streaming the source once to
+            # pick out the delta's rows never materialises the rows it discards. A TABLE, not a
+            # VIEW, so the 10-arm window scan below reads it without re-running that scan per
+            # arm (a view here cost a 9.7h phase and a 22.7GiB spill in 2026-08).
             con.execute(
                 """
                 CREATE TEMP TABLE _sent_new AS
-                SELECT t.appid, t.recommendationid, t.review_text
-                FROM stg_review_text t
-                JOIN _sent_new_ids n USING (recommendationid)
+                SELECT n.appid, n.recommendationid, r.review_text
+                FROM _sent_new_ids n
+                JOIN src.reviews r ON r.recommendationid = n.recommendationid
                 """
             )
             # Idempotent rescan: if a previous run died between inserting a review's mention rows
@@ -2375,6 +2522,13 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
                 """
                 )
             n_scored = con.execute("SELECT COUNT(*) FROM stg_aspect_mention_sentiment").fetchone()[0]
+            # The teardown's raw keyword counts, aggregated HERE — while the cache is still
+            # attached — into a table small enough to hand to the mart loop (one row per
+            # (eligible appid, aspect, voted_up), ~46k x 10 x 2 at most). Same bucketing as
+            # above and for the same reason: the input is the 21.7M-row cache. See
+            # _build_aspect_keyword_votes for why these counts equal the 10-arm regex scan
+            # mart_game_teardown.sql used to run over all 24.8M reviews.
+            _build_aspect_keyword_votes(con, "cache.aspect_mention", _n_buckets)
             print(f"[etl] aspect sentiment cache: {n_new_reviews:,} new review(s) scored "
                   f"({n_new_mentions:,} new mention rows); {n_scored:,} mention rows in scope total")
         finally:

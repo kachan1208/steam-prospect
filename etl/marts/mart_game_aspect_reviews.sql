@@ -126,23 +126,44 @@
 -- either side), so sorting the lean table first and joining the text on afterwards would silently
 -- change the published mart's physical row order. The sort costs ~1.7s; keep it honest.
 --
+-- NEVER MATERIALISE THE CORPUS'S TEXT (2026-08-31): the step above still began by copying
+-- review_text for the WHOLE eligible population into _aspectrev_base — 24,864,726 rows / 8.45GB
+-- — and only then attached it late. Once staging's twin copy went (stg_review_text ->
+-- stg_review_key), this was the largest single object left in the build, on a box with ~29GB of
+-- headroom for a ~30GB build that had failed eight nights running. The pool is now text-free and
+-- _aspectrev_srctext re-reads text from src.reviews for the RANKING SURVIVORS ONLY, by primary
+-- key. Output is unchanged by construction: recommendationid is src.reviews' PRIMARY KEY, so the
+-- keyed re-read returns the identical row, and the survivors are chosen by the ranking, which
+-- never looked at text in the first place.
+--
 -- Placeholder tokens are substituted by build_marts.py.
 
 DROP TABLE IF EXISTS mart_game_aspect_reviews;
 
--- Eligible-game English review pool with the ranking meta + full text, materialized ONCE from
--- SQLite (identical population + floor to _sent_pool in compute_aspect_sentiment and to
--- stg_review_text / _teardown_elig). recommendationid joins each cached mention back to its
--- helpfulness/recency (for ranking) and its review_text (for the survivor's excerpt window).
+-- Eligible-game English review pool with the ranking meta and NO TEXT, materialized ONCE from
+-- SQLite (identical population + floor to _sent_pool_meta in compute_aspect_sentiment and to
+-- stg_review_key / _teardown_elig). recommendationid joins each cached mention back to its
+-- helpfulness/recency (for ranking) and, for the few that survive the ranking, to its
+-- review_text (see _aspectrev_srctext).
 CREATE TEMP TABLE _aspectrev_elig AS
 SELECT appid FROM src.reviews
 WHERE language = 'english' AND review_text IS NOT NULL AND length(trim(review_text)) > 0
 GROUP BY appid HAVING COUNT(*) >= @TEARDOWN_MIN_REVIEWS@;
 
+-- NO review_text (2026-08-31). This pool used to carry it for the WHOLE eligible population —
+-- 24.8M rows / 8.45GB, the second corpus-wide copy of review text in the build after staging's
+-- stg_review_text (now stg_review_key, text removed for the same reason). Both were temp tables
+-- on a box with ~29GB of headroom for a ~30GB build, and eight consecutive nightlies died on it.
+-- Only the ranking SURVIVORS ever need text, and the file already had the machinery to attach it
+-- to them late (see "ATTACH THE TEXT LAST" above); this just moves the source of that text from a
+-- corpus-wide temp copy to a keyed re-read of src.reviews in _aspectrev_srctext below. Nothing
+-- about which rows are produced changes: recommendationid is src.reviews' PRIMARY KEY, so the
+-- keyed re-read returns exactly the row this pool would have carried.
+--
 -- author_steamid rides along here (and only here) because it is the other half of the permalink;
 -- it is a ~17-char id, so unlike review_text it costs nothing to carry through the pool.
 CREATE TEMP TABLE _aspectrev_base AS
-SELECT r.appid, r.recommendationid, r.review_text, r.author_steamid, r.votes_up,
+SELECT r.appid, r.recommendationid, r.author_steamid, r.votes_up,
     COALESCE(r.playtime_at_review, r.playtime_forever) AS playtime_minutes,
     r.timestamp_created, r.language
 FROM src.reviews r
@@ -154,10 +175,10 @@ WHERE r.language = 'english' AND r.review_text IS NOT NULL AND length(trim(r.rev
 -- hash table / sort spill and blows the step's runtime right back up (learned the hard way: an
 -- earlier cut of this that ranked straight off _aspectrev_base spilled ~0.8GB and ran for 20min+).
 -- Relying on the optimizer to project the column out through a join + window did NOT hold, so we
--- force it with a materialized barrier: a LEAN copy of just the ranking meta (no text). The rank
--- reads only this; review_text is re-attached to the handful of survivors afterwards.
--- author_steamid is kept out of here for the same reason (it is not a ranking input); like
--- review_text it is re-attached from _aspectrev_base below.
+-- force it with a materialized barrier: a LEAN copy of just the ranking meta. The rank reads only
+-- this. (Since 2026-08-31 _aspectrev_base has no text either, so this is a projection rather than
+-- a text barrier — kept because author_steamid is still not a ranking input, and because the
+-- barrier is what the measured plan above depends on.)
 CREATE TEMP TABLE _aspectrev_meta AS
 SELECT appid, recommendationid, votes_up, playtime_minutes, timestamp_created, language
 FROM _aspectrev_base;
@@ -221,31 +242,47 @@ DROP TABLE _aspectrev_meta;
 -- _aspectrev_meta / _aspectrev_base are already joined on above (a duplicate would fan the ranking
 -- out too, so its uniqueness is a pre-existing assumption of this file, not a new one), and the
 -- DISTINCT below is over the LEAN ranked table, so no text is aggregated to get here.
+-- THE ONLY REVIEW TEXT THIS FILE MATERIALISES: the survivors', read back from SQLite by key.
+-- At most @ASPECT_REVIEWS_TOP_K@ x 10 aspects x 2 sentiments distinct reviews per game, and in
+-- practice far fewer (the same review usually wins several of those slots). The join streams
+-- src.reviews once with the small survivor set on the build side, so the ~8.45GB of text it
+-- passes over is never materialized — only the survivors' rows land in a table.
+-- (appid, recommendationid) is the same key the ranking already assumed unique, and
+-- recommendationid is src.reviews' PRIMARY KEY, so this cannot fan a survivor out.
+-- COST, stated honestly: this is a THIRD pass over src.reviews in this file (after
+-- _aspectrev_elig and _aspectrev_base), and the sqlite scanner has no index lookup to push the
+-- join into, so it is a full streaming scan. Traded deliberately: the build's failures are
+-- memory/disk-spill, not wall clock, and this buys back 8.45GB of materialised text.
+CREATE TEMP TABLE _aspectrev_srctext AS
+SELECT k.appid, k.recommendationid, r.review_text
+FROM (SELECT DISTINCT appid, recommendationid FROM _aspectrev_ranked) k
+JOIN src.reviews r ON r.recommendationid = k.recommendationid AND r.appid = k.appid;
+
 CREATE TEMP TABLE _aspectrev_text AS
-SELECT b.appid, b.recommendationid,
-    CASE WHEN length(b.review_text) > 2000
-         THEN substr(b.review_text, 1, 1999) || '…'
-         ELSE b.review_text
+SELECT s.appid, s.recommendationid,
+    CASE WHEN length(s.review_text) > 2000
+         THEN substr(s.review_text, 1, 1999) || '…'
+         ELSE s.review_text
     END AS review_text,
     'https://steamcommunity.com/profiles/' || b.author_steamid
-        || '/recommended/' || b.appid || '/' AS steam_url
-FROM _aspectrev_base b
-JOIN (SELECT DISTINCT appid, recommendationid FROM _aspectrev_ranked) k
-  ON k.appid = b.appid AND k.recommendationid = b.recommendationid;
+        || '/recommended/' || s.appid || '/' AS steam_url
+FROM _aspectrev_srctext s
+JOIN _aspectrev_base b ON b.appid = s.appid AND b.recommendationid = s.recommendationid;
 
--- Attach review_text to the survivors ONLY (a few per group). Survivors are small, so this is a
--- hash-join with the survivors on the build side, streaming _aspectrev_base past it — no text
--- sort. Then drop the big pool so it doesn't sit in memory through the windowing below.
--- author_steamid is NOT carried here any more: the permalink is built once in _aspectrev_text
--- above, and the ten arms below never look at it.
+-- Attach the FULL (uncapped) review_text to the survivors — the ten excerpt arms below locate the
+-- keyword at its position in the whole review, so they must see the same string the sentiment
+-- window was cut from, not _aspectrev_text's 2000-char display copy. Both come from the one
+-- _aspectrev_srctext read. author_steamid is NOT carried here: the permalink is built once in
+-- _aspectrev_text above, and the ten arms below never look at it.
 CREATE TEMP TABLE _aspectrev_surv AS
 SELECT r.appid, r.recommendationid, r.aspect, r.kw_aspect, r.sentiment,
     r.votes_up, r.playtime_minutes, r.timestamp_created, r.language,
-    b.review_text
+    s.review_text
 FROM _aspectrev_ranked r
-JOIN _aspectrev_base b ON b.appid = r.appid AND b.recommendationid = r.recommendationid;
+JOIN _aspectrev_srctext s ON s.appid = r.appid AND s.recommendationid = r.recommendationid;
 
 DROP TABLE _aspectrev_base;
+DROP TABLE _aspectrev_srctext;
 
 -- Per-aspect excerpt window, computed on the survivors only. Each arm derives, in ONE SELECT via
 -- DuckDB lateral column aliases (each evaluated once — verified, they are not re-inlined):
