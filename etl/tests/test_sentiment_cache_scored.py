@@ -54,15 +54,15 @@ def _fresh_con() -> duckdb.DuckDBPyConnection:
     con.execute("CREATE SCHEMA src")
     con.execute(
         "CREATE TABLE src.reviews(appid INTEGER, recommendationid VARCHAR, review_text VARCHAR,"
-        " language VARCHAR)"
+        " language VARCHAR, voted_up INTEGER)"
     )
-    rows = [(1, rid, txt, "english") for rid, txt in MENTIONING + SILENT]
-    con.executemany("INSERT INTO src.reviews VALUES (?,?,?,?)", rows)
-    # compute_aspect_sentiment reads stg_review_text (the single copy of review text, built by
-    # create_staging in the real ETL) rather than src.reviews directly — mirror that here.
+    rows = [(1, rid, txt, "english", 1) for rid, txt in MENTIONING + SILENT]
+    con.executemany("INSERT INTO src.reviews VALUES (?,?,?,?,?)", rows)
+    # compute_aspect_sentiment reads the LEAN key table staging builds (stg_review_key — no
+    # review text) for the pool, and goes to src.reviews for the delta's text. Mirror that here.
     con.execute(
-        "CREATE TEMP TABLE stg_review_text AS "
-        "SELECT appid, recommendationid, TRUE AS voted_up, review_text "
+        "CREATE TEMP TABLE stg_review_key AS "
+        "SELECT appid, recommendationid, voted_up "
         "FROM src.reviews WHERE language = 'english'"
     )
     return con
@@ -97,11 +97,12 @@ def test_zero_mention_reviews_are_scanned_once():
 
         # A genuinely new review is still picked up (the cache must not go stale-forever).
         # Staging is rebuilt every nightly, so rebuild it here too after the insert.
-        con.execute("INSERT INTO src.reviews VALUES (1, 'late', 'The combat is fun.', 'english')")
-        con.execute("DROP TABLE stg_review_text")
         con.execute(
-            "CREATE TEMP TABLE stg_review_text AS "
-            "SELECT appid, recommendationid, TRUE AS voted_up, review_text "
+            "INSERT INTO src.reviews VALUES (1, 'late', 'The combat is fun.', 'english', 1)")
+        con.execute("DROP TABLE stg_review_key")
+        con.execute(
+            "CREATE TEMP TABLE stg_review_key AS "
+            "SELECT appid, recommendationid, voted_up "
             "FROM src.reviews WHERE language = 'english'"
         )
         n3 = _capture_new_reviews(bm.compute_aspect_sentiment, con, data_dir)
