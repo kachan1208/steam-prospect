@@ -16,6 +16,12 @@
 set -uo pipefail
 export PATH=/root/steam-scraper/.venv/bin:/root/.local/bin:$PATH
 export PROSPECT_DUCKDB_MEMORY_LIMIT=2500MB   # cap DuckDB on the 4GB box
+# Cap the SPILL too (2026-08-31). max_temp_directory_size defaults to all free disk, so the
+# 08-30 nightly spilled 20.6GB until the volume was full, then died after 5.35h with nothing
+# built. 15GB leaves room for the two retained marts (~2.3GB each), the scraper's SQLite + WAL
+# and the next build's scratch, so a runaway query now fails on its own budget instead of
+# taking the filesystem down with it. Raise only alongside `df -h /`.
+export PROSPECT_DUCKDB_TEMP_MAX=15GiB
 # Droplet-local secrets (STEAM_API_KEY, ...) — file lives only on the box, chmod 600,
 # never in git. Steps that can use a key pick it up from the environment; every keyless
 # path keeps working if the file is absent.
