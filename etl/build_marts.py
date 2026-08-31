@@ -2764,6 +2764,31 @@ def main() -> int:
         if _mem:
             con.execute(f"SET memory_limit='{_mem}'")
             print(f"[etl] duckdb memory_limit={_mem}")
+
+        # SPILL CONTROL (2026-08-31). The 2026-08-30 nightly died here:
+        #   OutOfMemoryException: failed to offload data block (20.6 GiB/20.6 GiB used)
+        #   This limit was set by the 'max_temp_directory_size' setting.
+        # It defaults to ALL free disk, so DuckDB spilled until the volume was full and then
+        # failed — after 5.35h, with nothing built. Two settings, both straight out of that
+        # error's own "possible solutions":
+        #
+        # preserve_insertion_order=false is the big one. Nothing here depends on insertion
+        # order: every mart that has a meaningful order states it in an explicit ORDER BY
+        # (and mart_game_aspect_reviews' was just given a unique tiebreak, so it no longer
+        # varies at all), and the pre-swap validation gate compares row COUNTS. Turning it off
+        # lets DuckDB stream large materialisations instead of buffering to preserve an order
+        # nobody reads — which is exactly what the 15M-row rebuild of
+        # stg_aspect_mention_sentiment at compute_aspect_sentiment() was buffering.
+        #
+        # max_temp_directory_size caps the spill BELOW free disk so a runaway query fails on
+        # its own budget while the box still has room, instead of taking the filesystem — and
+        # the scraper's SQLite, the app's mart and the next build's scratch down with it.
+        con.execute("SET preserve_insertion_order=false")
+        _tmp_max = os.environ.get("PROSPECT_DUCKDB_TEMP_MAX")
+        if _tmp_max:
+            con.execute(f"SET max_temp_directory_size='{_tmp_max}'")
+        print(f"[etl] duckdb preserve_insertion_order=false"
+              f"{f' max_temp_directory_size={_tmp_max}' if _tmp_max else ''}")
         con.execute("INSTALL sqlite; LOAD sqlite;")
         con.execute(f"ATTACH '{source_db}' AS src (TYPE sqlite, READ_ONLY)")
 
