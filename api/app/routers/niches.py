@@ -3,9 +3,15 @@
 Resurrected 2026-08 (the original was removed in the "trim to four surfaces" cut,
 e777cb2) and upgraded for everything the marts have grown since:
 
-- v2 scoring: opportunity_v2 (growth-gated), decline_gate, entrant_ratio,
-  solo_viability, tier — with the same interpretation rules the MCP find_niches tool
-  documents (low competition + shrinking pipeline = decline, not opportunity).
+- v2 scoring: opportunity_v2, its sub-scores (momentum / supply_room / revenue_spread /
+  market_pull / supply_brake), decline_gate, entrant_ratio, solo_viability, solo_tier,
+  tier — with the same interpretation rules the MCP find_niches tool documents (low
+  competition + shrinking pipeline = decline, not opportunity). REBUILT 2026-08-31: the
+  score is now built from the SAME axes and the SAME thresholds as the Radar board's ring
+  verdicts (it used to rank the opposite way — median score by ring ran enter 17.6 <
+  crowded 20.9 < declining 23.4), so a high opportunity_v2 means "the radar would tell you
+  to enter". decline_gate survives as a falsification TELL; it no longer multiplies
+  anything. See etl/marts/mart_niche.sql's "opportunity_v2 REBUILT" header.
 - Absolute size: total_owners / total_rev / total_reviews / market_size.
 - Live players: total_players_now / players_trend_7d_pct / players_coverage on every
   row, plus the per-niche daily series (mart_niche_players) in the detail response.
@@ -96,6 +102,9 @@ def _apply_solo_only(where: str, params: list) -> tuple[str, list]:
 SORTABLE = {
     "key",
     "opportunity", "opportunity_v2", "decline_gate", "entrant_ratio", "solo_viability",
+    # opportunity_v2's sub-scores — sortable so "show me the niches with the most demand
+    # momentum" / "the most supply room" is a first-class query, not a client-side filter.
+    "momentum", "supply_room", "revenue_spread", "market_pull", "supply_brake",
     "demand", "competition", "quality_gap",
     "market_size", "total_owners", "total_rev", "total_reviews",
     "median_rev", "median_reviews", "median_price", "median_owners",
@@ -128,6 +137,14 @@ _DEMAND24M_COLS = [
 # construction (etl/marts/mart_niche.sql's agg CTE). One column family, one probe
 # (_has_solo_evidence) — the three always ship in the same ETL build.
 _SOLO_EVIDENCE_COLS = ["self_published_share", "indie_share", "med_playtime_h"]
+# opportunity_v2's SUB-SCORES (2026-08-31 rebuild — see etl/marts/mart_niche.sql's
+# "opportunity_v2 REBUILT" header). The score is now a blend of four inspectable 0..100
+# terms times a supply brake, and these are those terms, so any consumer can take a score
+# apart into the four claims it makes instead of trusting one opaque number. solo_tier
+# ships in the same ETL build (the same commit added both), so one probe covers the family.
+_V2_PARTS_COLS = [
+    "momentum", "supply_room", "revenue_spread", "market_pull", "supply_brake", "solo_tier",
+]
 
 # Ordered base column list (single source of truth for SELECT + CSV header); the players
 # columns are appended when the mart carries them.
@@ -238,6 +255,21 @@ def _has_solo_evidence() -> bool:
     rows = analytics_db.query(
         "SELECT 1 FROM information_schema.columns "
         "WHERE table_name = 'mart_niche' AND column_name = 'med_playtime_h'"
+    )
+    return bool(rows)
+
+
+@lru_cache(maxsize=1)
+def _has_v2_parts() -> bool:
+    """The opportunity_v2 sub-scores + solo_tier (see _V2_PARTS_COLS) — landed with the
+    2026-08-31 score rebuild, so they get their own gate. IMPORTANT: opportunity_v2 itself
+    is served by every mart, old or new; what an older mart cannot serve is the BREAKDOWN.
+    Rows then carry null for the parts and the UI omits the breakdown — degrade, never a
+    BinderException 500 — but the score column stays populated (with the OLD formula's
+    values until the nightly rebuild lands, which is the honest state of that DB)."""
+    rows = analytics_db.query(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'mart_niche' AND column_name = 'supply_brake'"
     )
     return bool(rows)
 
@@ -412,6 +444,8 @@ def _cols() -> list[str]:
         cols.extend(_DEMAND24M_COLS)
     if _has_solo_evidence():
         cols.extend(_SOLO_EVIDENCE_COLS)
+    if _has_v2_parts():
+        cols.extend(_V2_PARTS_COLS)
     return cols
 
 
@@ -474,6 +508,14 @@ def _require_list_capabilities(sort: str, min_reviews: int) -> None:
         raise HTTPException(
             status_code=503,
             detail="mart_niche predates the 24-month demand columns — rebuild the marts (task etl).",
+        )
+    if sort in _V2_PARTS_COLS and not _has_v2_parts():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "mart_niche predates the opportunity_v2 sub-scores — rebuild the marts "
+                "(task etl). opportunity_v2 itself is still sortable."
+            ),
         )
     if min_reviews == 0 and not _has_no_floor_cut():
         raise HTTPException(

@@ -570,11 +570,32 @@ class NicheRow(BaseModel):
     competition: Optional[float] = None
     quality_gap: Optional[float] = None
     opportunity: Optional[float] = None
-    # v2 scoring (growth-gated; see etl/marts/mart_niche.sql header).
+    # v2 scoring — REBUILT 2026-08-31 (see etl/marts/mart_niche.sql's "opportunity_v2
+    # REBUILT" header). A renormalised blend of momentum / market_pull / revenue_spread /
+    # quality_gap, multiplied by supply_brake. It reads the same axes, against the same
+    # bars, as the Radar board's ring verdicts, so a high score now means "the radar would
+    # tell you to enter".
     opportunity_v2: Optional[float] = None
+    # The sub-scores, 0..100 each, absent (None) on marts that predate the rebuild. NULL is
+    # meaningful: "no comparable reading here" (e.g. an emerging niche has no honest demand
+    # trend), and the blend renormalises rather than reading it as 0.
+    # THE FOUR BLENDED TERMS are momentum, market_pull, revenue_spread and quality_gap
+    # (the long-standing column above). supply_room is NOT one of them — it is the brake's
+    # input, and the brake multiplies the blend rather than joining it.
+    momentum: Optional[float] = None        # weight 0.40; demand FLOW, 50 flat, 88.1 at the enter bar
+    market_pull: Optional[float] = None     # weight 0.22; the money/size percentiles, blended
+    revenue_spread: Optional[float] = None  # weight 0.20; 50 exactly at the winner-take-most bar
+    supply_room: Optional[float] = None     # NOT weighted — LEAST(flood_room, entrant_room)
+    supply_brake: Optional[float] = None    # the multiplier itself, in [0.35, 1]
+    # A FALSIFICATION TELL, no longer a score factor (it multiplied opportunity_v2 until
+    # 2026-08-31): "did everyone STOP entering this niche?"
     decline_gate: Optional[float] = None
     entrant_ratio: Optional[float] = None
     solo_viability: Optional[float] = None
+    # solo_viability as a FLAG rather than a scale: 'solo' | 'mixed' | 'team'. The raw
+    # share is compressed (catalog median 0.975, p10 0.913) so it ranks nothing; it only
+    # separates the ~3% of niches that are inherently multiplayer. Absent on older marts.
+    solo_tier: Optional[str] = None
     # Solo-evidence trio (2026-08-27): the member profile behind solo_viability (which is
     # the SINGLEPLAYER SHARE — a no-netcode proxy, not a production-scope measure). Same
     # per-cut population as solo_viability; absent (None) on marts that predate it.

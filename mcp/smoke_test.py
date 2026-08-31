@@ -18,6 +18,25 @@ def show(title: str, obj) -> None:
     print(json.dumps(obj, indent=2, default=str))
 
 
+def _blend_weights() -> dict[str, float]:
+    """opportunity_v2's blend weights, read from etl/build_marts.py when this runs inside a
+    full checkout so the smoke test cannot drift from the mart it is checking. The MCP ships
+    without the ETL package, so the literals below are the standalone fallback — they are
+    the values as of the 2026-08-31 rebuild and must be updated with the ETL's W2_* if
+    those ever change."""
+    try:
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "etl"))
+        import build_marts as bm  # type: ignore[import-not-found]
+
+        return {"momentum": bm.W2_MOMENTUM, "market": bm.W2_MARKET,
+                "spread": bm.W2_SPREAD, "quality": bm.W2_QUALITY}
+    except Exception:
+        return {"momentum": 0.40, "market": 0.22, "spread": 0.20, "quality": 0.18}
+
+
 def main() -> None:
     # 1. find_niches — defaults are now the niche-score v2 cut (window=24m,
     # sort=opportunity_v2, include_tiers=[micro, theme]). Tolerant on purpose: the v2
@@ -38,8 +57,31 @@ def main() -> None:
             assert field in top, f"missing v2 field {field!r} in find_niches rows"
         bad_tiers = {n["tier"] for n in niches["niches"]} - {"micro", "theme"}
         assert not bad_tiers, f"default include_tiers leaked tiers: {bad_tiers}"
-        assert all(n["opportunity_v2"] <= n["opportunity"] + 1e-9 for n in niches["niches"]), \
-            "opportunity_v2 must never exceed opportunity (gate is <= 1)"
+        # NOTE the old assertion here — "opportunity_v2 <= opportunity, the gate is <= 1" —
+        # was removed with the 2026-08-31 score rebuild. opportunity_v2 is no longer
+        # `opportunity x decline_gate`; it is an independent blend (see
+        # etl/marts/mart_niche.sql), so the two scores have no ordering relationship and
+        # asserting one would fail on every healthy niche. What IS still true of both:
+        assert all(0 <= n["opportunity_v2"] <= 100 for n in niches["niches"]), \
+            "opportunity_v2 must stay inside [0, 100]"
+        # ...and when the mart carries the sub-scores, the published score must equal the
+        # published parts — a live guard that the breakdown the UI renders is the real one.
+        if srv._has_v2_parts():
+            # Weights come from the ETL's own constants when this runs in a checkout that
+            # has them, so the smoke test can't drift from the mart it is checking; the
+            # literals are only the standalone fallback.
+            w = _blend_weights()
+            for n in niches["niches"]:
+                terms = [(w["momentum"], n["momentum"]), (w["market"], n["market_pull"]),
+                         (w["spread"], n["revenue_spread"]), (w["quality"], n["quality_gap"])]
+                live = [(w, v) for w, v in terms if v is not None]
+                core = sum(w * v for w, v in live) / sum(w for w, _ in live)
+                want = max(0.0, min(100.0, core * n["supply_brake"]))
+                assert abs(want - n["opportunity_v2"]) < 0.05, (
+                    f"{n['key']}: opportunity_v2 {n['opportunity_v2']} != its own published "
+                    f"sub-scores ({want:.2f})"
+                )
+            print("[OK] opportunity_v2 reproduces from its published sub-scores")
         # Live-player columns ride along exactly when the mart carries them (values may
         # be None — e.g. a fixture whose one capture day is > 7d stale).
         if srv._has_players():
@@ -50,7 +92,9 @@ def main() -> None:
         if srv._has_lifetime():
             assert "lifetime_survival_12m" in top, "missing lifetime field in find_niches rows"
         print(f"\n[OK] top niche is {top['key']!r} (tier={top['tier']}, "
-              f"opportunity_v2={top['opportunity_v2']}, gate={top['decline_gate']})")
+              f"opportunity_v2={top['opportunity_v2']}, "
+              f"momentum={top.get('momentum')}, supply_brake={top.get('supply_brake')}, "
+              f"decline_gate={top['decline_gate']})")
 
     # 2. niche_detail — same tolerance: v2 columns are in its variants query too.
     detail_key = niches["niches"][0]["key"] if has_v2 else "Open World Survival Craft"

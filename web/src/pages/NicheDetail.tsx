@@ -645,8 +645,8 @@ export default function NicheDetail() {
           valueClassName="text-brand"
           value={fmtCompact(activeVariant.opportunity_v2)}
           footnote={
-            activeVariant.decline_gate != null
-              ? `after decline gate ×${activeVariant.decline_gate.toFixed(2)}`
+            activeVariant.supply_brake != null
+              ? `after supply brake ×${activeVariant.supply_brake.toFixed(2)}`
               : undefined
           }
         />
@@ -811,17 +811,22 @@ export default function NicheDetail() {
               )}
             </div>
 
-            {/* Why the headline score — three weighted 4px bars, same formula the old card
-                computed, restyled to §4b's exact bar+footnote layout. */}
+            {/* Why the headline score — one weighted 4px bar per sub-score, in the same
+                §4b bar+footnote layout. These ARE the four terms mart_niche blends (see
+                its "opportunity_v2 REBUILT" header), so the card takes the score apart
+                into the four claims it makes rather than restating one number. Marts that
+                predate the 2026-08-31 rebuild serve them as undefined and the footnote
+                below falls back to a plain description. */}
             <div className="blueprint relative flex flex-[1] flex-col gap-3.5 border-ink-primary/25 px-6 py-5">
               <i className="bp-corner" />
               <h3 className="text-ink-primary">Why {fmtCompact(activeVariant.opportunity_v2)}</h3>
               <div className="flex flex-col gap-2.5 text-[13px]">
                 {(
                   [
-                    { label: "Demand", value: activeVariant.demand, weight: 0.5, positive: true },
-                    { label: "Competition", value: activeVariant.competition, weight: -0.35, positive: false },
-                    { label: "Quality gap", value: activeVariant.quality_gap, weight: 0.3, positive: true },
+                    { label: "Momentum", value: activeVariant.momentum ?? null, weight: 0.4, positive: true },
+                    { label: "Market pull", value: activeVariant.market_pull ?? null, weight: 0.22, positive: true },
+                    { label: "Revenue spread", value: activeVariant.revenue_spread ?? null, weight: 0.2, positive: true },
+                    { label: "Quality gap", value: activeVariant.quality_gap, weight: 0.18, positive: true },
                   ] as const
                 ).map((b) => {
                   const pct = b.value == null ? 0 : Math.max(0, Math.min(100, b.value));
@@ -844,28 +849,33 @@ export default function NicheDetail() {
                 })}
               </div>
               <div className="tabular mt-auto border-t border-ink-primary/20 pt-3 text-[12px] text-ink-primary/65">
-                {activeVariant.demand != null && activeVariant.competition != null && activeVariant.quality_gap != null ? (
-                  <>
-                    0.5×{activeVariant.demand.toFixed(1)} − 0.35×{activeVariant.competition.toFixed(1)} + 0.3×
-                    {activeVariant.quality_gap.toFixed(1)} ={" "}
-                    {(
-                      0.5 * activeVariant.demand -
-                      0.35 * activeVariant.competition +
-                      0.3 * activeVariant.quality_gap
-                    ).toFixed(1)}
-                    {0.5 * activeVariant.demand - 0.35 * activeVariant.competition + 0.3 * activeVariant.quality_gap < 0
-                      ? " → floored to 0"
-                      : ""}
-                    {activeVariant.decline_gate != null ? ` → × decline gate ${activeVariant.decline_gate.toFixed(2)}` : ""}
-                    {" → percentile "}
-                    <strong className="text-brand">{fmtCompact(activeVariant.opportunity_v2)}</strong>
-                    {activeVariant.beatable_share != null && (
-                      <>. {fmtPct(activeVariant.beatable_share)} of incumbents are thin or weak — beatable.</>
-                    )}
-                  </>
-                ) : (
-                  "Not enough scored inputs to break down the formula for this cut."
-                )}
+                {activeVariant.supply_brake != null
+                  ? (() => {
+                      const terms: [string, number | null | undefined, number][] = [
+                        ["momentum", activeVariant.momentum, 0.4],
+                        ["market pull", activeVariant.market_pull, 0.22],
+                        ["revenue spread", activeVariant.revenue_spread, 0.2],
+                        ["quality gap", activeVariant.quality_gap, 0.18],
+                      ];
+                      const live = terms.filter(([, n]) => n != null);
+                      const skipped = terms.filter(([, n]) => n == null).map(([l]) => l);
+                      // The blend RENORMALISES over the terms that exist — the divisor has
+                      // to be printed, or the products visibly fall short of the score.
+                      const liveWeight = live.reduce((a, [, , w]) => a + w, 0);
+                      return (
+                        <>
+                          {live.map(([, n, w]) => `${w.toFixed(2)}×${n!.toFixed(1)}`).join(" + ")}
+                          {skipped.length > 0 &&
+                            ` ÷ ${liveWeight.toFixed(2)} (${skipped.join(" + ")} — no comparable reading, skipped rather than counted as 0)`}
+                          {` → × supply brake ${activeVariant.supply_brake!.toFixed(2)} = `}
+                          <strong className="text-brand">{fmtCompact(activeVariant.opportunity_v2)}</strong>
+                          {activeVariant.beatable_share != null && (
+                            <>. {fmtPct(activeVariant.beatable_share)} of incumbents are thin or weak — beatable.</>
+                          )}
+                        </>
+                      );
+                    })()
+                  : "This mart predates the score breakdown — rebuild the marts to see the sub-scores."}
               </div>
             </div>
           </div>

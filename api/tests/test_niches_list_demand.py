@@ -154,6 +154,7 @@ _GATES = (
     niches._has_lifetime,
     niches._has_no_floor_cut,
     niches._has_solo_evidence,
+    niches._has_v2_parts,
 )
 
 

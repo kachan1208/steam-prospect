@@ -110,7 +110,8 @@ BOXLEITER_OWNERS_PER_REVIEW_MIN = 20   # mirrors api/app/benchmarks.py's "New Bo
 BOXLEITER_OWNERS_PER_REVIEW_MID = 30   # 20-55 owners/review band -- used here to floor
 BOXLEITER_OWNERS_PER_REVIEW_MAX = 55   # owners_mid when SteamSpy reports zero. Keep in sync.
 
-# Opportunity score weights (also documented in benchmarks.py).
+# Opportunity score weights for the ORIGINAL v1 `opportunity` (also documented in
+# benchmarks.py). v1 is frozen: opportunity_v2 no longer derives from it (see below).
 W_DEMAND = 0.50
 W_COMPETITION = 0.35
 W_QUALITY = 0.30
@@ -122,11 +123,18 @@ W_QUALITY = 0.30
 # returned Naval / Transportation / Diplomacy (new releases shrinking 15-37%/yr: the
 # "low competition" the score rewarded was everyone LEAVING, not an open market) and
 # 4X / Open World (genre umbrellas a solo dev can't "build", not actionable niches).
-# The v2 columns fix both failure modes WITHOUT touching the original score: a decline
-# gate multiplies `opportunity` into `opportunity_v2`, and a tag `tier` lets the MCP/API
+# The v2 columns fixed both failure modes WITHOUT touching the original score: a decline
+# gate multiplied `opportunity` into `opportunity_v2`, and a tag `tier` lets the MCP/API
 # default to buildable micro-genres + themes while keeping umbrellas/meta reachable.
+#
+# SUPERSEDED 2026-08-31 for the score half of that: the decline gate below NO LONGER
+# produces opportunity_v2 — see the "opportunity_v2 REBUILT" block further down for the
+# model that does. `decline_gate` is still computed and published, because it is a
+# genuinely useful falsification TELL ("did everyone stop entering this niche?") and the
+# MCP guidance is built on it; it just stopped being the headline multiplier. GATE_* below
+# therefore configure a diagnostic, not the score. The tag `tier` half is unchanged.
 # --------------------------------------------------------------------------------------
-# Decline gate (opportunity_v2 = opportunity * gate). Two independent decline signals:
+# Decline gate — two independent decline signals:
 #   sat_severity      = clamp(-saturation_yoy / GATE_SAT_FULL_DECLINE, 0, 1)
 #                       (release pipeline shrinking; full severity at a
 #                        GATE_SAT_FULL_DECLINE, e.g. 30%/yr, drop in new releases)
@@ -145,10 +153,159 @@ W_QUALITY = 0.30
 # signal as sufficient evidence on its own; a niche only keeps gate=1.0 when NEITHER
 # signal is negative. NULL signals (no prior-year releases / zero or missing medians)
 # count as "no evidence of decline", not as decline.
-GATE_FLOOR = 0.5                 # worst-case multiplier on opportunity (never below half)
+GATE_FLOOR = 0.5                 # worst-case value of the tell (never below half). It was
+                                 # the worst-case MULTIPLIER on opportunity until
+                                 # 2026-08-31; it multiplies nothing now.
 GATE_SAT_FULL_DECLINE = 0.30     # saturation_yoy <= -30%/yr -> full saturation severity
 GATE_ENTRANT_FULL = 0.5          # entrant_ratio <= 0.5 -> full entrant severity
                                  # (severity ramps linearly over er in [0.5, 1.0])
+
+# --------------------------------------------------------------------------------------
+# opportunity_v2 REBUILT (2026-08-31) — one model behind BOTH the numeric score and the
+# Radar's ring verdict. Full derivation in etl/marts/mart_niche.sql's header; the bars
+# below are the SAME numbers web/src/lib/radarVerdict.ts rings on, and MUST stay in
+# lockstep with it.
+#
+# WHY (measured on 219 live niches, tag / win=24m / min_reviews=50, the cut the Radar,
+# find_niches and NicheFinder all default to):
+#   - The old score ranked BACKWARDS against the Radar. Median opportunity_v2 by ring:
+#     enter 17.6, watch/hold 17.8, crowded 20.9, declining 23.4 — the niches the board
+#     told you to enter scored LOWER than the ones it warned you off.
+#   - corr(opportunity_v2, demand_trend_24m_pct) = -0.047. The headline score had
+#     literally NO relationship to the Radar's primary axis.
+#   - The mechanism was not the decline gate (median 1.000 — near-inert). It was
+#     `competition` = 0.6*percentile(n_recent) + 0.4*percentile(winner_concentration):
+#     on the win='24m' cut n_recent IS n_games, so 60% of the competition penalty was a
+#     pure NICHE-SIZE penalty. Metroidvania (177 recent games, demand +65%/24m) scored
+#     0.0; Naval (34 games, demand -11.8%/24m) scored 63.7 and ranked #1.
+#   - Only 2 of 219 niches (0.9%) reached the Radar's then-OPP_WATCH_SCORE=60 bar, catalog
+#     max 63.7 — the "watch" ring was unreachable by score. That constant was recalibrated
+#     60 -> 65 alongside this rebuild (web/src/lib/radarVerdict.ts), where 65 is the median
+#     score of the niches the board rings "enter" and selects ~16% of the default cut.
+#
+# THE MODEL. Four inspectable 0..100 sub-scores, blended, then braked by supply pressure:
+#
+#   momentum        demand FLOW. 50 + 50*tanh(g / g_enter), where g is the niche's
+#                   annualised continuous demand growth ln(1 + trend/100)/2 and g_enter
+#                   is the same for OPP_ENTER_PCT. So: flat demand = 50, the Radar's
+#                   enter bar (+40%/24m) = 88.1, the Radar's decline bar (-30%/24m) =
+#                   10.7. tanh, not a clamp, so nothing piles up at the ends (61 of 219
+#                   niches clear the enter bar — a hard cap would flatten 28% of the
+#                   catalog onto one value).
+#   supply_room     supply FLOW measured AGAINST demand flow, and newcomer economics —
+#                   the weaker (MIN) of:
+#                     flood_room   100 at or below zero excess supply growth, 50 when
+#                                  supply outgrows demand by exactly the Radar's flooding
+#                                  bar (+15%/yr), 0 at twice that.
+#                     entrant_room 0 at entrant_ratio 0.5, 100 at the CATALOG NORM 1.08
+#                                  (not 1.0 — see entrant_ratio's caveat). Capped there:
+#                                  above the norm is a survivor-cohort artifact, not
+#                                  evidence, so it earns no bonus.
+#   revenue_spread  revenue STRUCTURE from winner_concentration: 50 sits exactly on the
+#                   Radar's winner-take-most bar (0.85), 100 at 0.70, 0 at 1.00.
+#   market_pull     the LEVEL terms, deliberately demoted to a supporting role:
+#                   OPP_MARKET_MEDIAN_W * demand + (1-w) * market_size — "does a typical
+#                   game here earn" blended with "how big is the pie".
+#
+#   opp_core     = the weighted mean of the four, RENORMALISED over the sub-scores that
+#                  exist (a missing input does not vote and is never read as 0).
+#   supply_brake = SUPPLY_BRAKE_FLOOR + (1-floor) * supply_room/100, or 1.0 when neither
+#                  supply signal is available (unknown is not evidence of pressure).
+#   opportunity_v2 = opp_core * supply_brake, clamped to [0, 100].
+#
+# WHY THIS SHAPE. Two constraints pulled in opposite directions: momentum had to be a
+# first-class POSITIVE term (the old gate could only ever subtract, so a big stagnant
+# niche beat a small surging one by construction), while supply pressure had to be able
+# to sink a score ON ITS OWN. An additive term cannot sink (it can only remove its own
+# weight); a multiplier cannot reward. So momentum is additive and large, supply is a
+# multiplier with a floor low enough to bite: a fully-flooded niche keeps 35% of its core.
+#
+# WHY saturation_yoy IS READ AGAINST DEMAND, not on its own. This column is the exact
+# point where the two old systems contradicted each other: decline_gate penalised
+# saturation_yoy BELOW 0 (pipeline shrinking = decline) while the Radar penalises it
+# ABOVE +0.15 (pipeline flooding = crowding). Both readings are right, and the
+# disambiguator is demand: a pipeline shrinking while demand holds is a supply GAP; a
+# pipeline shrinking alongside demand is a market dying. Differencing the two growth
+# rates resolves it structurally instead of by fiat — and the death spiral gets no
+# reward, because momentum has already scored the demand half.
+#   flood_room is ONE-SIDED on purpose (capped at 100 once demand outpaces supply): a
+# collapsing pipeline is at best "calm", never a bonus. Rewarding it is precisely the
+# Naval/Transportation failure mode that motivated v2 in the first place.
+#
+# EMERGING NICHES. When demand_emerging is set, the niche's prior 24-month window is near
+# zero BY CONSTRUCTION (young Steam tags crystallize around new games only), so its
+# trend %, its saturation read AND its entrant_ratio are all artifacts of the label's
+# age. All three flow sub-scores go NULL and the niche is scored on market_pull /
+# revenue_spread / quality_gap alone — the same refusal-to-claim the Radar's precedence-0
+# emerging ring makes. NOT zero: NULL, so the blend renormalises.
+#
+# MEASURED RESULT (same 219 niches, same rings):
+#   median opportunity_v2 by ring, before -> after
+#     enter      17.6 -> 67.6      crowded    20.9 -> 39.1
+#     hold       17.8 -> 50.2      declining  23.4 -> 19.5
+#   The ordering enter > hold > crowded > declining now holds, and holds on the
+#   min_reviews=0, min_reviews=100 and win='all' cuts too (pinned by
+#   etl/tests/test_opportunity_ordering.py). Per-niche cross-cut rank agreement went UP,
+#   not down (Spearman min50-vs-min0 0.553 -> 0.663, 24m-vs-all 0.915 -> 0.955): the two
+#   flow sub-scores are computed from cut-INDEPENDENT columns, so they are identical on
+#   every cut by construction, which is stronger comparability than percentiles give.
+# --------------------------------------------------------------------------------------
+# Bars shared with web/src/lib/radarVerdict.ts — the score's sub-score anchors ARE the
+# Radar's ring thresholds, which is what makes the ring and the number one model.
+OPP_ENTER_PCT = 40.0             # == DEMAND_ENTER_PCT: +40%/24m demand growth -> momentum 88.1
+OPP_FLOOD_YOY = 0.15             # == SAT_FLOOD_YOY: supply outgrowing demand by +15%/yr
+                                 # -> flood_room 50
+OPP_WINNER_TAKE_MOST = 0.85      # == WC_WINNER_TAKE_MOST -> revenue_spread 50
+OPP_ENTRANT_NORM = 1.08          # == ENTRANT_RATIO_CATALOG_NORM -> entrant_room 100 (capped)
+OPP_ENTRANT_FULL = 0.5           # entrant_ratio <= 0.5 -> entrant_room 0 (same bar the
+                                 # retired gate used, kept so the two agree on "as bad as
+                                 # newcomer economics get")
+# Blend weights — must sum to 1.0 (asserted below). momentum is the single largest term
+# by design: the score's headline claim is about demand FLOW.
+W2_MOMENTUM = 0.40
+W2_MARKET = 0.22
+W2_SPREAD = 0.20
+W2_QUALITY = 0.18
+OPP_MARKET_MEDIAN_W = 0.6        # market_pull = 0.6*demand + 0.4*market_size (per-game
+                                 # money weighted over absolute pie size)
+SUPPLY_BRAKE_FLOOR = 0.35        # a fully supply-pressured niche keeps 35% of its core.
+                                 # Swept 0.25/0.35/0.45 on the live catalog: all three
+                                 # preserve the ring ordering on all four cuts; 0.35 gave
+                                 # the best margin/stability balance.
+assert abs((W2_MOMENTUM + W2_MARKET + W2_SPREAD + W2_QUALITY) - 1.0) < 1e-9, (
+    "opportunity_v2 blend weights must sum to 1.0"
+)
+
+# --------------------------------------------------------------------------------------
+# Solo viability is a FLAG, not a scale (2026-08-31, user-reported: "solo scoring isn't
+# working at all"). MEASURED over the same 219-niche production cut (tag / 24m / min50):
+#   min 0.353 | p05 0.853 | p10 0.913 | p25 0.953 | MEDIAN 0.975 | p75 0.990 | max 1.000
+#   below 0.90: 17 niches (7.8%)      below 0.80: 7 niches (3.2%)
+# and it is stable across cuts (median 0.969-0.976; below-0.80 2.1-4.0% on 24m/min0,
+# 24m/min100 and all/min50).
+#
+# So solo_viability is an EXCELLENT binary multiplayer detector and a USELESS ranking
+# scale: three quarters of the catalog sits inside a 0.047-wide band. The seven niches
+# under 0.80 are exactly the ones you would name by hand — Social Deduction 0.353,
+# MMORPG 0.449, Party Game 0.500, Party 0.636, Battle Royale 0.700, Extraction Shooter
+# 0.705, eSports 0.788. That is a true fact about the world (most genres really are
+# solo-buildable), NOT a defect to normalise away, so nothing here rescales it: the raw
+# share stays published unchanged and gains a coarse tier beside it.
+#
+# The 0.80 pass bar is UNCHANGED (RADAR_SOLO_FRIENDLY_MIN in api/app/routers/niches.py,
+# SOLO_FRIENDLY_MIN in web/src/lib/radarVerdict.ts): the distribution says it is already
+# the right cut. What was wrong was the DOCUMENTATION — the MCP instructions called ~0.9
+# "the norm" when 0.9 is the 10th percentile. Fixed there, not here.
+SOLO_TIER_SOLO_MIN = 0.90        # >= this -> 'solo'. The 10th percentile (p10 = 0.913):
+                                 # ~92% of niches, i.e. "unremarkable, like everything else".
+SOLO_TIER_TEAM_MAX = 0.80        # < this -> 'team' (multiplayer-dependent). Same bar the
+                                 # API's solo_only filter and the web legend use — one
+                                 # number, three places, no drift.
+                                 # In between -> 'mixed': passes the solo-only filter, but
+                                 # a real multiplayer minority among its members (Hero
+                                 # Shooter 0.800, Minigames 0.805, Escape Room 0.836,
+                                 # Class-Based 0.851, Football (Soccer) 0.853) — the band
+                                 # a bare "solo-friendly" badge used to hide.
 
 # Tag tiers. Curated TAG_TIER map below classifies the big/obvious tags; any UNMAPPED tag
 # falls back to a size heuristic: all-time n_games (win='all', min_reviews=
@@ -823,6 +980,21 @@ def build_params() -> dict[str, str]:
         "GATE_FLOOR": GATE_FLOOR,
         "GATE_SAT_FULL_DECLINE": GATE_SAT_FULL_DECLINE,
         "GATE_ENTRANT_FULL": GATE_ENTRANT_FULL,
+        # opportunity_v2 (rebuilt 2026-08-31) — the raw bars go into the SQL, which does
+        # the ln()/tanh() arithmetic inline so the derivation is visible where it is used.
+        "OPP_ENTER_PCT": OPP_ENTER_PCT,
+        "OPP_FLOOD_YOY": OPP_FLOOD_YOY,
+        "OPP_WINNER_TAKE_MOST": OPP_WINNER_TAKE_MOST,
+        "OPP_ENTRANT_NORM": OPP_ENTRANT_NORM,
+        "OPP_ENTRANT_FULL": OPP_ENTRANT_FULL,
+        "W2_MOMENTUM": W2_MOMENTUM,
+        "W2_MARKET": W2_MARKET,
+        "W2_SPREAD": W2_SPREAD,
+        "W2_QUALITY": W2_QUALITY,
+        "OPP_MARKET_MEDIAN_W": OPP_MARKET_MEDIAN_W,
+        "SUPPLY_BRAKE_FLOOR": SUPPLY_BRAKE_FLOOR,
+        "SOLO_TIER_SOLO_MIN": SOLO_TIER_SOLO_MIN,
+        "SOLO_TIER_TEAM_MAX": SOLO_TIER_TEAM_MAX,
         "UMBRELLA_N_GAMES": UMBRELLA_N_GAMES,
         "CURVE_MIN_REVIEWS": CURVE_MIN_REVIEWS,
         "CURVE_MIN_GAMES": CURVE_MIN_GAMES,
@@ -2382,11 +2554,28 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
         "global_median_revenue_paid": f"{med_rev_paid:.2f}" if med_rev_paid is not None else "",
         "boxleiter_owners_per_review": f"{boxleiter_slope:.2f}" if boxleiter_slope is not None else "",
         "pct_over_100k": f"{over_100k:.4f}" if over_100k is not None else "",
+        # v1 `opportunity` — frozen, still published alongside the v2 headline.
         "opportunity_weights": f"demand={W_DEMAND},competition={W_COMPETITION},quality_gap={W_QUALITY}",
+        # v2 headline (rebuilt 2026-08-31): a renormalised blend of four 0..100 sub-scores,
+        # multiplied by the supply brake. decline_gate survives as a falsification TELL and
+        # is reported separately below — it no longer multiplies anything.
+        "opportunity_v2_model": (
+            f"core=mean(momentum={W2_MOMENTUM},market_pull={W2_MARKET},"
+            f"revenue_spread={W2_SPREAD},quality_gap={W2_QUALITY}) over non-null terms; "
+            f"score=core*supply_brake, brake={SUPPLY_BRAKE_FLOOR}+"
+            f"{round(1 - SUPPLY_BRAKE_FLOOR, 2)}*supply_room/100; "
+            f"anchors enter_pct={OPP_ENTER_PCT},flood_yoy={OPP_FLOOD_YOY},"
+            f"winner_take_most={OPP_WINNER_TAKE_MOST},entrant_norm={OPP_ENTRANT_NORM}"
+        ),
         "opportunity_v2_gate": (
+            f"DIAGNOSTIC ONLY (not a score factor since 2026-08-31): "
             f"gate=1-(1-{GATE_FLOOR})*max(sat_severity,entrant_severity); "
             f"sat_full_decline={GATE_SAT_FULL_DECLINE},entrant_full={GATE_ENTRANT_FULL},"
             f"umbrella_n_games={UMBRELLA_N_GAMES}"
+        ),
+        "solo_tier_bars": (
+            f"solo>={SOLO_TIER_SOLO_MIN},team<{SOLO_TIER_TEAM_MAX} "
+            f"(solo_viability is a FLAG not a scale: catalog median 0.975, p10 0.913)"
         ),
         "ccu_panel_games": str(ccu_panel_games),
         "ccu_history_days": str(ccu_history_days),

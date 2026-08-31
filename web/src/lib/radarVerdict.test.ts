@@ -7,11 +7,15 @@ import {
   DEMAND_ENTER_PCT,
   DEMAND_HOLD_PCT,
   ENTRANT_RATIO_PAR,
+  MOMENTUM_DECLINE,
+  MOMENTUM_ENTER,
+  MOMENTUM_FLAT,
   OPP_WATCH_SCORE,
   RING_ORDER,
   SAT_FLOOD_YOY,
   SOLO_FRIENDLY_MIN,
   SOLO_HEAVY_CONTENT_H,
+  SOLO_MIXED_MIN,
   WC_WINNER_TAKE_MOST,
   blipRadius,
   hash01,
@@ -527,5 +531,89 @@ describe("soloBucket — the solo-viability lens", () => {
     const b = radarVerdict({ demand_trend_24m_pct: 50, saturation_yoy: 0.05 });
     expect(a).toEqual(b);
     expect(a.ring).toBe("enter");
+  });
+});
+
+describe("ONE MODEL — the score's sub-score anchors ARE these ring thresholds", () => {
+  // The 2026-08-31 rebuild made opportunity_v2 a blend of sub-scores whose anchor points
+  // are the constants in this file (see the module doc's ONE MODEL, TWO VIEWS block).
+  // These pins are the web half of that contract; etl/tests/test_opportunity_ordering.py
+  // asserts the same equivalence against the mart's own published columns. If either side
+  // moves alone, one of the two fails.
+  //
+  // momentum(trend) = 50 + 50*tanh( (ln(1 + trend/100)/2) / (ln(1 + ENTER/100)/2) )
+  const momentum = (trendPct: number) =>
+    50 + 50 * Math.tanh(Math.log(1 + trendPct / 100) / Math.log(1 + DEMAND_ENTER_PCT / 100));
+
+  it("MOMENTUM_ENTER is exactly the momentum of a niche sitting on DEMAND_ENTER_PCT", () => {
+    expect(momentum(DEMAND_ENTER_PCT)).toBeCloseTo(MOMENTUM_ENTER, 2);
+  });
+
+  it("MOMENTUM_DECLINE is exactly the momentum of a niche sitting on DEMAND_DECLINE_PCT", () => {
+    expect(momentum(DEMAND_DECLINE_PCT)).toBeCloseTo(MOMENTUM_DECLINE, 2);
+  });
+
+  it("MOMENTUM_FLAT is the neutral point — flat demand is neither a claim nor a warning", () => {
+    expect(momentum(0)).toBeCloseTo(MOMENTUM_FLAT, 6);
+  });
+
+  it("crossing the momentum anchor and crossing the demand bar are the SAME event", () => {
+    // The property that makes "a high score means the radar would say enter" true rather
+    // than aspirational: the two unit systems order identically around the bar, from
+    // either side.
+    for (const trend of [-90, -50, -30.1, -30, -29.9, -10, 0, 20, 39.9, 40, 40.1, 80, 300]) {
+      expect(momentum(trend) >= MOMENTUM_ENTER - 1e-9).toBe(trend >= DEMAND_ENTER_PCT);
+      expect(momentum(trend) <= MOMENTUM_DECLINE + 1e-9).toBe(trend <= DEMAND_DECLINE_PCT);
+    }
+  });
+
+  it("the anchors sit in ring order — decline < flat < enter", () => {
+    expect(MOMENTUM_DECLINE).toBeLessThan(MOMENTUM_FLAT);
+    expect(MOMENTUM_FLAT).toBeLessThan(MOMENTUM_ENTER);
+  });
+
+  it("OPP_WATCH_SCORE is reachable — the bar the old score's catalog max (63.7) never was", () => {
+    // The defect this constant carried: it guarded a ring only 0.9% of the live catalog
+    // could reach. The rebuilt score's live distribution is p50 47.6 / p90 68.0 / max 86.7.
+    expect(OPP_WATCH_SCORE).toBeGreaterThan(0);
+    expect(OPP_WATCH_SCORE).toBeLessThan(86.7);
+    // ...and a niche AT the bar with no demand trend still earns the score-only watch arm.
+    const v = radarVerdict({ demand_trend_24m_pct: null, opportunity_v2: OPP_WATCH_SCORE });
+    expect(v.ring).toBe("watch");
+    expect(v.caution).toBe(true);
+  });
+});
+
+describe("solo viability is a FLAG, not a scale", () => {
+  // Measured over 219 live niches: median 0.975, p25 0.953, p10 0.913, and only 3.2%
+  // below SOLO_FRIENDLY_MIN. The number cannot rank; it can only flag. These pins keep
+  // the two bars ordered and keep the middle band visible in the dossier copy.
+  const soloRowFor = (solo: number) =>
+    radarVerdictTrace({ solo_viability: solo }).checks.find((c) => c.id === "solo")!;
+
+  it("the two bars are ordered and bracket the catalog's bottom decile", () => {
+    expect(SOLO_FRIENDLY_MIN).toBeLessThan(SOLO_MIXED_MIN);
+    // p10 = 0.913 sits above SOLO_MIXED_MIN, so 'solo' really is ~92% of the catalog.
+    expect(SOLO_MIXED_MIN).toBeLessThanOrEqual(0.913);
+  });
+
+  it("the 0.80-0.90 band is called out instead of reading like a 1.00", () => {
+    const mixed = soloRowFor(0.85);
+    expect(mixed.pass).toBe(true); // still clears the filter bar — behaviour unchanged
+    expect(mixed.note).toContain("multiplayer minority");
+    const plain = soloRowFor(0.98);
+    expect(plain.pass).toBe(true);
+    expect(plain.note).not.toContain("multiplayer minority");
+    // ...and the band's upper boundary is 'solo', its lower boundary 'mixed'.
+    expect(soloRowFor(SOLO_MIXED_MIN).note).not.toContain("multiplayer minority");
+    expect(soloRowFor(SOLO_FRIENDLY_MIN).note).toContain("multiplayer minority");
+  });
+
+  it("still never moves a ring — the band is display-only", () => {
+    const market = { demand_trend_24m_pct: 50, saturation_yoy: 0.05 };
+    expect(radarVerdict({ ...market, solo_viability: 0.85 })).toEqual(
+      radarVerdict({ ...market, solo_viability: 0.99 }),
+    );
+    expect(soloBucket(0.85)).toBe("solo"); // the filter bucket is unchanged by the band
   });
 });
