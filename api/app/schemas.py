@@ -758,6 +758,15 @@ class NicheGameRow(BaseModel):
     est_revenue: Optional[float] = None
     total_reviews: Optional[int] = None
     owners_est: Optional[float] = None
+    # Carried so the niche page's overview "Top games" panel can render its own columns off
+    # THIS cut-aware list instead of the cut-independent mart_niche_top top-8 it used to
+    # show (see niches.py::_GAME_SELECT for the measurement). live_players is
+    # mart_game.live_players — the same per-appid latest CCU snapshot /api/games/{appid}
+    # serves, so the two surfaces can no longer disagree (DARK SOULS III read "—" in the
+    # niche panel and 3,849 on its own page).
+    positive_ratio: Optional[float] = None
+    live_players: Optional[int] = None
+    header_image: Optional[str] = None
 
 
 class NicheGameList(BaseModel):

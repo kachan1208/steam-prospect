@@ -55,6 +55,18 @@ HIST = [
     ("tag", "Roguelike", 4, 100.0, 316.22776601683796, 42),
 ]
 
+# appid -> positive_ratio, live_players, header_image. Added out of band so GAMES above stays
+# the seven hand-checkable numbers it was. These three ride the same projection because the
+# niche page's OVERVIEW "Top games" panel renders them, and that panel now reads this
+# cut-aware endpoint instead of the cut-independent mart_niche_top (see niches.py's
+# _GAME_SELECT for the Souls-like measurement). Hotel/Foxtrot are measured; Echo is
+# deliberately NOT — a game the CCU collector has never captured must travel as null, not 0.
+EXTRA = [
+    (8, 0.91, 3_849, "https://example.test/8.jpg"),
+    (6, 0.85, 2_716, "https://example.test/6.jpg"),
+    (5, 0.77, None, None),
+]
+
 
 def _build(path: Path) -> None:
     con = duckdb.connect(str(path))
@@ -65,6 +77,12 @@ def _build(path: Path) -> None:
             "owners_mid DOUBLE)"
         )
         con.executemany("INSERT INTO mart_game VALUES (?, ?, ?, ?, ?, ?, ?)", GAMES)
+        for col, typ in (("positive_ratio", "DOUBLE"), ("live_players", "INTEGER"), ("header_image", "VARCHAR")):
+            con.execute(f"ALTER TABLE mart_game ADD COLUMN {col} {typ}")
+        con.executemany(
+            "UPDATE mart_game SET positive_ratio = ?, live_players = ?, header_image = ? WHERE appid = ?",
+            [(pr, lp, hi, appid) for appid, pr, lp, hi in EXTRA],
+        )
 
         # The contract: keys only. Every attribute comes from the mart_game join.
         con.execute(
@@ -183,7 +201,41 @@ def test_games_row_shape_maps_the_mart_columns_onto_the_contract(niche_games_cli
         "est_revenue": 3_000_000.0,
         "total_reviews": 12_000,
         "owners_est": 2_000_000.0,
+        "positive_ratio": 0.91,
+        "live_players": 3_849,
+        "header_image": "https://example.test/8.jpg",
     }
+
+
+def test_games_rows_carry_the_overview_panels_own_columns(niche_games_client):
+    """positive_ratio / live_players / header_image are on this row for one reason: the niche
+    page's overview "Top games" panel needs them to render off THIS endpoint.
+
+    It used to render mart_niche_top instead — one cut-independent top-8 per (dimension, key)
+    — under a header naming the cut. On the live API's tag/Souls-like at win=24m,
+    min_reviews=50 (223 games) that panel headed with Black Myth $2.2B and ELDEN RING $2.1B,
+    appids that are not in those 223 at all, against the cut's real top of Clair Obscur
+    $414.3M: 5.24x on top-1. live_players in particular replaces a join against the niche's
+    top-8-BY-PLAYERS list, which printed "—" for every game ranked 9th or lower — DARK SOULS
+    III read "—" in that panel and 3,849 on /api/games/374320 at the same moment.
+
+    NULL is load-bearing: a game the CCU collector has never captured must come back null so
+    the UI renders "—", not a fabricated 0 players.
+    """
+    body = niche_games_client.get(
+        "/api/niches/tag/Roguelike/games", params={"sort": "revenue", "order": "desc", "limit": 3}
+    ).json()
+    rows = {i["appid"]: i for i in body["items"]}
+    assert _appids(body) == [8, 6, 5]
+
+    assert rows[8]["live_players"] == 3_849
+    assert rows[8]["positive_ratio"] == 0.91
+    assert rows[8]["header_image"] == "https://example.test/8.jpg"
+    assert rows[6]["live_players"] == 2_716
+    # Never captured -> null all the way through, not 0 and not a missing key.
+    assert rows[5]["live_players"] is None
+    assert rows[5]["header_image"] is None
+    assert "live_players" in rows[5]
 
 
 def test_games_honours_the_requested_cut(niche_games_client):

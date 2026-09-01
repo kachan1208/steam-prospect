@@ -71,6 +71,10 @@ export { NICHE_ROUTE_PATH, nicheDetailPath } from "../lib/nichePath";
 
 export const GAMES_PAGE_SIZE = 25;
 
+/** Rows in the overview's "Top games in the niche" preview. It is a request `limit` now, not
+ * a `.slice()` of a fixed top-8 the API happened to ship — see the panel for why. */
+export const TOP_GAMES_PANEL_SIZE = 5;
+
 const DIMENSIONS: Dimension[] = ["tag", "genre"];
 
 export type DistMetric = "revenue" | "price";
@@ -426,6 +430,22 @@ export default function NicheDetail() {
   // so the overview never waits on them.
   const onGamesTab = tab === "games";
   const gamesQ = useNicheGames(dimension ?? "tag", dimension && onGamesTab ? nicheKey : null, gamesParams);
+  // The overview's "Top games in the niche" panel reads the SAME cut-aware endpoint as the
+  // games tab's table — see the panel itself for the measurement that forced it. It asks for
+  // the cut ONLY: no rev_min/price_min, because this panel is "the niche's biggest games at
+  // this cut", not the histogram-brushed slice (the brush belongs to the table below).
+  const topGamesParams = useMemo<NicheGamesParams>(
+    () => ({
+      win: cut.win,
+      min_reviews: cut.min_reviews,
+      sort: "revenue",
+      order: "desc",
+      limit: TOP_GAMES_PANEL_SIZE,
+      offset: 0,
+    }),
+    [cut],
+  );
+  const topGamesQ = useNicheGames(dimension ?? "tag", dimension && !onGamesTab ? nicheKey : null, topGamesParams);
   const revenueDistQ = useNicheDistribution(dimension ?? "tag", dimension && onGamesTab ? nicheKey : null, "revenue", cut);
   const priceDistQ = useNicheDistribution(dimension ?? "tag", dimension && onGamesTab ? nicheKey : null, "price", cut);
 
@@ -526,12 +546,18 @@ export default function NicheDetail() {
 
   const totalPlayersNow = players?.total_players_now ?? activeVariant.total_players_now;
   const playersTrend = players?.players_trend_7d_pct ?? activeVariant.players_trend_7d_pct;
-  // Neither /niches/.../games nor representative_games carries a live-CCU column — the only
-  // per-game "now" figure this page has is the players endpoint's own top-5-by-share list.
-  // Join it in by appid so the top-games table can show it where it overlaps, "—" elsewhere,
-  // rather than inventing a number the API never served.
-  const liveNow = new Map((players?.distribution?.top_games ?? []).map((g) => [g.appid, g.players]));
+  // /niches/.../games now carries live_players per row (routers/niches.py `_GAME_SELECT`),
+  // which is what killed the old players.distribution.top_games join here: that list is the
+  // top 8 BY PLAYERS, so every row outside it fell through to "—". DARK SOULS III, Sekiro
+  // and Clair Obscur each printed "—" in this panel while /games/374320, /games/814380 and
+  // /games/1903340 printed 3,849 / 2,716 / 6,453 for the same moment. Same fact, two
+  // answers — the join was a ranked list being used as a lookup table.
   const hasP90Trend = detail.saturation_trend.some((p) => p.p90_rev != null);
+  // The cut-aware top games for the overview panel. Falls back to the cut-INDEPENDENT
+  // representative_games (mart_niche_top) only when the games mart isn't there — and says so
+  // in the panel when it does, because that list is a different population.
+  const topGames = topGamesQ.data?.items ?? [];
+  const topGamesDegraded = !topGamesQ.isLoading && (topGamesQ.isError || topGames.length === 0);
 
   const gamesUnavailable =
     gamesQ.isError ||
@@ -656,6 +682,20 @@ export default function NicheDetail() {
             that horizon (the mart's demand trend is demand_trend_24m_pct — a 24-month
             structural read, deliberately not a 90-day one) — used the real 7-day, same-panel
             PLAYERS trend instead of inventing a 90-day review-velocity number. */}
+        {/* Same disclosure problem as Saturation YoY next door, and the same fix. The live-
+            player marts are keyed by (dimension, key, date) ONLY — mart_players.sql's panel
+            is "niche members with >=50 reviews that the CCU collector has ever measured",
+            with no window and no review-floor dimension to filter on — so this pair of
+            numbers is identical under all six cuts. Live API, tag/Souls-like: 207.0K playing
+            now over n_games_panel = 798 games, which matches NONE of the six selectable cuts
+            (624 / 223 / 177 / 1841 / 739 / 584). Four of the eight biggest contributors are
+            outside the 223-game 24m/>=50 cut the header names — ELDEN RING 32,145 (15.53%),
+            Where Winds Meet 10,446, Wuthering Waves 9,212, Black Myth 8,392 — 60,195 players
+            together, 29.1% of the 207,006 shown. A cut-scoped sum is NOT available to invent
+            here either: the 7-day trend that is this tile's actual VALUE needs both windows'
+            per-game averages, and only the ratio survives into the marts. So the tile does
+            what the saturation tile does — states its own population instead of pretending
+            to answer the controls. */}
         <KpiCell
           label="Players / 7d"
           valueClassName={playersTrend != null && playersTrend >= 0 ? "text-brand" : undefined}
@@ -664,7 +704,22 @@ export default function NicheDetail() {
               ? `${playersTrend >= 0 ? "▲" : "▼"} ${playersTrend >= 0 ? "+" : ""}${playersTrend.toFixed(1)}%`
               : "—"
           }
-          footnote={totalPlayersNow != null ? `${fmtCompact(totalPlayersNow)} playing now` : "same-panel vs prior 7d"}
+          footnoteWrap
+          footnote={
+            // No figure at all -> nothing to disown; keep the bare basis line.
+            totalPlayersNow == null && playersTrend == null ? (
+              "same-panel vs prior 7d"
+            ) : (
+              <>
+                {totalPlayersNow != null ? `${fmtCompact(totalPlayersNow)} playing now` : "same-panel vs prior 7d"}
+                <span className="mt-0.5 block text-ink-primary/45">
+                  Every measured game in the niche
+                  {players?.n_games_panel != null ? ` (${fmtInt(players.n_games_panel)})` : ""} — this tile ignores the
+                  window and review-floor controls above.
+                </span>
+              </>
+            )
+          }
         />
         <KpiCell
           label="P90 revenue"
@@ -696,6 +751,11 @@ export default function NicheDetail() {
           // know mart_niche.sql to read the KPI row left to right. Cut-independence is the
           // mart's deliberate design (one saturation figure per dimension+key); disclosing it
           // is presentation's job.
+          //
+          // "this tile ALONE ignores…" until 2026-09-01: the Players / 7d cell two places
+          // left turned out to be cut-independent too (its marts have no window/floor key at
+          // all — 798 measured games against the row's 223), so it now carries the same
+          // sentence and "alone" stopped being true.
           footnoteWrap
           footnote={
             activeVariant.n_recent_year != null && activeVariant.n_prior_year != null ? (
@@ -703,7 +763,7 @@ export default function NicheDetail() {
                 {fmtInt(activeVariant.n_recent_year)} released last full year vs{" "}
                 {fmtInt(activeVariant.n_prior_year)} the year before
                 <span className="mt-0.5 block text-ink-primary/45">
-                  Whole niche, every review count — this tile alone ignores the window and review-floor controls above.
+                  Whole niche, every review count — this tile ignores the window and review-floor controls above.
                 </span>
               </>
             ) : (
@@ -899,9 +959,21 @@ export default function NicheDetail() {
             </div>
           </div>
 
-          {/* Top games in the niche — the same representative_games the degraded games-tab
-              fallback already uses (so no new fetch), previewed here and linked through to the
-              full, sortable/filterable list on the Games & distribution tab. */}
+          {/* Top games in the niche — the top five OF THIS CUT, off the same
+              /niches/:dimension/:key/games endpoint the Games & distribution table reads.
+              It used to render detail.representative_games, i.e. mart_niche_top: ONE
+              cut-independent top-8 per (dimension, key), under a header that names the cut.
+              Live API, tag/Souls-like at win=24m min_reviews=50 (header: "window 24m · ≥50
+              reviews", tile: "223 scored games") it listed Black Myth $2.2B and ELDEN RING
+              $2.1B — appids 2358720 and 1245620, neither of which is in those 223 at all:
+              ask that cut for its own top by revenue desc and the first row back is Clair
+              Obscur, which those two would outrank 5:1 if they were members. So the cut's
+              real top game is Clair Obscur at $414.3M, and the panel's
+              top-1 read 5.24x the truth and its top-5 sum 4.82x, and the same five rows were
+              served under all six selectable cuts — only the "All N →" label moved. The
+              games tab's table was already right (Clair Obscur, Silksong, NIGHTREIGN, PoE2,
+              Stellar Blade); this panel now shares its data path, so the two surfaces cannot
+              disagree again. */}
           <div className="blueprint relative border-ink-primary/25">
             <i className="bp-corner" />
             <div className="flex items-baseline gap-2 px-5 pb-2.5 pt-3.5">
@@ -914,15 +986,30 @@ export default function NicheDetail() {
                 All {fmtInt(activeVariant.n_games)} →
               </button>
             </div>
-            {detail.representative_games.length === 0 ? (
+            {topGamesQ.isLoading ? (
               <div className="border-t border-ink-primary/20 px-5 py-6 text-center text-xs text-ink-muted">
-                No representative games for this cut yet.
+                Loading top games…
+              </div>
+            ) : topGamesDegraded && detail.representative_games.length === 0 ? (
+              <div className="border-t border-ink-primary/20 px-5 py-6 text-center text-xs text-ink-muted">
+                No games for this cut yet.
               </div>
             ) : (
               // Six fixed columns don't reflow at phone widths — scroll horizontally instead
               // of squeezing them (same convention as the Games & distribution tab's table).
               <div className="overflow-x-auto">
                 <div className="min-w-[640px]">
+                  {/* The game mart only lands on a nightly REBUILD, so for a few hours after
+                      a deploy there is no cut-aware list. Falling back to mart_niche_top is
+                      still the best list we have — but it is the population this panel was
+                      just fixed for showing silently, so in that state it has to say so. */}
+                  {topGamesDegraded && (
+                    <div className="border-t border-ink-primary/20 px-5 py-2 text-[11px] leading-snug text-ink-primary/50">
+                      The per-cut list needs the nightly game mart, which hasn’t landed yet — these are the niche’s
+                      biggest games all-time at every review count, not the {variantLabel(activeVariant).toLowerCase()}{" "}
+                      cut.
+                    </div>
+                  )}
                   <div className="grid grid-cols-[60px_2fr_1fr_1fr_1fr_1fr] items-center gap-3.5 border-t border-ink-primary/20 px-5 py-2.5">
                     <span />
                     <span className="kicker text-[11px] text-ink-primary/55">Game</span>
@@ -931,38 +1018,56 @@ export default function NicheDetail() {
                     <span className="kicker text-[11px] text-ink-primary/55">Reviews</span>
                     <span className="kicker text-[11px] text-ink-primary/55">Players now</span>
                   </div>
-                  {detail.representative_games.slice(0, 5).map((g) => {
-                    const live = liveNow.get(g.appid);
-                    return (
-                      <Link
-                        key={g.appid}
-                        to={`/games/${g.appid}`}
-                        className="grid grid-cols-[60px_2fr_1fr_1fr_1fr_1fr] items-center gap-3.5 border-t border-ink-primary/10 px-5 py-2.5 text-sm transition-colors hover:bg-ink-primary/[0.04]"
-                      >
-                        {g.header_image ? (
-                          <img src={g.header_image} alt="" className="h-[26px] w-full object-cover" loading="lazy" />
-                        ) : (
-                          <span
-                            aria-hidden
-                            className="h-[26px] w-full"
-                            style={{
-                              backgroundImage:
-                                "repeating-linear-gradient(45deg, color-mix(in srgb, var(--text-primary) 12%, transparent), color-mix(in srgb, var(--text-primary) 12%, transparent) 4px, transparent 4px, transparent 8px)",
-                            }}
-                          />
-                        )}
-                        <span className="truncate font-medium text-ink-primary">{g.name ?? `App ${g.appid}`}</span>
-                        <span className="tabular text-ink-primary/70">{g.release_year ?? "—"}</span>
-                        <span className="tabular text-ink-primary/70">
-                          {fmtRevenue(g.est_rev_reviews, g.price_initial === 0)}
-                        </span>
-                        <span className="tabular text-ink-primary/70">
-                          {fmtPct(g.positive_ratio)} · {fmtInt(g.total_reviews)}
-                        </span>
-                        <span className="tabular text-brand">{live != null ? fmtCompact(live) : "—"}</span>
-                      </Link>
-                    );
-                  })}
+                  {(topGamesDegraded
+                    ? detail.representative_games.slice(0, TOP_GAMES_PANEL_SIZE).map((g) => ({
+                        appid: g.appid,
+                        name: g.name,
+                        release_year: g.release_year,
+                        price_initial: g.price_initial,
+                        est_revenue: g.est_rev_reviews,
+                        positive_ratio: g.positive_ratio,
+                        total_reviews: g.total_reviews,
+                        header_image: g.header_image,
+                        // mart_niche_top carries no CCU column, and the fallback must not
+                        // reach back into players.distribution.top_games for it — that is a
+                        // top-8-BY-PLAYERS ranking, and using it as a lookup is precisely
+                        // what made DARK SOULS III read "—" here and 3,849 on /games/374320.
+                        live_players: null as number | null,
+                      }))
+                    : topGames
+                  ).map((g) => (
+                    <Link
+                      key={g.appid}
+                      to={`/games/${g.appid}`}
+                      className="grid grid-cols-[60px_2fr_1fr_1fr_1fr_1fr] items-center gap-3.5 border-t border-ink-primary/10 px-5 py-2.5 text-sm transition-colors hover:bg-ink-primary/[0.04]"
+                    >
+                      {g.header_image ? (
+                        <img src={g.header_image} alt="" className="h-[26px] w-full object-cover" loading="lazy" />
+                      ) : (
+                        <span
+                          aria-hidden
+                          className="h-[26px] w-full"
+                          style={{
+                            backgroundImage:
+                              "repeating-linear-gradient(45deg, color-mix(in srgb, var(--text-primary) 12%, transparent), color-mix(in srgb, var(--text-primary) 12%, transparent) 4px, transparent 4px, transparent 8px)",
+                          }}
+                        />
+                      )}
+                      <span className="truncate font-medium text-ink-primary">{g.name ?? `App ${g.appid}`}</span>
+                      <span className="tabular text-ink-primary/70">{g.release_year ?? "—"}</span>
+                      <span className="tabular text-ink-primary/70">
+                        {fmtRevenue(g.est_revenue, g.price_initial === 0)}
+                      </span>
+                      <span className="tabular text-ink-primary/70">
+                        {fmtPct(g.positive_ratio)} · {fmtInt(g.total_reviews)}
+                      </span>
+                      {/* Per-row live CCU from the game mart — the same column /api/games/
+                          {appid} serves, not a rank-8 leaderboard join. */}
+                      <span className="tabular text-brand">
+                        {g.live_players != null ? fmtCompact(g.live_players) : "—"}
+                      </span>
+                    </Link>
+                  ))}
                 </div>
               </div>
             )}
@@ -999,16 +1104,32 @@ export default function NicheDetail() {
               as GameProfile. */}
           {view === "detailed" && (
             <>
+              {/* Everything in this card — the tiles, the series, the monthly history, the
+                  holders list and the histogram — comes from the mart_niche_players family,
+                  which is keyed by (dimension, key, date) with NO window/review-floor
+                  dimension. The whole card therefore answers for one fixed panel while the
+                  controls at the top of the page move; saying so once, in the subtitle, is
+                  cheaper for the reader than a caveat per tile. */}
               <Card
                 title="Live players — is this niche hot right now"
-                subtitle="Nightly ~21–22:00 UTC point samples, not daily peaks; each game's last capture carries forward up to 7 days so the capture rotation doesn't read as audience dips."
+                subtitle="Nightly ~21–22:00 UTC point samples, not daily peaks; each game's last capture carries forward up to 7 days so the capture rotation doesn't read as audience dips. Whole measured niche: this card ignores the window and review-floor controls above."
               >
                 <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
                   <StatTile
-                    help="Summed current concurrent players across the niche's scored games. Dominated by the niche's biggest games."
+                    help="Summed current concurrent players across every game in the niche the CCU collector has measured — NOT the cut selected above. Dominated by the niche's biggest games."
                     label="Playing now"
                     value={players?.total_players_now != null ? fmtCompact(players.total_players_now) : "—"}
-                    sub={players?.n_games_panel != null ? `${fmtInt(players.n_games_panel)} games measured` : undefined}
+                    sub={
+                      players?.n_games_panel != null ? (
+                        <>
+                          {fmtInt(players.n_games_panel)} games measured
+                          {/* On tag/Souls-like this is 798 against a header that says 223 —
+                              the panel is not any of the six cuts, so the count has to be
+                              readable as its own population, not as the cut's. */}
+                          <span className="mt-0.5 block text-ink-muted">whole niche, not the selected cut</span>
+                        </>
+                      ) : undefined
+                    }
                   />
                   <StatTile
                     help="Last 7 days vs the 7 before, counting only games measured in BOTH windows — growing data coverage can't fake an audience trend."

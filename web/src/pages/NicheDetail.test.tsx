@@ -302,8 +302,12 @@ describe("NicheDetail — the Saturation YoY tile disowns the cut controls", () 
   it("states in the tile that the figure covers the whole niche and ignores the controls", async () => {
     renderNiche();
     expect(
+      // "this tile ALONE ignores…" until 2026-09-01 — the Players / 7d cell in the same
+      // strip turned out to be cut-independent too (798 measured games against the row's
+      // 223), so it now carries the same sentence and "alone" had to go. The leading clause
+      // is what keeps each tile's disclosure identifiable.
       await screen.findByText(
-        /Whole niche, every review count — this tile alone ignores the window and review-floor controls above/,
+        /Whole niche, every review count — this tile ignores the window and review-floor controls above/,
       ),
     ).toBeTruthy();
   });
@@ -326,11 +330,303 @@ describe("NicheDetail — the Saturation YoY tile disowns the cut controls", () 
     // Same tile, same three numbers, disclosure still on screen.
     expect(screen.getByText(/346 released last full year vs 340 the year before/)).toBeTruthy();
     expect(screen.getByText("▲ +2%")).toBeTruthy();
-    expect(screen.getByText(/this tile alone ignores the window and review-floor controls above/)).toBeTruthy();
+    expect(
+      screen.getByText(/Whole niche, every review count — this tile ignores the window and review-floor controls above/),
+    ).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "All-time · ≥50 reviews" }));
     expect(await screen.findByText(/739 scored games/)).toBeTruthy();
     expect(screen.getByText(/346 released last full year vs 340 the year before/)).toBeTruthy();
     expect(screen.getByText("▲ +2%")).toBeTruthy();
+  });
+});
+
+/**
+ * The overview's "Top games in the niche" panel, and the KPI strip's live-player cell.
+ *
+ * Both were reported by the 2026-09-01 data-consistency audit of /niches/tag/Souls-like, and
+ * both had the same shape of defect: a panel summarising a population that is not the one its
+ * own header names ("window 24m · ≥50 reviews", "223 scored games").
+ *
+ *   Top games   rendered detail.representative_games = mart_niche_top, ONE cut-independent
+ *               list per (dimension, key). Live API at 24m/≥50 it showed Black Myth $2.2B and
+ *               ELDEN RING $2.1B; appids 2358720 and 1245620 are not among those 223 at all
+ *               (200 of the 223 fetched by revenue desc — as members they would rank #1/#2).
+ *               The cut's real top game is Clair Obscur at $414.3M: panel top-1 was 5.24x the
+ *               truth, its top-5 sum 4.82x, and the same rows were served under all six cuts
+ *               while only the "All N →" label moved. The mart_niche_top list IS the
+ *               (all, 50) ranking — right in exactly one of the six selectable cuts.
+ *   Players now the column joined players.distribution.top_games, which is the top 8 BY
+ *               PLAYERS. Rank 9+ fell through to "—", so DARK SOULS III read "—" here and
+ *               "Players now 3,849" on /games/374320.
+ *   Players/7d  207.0K over n_games_panel = 798, which is none of the six cuts
+ *               (624/223/177/1841/739/584) — and cannot be made into one, because the marts
+ *               behind it carry no window/review-floor key. Disclosed, like Saturation YoY.
+ *
+ * The fixtures below are the live API's own rows, so every expectation is checkable against
+ * production. The games-tab table was ALREADY correct and is deliberately untouched — these
+ * tests exist to pin that the overview now shares its data path.
+ */
+describe("NicheDetail — the overview Top games panel is the SELECTED CUT's top games", () => {
+  const VARIANTS = [
+    { window: "24m", min_reviews: 0, n_games: 624 },
+    { window: "24m", min_reviews: 50, n_games: 223 },
+    { window: "24m", min_reviews: 100, n_games: 177 },
+    { window: "all", min_reviews: 0, n_games: 1841 },
+    { window: "all", min_reviews: 50, n_games: 739 },
+    { window: "all", min_reviews: 100, n_games: 584 },
+  ].map((v) => ({
+    dimension: "tag",
+    key: "Souls-like",
+    median_rev: 152898,
+    p90_rev: 9431453.58,
+    median_price: 14.99,
+    supply_brake: 1,
+    opportunity_v2: 77.25,
+    saturation_yoy: 0.01764705882352941,
+    n_recent_year: 346,
+    n_prior_year: 340,
+    // Cut-independent in the mart — the same pair is stamped on every one of the six rows.
+    total_players_now: 207006,
+    players_trend_7d_pct: -5.26,
+    ...v,
+  }));
+
+  // GET /api/niches/tag/Souls-like -> representative_games[0..4], verbatim. This is
+  // mart_niche_top: the (all, 50) ranking, served under every cut.
+  const REPRESENTATIVE = [
+    [1, 2358720, "Black Myth: Wukong", 2024, 59.99, 2172027335.1, 1206883, 0.9651167511680917],
+    [2, 1245620, "ELDEN RING", 2022, 59.99, 2067907491.3, 1149029, 0.9307876476572828],
+    [3, 374320, "DARK SOULS III", 2016, 59.99, 790876365.3, 439449, 0.9434450869156603],
+    [4, 814380, "Sekiro: Shadows Die Twice - GOTY Edition", 2019, 59.99, 638787317.7, 354941, 0.9525075998546237],
+    [5, 1903340, "Clair Obscur: Expedition 33", 2025, 49.99, 414290625.3, 276249, 0.9528070689848651],
+  ].map(([rank_in_niche, appid, name, release_year, price_initial, est_rev_reviews, total_reviews, positive_ratio]) => ({
+    rank_in_niche,
+    appid,
+    name,
+    release_year,
+    price_initial,
+    est_rev_reviews,
+    total_reviews,
+    positive_ratio,
+    owners_mid: null,
+    self_published: 0,
+    header_image: null,
+  }));
+
+  // GET /api/niches/tag/Souls-like/games?win=…&min_reviews=…&sort=revenue&order=desc&limit=5,
+  // verbatim, plus the live_players column this fix added (each value cross-checked against
+  // /api/games/{appid} on the same day).
+  const CUT_GAMES: Record<string, { total: number; items: unknown[] }> = {
+    "24m:50": {
+      total: 223,
+      items: [
+        [1903340, "Clair Obscur: Expedition 33", 2025, 49.99, 414290625.3, 276249, 0.9528070689848651, 6453],
+        [1030300, "Hollow Knight: Silksong", 2025, 19.99, 251133970.2, 418766, 0.8941031506855858, 4820],
+        [2622380, "ELDEN RING NIGHTREIGN", 2025, 39.99, 227657471.4, 189762, 0.8172078709119844, 9836],
+        [2694490, "Path of Exile 2", 2024, 29.99, 202068121.5, 224595, 0.7471537656670897, 19230],
+        [3489700, "Stellar Blade", 2025, 59.99, 167906610.9, 93297, 0.9, 1204],
+      ],
+    },
+    "all:50": {
+      total: 739,
+      items: [
+        [2358720, "Black Myth: Wukong", 2024, 59.99, 2172027335.1, 1206883, 0.9651167511680917, 8392],
+        [1245620, "ELDEN RING", 2022, 59.99, 2067907491.3, 1149029, 0.9307876476572828, 32145],
+        [374320, "DARK SOULS III", 2016, 59.99, 790876365.3, 439449, 0.9434450869156603, 3849],
+        [814380, "Sekiro: Shadows Die Twice - GOTY Edition", 2019, 59.99, 638787317.7, 354941, 0.9525075998546237, 2716],
+        [1903340, "Clair Obscur: Expedition 33", 2025, 49.99, 414290625.3, 276249, 0.9528070689848651, 6453],
+      ],
+    },
+  };
+
+  function gamesPage(cut: string) {
+    const page = CUT_GAMES[cut] ?? { total: 0, items: [] };
+    return {
+      total: page.total,
+      limit: 5,
+      offset: 0,
+      items: (page.items as [number, string, number, number, number, number, number, number][]).map(
+        ([appid, name, release_year, price_initial, est_revenue, total_reviews, positive_ratio, live_players]) => ({
+          appid,
+          name,
+          release_year,
+          price_initial,
+          est_revenue,
+          total_reviews,
+          positive_ratio,
+          live_players,
+          owners_est: null,
+          header_image: null,
+        }),
+      ),
+    };
+  }
+
+  const DETAIL = {
+    dimension: "tag",
+    key: "Souls-like",
+    tier: "micro",
+    variants: VARIANTS,
+    saturation_trend: [],
+    revenue_histogram: [],
+    representative_games: REPRESENTATIVE,
+    // The live payload, trimmed to the fields this page reads. n_games_panel 798 matches no
+    // cut; the top_games list is the top 8 BY PLAYERS that used to be joined per row.
+    players: {
+      total_players_now: 207006,
+      players_trend_7d_pct: -5.26,
+      players_coverage: 1,
+      n_games_panel: 798,
+      series: [],
+      monthly: [],
+      distribution: {
+        median_players_now: 1,
+        players_top5_share: 0.4283,
+        n_games_now: 798,
+        histogram: [],
+        top_games: [
+          { rank: 1, appid: 1245620, name: "ELDEN RING", players: 32145, share: 0.1553 },
+          { rank: 2, appid: 2694490, name: "Path of Exile 2", players: 19230, share: 0.0929 },
+          { rank: 3, appid: 2584270, name: "Mortal Shell II", players: 17006, share: 0.0822 },
+          { rank: 4, appid: 3564740, name: "Where Winds Meet", players: 10446, share: 0.0505 },
+          { rank: 5, appid: 2622380, name: "ELDEN RING NIGHTREIGN", players: 9836, share: 0.0475 },
+          { rank: 6, appid: 3282300, name: "Mistfall Hunter", players: 9222, share: 0.0445 },
+          { rank: 7, appid: 3513350, name: "Wuthering Waves", players: 9212, share: 0.0445 },
+          { rank: 8, appid: 2358720, name: "Black Myth: Wukong", players: 8392, share: 0.0405 },
+        ],
+      },
+    },
+    themes: [],
+    press: null,
+    hit_rates: { hit_rate_200k: null, hit_rate_500k: null, median_rev: null, n_games: null, winner_concentration: null },
+  };
+
+  function json(body: unknown, status = 200) {
+    return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+  }
+
+  /** `gamesStatus` simulates the hours-after-deploy state: mart_niche_game not rebuilt yet. */
+  function stubApi(gamesStatus?: number) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input), "http://test.local");
+        if (url.pathname.endsWith("/games")) {
+          if (gamesStatus) return json({ detail: "mart_niche_game is missing — run task etl" }, gamesStatus);
+          return json(gamesPage(`${url.searchParams.get("win")}:${url.searchParams.get("min_reviews")}`));
+        }
+        if (url.pathname.includes("/market/benchmarks")) {
+          return json({ cited: { pct_new_releases_over_100k: 0.085, revenue_benchmark_marks: [], dev_tiers: [] } });
+        }
+        if (url.pathname.includes("/niches/tag/")) return json(DETAIL);
+        return json({});
+      }),
+    );
+  }
+
+  function renderNiche() {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    return render(
+      <QueryClientProvider client={client}>
+        <ThemeProvider>
+          <MemoryRouter initialEntries={["/niches/tag/Souls-like"]}>
+            <Routes>
+              <Route path={NICHE_ROUTE_PATH} element={<NicheDetail />} />
+            </Routes>
+          </MemoryRouter>
+        </ThemeProvider>
+      </QueryClientProvider>,
+    );
+  }
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("lists the 24m/≥50 cut's top games — not the two that aren't in the cut at all", async () => {
+    stubApi();
+    renderNiche();
+
+    // The header this panel sits under says 223 scored games; these five are those 223's top.
+    expect(await screen.findByText("Clair Obscur: Expedition 33")).toBeTruthy();
+    for (const name of ["Hollow Knight: Silksong", "ELDEN RING NIGHTREIGN", "Path of Exile 2", "Stellar Blade"]) {
+      expect(screen.getByText(name)).toBeTruthy();
+    }
+    // appid 2358720 / 1245620: outside the cut, and they used to head this panel.
+    expect(screen.queryByText("Black Myth: Wukong")).toBeNull();
+    expect(screen.queryByText("ELDEN RING")).toBeNull();
+    // Top-1 revenue is the cut's $414.3M, not the 5.24x-larger $2.2B.
+    expect(screen.getByText("$414.3M")).toBeTruthy();
+    expect(screen.queryByText("$2.2B")).toBeNull();
+    // The reviews column survived the data-source switch (positive_ratio now rides /games).
+    expect(screen.getByText(/95\.3% · 276,249/)).toBeTruthy();
+  });
+
+  it("re-reads the panel when the cut changes, instead of relabelling the same five rows", async () => {
+    stubApi();
+    renderNiche();
+    expect(await screen.findByText("Clair Obscur: Expedition 33")).toBeTruthy();
+    expect(screen.getByText("All 223 →")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "All-time · ≥50 reviews" }));
+    // All-time IS the cut mart_niche_top happens to describe, so this is where the old panel
+    // was right — the rows must arrive here, and only here.
+    expect(await screen.findByText("Black Myth: Wukong")).toBeTruthy();
+    expect(screen.getByText("ELDEN RING")).toBeTruthy();
+    expect(screen.getByText("$2.2B")).toBeTruthy();
+    expect(screen.getByText("All 739 →")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Last 24m · ≥50 reviews" }));
+    expect(await screen.findByText("Hollow Knight: Silksong")).toBeTruthy();
+    expect(screen.queryByText("Black Myth: Wukong")).toBeNull();
+    expect(screen.queryByText("ELDEN RING")).toBeNull();
+  });
+
+  it("prints players now per row, including games outside the top-8-by-players list", async () => {
+    stubApi();
+    renderNiche();
+
+    // Clair Obscur is not in players.distribution.top_games, so the old join printed "—"
+    // while /api/games/1903340 answered 6,453 for the same moment.
+    expect(await screen.findByText("6,453")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "All-time · ≥50 reviews" }));
+    // Same for DARK SOULS III (3,849 on /games/374320) and Sekiro (2,716 on /games/814380).
+    expect(await screen.findByText("3,849")).toBeTruthy();
+    expect(screen.getByText("2,716")).toBeTruthy();
+    // ELDEN RING IS in that top-8; its number must be the same either way.
+    expect(screen.getByText("32.1K")).toBeTruthy();
+  });
+
+  it("says the live-player tile covers the whole measured niche, at every cut", async () => {
+    stubApi();
+    renderNiche();
+
+    const disclosure = /Every measured game in the niche \(798\) — this tile ignores the window and review-floor controls above/;
+    expect(await screen.findByText(disclosure)).toBeTruthy();
+    expect(screen.getByText(/207\.0K playing now/)).toBeTruthy();
+    expect(screen.getByText(/223 scored games/)).toBeTruthy();
+
+    // The neighbouring count moves 223 -> 739; the players figure is the same 207.0K over the
+    // same 798 games, and still says so.
+    fireEvent.click(screen.getByRole("button", { name: "All-time · ≥50 reviews" }));
+    expect(await screen.findByText(/739 scored games/)).toBeTruthy();
+    expect(screen.getByText(/207\.0K playing now/)).toBeTruthy();
+    expect(screen.getByText(disclosure)).toBeTruthy();
+  });
+
+  it("labels the fallback list when the game mart hasn't been rebuilt yet", async () => {
+    stubApi(503);
+    renderNiche();
+
+    // mart_niche_top is still the best list available — but it is all-time, and the panel is
+    // under a header that says 24m/≥50, so the substitution has to be visible.
+    expect(await screen.findByText(/these are the niche’s biggest games all-time at every review count/)).toBeTruthy();
+    expect(screen.getByText("Black Myth: Wukong")).toBeTruthy();
+    // And it must NOT fall back to the players top-8 for the players column: that ranking is
+    // exactly what made the same fact read two ways.
+    expect(screen.queryByText("32.1K")).toBeNull();
   });
 });
