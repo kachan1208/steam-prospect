@@ -23,6 +23,7 @@ import { nicheWatchlistId, toggleNicheWatchlist, useWatchlist, WATCHLIST_CAP } f
 import {
   ApiError,
   nicheExportCsvUrl,
+  notFoundReason,
   useMarketBenchmarks,
   useNicheDetail,
   useNicheDistribution,
@@ -43,7 +44,7 @@ import { heatDomain, heatStyle } from "../lib/heat";
 import { CSS_VAR } from "../lib/palette";
 import { usePageTitle } from "../lib/usePageTitle";
 import { useDetailView } from "../lib/viewMode";
-import { nicheCombinedPath } from "../lib/nicheSelection";
+import { DEFAULT_NICHE_CUT, nicheCombinedPath } from "../lib/nicheSelection";
 
 /** The condensed stack the foundation applies to h1–h6 and .kicker (index.css) — used inline
  * for KPI/panel numerals that aren't semantically headings, so they still read as the
@@ -387,8 +388,10 @@ export default function NicheDetail() {
     watchlistEntries.some((e) => e.id === nicheWatchlistId(dimension, nicheKey));
 
   const tab: TabKey = searchParams.get("tab") === "games" ? "games" : "overview";
-  const urlWindow: Window = searchParams.get("win") === "all" ? "all" : "24m";
-  const urlMinReviews = readNum(searchParams.get("min_reviews")) ?? 50;
+  // DEFAULT_NICHE_CUT is the single definition of "no override" — shared with the finder and
+  // with GameProfile's "In niches" rail, so a score quoted there is this page's score.
+  const urlWindow: Window = searchParams.get("win") === "all" ? "all" : DEFAULT_NICHE_CUT.win;
+  const urlMinReviews = readNum(searchParams.get("min_reviews")) ?? DEFAULT_NICHE_CUT.min_reviews;
 
   const detailQ = useNicheDetail(dimension ?? "tag", dimension ? nicheKey : null);
   const benchmarksQ = useMarketBenchmarks();
@@ -494,10 +497,9 @@ export default function NicheDetail() {
 
   if (detailQ.isError || !detail || !activeVariant) {
     // The API's own 404 detail already reads "niche not found: tag/Foo" — don't stutter it.
-    const reason =
-      detailQ.error instanceof Error
-        ? detailQ.error.message.replace(/^niche not found:\s*/i, "").trim()
-        : "";
+    // Shared with GameProfile, which had the same 404 shape and NOT the same regex (it
+    // rendered "Game not found: game not found: 999999999" until this moved into lib/api).
+    const reason = notFoundReason(detailQ.error);
     return (
       <Card>
         <div className="flex flex-col items-center gap-2 py-8 text-center text-sm">
@@ -685,11 +687,28 @@ export default function NicheDetail() {
           // against 119 the year before, a 243-game base. Reading it as "38 games, up 4%"
           // makes a solid number look like noise, and on a genuinely small niche it would
           // make noise look solid.
+          //
+          // The counts and the percentage now share a population, but that population is not
+          // the one the rest of the row uses: it is the WHOLE niche, and it is the same three
+          // numbers at every (window x review-floor) the controls above offer. The tile next
+          // door moves 624 -> 223 -> 177 -> 739 as you click those controls while this one
+          // never budges, so the tile has to disown them itself — a reader must not need to
+          // know mart_niche.sql to read the KPI row left to right. Cut-independence is the
+          // mart's deliberate design (one saturation figure per dimension+key); disclosing it
+          // is presentation's job.
+          footnoteWrap
           footnote={
-            activeVariant.n_recent_year != null && activeVariant.n_prior_year != null
-              ? `${fmtInt(activeVariant.n_recent_year)} released last full year vs ` +
-                `${fmtInt(activeVariant.n_prior_year)} the year before`
-              : "year-over-year release counts unavailable"
+            activeVariant.n_recent_year != null && activeVariant.n_prior_year != null ? (
+              <>
+                {fmtInt(activeVariant.n_recent_year)} released last full year vs{" "}
+                {fmtInt(activeVariant.n_prior_year)} the year before
+                <span className="mt-0.5 block text-ink-primary/45">
+                  Whole niche, every review count — this tile alone ignores the window and review-floor controls above.
+                </span>
+              </>
+            ) : (
+              "year-over-year release counts unavailable"
+            )
           }
         />
       </div>
@@ -1273,8 +1292,14 @@ export default function NicheDetail() {
               >
                 <SaturationTrend points={detail.saturation_trend} />
                 {activeVariant.saturation_yoy != null && (
+                  // Same disclosure as the KPI tile: this chart and this percentage are the
+                  // whole niche at every review floor, unlike everything else on the page.
                   <p className="mt-1.5 text-[11px] text-ink-muted">
-                    Releases {fmtSigned(activeVariant.saturation_yoy, 0)} year-over-year.
+                    Releases {fmtSigned(activeVariant.saturation_yoy, 0)} year-over-year
+                    {activeVariant.n_recent_year != null && activeVariant.n_prior_year != null
+                      ? ` (${fmtInt(activeVariant.n_recent_year)} last full year vs ${fmtInt(activeVariant.n_prior_year)} the year before)`
+                      : ""}
+                    . Whole niche, every review count — not the “{variantLabel(activeVariant)}” cut selected above.
                   </p>
                 )}
               </Card>

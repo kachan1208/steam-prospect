@@ -11,10 +11,21 @@ function dateOnly(s: string | null): string {
   return s ? s.slice(0, 10) : "—";
 }
 
-/** Card-header tone chip — the same press_pos_share/n_scored_articles the "Press footprint"
+/**
+ * Card-header tone chip — the same press_pos_share/n_scored_articles the "Press footprint"
  * card's tone bar uses, just condensed to one line. Returns null when nothing was scored (no
- * chip rendered) rather than a misleading "0% positive". */
-function toneSummary(press: GamePress): { dotColor: string | null; label: string; detail: string } | null {
+ * chip rendered) rather than a misleading "0% positive".
+ *
+ * press_pos_share is positive / (positive + negative) — NEUTRALS ARE EXCLUDED (see GamePress in
+ * lib/api.ts and mart_game_teardown.sql). The chip used to print that share beside
+ * n_scored_articles, a base that includes them: Hollow Knight read "83% positive · 101 scored"
+ * over 58 positive / 12 negative / 31 neutral, and 58/101 is 57%, not 83%. A reader who divides
+ * the two numbers we put next to each other must land on the number we printed, so the chip now
+ * carries the RATED base (positive + negative) and says outright that neutrals sit outside it.
+ */
+export function pressToneSummary(
+  press: GamePress,
+): { dotColor: string | null; label: string; detail: string } | null {
   if (press.n_scored_articles === 0) return null;
   const s = press.press_pos_share;
   if (s == null) {
@@ -22,7 +33,12 @@ function toneSummary(press: GamePress): { dotColor: string | null; label: string
   }
   const label = s >= 0.66 ? "Mostly positive" : s <= 0.34 ? "Mostly negative" : "Mixed tone";
   const dotColor = s >= 0.66 ? CSS_VAR.praise : s <= 0.34 ? CSS_VAR.complaint : CSS_VAR.textMuted;
-  return { dotColor, label, detail: `${fmtPct(s, 0)} positive · ${fmtInt(press.n_scored_articles)} scored` };
+  const rated = press.n_pos_articles + press.n_neg_articles;
+  const detail =
+    press.n_neutral_articles > 0
+      ? `${fmtPct(s, 0)} positive of ${fmtInt(rated)} rated · ${fmtInt(press.n_neutral_articles)} neutral excluded`
+      : `${fmtPct(s, 0)} positive of ${fmtInt(rated)} scored`;
+  return { dotColor, label, detail };
 }
 
 /** Article title: a real link (with a small external-link glyph) when the article has a URL,
@@ -130,7 +146,7 @@ export function NotableCoverageCard({ press }: { press: GamePress }) {
     return (a.published_at ?? "").localeCompare(b.published_at ?? "");
   });
 
-  const tone = toneSummary(press);
+  const tone = pressToneSummary(press);
 
   return (
     <Card
@@ -143,7 +159,7 @@ export function NotableCoverageCard({ press }: { press: GamePress }) {
             // inside stays a circle; dots aren't chips).
             className="inline-flex shrink-0 items-center gap-1.5 border border-chartborder bg-page px-2.5 py-1 text-[11px]"
             title={`${fmtInt(press.n_pos_articles)} positive · ${fmtInt(press.n_neg_articles)} negative${
-              press.n_neutral_articles ? ` · ${fmtInt(press.n_neutral_articles)} neutral` : ""
+              press.n_neutral_articles ? ` · ${fmtInt(press.n_neutral_articles)} neutral (excluded from the share)` : ""
             } of ${fmtInt(press.n_scored_articles)} scored — VADER on headlines/summaries`}
           >
             {tone.dotColor && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: tone.dotColor }} />}

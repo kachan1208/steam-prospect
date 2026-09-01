@@ -8,13 +8,18 @@ import { usePageTitle } from "../lib/usePageTitle";
 // Prospect is hosted.
 const MCP_URL = `${window.location.origin}/mcp/`;
 
+// The press figures were "500K+ articles across 17 gaming outlets" — both wrong, in opposite
+// directions. Re-verify with:
+//   curl -s {origin}/api/refresh/history?limit=1     -> counts.articles (1,128,930 @ mart 20260831)
+//   press_pitch_list over the MCP, unioning `outlets` -> 6 distinct sources
+// Stated as "1.1M+" so nightly growth can only make it more true, never less.
 const CAPABILITIES = [
   "Find under-served niches — demand vs. competition vs. quality gap",
   "Benchmark the market — median revenue, review counts, price bands",
   "Estimate revenue for a given price × review-count scenario",
   "Check launch timing & seasonality for a genre",
   "Look up or compare specific games",
-  "Build press pitch lists from 500K+ articles across 17 gaming outlets",
+  "Build press pitch lists from 1.1M+ articles across 6 tracked gaming outlets",
 ];
 
 function CopyField({ value, label }: { value: string; label?: string }) {
@@ -144,8 +149,10 @@ export default function Chat() {
       </Card>
 
       {/* KEEP IN SYNC with mcp/prospect_mcp.py — the count is the number of @mcp.tool()
-          decorators in that file (verify with: grep -c '@mcp.tool()' mcp/prospect_mcp.py).
-          It read 15 for a long stretch while the server had grown to 25. */}
+          decorators in that file (verify with: grep -c '@mcp.tool()' mcp/prospect_mcp.py, and
+          cross-check tools/list against the deployed server). It read 15 for a long stretch
+          while the server had grown to 25. The same number, plus the full tool list, is stated
+          on /docs as MCP_TOOL_COUNT (web/src/pages/Docs.tsx) — change both together. */}
       <p className="px-1 text-[11px] text-ink-muted">
         Prospect exposes 25 read-only analytics tools plus a data-dictionary resource — ask Claude to read
         the dictionary first for definitions of opportunity, demand, competition, and quality-gap.

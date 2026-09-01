@@ -1116,11 +1116,21 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         -- and rank is recomputed by votes DESC (source rank can't be trusted across a merge).
         CREATE TEMP TABLE stg_game_tags AS
         WITH unescaped AS (
+            -- trim() is the same fix as the unescape beside it, for a different character.
+            -- The unescape landed because '&amp;' and '&' were publishing as two niches with
+            -- one visible name; trailing SPACE does exactly that too, and was still doing it
+            -- on 2026-09-01: 'Dystopian ' and 'Dystopian' rendered as an identical pair in the
+            -- Niche Finder, and on the Radar as two blips with OPPOSITE verdicts (ENTER NOW vs
+            -- EMERGING). Splitting one tag's games across two keys also wrecks the trend — the
+            -- thinner twin showed demand_trend_24m_pct +2735%, a pure artifact of the split.
+            -- Normalise BEFORE the GROUP BY below so the twins merge into one niche and their
+            -- votes combine, exactly as the entity variants do.
             SELECT gt.appid,
-                replace(replace(replace(replace(replace(gt.tag,
-                    '&amp;', '&'), '&quot;', '"'), '&#39;', ''''), '&lt;', '<'), '&gt;', '>') AS tag,
+                trim(replace(replace(replace(replace(replace(gt.tag,
+                    '&amp;', '&'), '&quot;', '"'), '&#39;', ''''), '&lt;', '<'), '&gt;', '>')) AS tag,
                 gt.votes
             FROM src.game_tags gt
+            WHERE trim(COALESCE(gt.tag, '')) <> ''   -- a whitespace-only tag is not a niche
         ),
         merged AS (
             SELECT appid, tag, MAX(votes) AS votes
@@ -1139,9 +1149,18 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
           AND gt.tag NOT IN (SELECT tag FROM denylist_tag);
 
         CREATE TEMP TABLE stg_genre_membership AS
-        SELECT DISTINCT gg.appid, gg.genre
+        -- trim + case-fold BOTH sides of the denylist comparison (2026-09-01). It was an exact
+        -- NOT IN, so 'Early Access ' with a trailing space, or 'early access', slipped straight
+        -- past the list and republished the very niche the denylist exists to suppress — the
+        -- bug this table was created to fix. The list carrying BOTH 'Free To Play' and
+        -- 'Free to Play' by hand is the tell that case had already bitten once; enumerating
+        -- spellings does not scale, normalising does. The whitespace half is not theoretical:
+        -- the TAG side shipped 'Dystopian ' and 'Parody ' as twins of their trimmed selves.
+        -- trim() on the stored value too, so twins merge instead of publishing side by side.
+        SELECT DISTINCT gg.appid, trim(gg.genre) AS genre
         FROM src.game_genres gg
-        WHERE gg.genre NOT IN (SELECT genre FROM denylist_genre);
+        WHERE trim(COALESCE(gg.genre, '')) <> ''
+          AND lower(trim(gg.genre)) NOT IN (SELECT lower(trim(genre)) FROM denylist_genre);
 
         -- Niche-score v2 fallback for is_singleplayer (see stg_game below): games carrying
         -- the 'Singleplayer' community tag anywhere in the FULL game_tags table — no vote/
@@ -1159,14 +1178,19 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         -- genres are denylisted gets no row here -> NULL primary_genre downstream (every
         -- consumer LEFT JOINs this table or filters primary_genre IS NOT NULL).
         CREATE TEMP TABLE stg_primary_genre AS
+        -- Same trim + case-fold as stg_genre_membership above, and for the same reason: this
+        -- is a SECOND copy of the denylist filter, so fixing only the other one still let
+        -- 'early access' through as a game's PRIMARY genre. Two filters over one list is the
+        -- hazard; they must be normalised identically or they drift apart silently.
         WITH g AS (
-            SELECT gg.appid, gg.genre,
+            SELECT gg.appid, trim(gg.genre) AS genre,
                 row_number() OVER (PARTITION BY gg.appid ORDER BY
-                    CASE WHEN gg.genre IN ('Indie','Casual','Massively Multiplayer')
+                    CASE WHEN trim(gg.genre) IN ('Indie','Casual','Massively Multiplayer')
                          THEN 1 ELSE 0 END,
-                    gg.genre) AS rn
+                    trim(gg.genre)) AS rn
             FROM src.game_genres gg
-            WHERE gg.genre NOT IN (SELECT genre FROM denylist_genre)
+            WHERE trim(COALESCE(gg.genre, '')) <> ''
+              AND lower(trim(gg.genre)) NOT IN (SELECT lower(trim(genre)) FROM denylist_genre)
         )
         SELECT appid, genre AS primary_genre FROM g WHERE rn = 1;
 

@@ -17,11 +17,16 @@ export function KpiCell({
   label,
   value,
   footnote,
+  footnoteWrap,
   valueClassName,
 }: {
   label: string;
   value: ReactNode;
   footnote?: ReactNode;
+  /** Let the footnote wrap onto more lines instead of ellipsising at one. For footnotes that
+   * carry a CAVEAT rather than a restatement — a truncated caveat is worse than none, because
+   * the reader sees a confident half-sentence and never learns it was qualified. */
+  footnoteWrap?: boolean;
   valueClassName?: string;
 }) {
   return (
@@ -36,7 +41,11 @@ export function KpiCell({
       >
         {value}
       </div>
-      {footnote && <div className="mt-1.5 truncate text-[11px] text-ink-primary/55">{footnote}</div>}
+      {footnote && (
+        <div className={clsx("mt-1.5 text-[11px] text-ink-primary/55", footnoteWrap ? "text-balance" : "truncate")}>
+          {footnote}
+        </div>
+      )}
     </div>
   );
 }

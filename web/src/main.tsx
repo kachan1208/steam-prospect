@@ -5,18 +5,17 @@ import { BrowserRouter } from "react-router-dom";
 
 import "@fontsource-variable/inter";
 import { ThemeProvider } from "./lib/theme";
+import { DEFAULT_QUERY_OPTIONS } from "./lib/api";
 import App from "./App";
 import "./index.css";
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      refetchOnWindowFocus: false,
-      staleTime: 30_000,
-      retry: 1,
-    },
-  },
-});
+// Defined in lib/api.ts (and pinned by its tests) rather than spelled out here. Its `retry`
+// is NOT the bare `retry: 1` this used to carry — that retried 404s, and a 404 is an answer,
+// not a blip. /games/999999999 fires five endpoints; under `retry: 1` that was ten doomed
+// requests and 6-9 seconds of header-and-footer-only page before the "not found" message the
+// very first response had already justified. Hooks needing a different policy still declare
+// their own `retry` (see lib/api.ts's retryUnlessUnavailable).
+const queryClient = new QueryClient({ defaultOptions: { queries: DEFAULT_QUERY_OPTIONS } });
 
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("#root element not found");

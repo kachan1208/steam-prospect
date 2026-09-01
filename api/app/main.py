@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI):
     try:
         analytics_db.init(settings.analytics_db_path, settings.analytics_pool_size)
     except FileNotFoundError as exc:
-        # Keep the app up so /docs and a clear error are reachable; endpoints will 503.
+        # Keep the app up so /api/docs and a clear error are reachable; endpoints will 503.
         print(f"[api] WARNING: {exc}")
     # The mounted MCP's Streamable-HTTP transport needs its session manager running for the
     # whole app lifetime; drive it here when the MCP is enabled.
@@ -44,7 +44,22 @@ async def lifespan(app: FastAPI):
     close_prospect_mcp()  # the mounted MCP module's own DuckDB conn (no-op when disabled)
 
 
-app = FastAPI(title=settings.api_title, version=settings.api_version, lifespan=lifespan)
+# The interactive API explorer lives under /api, NOT at FastAPI's defaults (/docs, /redoc,
+# /openapi.json). The SPA owns /docs and /docs/:slug in its client-side router (the
+# human-facing methodology guide), and the two claims to the same URL cannot both win:
+# clicking "Docs" in-app rendered the React guide while RELOADING or sharing that exact URL
+# served Swagger UI, and /docs/glossary — a live client route — 404'd from the server. The
+# explorer is an API concern, so it moves under the /api prefix and the bookmarkable page
+# keeps the name. The SPA catch-all's reserved-segment guard below no longer lists
+# docs/redoc/openapi.json, which is the other half of this fix.
+app = FastAPI(
+    title=settings.api_title,
+    version=settings.api_version,
+    lifespan=lifespan,
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
+)
 
 # Body-size cap for the two public WRITE surfaces (the analytics collect endpoint and the
 # /mcp mount). Everything else is read-only over precomputed marts and already bounded, so
@@ -147,7 +162,7 @@ def root():
     return {
         "name": settings.api_title,
         "version": settings.api_version,
-        "docs": "/docs",
+        "docs": "/api/docs",
         "health": "/api/health",
     }
 
@@ -158,20 +173,25 @@ if _SERVE_SPA:
     if _assets_dir.is_dir():
         app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="assets")
 
-    # SPA fallback — registered LAST so it never shadows /api/*, /docs, /openapi.json,
+    # SPA fallback — registered LAST so it never shadows /api/*, /api/docs, /api/openapi.json,
     # /metrics (each matched by its own route above). Any other path returns a real static
     # file if one exists (favicon, etc.), otherwise index.html so client-side routes
     # (/niches, /devlog, …) survive a hard refresh.
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_fallback(full_path: str):
         # Compare the first path SEGMENT, not a bare string prefix. startswith(("api", ...))
-        # also swallows /apiary, /metricsboard, /docsearch, /mcpx and /redocs-guide — so any
-        # future client-side route whose name merely BEGINS with one of these words would 404
-        # on a hard refresh while working fine on in-app navigation, which is a maddening
-        # class of bug to track down. These names are reserved as whole segments, not prefixes.
-        if full_path.split("/", 1)[0] in {
-            "api", "docs", "redoc", "openapi.json", "metrics", "mcp",
-        }:
+        # also swallows /apiary, /metricsboard and /mcpx — so any future client-side route
+        # whose name merely BEGINS with one of these words would 404 on a hard refresh while
+        # working fine on in-app navigation, which is a maddening class of bug to track down.
+        # These names are reserved as whole segments, not prefixes.
+        #
+        # "docs"/"redoc"/"openapi.json" are DELIBERATELY absent. They used to be reserved
+        # here because FastAPI served its explorer at those exact paths, which meant the
+        # SPA's own /docs and /docs/:slug routes 404'd on a hard refresh or a shared link
+        # while working fine in-app. The explorer now lives under /api (see the FastAPI()
+        # constructor above), so these fall through to index.html like every other client
+        # route. Re-adding either name here resurrects that bug.
+        if full_path.split("/", 1)[0] in {"api", "metrics", "mcp"}:
             raise HTTPException(status_code=404)
         # Path traversal: uvicorn percent-decodes the path BEFORE routing, so a request
         # like GET /%2e%2e/secret.txt arrives here as "../secret.txt" and the naive

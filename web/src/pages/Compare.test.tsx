@@ -80,6 +80,28 @@ const PROFILES: Record<number, GameProfile> = {
     live_players: 5910,
     players_trend_7d_pct: 2.1,
   }),
+  // GET /api/games/367520 and /api/games/1030300, verbatim — the pair that exposed the mixed
+  // estimators. Silksong carries a HIGHER price, a LOWER reviews-based revenue and a HIGHER
+  // owners_mid than Hollow Knight, so pairing revenue-from-reviews with units-from-owners made
+  // the grid say "more units, less revenue, higher price" — three claims that cannot all hold.
+  367520: profile({
+    appid: 367520,
+    name: "Hollow Knight",
+    price_initial: 14.99,
+    total_reviews: 559_257,
+    est_rev_reviews: 251_497_872.9,
+    est_rev_owners: 112_425_000,
+    owners_mid: 7_500_000,
+  }),
+  1030300: profile({
+    appid: 1030300,
+    name: "Hollow Knight: Silksong",
+    price_initial: 19.99,
+    total_reviews: 418_766,
+    est_rev_reviews: 251_133_970.2,
+    est_rev_owners: 218_852_556.77,
+    owners_mid: 10_948_101.89,
+  }),
 };
 
 let lastLocation = { pathname: "", search: "" };
@@ -203,6 +225,29 @@ describe("Compare metric grid", () => {
     renderCompare("/compare?ids=1,2,3,4,5,6");
     await screen.findByText("6 of 6 slots · share this view by URL");
     expect(screen.queryByText("+ Add game")).toBeNull();
+  });
+
+  it("takes units from the same estimator as revenue, so price × units reproduces the row above", async () => {
+    renderCompare("/compare?ids=367520,1030300");
+    await screen.findByLabelText("Remove Hollow Knight from comparison");
+
+    // Reviews-based on both rows: 559,257 × 30 × $14.99 = $251.5M over 16.8M units at $14.99;
+    // 418,766 × 30 × $19.99 = $251.1M over 12.6M units at $19.99.
+    expect(screen.getByText("$251.5M")).toBeTruthy();
+    expect(screen.getByText("$251.1M")).toBeTruthy();
+    expect(screen.getByText("16.8M")).toBeTruthy();
+    expect(screen.getByText("12.6M")).toBeTruthy();
+
+    // The owners-based counts must no longer appear in the units row — pairing them with the
+    // reviews-based revenue is what produced "more units AND less revenue at a higher price".
+    expect(screen.queryByText("7.5M")).toBeNull();
+    expect(screen.queryByText("10.9M")).toBeNull();
+
+    // Best-in-row now agrees with itself: the higher-revenue game is also the higher-units game.
+    const bestRevenue = screen.getByText("$251.5M");
+    const bestUnits = screen.getByText("16.8M");
+    expect(bestRevenue.className).toContain("font-semibold");
+    expect(bestUnits.className).toContain("font-semibold");
   });
 
   it("removes a game from both the URL and the stored compare list", async () => {

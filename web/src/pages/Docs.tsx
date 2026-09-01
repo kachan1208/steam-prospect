@@ -10,6 +10,33 @@ import { usePageTitle } from "../lib/usePageTitle";
 const APP_URL = window.location.origin;
 const MCP_URL = `${window.location.origin}/mcp/`;
 
+// ---- figures that have to be kept in sync by hand --------------------------------------
+// Everything below is a number this page STATES rather than fetches. Each one carries where
+// it comes from, so the next person can re-derive it instead of trusting the prose. This page
+// drifted badly once already (it claimed 15 tools while the server had 25, and a ~142K catalog
+// while the mart held ~175K) — that is what these comments exist to prevent.
+
+// KEEP IN SYNC with mcp/prospect_mcp.py — the number of @mcp.tool() decorators in that file.
+// Verify with: grep -c '@mcp.tool()' mcp/prospect_mcp.py
+// Cross-check against the deployed server: tools/list over POST {origin}/mcp/.
+// The same constant is stated on /chat (web/src/pages/Chat.tsx) — change both together.
+const MCP_TOOL_COUNT = 25;
+
+// Corpus size and freshness. Source: GET /api/refresh/history (the Data log's own feed) for
+// the mart build these were read from. Deliberately stated as "as of <mart>" rather than as a
+// bare number, so a stale figure is visibly stale instead of quietly wrong. Re-read with:
+//   curl -s {origin}/api/refresh/history?limit=1
+//   curl -s {origin}/api/games/search?limit=1   (the `total` = games searchable in mart_game)
+const CORPUS_AS_OF = "mart 20260831";
+const CORPUS_GAMES = "~175K";        // 174,705 scraped apps / 174,265 searchable in mart_game
+const CORPUS_REVIEWS = "~52M";       // 51,965,530 sampled reviews
+const CORPUS_ARTICLES = "~1.1M";     // 1,128,930 press articles
+const CORPUS_OUTLETS = 6;            // distinct `source` values in the press corpus
+
+// The build the worked example in #opportunity-score was read from. Stamped next to the
+// numbers so a stale example announces itself instead of reading as current.
+const EXAMPLE_AS_OF = "mart 20260831 (1 Sep 2026)";
+
 // ---- small building blocks --------------------------------------------------------------
 
 /** A top-level section anchor + heading. `scroll-mt` keeps the heading clear of the sticky
@@ -237,11 +264,13 @@ const TOC: { group: string; items: [string, string][] }[] = [
   {
     group: "The core",
     items: [
+      ["radar", "Radar"],
       ["niches", "Niche Finder"],
       ["opportunity-score", "Reading the Opportunity score"],
       ["games", "Games & teardown"],
       ["studios", "Studios"],
       ["timing", "Launch & Timing"],
+      ["watchlist", "Watchlist"],
     ],
   },
   {
@@ -324,11 +353,23 @@ export default function Docs() {
               analyze, nothing to configure.
             </p>
             <p className="text-ink-secondary">
-              Prospect is five screens plus a connector. The screens are the things worth looking at — charts you
+              Prospect is six screens plus a connector. The screens are the things worth looking at — charts you
               read rather than numbers you quote. Everything else is answered by asking, through the MCP:
             </p>
             <Terms
               items={[
+                [
+                  "Radar",
+                  <>
+                    The landing screen (<Code>/</Code> redirects here). Every niche plotted on the board's verdict
+                    quadrants for the last 24 months — the fastest read on where the openings are, and the way into
+                    the Niche Finder.
+                  </>,
+                ],
+                [
+                  "Niche Finder",
+                  <>What should I build — which niches reward a new entrant, and which only look open?</>,
+                ],
                 [
                   "Games & teardown",
                   <>Where does a specific title stand, and — from its own reviews — why does it win versus genre peers?</>,
@@ -342,18 +383,28 @@ export default function Docs() {
                   <>When should I launch, and is my genre a launch-splash or a slow-burn?</>,
                 ],
                 [
+                  "Watchlist",
+                  <>
+                    Niches and games you saved, with alert rules that are evaluated live against current data (not by
+                    a nightly job). Prospect keeps no change history — you see the current value, not a diff.
+                  </>,
+                ],
+                [
                   "MCP",
                   <>
                     Connect Prospect to your own Claude and ask in plain language. This is where the rest of the
                     analysis lives: <Code>find_niches</Code> (what should I build), <Code>market_benchmarks</Code>{" "}
                     (is this number good), <Code>estimate_revenue</Code> (owners/revenue range for N reviews at
-                    price P), <Code>press_pitch_list</Code> and <Code>creator_pitch_list</Code> (who to pitch) —
-                    15 tools over the same marts these screens read.
+                    price P), <Code>press_pitch_list</Code> and <Code>publisher_pitch_list</Code> (who to pitch) —
+                    {" "}{MCP_TOOL_COUNT} tools over the same marts these screens read.
                   </>,
                 ],
                 [
                   "Data log",
-                  <>What changed in the data, and when it last refreshed.</>,
+                  <>
+                    What changed in the data, and when it last refreshed. Reached from the{" "}
+                    <span className="text-ink-primary">footer</span>, not the header nav.
+                  </>,
                 ],
               ]}
             />
@@ -390,9 +441,11 @@ export default function Docs() {
               </>,
               <>
                 <span className="font-semibold text-ink-primary">Study a hit.</span> Search a comparable game in{" "}
-                <Link to="/games" className="font-medium text-brand hover:underline">Games</Link>, open it, and read the{" "}
-                <span className="text-ink-primary">Why it works</span> tab — what its own players praise, measured
-                against genre peers.
+                <Link to="/games" className="font-medium text-brand hover:underline">Games</Link>, open it, and read{" "}
+                <span className="text-ink-primary">What reviews praise / pan</span> — what its own players praise,
+                measured against genre peers. Flip the page's{" "}
+                <span className="text-ink-primary">Simple / Detailed</span> control to Detailed for the charts and the
+                press footprint.
               </>,
               <>
                 <span className="font-semibold text-ink-primary">Time it.</span> Check{" "}
@@ -418,29 +471,59 @@ export default function Docs() {
       </Section>
 
       {/* ============================ THE CORE ============================ */}
+      <Section id="radar" kicker="The core" title="Radar">
+        <Feature
+          id="radar-card"
+          name="Niche radar"
+          where="Header nav “Radar” — also the landing screen"
+          to="/radar"
+          question="Where are the openings right now, at a glance?"
+        >
+          <p>
+            The board every session starts on: <Code>/</Code> redirects here. Every scored niche is plotted on the
+            last-24-months cut into <span className="text-ink-primary">verdict quadrants</span>, so the shape of the
+            market reads before any number does. Filter by class, restrict to{" "}
+            <span className="text-ink-primary">solo-friendly</span> niches, or cap the board to the top N. Click a
+            quadrant to zoom it; <span className="text-ink-primary">Open Niche Finder →</span> takes the same cut into
+            the sortable table.
+          </p>
+          <ReadBox>
+            The radar reads the same evidence, on the same thresholds, as the Opportunity score below — that is
+            deliberate, and it is why the board and the score can't disagree about direction. The radar is the
+            picture; the finder is the ranking; the niche deep-dive is the argument against both.
+          </ReadBox>
+        </Feature>
+      </Section>
+
       <Section id="niches" kicker="The core" title="Niche Finder">
         <Feature
           id="niches-card"
           name="Niche Finder"
-          where="Header nav “Niches”"
+          where="From Radar → “Open Niche Finder →” (not in the header nav)"
           to="/niches"
           question="What should I build — which niches reward a new entrant, and which only look open?"
         >
           <p>
-            Ranks every Steam community tag and genre by a growth-gated{" "}
+            Ranks every Steam community tag and genre by the{" "}
             <span className="text-ink-primary">Opportunity score</span> (explained in full below), alongside the
             evidence you should check before believing it: how many games compete there, what the successful ones earn
             (P90 revenue), how big the total audience is (owners), <span className="text-ink-primary">who is actually
             playing right now</span> (live concurrent players, updated nightly, with a 7-day trend), and whether the
-            release pipeline is growing or shrinking. Click any niche for the deep dive: decline flags first, then
-            score breakdown, live-player history, revenue distribution, what players praise and complain about, press
-            coverage, and the niche's top games.
+            release pipeline is growing or shrinking. Click any niche for the deep dive, in the order the page actually
+            presents it: the stat tiles, demand-vs-pipeline by year, the score breakdown (headed{" "}
+            <span className="text-ink-primary">“Why”</span> plus that niche's score), the niche's top games, and then
+            the <span className="text-ink-primary">“Read this first”</span> flags that argue against the score.
+            Switching that page to <span className="text-ink-primary">Detailed</span> adds live-player history, revenue
+            spread, hit rates, the saturation trend, what players praise and complain about, press coverage, the
+            revenue and price distributions, and the full games table.
           </p>
           <ReadBox>
             Defaults are opinionated on purpose: the <span className="text-ink-primary">last-24-months</span> window
-            (the market a new entrant actually faces, not all of Steam history) and only{" "}
-            <span className="text-ink-primary">buildable tiers</span> (micro-genres and themes — “Open World” is a
-            container, not a plan). Every column header has a ⓘ hover explaining how to read it.
+            (the market a new entrant actually faces, not all of Steam history), a{" "}
+            <span className="text-ink-primary">≥50-review floor</span> (enough of a track record to estimate from), and
+            only <span className="text-ink-primary">buildable tiers</span> (micro-genres and themes — “Open World” is a
+            container, not a plan). Window and floor are the two controls at the top; between them they select the six
+            cuts the mart materialises. Every column header has a ⓘ hover explaining how to read it.
           </ReadBox>
         </Feature>
       </Section>
@@ -456,35 +539,50 @@ export default function Docs() {
             </p>
             <FormulaFlow />
             <div>
-              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-muted">
-                Why a well-off niche can still score badly — a real example (Aug 2026)
+              <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-muted">
+                Why a well-off niche can still score badly — a worked example
               </div>
+              {/* SNAPSHOT, NOT A LIVE READ. Every number in this block was read from the
+                  production API at the stated cut and mart version:
+                    GET /api/niches/tag/Colony%20Sim?window=24m&min_reviews=50
+                    GET /api/niches/tag/Action%20RTS?window=24m&min_reviews=50
+                  Nightly rebuilds move these. The as-of line below is not decoration — it is
+                  what makes a stale example visibly stale rather than quietly wrong, which is
+                  exactly how the previous figures (86.7 / 57.2 / 86.5, "$150K vs $124K") survived
+                  well past the rebuild that changed them. If you refresh the numbers, refresh the
+                  stamp in the same commit. */}
+              <p className="mb-2 text-[11px] text-ink-muted">
+                A snapshot of two real niches, read from the{" "}
+                <span className="text-ink-primary">last 24 months · ≥50 reviews</span> cut as of{" "}
+                <span className="text-ink-primary">{EXAMPLE_AS_OF}</span> — open either niche today and the numbers
+                will have moved; the shape of the argument is the durable part.
+              </p>
               <div className="flex flex-col gap-3 sm:flex-row">
                 <ScoreWaterfall
                   name="Colony Sim"
-                  momentum={38.8}
-                  market={74.4}
+                  momentum={38.92}
+                  market={73.7}
                   spread={100}
-                  quality={89.2}
+                  quality={89.25}
                   brake={0.35}
-                  final={23.8}
+                  final={23.75}
                   note="Demand −7% / 24m while releases grew +37% YoY — the pipeline is filling faster than the audience."
                 />
                 <ScoreWaterfall
                   name="Action RTS"
-                  momentum={96.4}
-                  market={57.2}
+                  momentum={96.36}
+                  market={58.6}
                   spread={100}
-                  quality={86.5}
+                  quality={87.16}
                   brake={1.0}
-                  final={86.7}
+                  final={87.12}
                   note="Demand +74% / 24m while releases fell −7% YoY — growing audience, thinning competition."
                 />
               </div>
               <p className="mt-2 text-xs text-ink-muted">
-                Colony Sim wins on <span className="text-ink-primary">every static measure</span> — its typical game
-                earns more ($150K vs $124K), its field is more beatable, its revenue is just as spread out. It still
-                scores a third as much, because{" "}
+                Colony Sim wins on <span className="text-ink-primary">nearly every static measure</span> — its typical
+                game earns more ($145K vs $124K), its revenue is just as spread out, its field is a shade more
+                beatable. It still scores a quarter as much, because{" "}
                 <span className="font-semibold text-ink-primary">a market being flooded faster than it grows is a
                 worse place to start a 2-year build than a smaller one that's pulling away.</span>{" "}
                 Momentum and the supply brake carry that; the money terms deliberately can't outvote them.
@@ -526,7 +624,7 @@ export default function Docs() {
         </Feature>
       </Section>
 
-      <Section id="games" kicker="The core" title="Games & the “Why it works” teardown">
+      <Section id="games" kicker="The core" title="Games & the review teardown">
         <Feature
           id="games-card"
           name="Games (search)"
@@ -543,22 +641,29 @@ export default function Docs() {
 
         <Feature
           id="game-profile"
-          name="Game profile & “Why it works”"
+          name="Game profile & the review teardown"
           where="Click any game in search"
           question="How big is this game, and what makes it stand out?"
         >
           <p>
-            Every game opens to two tabs. <span className="text-ink-primary">Overview</span> gives its estimated revenue
-            range, owners, reviews, rating and live players; a <span className="text-ink-primary">percentile-vs-genre</span>{" "}
-            read (where it ranks among genre peers on revenue, reviews and owners); its genre's launch shape; review and
-            momentum timelines; a language split; playtime; and a <span className="text-ink-primary">comparables</span>{" "}
-            table ranked by tag overlap.
+            A game profile is one page with a <span className="text-ink-primary">Simple / Detailed</span> control
+            part-way down — not tabs. <span className="text-ink-primary">Simple</span> keeps the decision-critical
+            reads: the estimated revenue range, owners, reviews, rating and live players; review velocity since launch;
+            price history; the niches the game belongs to; and{" "}
+            <span className="text-ink-primary">What reviews praise / pan</span>, the teardown.{" "}
+            <span className="text-ink-primary">Detailed</span> adds the{" "}
+            <span className="text-ink-primary">percentile-vs-genre</span> read (where it ranks among genre peers on
+            revenue, reviews and owners), review and momentum timelines, its genre's launch shape and channel mix, a
+            language split, playtime, a <span className="text-ink-primary">comparables</span> table ranked by tag
+            overlap, and the press footprint.
           </p>
           <p>
-            <span className="text-ink-primary">Why it works</span> is the teardown: it mines the game's own reviews into
-            ten fixed aspects (Combat, World & Exploration, Art, Music, Story, Difficulty, Controls, Navigation, Content
-            & Length, Price & Value) and shows, per aspect, whether players praise it <em>more than the genre
-            baseline</em>. It also maps the game's press footprint and notable coverage.
+            The teardown mines the game's own reviews into ten fixed aspects (Combat, World & Exploration, Art, Music,
+            Story, Difficulty, Controls, Navigation, Content & Length, Price & Value) and shows, per aspect, whether
+            players praise it <em>more than the genre baseline</em>. Sentiment is read from the review text around each
+            aspect keyword by a classifier trained on game reviews, so a thumbs-up review that pans one aspect counts
+            as negative for that aspect — the overall thumbs-up/down split is shown underneath for comparison. Every
+            row opens to the actual review excerpts behind it.
           </p>
           <ReadBox>
             The teardown's signal is the <span className="text-ink-primary">difference vs. genre peers</span>, not raw
@@ -588,6 +693,29 @@ export default function Docs() {
             Studio names are self-reported Steam credit strings, so the same company can appear under several
             spellings, and every revenue figure is a review-based estimate — read the numbers as directional, not as a
             registry.
+          </ReadBox>
+        </Feature>
+      </Section>
+
+      <Section id="watchlist" kicker="The core" title="Watchlist">
+        <Feature
+          id="watchlist-card"
+          name="Watchlist"
+          where="Header nav “Watchlist”"
+          to="/watchlist"
+          question="Which niches and games am I tracking, and has anything crossed a line I care about?"
+        >
+          <p>
+            Save any niche or game and give it an <span className="text-ink-primary">alert rule</span> — a metric, a
+            direction and a threshold. Rules are evaluated <span className="text-ink-primary">live against the current
+            data</span> whenever you open the page, not by a nightly job that emails you, so an alert is a statement
+            about the mart you are looking at right now.
+          </p>
+          <ReadBox>
+            Prospect keeps <span className="text-ink-primary">no per-item change history</span> — the page shows the
+            current value of the metric you're watching, not a diff against last week. If you need the trajectory,
+            open the niche or game itself. The list is stored in your browser, so it doesn't follow you to another
+            device.
           </ReadBox>
         </Feature>
       </Section>
@@ -658,13 +786,25 @@ export default function Docs() {
               </ul>
             </div>
 
+            {/* The tool names below are the @mcp.tool() function names in mcp/prospect_mcp.py,
+                verbatim and in full — a list is far more likely to stay honest than a prose
+                summary, because a missing name is obvious next to a count. This list previously
+                claimed 15 and included `creator_pitch_list`, a tool the server has never
+                defined. See MCP_TOOL_COUNT at the top of this file for how to re-verify. */}
             <ReadBox label="Good to know">
-              Prospect exposes <span className="text-ink-primary">15 read-only analytics tools</span> (find niches,
-              niche detail, market benchmarks, revenue distribution, estimate revenue, launch shape, best launch timing,
-              game search, game profile, game teardown, press pitch list, buzz trends, creator pitch list, channel mix,
-              channel buzz) plus a <span className="text-ink-primary">data-dictionary resource</span>. Ask Claude to read
-              the data dictionary first, so it uses the same definitions of opportunity / demand / competition /
-              quality-gap that this guide does.
+              Prospect exposes{" "}
+              <span className="text-ink-primary">{MCP_TOOL_COUNT} read-only analytics tools</span> plus a{" "}
+              <span className="text-ink-primary">data-dictionary resource</span>:{" "}
+              <Code>find_niches</Code>, <Code>niche_detail</Code>, <Code>niche_player_history</Code>,{" "}
+              <Code>niche_review_themes</Code>, <Code>tag_combos</Code>, <Code>tag_suggest</Code>,{" "}
+              <Code>market_benchmarks</Code>, <Code>revenue_distribution</Code>, <Code>estimate_revenue</Code>,{" "}
+              <Code>launch_shape</Code>, <Code>best_launch_timing</Code>, <Code>lifetime_curve</Code>,{" "}
+              <Code>game_search</Code>, <Code>game_profile</Code>, <Code>game_teardown</Code>,{" "}
+              <Code>game_reviews_summary</Code>, <Code>game_player_history</Code>, <Code>aspect_reviews</Code>,{" "}
+              <Code>find_comparables</Code>, <Code>entity_profile</Code>, <Code>publisher_pitch_list</Code>,{" "}
+              <Code>press_pitch_list</Code>, <Code>buzz_trends</Code>, <Code>channel_mix</Code> and{" "}
+              <Code>channel_buzz</Code>. Ask Claude to read the data dictionary first, so it uses the same definitions
+              of opportunity / demand / competition / quality-gap that this guide does.
             </ReadBox>
           </div>
         </Card>
@@ -675,7 +815,7 @@ export default function Docs() {
         <Feature
           id="datalog-card"
           name="Data log"
-          where="Header nav “Data”"
+          where="Footer link “Data log”"
           to="/datalog"
           question="How fresh is the data I'm looking at?"
         >
@@ -695,38 +835,65 @@ export default function Docs() {
               items={[
                 ["Steam storefront", "The public catalog (names, prices, tags, genres, release dates, header art, short descriptions) and player reviews. Review counts are reconciled against Steam's own numbers for ground truth where possible."],
                 ["SteamSpy", "Owner-range estimates. These got noisier after Steam changed its default profile privacy in 2018 — which is exactly why Prospect treats owners as a range and leans on review-based estimates."],
-                ["Games press", "Article metadata (headline, byline, date, outlet) from a set of tracked outlets — PC Gamer, IGN, Eurogamer, GamesIndustry.biz, Game Developer, and others — matched to games by title. Prospect links to the original article and never reproduces its body text."],
+                ["Games press", `Article metadata (headline, byline, date, outlet) from ${CORPUS_OUTLETS} tracked outlets — Eurogamer, GamesIndustry.biz, PC Gamer, IGN, Game Developer and DOU Gamedev — matched to games by title. Prospect links to the original article and never reproduces its body text.`],
               ]}
             />
+            {/* Numbers come from the constants at the top of this file; see the provenance
+                comment there for how to re-read them. Stated with an explicit as-of because
+                the previous version of this line claimed ~142K apps against a ~175K mart. */}
             <p className="text-xs text-ink-muted">
-              Roughly: the full Steam catalog (~142K apps), a few million sampled reviews, and ~1.1M press articles —
-              rebuilt nightly. The exact size and build date for your session are in the footer health dot and the{" "}
-              <a href="#datalog" className="text-brand hover:underline">Data log</a>.
+              Roughly, as of <span className="text-ink-primary">{CORPUS_AS_OF}</span>: the full Steam catalog
+              ({CORPUS_GAMES} apps), {CORPUS_REVIEWS} sampled reviews, and {CORPUS_ARTICLES} press articles — rebuilt
+              nightly, and growing. Don't quote these; the exact size and build date for your session are in the footer
+              health dot and the <a href="#datalog" className="text-brand hover:underline">Data log</a>, which is the
+              authoritative answer.
             </p>
           </div>
         </Card>
 
+        {/* The score the app actually ranks by. This card documented the RETIRED v1 blend
+            (0.5·Demand − 0.35·Competition + 0.3·Quality gap over three percentile scores) for
+            some time after the rebuild, while #opportunity-score above described the current
+            model — two mutually exclusive formulas on one page. Weights below are mirrored from
+            etl/build_marts.py (W2_MOMENTUM/W2_MARKET/W2_SPREAD/W2_QUALITY, SUPPLY_BRAKE_FLOOR,
+            MIN_NICHE_GAMES); the assembly is etl/marts/mart_niche.sql's `scored_v2` CTE. If you
+            change a weight there, change it here AND in SCORE_PARTS at the top of this file. */}
         <Card title="The Opportunity score">
           <div className="flex flex-col gap-3 text-sm leading-relaxed text-ink-secondary">
             <p>
-              Every niche gets three 0–100 <span className="text-ink-primary">percentile</span> scores, ranked against
-              all other niches in the same cut, then blended:
+              The headline score is <Code>opportunity_v2</Code>. Every niche gets four{" "}
+              <span className="text-ink-primary">0–100 sub-scores</span> — absolute readings against fixed
+              thresholds, not percentile ranks against other niches — which are blended with fixed weights and then
+              multiplied by a supply brake. This is the same model the{" "}
+              <a href="#opportunity-score" className="text-brand hover:underline">score guide above</a> draws:
             </p>
             <Terms
               items={[
-                ["Demand", "0.4 × (median revenue) + 0.3 × (median owners) + 0.3 × (recent 24-month review velocity). Higher = a bigger, hotter market."],
-                ["Competition", "0.6 × (count of recent releases) + 0.4 × (winner concentration — how much of the niche's revenue the top few games hold). Higher = more crowded / winner-take-most, which is bad for a new entrant."],
-                ["Quality gap", "The share of incumbents that are weak — rating under 80% OR fewer than 50 reviews. Higher = easier to out-execute the field."],
-                ["Opportunity", "clamp( 0.5 × Demand − 0.35 × Competition + 0.3 × Quality gap, 0, 100 )."],
+                ["Momentum (0.40)", "Demand FLOW: the niche's annualised review-inflow growth, squashed to 0–100 so 50 = flat and 88 = the Radar's “enter” bar. The largest weight, on purpose — a market's direction outranks its current size."],
+                ["Market pull (0.22)", "What the typical game there earns, scaled by how big the pie is. The money term."],
+                ["Revenue spread (0.20)", "How evenly revenue is shared. 50 = winner-take-most; higher = money reaches more than the top few."],
+                ["Quality gap (0.18)", "How beatable the field is — the share of incumbents weak enough to out-execute."],
+                ["Supply brake (×0.35–1.0)", "The only downside term. It bites when releases outgrow demand, or when recent entrants earn under the catalog norm — either alone can sink a score. An unknown supply read is never a penalty: it scores 1.0."],
+                ["Opportunity v2", "clamp( (0.40 × Momentum + 0.22 × Market pull + 0.20 × Revenue spread + 0.18 × Quality gap) × Supply brake, 0, 100 ). A sub-score that can't be computed drops out of both the numerator and the weight total, so a missing part never reads as a zero."],
               ]}
             />
             <p>
-              Scores are computed at four cuts — window (all-time / last 24 months) × review floor (50 / 100) — and a
-              niche needs at least 30 qualifying games to be scored at all. Because the parts are percentiles,{" "}
-              <span className="text-ink-primary">Opportunity is a relative ranking</span>, not an absolute grade: an 80
-              means "better than most niches on this blend," not "80% likely to succeed." That's why the app always
-              shows the three parts, never just the blend.
+              Scores are computed at <span className="text-ink-primary">six cuts</span> — window (all-time / last 24
+              months) × review floor (no floor / ≥50 / ≥100) — and a niche needs at least 30 qualifying games in a cut
+              to be scored at all. A score is an{" "}
+              <span className="text-ink-primary">absolute reading, but a screening one</span>: an 85 means "this niche
+              clears the bars the Radar draws," not "85% likely to succeed." That's why the app always shows the
+              parts, never just the blend.
             </p>
+            <ReadBox label="Columns that are evidence, not score inputs">
+              The finder still serves the older <Code>demand</Code>, <Code>competition</Code>,{" "}
+              <Code>quality_gap</Code> and <Code>opportunity</Code> columns, plus{" "}
+              <Code>decline_gate</Code>. These are kept because they are useful to inspect and to argue with —{" "}
+              <span className="text-ink-primary">none of them multiplies or feeds the ranked score</span>.{" "}
+              <Code>decline_gate</Code> in particular stopped being a score factor and is now purely a falsification
+              tell: a low value is a reason to go and check the saturation trend, not a penalty that has already been
+              applied for you.
+            </ReadBox>
           </div>
         </Card>
 
