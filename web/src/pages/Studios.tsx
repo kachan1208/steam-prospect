@@ -133,14 +133,26 @@ export default function Studios() {
                   <th className="whitespace-nowrap px-3 py-2 font-medium" title="Released something in the last 24 months">
                     Active
                   </th>
-                  <th className="whitespace-nowrap px-3 py-2 font-medium" title="Summed estimated lifetime gross across all releases (Boxleiter-style estimate, not reported figures)">Total est. revenue</th>
+                  {/* Same base as the hit rate below — SUM and quantile both ignore NULL
+                      estimates, so neither covers "all releases" when the Games column is
+                      larger. */}
+                  <th className="whitespace-nowrap px-3 py-2 font-medium" title="Summed estimated lifetime gross over the releases we could estimate (Boxleiter-style estimate, not reported figures) — releases with no estimate contribute nothing">Total est. revenue</th>
                   <th
                     className="whitespace-nowrap px-3 py-2 font-medium"
-                    title="90th-percentile est. lifetime revenue per release — what the entity's successful titles earn"
+                    title="90th-percentile est. lifetime revenue over the releases with an estimate — what the entity's successful titles earn"
                   >
                     P90 est. revenue
                   </th>
-                  <th className="whitespace-nowrap px-3 py-2 font-medium" title="Share of releases clearing $200K est. revenue">
+                  {/* NOT "share of releases": the Games column counts every release, this
+                      percentage's denominator is only the ones carrying a revenue estimate
+                      (mart_entity.hit_rate_200k excludes NULL-estimate games). 41.9% of prod
+                      entities differ on the two, up to 4x — Hooded Horse lists 50 and scores
+                      91% off 33. The profile page prints the exact base per entity; the list
+                      can at least stop claiming the wrong one. */}
+                  <th
+                    className="whitespace-nowrap px-3 py-2 font-medium"
+                    title="Share of the entity's releases WITH a revenue estimate that clear $200K est. revenue — not of the Games count beside it, which includes releases we could not estimate. Open the profile for the exact base."
+                  >
                     Hit rate ≥ $200K
                   </th>
                   <th className="whitespace-nowrap px-3 py-2 font-medium" title="The genres this entity ships most">Top genres</th>

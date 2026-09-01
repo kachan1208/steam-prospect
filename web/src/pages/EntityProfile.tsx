@@ -15,6 +15,14 @@ import {
 } from "../lib/api";
 import clsx from "clsx";
 
+import {
+  ENTITY_MIN_ESTIMATED_FOR_VERDICT,
+  gamesSub,
+  hitRateSub,
+  medianRevSub,
+  revenueEstimateBase,
+  totalRevSub,
+} from "../lib/entities";
 import { fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
 import { genreTintStyle, heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { CSS_VAR, MONO} from "../lib/palette";
@@ -55,6 +63,12 @@ export default function EntityProfile() {
   // Portfolio table rows: latest release first (seq DESC) — the API sends seq ASC.
   const tableGames = useMemo(
     () => [...(profileQ.data?.games ?? [])].sort((a, b) => b.seq - a.seq),
+    [profileQ.data],
+  );
+
+  // The denominator behind every revenue tile below — NOT n_games. See revenueEstimateBase.
+  const revBase = useMemo(
+    () => revenueEstimateBase(profileQ.data?.games ?? []),
     [profileQ.data],
   );
 
@@ -219,25 +233,33 @@ export default function EntityProfile() {
       </Card>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <StatTile label="Games" value={fmtInt(entity.n_games)} />
+        <StatTile label="Games" value={fmtInt(entity.n_games)} sub={gamesSub(revBase)} />
         <StatTile
           label="Total est. revenue"
           value={fmtUsd(entity.total_rev)}
-          sub="Boxleiter gross across the catalog"
+          sub={totalRevSub(revBase)}
         />
         <StatTile
           label="P90 est. revenue"
           valueClassName="text-brand"
           value={entity.p90_rev != null ? fmtUsd(entity.p90_rev) : "—"}
-          sub={`median ${fmtUsd(entity.median_rev)} per release`}
+          sub={medianRevSub(fmtUsd(entity.median_rev), revBase)}
         />
         <StatTile
           label="Hit rate ≥ $200K"
           // Metric verdict, not an error state — same mono-steel rule as
           // positiveRatioClass (lib/heat.ts): strong reads accent-300, never green.
-          valueClassName={(entity.hit_rate_200k ?? 0) >= 0.25 ? "text-[color:var(--accent-300)]" : undefined}
+          // Gated on ENTITY_MIN_ESTIMATED_FOR_VERDICT: the colour is a claim about the
+          // studio, and it was firing on entities whose whole record is one estimated
+          // release, where the rate can only ever read 0% or 100%.
+          valueClassName={
+            (entity.hit_rate_200k ?? 0) >= 0.25 &&
+            revBase.estimated >= ENTITY_MIN_ESTIMATED_FOR_VERDICT
+              ? "text-[color:var(--accent-300)]"
+              : undefined
+          }
           value={fmtPct(entity.hit_rate_200k, 0)}
-          sub="Share of releases clearing $200K est."
+          sub={hitRateSub(revBase)}
         />
         <StatTile
           label="Median rating"
