@@ -6,6 +6,7 @@ import clsx from "clsx";
 import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Loading } from "../components/ui/Loading";
+import { TableScroll } from "../components/ui/TableScroll";
 import { trackEvent } from "../lib/analytics";
 import {
   ApiError,
@@ -555,7 +556,7 @@ export default function NicheCombined() {
                 The API returned no game rows for this page of the combination.
               </div>
             ) : (
-              <div className="overflow-x-auto">
+              <TableScroll>
                 <table className="w-full min-w-[720px] border-collapse text-sm">
                   <thead>
                     <tr className="kicker border-b border-ink-primary/20 text-left text-[11px] text-ink-primary/55">
@@ -600,7 +601,7 @@ export default function NicheCombined() {
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </TableScroll>
             )}
             <div className="flex items-center justify-between border-t border-chartborder px-4 py-2.5 text-xs text-ink-muted">
               <span>

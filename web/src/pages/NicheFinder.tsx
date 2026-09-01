@@ -5,6 +5,7 @@ import clsx from "clsx";
 
 import { EmptyState } from "../components/ui/EmptyState";
 import { Loading } from "../components/ui/Loading";
+import { TableScroll } from "../components/ui/TableScroll";
 import { trackEvent } from "../lib/analytics";
 import {
   nicheExportCsvUrl,
@@ -905,7 +906,7 @@ export default function NicheFinder() {
           />
         )}
         {data && data.items.length > 0 && (
-          <div className="overflow-x-auto">
+          <TableScroll>
             <div role="table" style={{ minWidth: TABLE_MIN_WIDTH }}>
               {table.getHeaderGroups().map((hg) => (
                 <div key={hg.id} role="row" className="border-b border-chartborder" style={{ ...ROW_GRID, padding: "12px 20px" }}>
@@ -931,7 +932,7 @@ export default function NicheFinder() {
                 </div>
               ))}
             </div>
-          </div>
+          </TableScroll>
         )}
       </div>
 
@@ -988,7 +989,7 @@ export default function NicheFinder() {
           {showMoreMetrics && (
             <div className="blueprint">
               <i className="bp-corner" />
-              <div className="overflow-x-auto">
+              <TableScroll>
                 <div role="table" style={{ minWidth: MORE_METRICS_MIN_WIDTH }}>
                   <div role="row" className="border-b border-chartborder" style={{ ...MORE_METRICS_ROW_GRID, padding: "12px 20px" }}>
                     <ColHead active={false} order="desc">
@@ -1023,7 +1024,7 @@ export default function NicheFinder() {
                     </div>
                   ))}
                 </div>
-              </div>
+              </TableScroll>
             </div>
           )}
         </div>

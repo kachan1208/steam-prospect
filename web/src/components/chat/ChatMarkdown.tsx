@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import clsx from "clsx";
 
+import { TableScroll } from "../ui/TableScroll";
+
 /**
  * A small Markdown-ish renderer for assistant chat answers: paragraphs, **bold**,
  * *italic*, `code`, bullet/numbered lists, `##`/`###` headings, and GFM-style pipe
@@ -84,7 +86,7 @@ export function ChatMarkdown({ text }: { text: string }) {
       }
       blockKey += 1;
       blocks.push(
-        <div key={`b${blockKey}`} className="my-2 overflow-x-auto">
+        <TableScroll key={`b${blockKey}`} className="my-2">
           <table className="w-full min-w-[320px] border-collapse text-xs">
             <thead>
               <tr className="border-b border-chartborder text-left text-ink-muted">
@@ -107,7 +109,7 @@ export function ChatMarkdown({ text }: { text: string }) {
               ))}
             </tbody>
           </table>
-        </div>,
+        </TableScroll>,
       );
       continue;
     }
