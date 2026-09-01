@@ -137,7 +137,10 @@ function Pre({ children }: { children: ReactNode }) {
 
 // The four terms mart_niche blends into opportunity_v2, in weight order. These ARE the
 // Radar board's axes read on the Radar board's thresholds (see web/src/lib/radarVerdict.ts's
-// "ONE MODEL, TWO VIEWS" block) — which is why the score and the ring now agree.
+// "ONE MODEL, TWO VIEWS" block) — which is why the score and the ring agree on direction.
+// Note what is NOT in this list: the supply brake. It is a multiplier, not a blended term,
+// and it reads supply as a different question than the ring does (relative to demand, plus
+// entrant economics) — they contradict on 28.0% of the default cut, deliberately.
 // All four share CSS_VAR.demand deliberately, per palette.ts's two-tone rule: colour
 // encodes POLARITY, not identity, and after the rebuild every blended term is positive
 // (higher = better for the score). Crowding no longer arrives as a negative bar — it
@@ -487,10 +490,27 @@ export default function Docs() {
             quadrant to zoom it; <span className="text-ink-primary">Open Niche Finder →</span> takes the same cut into
             the sortable table.
           </p>
+          {/* The old copy here read "the same evidence, on the same thresholds ... it is why the
+              board and the score can't disagree about direction". The first half is true of the
+              demand and concentration bars; the claim about supply was false and measurably so —
+              59 of 211 comparable niches on this cut (28.0%) contradict. Rewritten 2026-09-01
+              rather than changing either model: both readings were measured, both are correct for
+              their own job, and swapping either was rejected (see radarVerdict.ts's ONE MODEL,
+              TWO VIEWS block for the full measurement). No published number moved with this copy. */}
           <ReadBox>
-            The radar reads the same evidence, on the same thresholds, as the Opportunity score below — that is
-            deliberate, and it is why the board and the score can't disagree about direction. The radar is the
-            picture; the finder is the ranking; the niche deep-dive is the argument against both.
+            The radar and the <span className="text-ink-primary">Opportunity score</span> below share their demand
+            and concentration bars — the same <span className="text-ink-primary">+40%/24m</span> growth line and the
+            same <span className="text-ink-primary">0.85</span> winner-take-most line, pinned by a test so they
+            cannot drift — and the direction ordering does hold: median score falls ring by ring, enter › watch ›
+            crowded › declining, on every cut the mart builds.{" "}
+            <span className="text-ink-primary">Supply is deliberately not shared.</span>{" "}
+            The ring asks “how fast is the release pipeline growing” — absolute, the +15%/yr line drawn across the
+            board. The score asks “is the pipeline outgrowing <em>demand</em>”, and brakes further on how recent
+            entrants actually earn. On roughly a quarter of the board those two reads disagree: a niche can ring
+            “pipeline calm” and still be braked, or ring “flooding” and take no brake at all. That is the design, not
+            a defect — a new entrant ships into the whole pipeline, while the score has to refuse to call a niche
+            open just because everyone left it. The radar is the picture; the finder is the ranking; the niche
+            deep-dive is the argument against both.
           </ReadBox>
         </Feature>
       </Section>
@@ -531,11 +551,22 @@ export default function Docs() {
       <Section id="opportunity-score" kicker="The core" title="Reading the Opportunity score">
         <Card>
           <div className="flex flex-col gap-4 text-sm leading-relaxed text-ink-secondary">
+            {/* Same correction as the Radar ReadBox above: momentum and revenue_spread really are
+                anchored on the ring's own bars, but the supply BRAKE is a different question and
+                contradicts the ring on
+                28.0% of the default cut (9/222 ring "flooding" with no brake; 43/222 ring "calm"
+                and brake below x0.80, 15 of those on entrant_ratio alone). Say so here, where the
+                brake is being explained, instead of promising an agreement that does not exist. */}
             <p className="text-xs text-ink-muted">
-              Four 0–100 sub-scores, blended with fixed weights, then multiplied by the supply brake. The score reads
-              the same evidence the <span className="text-ink-primary">Radar rings</span> read, against the same
-              thresholds — so a high score means “the radar would tell you to enter”, and the two can't disagree about
-              direction. Hover any ⓘ in the finder for the same math with that row's real numbers.
+              Four 0–100 sub-scores, blended with fixed weights, then multiplied by the supply brake. The two blended
+              terms that have a <span className="text-ink-primary">Radar ring</span> counterpart read its exact bars
+              — +40%/24m for demand, 0.85 for winner-take-most — so a high score does mean “the radar would tell you
+              to enter”, and the ring ordering holds. The <span className="text-ink-primary">brake</span> is where they
+              part company on purpose: the ring flags a pipeline growing more than +15%/yr, full stop, while the
+              brake flags a pipeline outgrowing <em>demand</em> by that much and then brakes again if recent entrants
+              earn below the niche median (a tell that never moves a ring). So a calm ring can sit beside a heavily
+              braked score, and about a quarter of the board does. Hover any ⓘ in the finder for the same math with
+              that row's real numbers.
             </p>
             <FormulaFlow />
             <div>
