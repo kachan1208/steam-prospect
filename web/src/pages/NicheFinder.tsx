@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import clsx from "clsx";
@@ -56,6 +56,38 @@ const CONDENSED = '"Barlow Condensed", "Barlow", system-ui, sans-serif';
 // Umbrella/meta tags are containers/reception labels, not buildable niches — excluded by
 // default, same reasoning (and default) as the MCP find_niches tool.
 const DEFAULT_TIERS: NicheTier[] = ["micro", "theme"];
+
+const DEFAULT_SORT: SortKey = "opportunity_v2";
+
+/** The sortable columns THIS page offers — the eight in the mockup grid plus the five in
+ * the "More metrics" panel. The URL's `sort` is validated against it (an unknown key
+ * falls back to the default) so a hand-edited link can't ask the API to order by a
+ * column the table can't even draw an arrow on. */
+const FINDER_SORT_KEYS: readonly SortKey[] = [
+  "key", "n_games", "p90_rev", "demand", "competition", "quality_gap", "opportunity_v2",
+  "players_trend_7d_pct",
+  "lifetime_survival_12m", "total_owners", "hit_rate_200k", "saturation_yoy", "total_players_now",
+] as const;
+
+/** The review floors the mart materializes — 0 (no floor), 50 and 100. Anything else in
+ * the URL is a population that does not exist, so it reads as the default. */
+const MIN_REVIEW_OPTIONS = [0, 50, 100];
+
+/** Tiers as a canonical, comma-joined string: NICHE_TIERS order, deduped, so ticking the
+ * same set two different ways serializes identically (and so "the default set" is one
+ * exact string we can omit from the URL). */
+function serializeTiers(tiers: NicheTier[]): string {
+  return NICHE_TIERS.filter((t) => tiers.includes(t)).join(",");
+}
+
+function parseTiers(raw: string | null): NicheTier[] {
+  if (raw === null) return DEFAULT_TIERS;
+  const wanted = new Set(raw.split(","));
+  const picked = NICHE_TIERS.filter((t) => wanted.has(t));
+  // An empty/garbage list would ask the API for nothing at all — the UI itself refuses
+  // to reach that state (toggleTier keeps one tier lit), so the URL must too.
+  return picked.length > 0 ? picked : DEFAULT_TIERS;
+}
 
 const TIER_TITLE: Record<NicheTier, string> = {
   micro: "Buildable game concepts (Colony Sim, Souls-like…)",
@@ -206,49 +238,142 @@ function SegButton({
 
 export default function NicheFinder() {
   usePageTitle("Niche Finder");
-  const [dimension, setDimension] = useState<Dimension>("tag");
+  // ---- URL-backed view state --------------------------------------------------------
+  // THE WHOLE VIEW RIDES THE URL — dimension, cut (window × review floor), tiers, search,
+  // sort/order, paging and the More-metrics disclosure, alongside the multi-select that
+  // already did.
+  //
+  // Until 2026-09-01 only the selection was routed, on the argument that "filters stay in
+  // component state: they're a browsing pose, the selection is the artifact worth sending
+  // someone". Three things retired that argument:
+  //
+  //  1. THESE FILTERS ARE NOT A POSE, THEY ARE THE POPULATION. mart_niche precomputes its
+  //     aggregates per (window, min_reviews) population, so the cut chips don't narrow a
+  //     list — they swap in different medians, a different saturation_yoy and a different
+  //     opportunity_v2 for the same niche (Radar.tsx's BOARD_WINDOW doc spells this out,
+  //     which is why the board pins its cut instead of exposing chips). A URL that omits
+  //     them doesn't describe what the sender was looking at: the recipient sees the same
+  //     rows carrying different numbers.
+  //  2. THIS PAGE ALREADY TREATED THE CUT AS PART OF THE ARTIFACT. "Analyse combined"
+  //     hands win/min_reviews to nicheCombinedPath, and Export CSV builds its href from
+  //     every filter. So a shared /niches?niches=… link restored the ticked rows, silently
+  //     re-based them onto the DEFAULT cut, and then produced a different combined page
+  //     than the sender got. That is a wrong answer, not an inconvenience.
+  //  3. THE APP PROMISES THIS BEHAVIOUR OUT LOUD on /niches/:dim/:key ("This filter lives
+  //     in the URL — copy the address bar to share exactly this slice"). A user who learns
+  //     the rule one click away reasonably expects it here.
+  //
+  // Contract, matching NicheDetail (the page these rows link into): DEFAULTS ARE OMITTED,
+  // so a pristine /niches stays a clean URL and only a non-default reading writes a param;
+  // unknown/garbage values fall back to the default instead of throwing; and every write
+  // `replace`s — this page's own convention since the selection landed ("ticking
+  // checkboxes shouldn't bury the previous page in history"), and flipping a chip or a
+  // sort arrow has exactly the same claim on the back button as ticking a row.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
+
+  /** One writer for every param: null/"" clears the key. Any filter/sort change re-pages
+   * to the top (offset never points past a new result set) unless the caller is the pager
+   * itself — the same keepOffset idiom /games uses. */
+  const patchParams = useCallback(
+    (patch: Record<string, string | null>, opts?: { keepOffset?: boolean }) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          for (const [k, v] of Object.entries(patch)) {
+            if (v === null || v === "") next.delete(k);
+            else next.set(k, v);
+          }
+          if (!opts?.keepOffset) next.delete("offset");
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const dimension: Dimension = searchParams.get("dim") === "genre" ? "genre" : "tag";
+  const setDimension = useCallback(
+    (d: Dimension) => patchParams({ dim: d === "tag" ? null : d }),
+    [patchParams],
+  );
   // 24m is the market a new entrant actually faces — the all-time cut is context, not an
   // entry decision, so it is NOT the default (same default as the MCP tool).
-  const [windowParam, setWindowParam] = useState<Window>(DEFAULT_NICHE_CUT.win);
-  // mart materializes exactly 0 (no floor), 50 & 100
-  const [minReviews, setMinReviews] = useState(DEFAULT_NICHE_CUT.min_reviews);
-  const [tiers, setTiers] = useState<NicheTier[]>(DEFAULT_TIERS);
-  const [q, setQ] = useState("");
+  const windowParam: Window = searchParams.get("win") === "all" ? "all" : DEFAULT_NICHE_CUT.win;
+  const setWindowParam = useCallback(
+    (w: Window) => patchParams({ win: w === DEFAULT_NICHE_CUT.win ? null : w }),
+    [patchParams],
+  );
+  // mart materializes exactly 0 (no floor), 50 & 100. Read as a STRING first: 0 is a real
+  // floor here, and Number(null) is also 0 — so a plain Number() would turn "no param" into
+  // the All-games cut and quietly serve a different population than the default.
+  const rawMinReviews = searchParams.get("min_reviews");
+  const minReviews =
+    rawMinReviews !== null && MIN_REVIEW_OPTIONS.includes(Number(rawMinReviews))
+      ? Number(rawMinReviews)
+      : DEFAULT_NICHE_CUT.min_reviews;
+  const setMinReviews = useCallback(
+    (n: number) => patchParams({ min_reviews: n === DEFAULT_NICHE_CUT.min_reviews ? null : String(n) }),
+    [patchParams],
+  );
+  const tiers = useMemo(() => parseTiers(searchParams.get("tiers")), [searchParams]);
+  const rawSort = searchParams.get("sort") as SortKey | null;
+  const sort: SortKey = rawSort && FINDER_SORT_KEYS.includes(rawSort) ? rawSort : DEFAULT_SORT;
+  const order: "asc" | "desc" = searchParams.get("order") === "asc" ? "asc" : "desc";
+  const offset = Math.max(0, Number(searchParams.get("offset")) || 0);
+
+  // The search box keeps a local DRAFT — a request (and a URL write) per keystroke would
+  // be absurd — committed to the URL on the same 300ms debounce it always fetched on.
+  const urlQ = searchParams.get("q") ?? "";
+  const [q, setQ] = useState(urlQ);
   const debouncedQ = useDebounced(q, 300);
-  const [sort, setSort] = useState<SortKey>("opportunity_v2");
-  const [order, setOrder] = useState<"asc" | "desc">("desc");
+  // The last query string the box and the URL agreed on: it tells our own commit's echo
+  // apart from an external navigation (back/forward, a shared link).
+  const lastCommittedQ = useRef(urlQ);
+  useEffect(() => {
+    const committed = debouncedQ.trim();
+    if (committed === lastCommittedQ.current) return;
+    lastCommittedQ.current = committed;
+    patchParams({ q: committed || null });
+  }, [debouncedQ, patchParams]);
+  useEffect(() => {
+    if (urlQ === lastCommittedQ.current) return;
+    lastCommittedQ.current = urlQ;
+    setQ(urlQ);
+  }, [urlQ]);
 
   const toggleSort = useCallback(
     (col: SortKey) => {
-      if (sort === col) setOrder((o) => (o === "desc" ? "asc" : "desc"));
-      else {
-        setSort(col);
-        setOrder(col === "key" ? "asc" : "desc");
+      if (sort === col) {
+        patchParams({ sort: col === DEFAULT_SORT ? null : col, order: order === "desc" ? "asc" : "desc" });
+      } else {
+        const nextOrder = col === "key" ? "asc" : "desc";
+        patchParams({ sort: col === DEFAULT_SORT ? null : col, order: nextOrder === "desc" ? null : nextOrder });
       }
     },
-    [sort],
+    [sort, order, patchParams],
   );
-  const toggleTier = useCallback((t: NicheTier) => {
-    setTiers((cur) => {
-      const next = cur.includes(t) ? cur.filter((x) => x !== t) : [...cur, t];
-      return next.length === 0 ? cur : next; // never allow an empty selection
-    });
-  }, []);
-  const [offset, setOffset] = useState(0);
-
-  // Any filter change re-pages to the top so offset never points past the new result set.
-  useEffect(() => {
-    setOffset(0);
-  }, [dimension, windowParam, minReviews, tiers, debouncedQ, sort, order]);
+  const toggleTier = useCallback(
+    (t: NicheTier) => {
+      const next = tiers.includes(t) ? tiers.filter((x) => x !== t) : [...tiers, t];
+      if (next.length === 0) return; // never allow an empty selection
+      const serialized = serializeTiers(next);
+      patchParams({ tiers: serialized === serializeTiers(DEFAULT_TIERS) ? null : serialized });
+    },
+    [tiers, patchParams],
+  );
+  const setOffset = useCallback(
+    (next: number) => patchParams({ offset: next <= 0 ? null : String(next) }, { keepOffset: true }),
+    [patchParams],
+  );
 
   // ---- multi-select ---------------------------------------------------------------
   // A game carries many tags, so it lives in many niches — selecting 2..N and analysing
   // the overlap is a first-class question. The selection rides the URL (repeated
   // `niches=<dimension>:<key>`) so a half-built combination is shareable, exactly like
-  // /compare?ids=. Filters stay in component state: they're a browsing pose, the
-  // selection is the artifact worth sending someone.
-  const [searchParams, setSearchParams] = useSearchParams();
-  const navigate = useNavigate();
+  // /compare?ids=. It writes through its OWN writer rather than patchParams: ticking a
+  // checkbox is not a filter change, so it must not re-page the table under the user.
   const selection = useMemo(() => parseNicheSelection(searchParams), [searchParams]);
   const selectedRefs = useMemo(() => new Set(selection.map(formatNicheRef)), [selection]);
 
@@ -554,7 +679,16 @@ export default function NicheFinder() {
   // *trend*). Not deleted, just not crammed into the mockup-faithful grid above: reachable
   // below the table, behind an explicit toggle, sharing the exact same sort/order state
   // (and so the exact same row order) as the primary table above it.
-  const [showMoreMetrics, setShowMoreMetrics] = useState(false);
+  //
+  // Routed too (?more=1) precisely BECAUSE it shares that sort state: a link carrying
+  // sort=saturation_yoy without the panel would land on a table that has no such column
+  // and no arrow to explain the order it is in. keepOffset — opening a disclosure is not
+  // a filter change, so it must not re-page the table.
+  const showMoreMetrics = searchParams.get("more") === "1";
+  const setShowMoreMetrics = useCallback(
+    (v: boolean) => patchParams({ more: v ? "1" : null }, { keepOffset: true }),
+    [patchParams],
+  );
   const moreMetricsColumns = useMemo(
     () => [
       {
@@ -812,7 +946,7 @@ export default function NicheFinder() {
             <button
               type="button"
               disabled={offset === 0}
-              onClick={() => setOffset((o) => Math.max(0, o - LIMIT))}
+              onClick={() => setOffset(Math.max(0, offset - LIMIT))}
               className={clsx("px-3 py-1 text-ink-primary transition-colors", offset === 0 ? "pointer-events-none" : "hover:bg-surface2")}
               style={{ border: `1px solid ${PAPER_35}`, color: offset === 0 ? PAPER_45 : undefined }}
             >
@@ -821,7 +955,7 @@ export default function NicheFinder() {
             <button
               type="button"
               disabled={offset + LIMIT >= total}
-              onClick={() => setOffset((o) => o + LIMIT)}
+              onClick={() => setOffset(offset + LIMIT)}
               className={clsx(
                 "px-3 py-1 text-ink-primary transition-colors",
                 offset + LIMIT >= total ? "pointer-events-none" : "hover:bg-surface2",
@@ -843,7 +977,7 @@ export default function NicheFinder() {
         <div className="flex flex-col" style={{ gap: 10 }}>
           <button
             type="button"
-            onClick={() => setShowMoreMetrics((v) => !v)}
+            onClick={() => setShowMoreMetrics(!showMoreMetrics)}
             aria-expanded={showMoreMetrics}
             className="kicker inline-flex w-fit items-center gap-2 text-ink-muted transition-colors hover:text-ink-secondary"
             style={{ fontSize: 11, border: `1px solid ${PAPER_30}`, padding: "6px 12px" }}
