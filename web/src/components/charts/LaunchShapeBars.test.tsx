@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
 
-import { StaggeredTick, needsStaggeredAxis } from "./LaunchShapeBars";
+import { LaunchShapeBars, StaggeredTick, needsStaggeredAxis } from "./LaunchShapeBars";
+import { axisTicks, installChartLayout } from "../../test/recharts";
+import type { LaunchCurvePoint } from "../../lib/api";
 
 /**
  * A10 — the launch-shape x-axis ran its labels together at phone widths: /timing @390
@@ -55,5 +57,60 @@ describe("StaggeredTick", () => {
     expect(text?.textContent).toBe("4–6m");
     // recharts' own class has to survive: index.css styles ticks through it.
     expect(text?.getAttribute("class")).toBe("recharts-cartesian-axis-tick-value");
+  });
+});
+
+/**
+ * A5, the y-axis half — and the one assertion the A5 work shipped without.
+ *
+ * LaunchShapeBars routes its y-axis through the shared `axisScale(max, "pct", 4)` instead
+ * of letting recharts pick a domain off the data. With this fixture the largest window is
+ * 32%, so the two behaviours are visibly different:
+ *
+ *     shared scale (correct)   0% / 10% / 20% / 30% / 40%
+ *     recharts' own domain     0% /  8% / 16% / 24% / 32%
+ *
+ * That second row is verbatim the defect quoted in axisConsistency.test.tsx's own fixture
+ * comment. It was nonetheless invisible to every test in the tree: the sibling check in
+ * axisConsistency compares only tick SUFFIXES and DECIMAL COUNTS between the mini and the
+ * big charts, and 8/16/24/32 and 10/20/30/40 are both integer-and-percent — identical
+ * vocabularies, different numbers. Reverting the axis wiring left the whole suite green.
+ *
+ * So this asserts the tick STRINGS. The load-bearing part is the top tick: a shared scale
+ * rounds UP past the data (40 > 32), while a data-fitted domain lands exactly on it.
+ */
+describe("LaunchShapeBars y-axis", () => {
+  const CURVE = [
+    { day: 7, median_cum_fraction: 0.32, n_games: 100 },
+    { day: 14, median_cum_fraction: 0.44, n_games: 100 },
+    { day: 30, median_cum_fraction: 0.56, n_games: 100 },
+    { day: 60, median_cum_fraction: 0.66, n_games: 100 },
+    { day: 90, median_cum_fraction: 0.73, n_games: 100 },
+    { day: 180, median_cum_fraction: 0.86, n_games: 100 },
+    { day: 365, median_cum_fraction: 1, n_games: 100 },
+  ] as unknown as LaunchCurvePoint[];
+
+  it("takes its ticks from the shared percent scale, not from the data's own maximum", () => {
+    const restore = installChartLayout(900, 320);
+    try {
+      const { container } = render(<LaunchShapeBars points={CURVE} />);
+      expect(axisTicks(container, "y")).toEqual(["0%", "10%", "20%", "30%", "40%"]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("rounds the axis up past the tallest bar rather than stopping on it", () => {
+    // The generic form of the above: whatever the scale picks, the top tick must clear the
+    // data (here 32%). This is what a data-fitted domain can never satisfy.
+    const restore = installChartLayout(900, 320);
+    try {
+      const { container } = render(<LaunchShapeBars points={CURVE} />);
+      const ticks = axisTicks(container, "y").map((t) => Number(t.replace("%", "")));
+      expect(Math.max(...ticks)).toBeGreaterThan(32);
+      for (const t of ticks) expect(t % 10).toBe(0);
+    } finally {
+      restore();
+    }
   });
 });

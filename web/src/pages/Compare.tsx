@@ -3,7 +3,12 @@ import { Link, useSearchParams } from "react-router-dom";
 import { useQueries } from "@tanstack/react-query";
 import clsx from "clsx";
 
-import { CompareTrendsChart, compareSeriesColor } from "../components/charts/CompareTrendsChart";
+import {
+  CompareTrendsChart,
+  SeriesKey,
+  compareSeriesColor,
+  seriesShapePath,
+} from "../components/charts/CompareTrendsChart";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Loading } from "../components/ui/Loading";
 import { TableScroll } from "../components/ui/TableScroll";
@@ -11,7 +16,8 @@ import { gameProfileQueryOptions, type GameProfile } from "../lib/api";
 import { COMPARE_CAP, removeFromCompare, useCompareList } from "../lib/compareList";
 import { estimatedUnits } from "../lib/estimates";
 import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtRevenue } from "../lib/format";
-import { genreTintStyle } from "../lib/heat";
+import { genreTintStyles } from "../lib/heat";
+import { compareSeries } from "../lib/palette";
 import { usePageTitle } from "../lib/usePageTitle";
 
 /**
@@ -262,7 +268,10 @@ export default function Compare() {
               <div className="flex flex-wrap items-center gap-4 sm:ml-auto">
                 {ids.map((id, i) => (
                   <span key={id} className="inline-flex items-center gap-1.5 text-[11px] text-ink-muted">
-                    <span aria-hidden className="h-[2px] w-3.5" style={{ backgroundColor: compareSeriesColor(i) }} />
+                    {/* Was a flat 14x2 colour bar. Two of the three games rendered it in
+                        greys 1.25:1 apart, so the legend was as unreadable as the chart —
+                        it now repeats the line's dash and marker too (SeriesKey). */}
+                    <SeriesKey style={compareSeries(i)} />
                     {names.get(id)}
                   </span>
                 ))}
@@ -292,12 +301,21 @@ export default function Compare() {
                       return (
                         <div key={id} className="flex flex-col gap-1.5">
                           <div className="flex items-start justify-between gap-1">
-                            {/* series dot ties the column to its line in the trends chart */}
-                            <span
+                            {/* Series mark ties the column to its line in the trends chart.
+                                It carries the line's SHAPE as well as its colour, because
+                                two columns can otherwise wear near-identical tones. */}
+                            <svg
                               aria-hidden
-                              className="mt-1 h-2 w-2 shrink-0"
-                              style={{ backgroundColor: compareSeriesColor(i) }}
-                            />
+                              width={10}
+                              height={10}
+                              viewBox="0 0 10 10"
+                              className="mt-1 shrink-0 overflow-visible"
+                            >
+                              <path
+                                d={seriesShapePath(compareSeries(i).shape, 5, 5, 3.6)}
+                                fill={compareSeriesColor(i)}
+                              />
+                            </svg>
                             <button
                               type="button"
                               onClick={() => remove(id)}
@@ -415,9 +433,15 @@ export default function Compare() {
                     </span>
                     {ids.map((id) => {
                       const p = profiles.get(id);
+                      const tags = (p?.top_tags ?? []).slice(0, 8);
+                      // Tinted as a GROUP so no two chips in one cell land on the same
+                      // slot; the shared ones are excluded because they take the brand
+                      // highlight instead and never spend a slot. See lib/heat.ts.
+                      const tinted = tags.filter((t) => !sharedTags.has(t));
+                      const tints = new Map(genreTintStyles(tinted).map((s, i) => [tinted[i], s]));
                       return (
                         <div key={id} className="flex flex-wrap gap-1">
-                          {(p?.top_tags ?? []).slice(0, 8).map((t) => (
+                          {tags.map((t) => (
                             <span
                               key={t}
                               className={clsx(
@@ -428,7 +452,7 @@ export default function Compare() {
                               )}
                               // Shared tags keep the brand highlight (that's the signal on this
                               // page); only the rest wear their categorical genre tint.
-                              style={sharedTags.has(t) ? undefined : genreTintStyle(t)}
+                              style={sharedTags.has(t) ? undefined : tints.get(t)}
                             >
                               {t}
                             </span>

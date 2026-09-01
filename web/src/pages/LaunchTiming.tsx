@@ -108,6 +108,7 @@ function RecommendationCard({ overview }: { overview: TimingOverview }) {
           height={150}
           valueLabel="Score (demand − congestion)"
           formatValue={(v) => v.toFixed(2)}
+          axisKind="count"
           referenceY={0}
           dimUnhighlighted
         />
@@ -202,6 +203,7 @@ export default function LaunchTiming() {
               height={190}
               valueLabel="Share of yearly buying"
               formatValue={(v) => `${v.toFixed(1)}%`}
+              axisKind="pct"
               referenceY={100 / 12}
             />
             <p className="mt-2 text-[11px] text-ink-muted">
@@ -233,6 +235,7 @@ export default function LaunchTiming() {
                 secondaryLabel="$200K+ releases / yr"
                 formatValue={(v) => v.toFixed(0)}
                 formatSecondary={(v) => v.toFixed(0)}
+                axisKind="count"
                 color={CSS_VAR.competition}
                 secondaryColor={CSS_VAR.qualityGap}
               />
@@ -300,6 +303,7 @@ export default function LaunchTiming() {
               height={190}
               valueLabel="Share of first-24m reviews"
               formatValue={(v) => `${v.toFixed(1)}%`}
+              axisKind="pct"
             />
             <p className="mt-2 text-[11px] text-ink-muted">Months since release (0 = launch month).</p>
           </>
@@ -364,7 +368,7 @@ export default function LaunchTiming() {
             <Histogram
               buckets={priceDist.buckets}
               color={CSS_VAR.demand}
-              formatX={fmtUsd}
+              xKind="usd"
               marks={priceDist.benchmark_marks.map((m) => ({ label: m.label, value: m.value }))}
             />
             <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 border-t border-chartborder pt-3 text-xs">

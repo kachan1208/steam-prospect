@@ -10,6 +10,7 @@ import {
   YAxis,
 } from "recharts";
 
+import { axisFormatter, niceAxisTicks, type AxisKind } from "../../lib/format";
 import { CSS_VAR, MONO } from "../../lib/palette";
 import { TooltipPanel } from "./TooltipPanel";
 
@@ -45,6 +46,7 @@ export function TimingBars({
   secondaryLabel,
   formatValue,
   formatSecondary,
+  axisKind = "count",
   referenceY,
   referenceLabel,
   dimUnhighlighted = false,
@@ -55,13 +57,37 @@ export function TimingBars({
   secondaryColor?: string;
   valueLabel: string;
   secondaryLabel?: string;
+  /** TOOLTIP precision — deliberately finer than the axis (a tooltip names one bar). */
   formatValue: (v: number) => string;
   formatSecondary?: (v: number) => string;
+  /** What the y-axes measure. The AXIS ticks are formatted from this, not from
+   *  `formatValue`: passing the tooltip's formatter through to the ticks is what put
+   *  "0.0% / 5.0% / 10.0% / 15.0% / 20.0%" on /timing's big charts while the launch-shape
+   *  minis on the same page printed "0% / 8% / 16% / 24% / 32%". */
+  axisKind?: AxisKind;
   referenceY?: number;
   referenceLabel?: string;
   dimUnhighlighted?: boolean;
 }) {
   const hasSecondary = data.some((d) => d.secondary !== undefined && d.secondary !== null);
+
+  // Ticks are computed here so the formatter is sized for exactly the values printed.
+  // The domain can go negative (window scores), so both ends get nice ticks.
+  const values = data.map((d) => d.value).filter((v): v is number => v != null);
+  const lo = Math.min(0, ...values, ...(referenceY != null ? [referenceY] : []));
+  const hi = Math.max(0, ...values, ...(referenceY != null ? [referenceY] : []));
+  // An axis that straddles zero splits the tick budget between its halves, so a +/-0.4
+  // score axis stays at 5 ticks rather than doubling to 9.
+  const perSide = lo < 0 ? 2 : 4;
+  const posTicks = niceAxisTicks(hi, perSide);
+  const negTicks = niceAxisTicks(-lo, perSide).filter((t) => t > 0).map((t) => -t);
+  const leftTicks = [...negTicks].reverse().concat(posTicks);
+  const leftFormat = axisFormatter(leftTicks, axisKind);
+
+  const secondaries = data.map((d) => d.secondary).filter((v): v is number => v != null);
+  const rightTicks = niceAxisTicks(Math.max(0, ...secondaries), 4);
+  const rightFormat = axisFormatter(rightTicks, axisKind);
+
   return (
     <ResponsiveContainer width="100%" height={height}>
       <BarChart data={data} margin={{ top: 4, right: hasSecondary ? 0 : 8, left: 0, bottom: 0 }}>
@@ -80,7 +106,10 @@ export function TimingBars({
         <YAxis
           yAxisId="left"
           tick={{ fontSize: 10 }}
-          tickFormatter={formatValue}
+          ticks={leftTicks}
+          interval={0}
+          domain={[leftTicks[0] ?? 0, leftTicks[leftTicks.length - 1] ?? 0]}
+          tickFormatter={(v: number) => leftFormat(v)}
           tickLine={false}
           axisLine={false}
           width={44}
@@ -90,7 +119,10 @@ export function TimingBars({
             yAxisId="right"
             orientation="right"
             tick={{ fontSize: 10 }}
-            tickFormatter={formatSecondary ?? formatValue}
+            ticks={rightTicks}
+            interval={0}
+            domain={[0, rightTicks[rightTicks.length - 1] ?? 0]}
+            tickFormatter={(v: number) => rightFormat(v)}
             tickLine={false}
             axisLine={false}
             width={40}

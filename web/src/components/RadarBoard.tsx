@@ -1310,111 +1310,32 @@ export function RadarBoard({
                 plot frame carries it; the edge tick names the value), so the hairline +
                 label draw only while the bar cuts through the interior. */}
             {xBarInside && (
-              <>
-                <line
-                  data-testid="xy-bar-demand"
-                  x1={xBarPx}
-                  y1={plot.t}
-                  x2={xBarPx}
-                  y2={plotY1}
-                  stroke="var(--baseline)"
-                  strokeWidth={1}
-                  strokeDasharray="6 3"
-                />
-                <HaloText x={xBarPx + 4} y={plot.t + 11} anchor="start" size={compact ? 8 : 9.5} fill="var(--text-secondary)">
-                  {compact ? `ENTER +${X_BAR}%` : `ENTER BAR +${X_BAR}% / 24M`}
-                </HaloText>
-              </>
+              <line
+                data-testid="xy-bar-demand"
+                x1={xBarPx}
+                y1={plot.t}
+                x2={xBarPx}
+                y2={plotY1}
+                stroke="var(--baseline)"
+                strokeWidth={1}
+                strokeDasharray="6 3"
+              />
             )}
             {yBarInside && (
-              <>
-                <line
-                  data-testid="xy-bar-flood"
-                  x1={plot.l}
-                  y1={yBarPx}
-                  x2={plotX1}
-                  y2={yBarPx}
-                  stroke="var(--baseline)"
-                  strokeWidth={1}
-                  strokeDasharray="6 3"
-                />
-                {/* Flooding lives BELOW the bar (calmer-up), so the bar's label sits on
-                    the flooding side of its own line. */}
-                <HaloText x={plot.l + 5} y={yBarPx + 12} anchor="start" size={compact ? 8 : 9.5} fill="var(--text-secondary)">
-                  {compact ? `FLOOD +${Y_BAR}% — BELOW` : `FLOOD BAR +${Y_BAR}% YOY — FLOODING BELOW`}
-                </HaloText>
-              </>
+              <line
+                data-testid="xy-bar-flood"
+                x1={plot.l}
+                y1={yBarPx}
+                x2={plotX1}
+                y2={yBarPx}
+                stroke="var(--baseline)"
+                strokeWidth={1}
+                strokeDasharray="6 3"
+              />
             )}
-
-            {/* Quadrant readings — region names only; the DOT STYLE carries the final
-                verdict (a growing·open dot can still be Watch on a concentration veto).
-                Calmer-up orientation: the TOP-RIGHT corner is the focus zone, and its
-                label alone takes the enter hue. While a region is hovered its label
-                BRIGHTENS (region-hover contract): the neutral corners step muted →
-                primary, and the focus corner mixes its green toward primary — more
-                contrast on both themes without abandoning the hue. While a QUADRANT is
-                zoomed the four corner labels give way to ONE plot title naming the
-                zoomed region (+ the exit affordances) — four corners would lie about a
-                single-region view. */}
-            {zoom !== null && zoom !== "strip" ? (
-              <>
-                <HaloText
-                  x={plot.l + 8}
-                  y={plot.t + 18}
-                  anchor="start"
-                  size={11}
-                  fill={REGION_TONE[zoom]}
-                >
-                  {REGION_NAME[zoom]} — ZOOMED
-                </HaloText>
-                <HaloText x={plot.l + 8} y={plot.t + 33} anchor="start" size={8.5}>
-                  ESC · BACKGROUND CLICK · OR THE RAIL CHIP ✕ EXITS
-                </HaloText>
-              </>
-            ) : (
-              <>
-                <HaloText
-                  x={plotX1 - 8}
-                  y={plot.t + 26}
-                  anchor="end"
-                  size={compact ? 7.5 : 9}
-                  fill={
-                    effectiveRegion === "growing-open"
-                      ? "color-mix(in srgb, var(--verdict-enter) 60%, var(--text-primary))"
-                      : "var(--verdict-enter)"
-                  }
-                >
-                  {compact ? "GROW · OPEN" : "GROWING · OPEN"}
-                </HaloText>
-                <HaloText
-                  x={plotX1 - 8}
-                  y={plotY1 - 10}
-                  anchor="end"
-                  size={compact ? 7.5 : 9}
-                  fill={effectiveRegion === "growing-flooding" ? "var(--text-primary)" : "var(--text-muted)"}
-                >
-                  {compact ? "GROW · FLOOD" : "GROWING · FLOODING"}
-                </HaloText>
-                <HaloText
-                  x={plot.l + 8}
-                  y={plotY1 - 10}
-                  anchor="start"
-                  size={compact ? 7.5 : 9}
-                  fill={effectiveRegion === "shrinking-flooding" ? "var(--text-primary)" : "var(--text-muted)"}
-                >
-                  {compact ? "SHRINK · FLOOD" : "SHRINKING · FLOODING"}
-                </HaloText>
-                <HaloText
-                  x={plot.l + 8}
-                  y={plot.t + 26}
-                  anchor="start"
-                  size={compact ? 7.5 : 9}
-                  fill={effectiveRegion === "shrinking-open" ? "var(--text-primary)" : "var(--text-muted)"}
-                >
-                  {compact ? "FLAT · OPEN" : "FLAT/SHRINKING · OPEN"}
-                </HaloText>
-              </>
-            )}
+            {/* The two bars' LABELS, and the quadrant corner readings, are not here — they
+                are annotations sitting inside the plot, so they render in xy-annotations
+                AFTER the dots. See that layer for why. */}
 
             {/* X ticks + labels — computed for the ACTIVE domain (density follows the
                 plot width; a zoom re-domains and re-ticks). Edge labels grow a ≥ / ≤
@@ -1652,6 +1573,105 @@ export function RadarBoard({
                 )}
               </g>
             ))}
+          </g>
+
+          {/* IN-PLOT ANNOTATIONS — LAST, so they paint OVER the dots.
+              SVG paints in document order, and these used to live inside xy-decor, which
+              is drawn first. Measured on production /radar: the FLOOD BAR label's box
+              overlapped 10 dots at 1440, 15 at 1024 and 11 at 390, all of them painted
+              after it, and the trailing word ("…FLOODING BELOW") was completely covered by
+              the dense cluster that sits on the bar. That label defines the horizontal
+              reference line the whole verdict model hangs on (SAT_FLOOD_YOY — see the
+              module doc and Docs' supply section), so it is exactly the wrong thing to
+              lose under the data.
+              Moving them up costs nothing: the group is pointerEvents="none", so every dot
+              keeps its own hover/click, and HaloText already paints a --page-plane halo
+              (paintOrder: stroke) which now knocks the dots back around the glyphs instead
+              of only the gridlines. The bars' own hairlines stay DOWN in xy-decor — a
+              gridline belongs under the data; its label does not. */}
+          <g pointerEvents="none" data-testid="xy-annotations">
+            {xBarInside && (
+              <HaloText x={xBarPx + 4} y={plot.t + 11} anchor="start" size={compact ? 8 : 9.5} fill="var(--text-secondary)">
+                {compact ? `ENTER +${X_BAR}%` : `ENTER BAR +${X_BAR}% / 24M`}
+              </HaloText>
+            )}
+            {yBarInside && (
+              /* Flooding lives BELOW the bar (calmer-up), so the bar's label sits on the
+                 flooding side of its own line. */
+              <HaloText x={plot.l + 5} y={yBarPx + 12} anchor="start" size={compact ? 8 : 9.5} fill="var(--text-secondary)">
+                {compact ? `FLOOD +${Y_BAR}% — BELOW` : `FLOOD BAR +${Y_BAR}% YOY — FLOODING BELOW`}
+              </HaloText>
+            )}
+
+            {/* Quadrant readings — region names only; the DOT STYLE carries the final
+                verdict (a growing·open dot can still be Watch on a concentration veto).
+                Calmer-up orientation: the TOP-RIGHT corner is the focus zone, and its
+                label alone takes the enter hue. While a region is hovered its label
+                BRIGHTENS (region-hover contract): the neutral corners step muted →
+                primary, and the focus corner mixes its green toward primary — more
+                contrast on both themes without abandoning the hue. While a QUADRANT is
+                zoomed the four corner labels give way to ONE plot title naming the
+                zoomed region (+ the exit affordances) — four corners would lie about a
+                single-region view. */}
+            {zoom !== null && zoom !== "strip" ? (
+              <>
+                <HaloText
+                  x={plot.l + 8}
+                  y={plot.t + 18}
+                  anchor="start"
+                  size={11}
+                  fill={REGION_TONE[zoom]}
+                >
+                  {REGION_NAME[zoom]} — ZOOMED
+                </HaloText>
+                <HaloText x={plot.l + 8} y={plot.t + 33} anchor="start" size={8.5}>
+                  ESC · BACKGROUND CLICK · OR THE RAIL CHIP ✕ EXITS
+                </HaloText>
+              </>
+            ) : (
+              <>
+                <HaloText
+                  x={plotX1 - 8}
+                  y={plot.t + 26}
+                  anchor="end"
+                  size={compact ? 7.5 : 9}
+                  fill={
+                    effectiveRegion === "growing-open"
+                      ? "color-mix(in srgb, var(--verdict-enter) 60%, var(--text-primary))"
+                      : "var(--verdict-enter)"
+                  }
+                >
+                  {compact ? "GROW · OPEN" : "GROWING · OPEN"}
+                </HaloText>
+                <HaloText
+                  x={plotX1 - 8}
+                  y={plotY1 - 10}
+                  anchor="end"
+                  size={compact ? 7.5 : 9}
+                  fill={effectiveRegion === "growing-flooding" ? "var(--text-primary)" : "var(--text-muted)"}
+                >
+                  {compact ? "GROW · FLOOD" : "GROWING · FLOODING"}
+                </HaloText>
+                <HaloText
+                  x={plot.l + 8}
+                  y={plotY1 - 10}
+                  anchor="start"
+                  size={compact ? 7.5 : 9}
+                  fill={effectiveRegion === "shrinking-flooding" ? "var(--text-primary)" : "var(--text-muted)"}
+                >
+                  {compact ? "SHRINK · FLOOD" : "SHRINKING · FLOODING"}
+                </HaloText>
+                <HaloText
+                  x={plot.l + 8}
+                  y={plot.t + 26}
+                  anchor="start"
+                  size={compact ? 7.5 : 9}
+                  fill={effectiveRegion === "shrinking-open" ? "var(--text-primary)" : "var(--text-muted)"}
+                >
+                  {compact ? "FLAT · OPEN" : "FLAT/SHRINKING · OPEN"}
+                </HaloText>
+              </>
+            )}
           </g>
         </svg>
 

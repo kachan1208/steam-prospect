@@ -1,7 +1,7 @@
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import type { TrendPoint } from "../../lib/api";
-import { fmtAxisCompact, fmtAxisUsd, fmtCompact, fmtUsd } from "../../lib/format";
+import { axisScale, fmtCompact, fmtUsd } from "../../lib/format";
 import { CSS_VAR } from "../../lib/palette";
 import { TooltipPanel } from "./TooltipPanel";
 
@@ -23,6 +23,16 @@ export function SaturationTrend({ points }: { points: TrendPoint[] }) {
     );
   }
 
+  // Each small multiple gets its own single-unit axis (lib/format.ts axisScale) instead of
+  // the per-value ladder, which mixed comma-grouped and K-abbreviated ticks on one column.
+  const releasesAxis = axisScale(Math.max(0, ...points.map((p) => p.n_releases ?? 0)), "count", 4);
+  const revKey = hasP90 ? "p90_rev" : "median_rev";
+  const revAxis = axisScale(
+    Math.max(0, ...points.map((p) => (typeof p[revKey] === "number" ? (p[revKey] as number) : 0))),
+    "usd",
+    4,
+  );
+
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
       <div>
@@ -33,7 +43,10 @@ export function SaturationTrend({ points }: { points: TrendPoint[] }) {
             <XAxis dataKey="year" tick={{ fontSize: 10 }} tickLine={false} axisLine={{ stroke: "var(--baseline)" }} />
             <YAxis
               tick={{ fontSize: 10 }}
-              tickFormatter={(v: number) => fmtAxisCompact(v)}
+              ticks={releasesAxis.ticks}
+              interval={0}
+              domain={releasesAxis.domain}
+              tickFormatter={(v: number) => releasesAxis.format(v)}
               tickLine={false}
               axisLine={false}
               width={32}
@@ -67,7 +80,10 @@ export function SaturationTrend({ points }: { points: TrendPoint[] }) {
             <XAxis dataKey="year" tick={{ fontSize: 10 }} tickLine={false} axisLine={{ stroke: "var(--baseline)" }} />
             <YAxis
               tick={{ fontSize: 10 }}
-              tickFormatter={(v: number) => fmtAxisUsd(v)}
+              ticks={revAxis.ticks}
+              interval={0}
+              domain={revAxis.domain}
+              tickFormatter={(v: number) => revAxis.format(v)}
               tickLine={false}
               axisLine={false}
               width={44}
@@ -94,7 +110,7 @@ export function SaturationTrend({ points }: { points: TrendPoint[] }) {
             />
             <Line
               type="linear"
-              dataKey={hasP90 ? "p90_rev" : "median_rev"}
+              dataKey={revKey}
               stroke={CSS_VAR.demand}
               strokeWidth={1.5}
               dot={{ r: 4, fill: CSS_VAR.demand, strokeWidth: 2, stroke: "var(--surface-1)" }}

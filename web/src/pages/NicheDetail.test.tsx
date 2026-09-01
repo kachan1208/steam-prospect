@@ -7,12 +7,14 @@ import NicheDetail, {
   GAMES_PAGE_SIZE,
   NICHE_ROUTE_PATH,
   nicheDetailPath,
+  partialTrendYear,
   readGamesParams,
   readSelection,
   writeSelection,
   type DistMetric,
 } from "./NicheDetail";
 import { ThemeProvider } from "../lib/theme";
+import { axisTicks, installChartLayout } from "../test/recharts";
 
 afterEach(cleanup);
 
@@ -817,5 +819,176 @@ describe("NicheDetail — the games table multiplies out across the row", () => 
       // And the old pairing must fail that same check, which is the whole point.
       expect(Math.abs(g.owners_est * price - g.est_revenue)).toBeGreaterThan(0.05e6 * price);
     }
+  });
+});
+
+/**
+ * B4 — "Demand vs. pipeline, by year" plotted DOLLARS and RELEASE COUNTS against no axis
+ * at all: both <YAxis> carried `hide`, so there were no ticks, no units and no way to
+ * tell which line was which (the dashed Releases key rendered no swatch, because a
+ * Tailwind opacity modifier on a var()-valued colour produces nothing). The crossing
+ * point of two invisible scales means nothing, and the final year is a partial one —
+ * which is where the "2026 cliff" comes from.
+ *
+ * Fixture is the real GET /api/niches/tag/Action%20RTS saturation_trend (2026-09-01).
+ */
+describe("NicheDetail — demand vs. pipeline has two labelled axes (B4)", () => {
+  const TREND = [
+    { year: 2019, n_releases: 12, n_scored: 5, median_rev: 136_063.8, p90_rev: 781_295.04 },
+    { year: 2020, n_releases: 12, n_scored: 8, median_rev: 73_701.75, p90_rev: 1_462_368.99 },
+    { year: 2021, n_releases: 60, n_scored: 14, median_rev: 103_707.9, p90_rev: 554_240.79 },
+    { year: 2022, n_releases: 94, n_scored: 27, median_rev: 43_620.9, p90_rev: 354_705.18 },
+    { year: 2023, n_releases: 109, n_scored: 21, median_rev: 78_455.55, p90_rev: 2_619_427.23 },
+    { year: 2024, n_releases: 190, n_scored: 47, median_rev: 70_622.1, p90_rev: 5_874_407.82 },
+    { year: 2025, n_releases: 176, n_scored: 50, median_rev: 116_338.35, p90_rev: 11_245_567.59 },
+    { year: 2026, n_releases: 189, n_scored: 36, median_rev: 116_520.3, p90_rev: 1_202_827.44 },
+  ];
+
+  const DETAIL = {
+    dimension: "tag",
+    key: "Action RTS",
+    tier: "micro",
+    variants: [
+      {
+        dimension: "tag",
+        key: "Action RTS",
+        window: "24m",
+        min_reviews: 50,
+        n_games: 86,
+        median_rev: 123_540.9,
+        p90_rev: 9_650_604.6,
+        median_price: 14.99,
+        supply_brake: 1,
+        saturation_yoy: -0.0737,
+        n_recent_year: 176,
+        n_prior_year: 190,
+        opportunity_v2: 87.12,
+      },
+    ],
+    saturation_trend: TREND,
+    revenue_histogram: [],
+    representative_games: [],
+    players: null,
+    themes: [],
+    press: null,
+    hit_rates: { hit_rate_200k: null, hit_rate_500k: null, median_rev: null, n_games: null, winner_concentration: null },
+  };
+
+  let restore: () => void;
+
+  beforeEach(() => {
+    restore = installChartLayout(900, 320);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        const body = url.includes("/niches/tag/")
+          ? DETAIL
+          : url.includes("/market/benchmarks")
+            ? { cited: { pct_new_releases_over_100k: 0.085, revenue_benchmark_marks: [], dev_tiers: [] } }
+            : {};
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    restore();
+  });
+
+  function renderNiche() {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    return render(
+      <QueryClientProvider client={client}>
+        <ThemeProvider>
+          <MemoryRouter initialEntries={["/niches/tag/Action%20RTS"]}>
+            <Routes>
+              <Route path={NICHE_ROUTE_PATH} element={<NicheDetail />} />
+            </Routes>
+          </MemoryRouter>
+        </ThemeProvider>
+      </QueryClientProvider>,
+    );
+  }
+
+  /** The chart under test is the first recharts wrapper on the page. */
+  function trendChart(container: HTMLElement): HTMLElement {
+    return container.querySelector<HTMLElement>(".recharts-wrapper")!;
+  }
+
+  it("draws a LEFT dollar axis with ticks, not a hidden one", async () => {
+    const { container } = renderNiche();
+    expect(await screen.findByText("Demand vs. pipeline, by year")).toBeTruthy();
+    const ticks = axisTicks(trendChart(container), "y", 0);
+    expect(ticks.length).toBeGreaterThan(1);
+    for (const t of ticks) expect(t.startsWith("$")).toBe(true);
+  });
+
+  it("draws a RIGHT count axis with ticks, in its own unit", async () => {
+    const { container } = renderNiche();
+    expect(await screen.findByText("Demand vs. pipeline, by year")).toBeTruthy();
+    const ticks = axisTicks(trendChart(container), "y", 1);
+    expect(ticks.length).toBeGreaterThan(1);
+    for (const t of ticks) expect(t.startsWith("$")).toBe(false);
+  });
+
+  it("names each series' unit and side in the legend", async () => {
+    renderNiche();
+    expect(await screen.findByText(/P90 revenue \(\$, left\)/)).toBeTruthy();
+    expect(screen.getByText(/Releases \(count, right\)/)).toBeTruthy();
+  });
+
+  it("gives the DASHED releases series a dashed line swatch, not a blank span", async () => {
+    const { container } = renderNiche();
+    expect(await screen.findByText(/Releases \(count, right\)/)).toBeTruthy();
+    const key = screen.getByText(/Releases \(count, right\)/).closest("span")!.querySelector("svg line");
+    expect(key).not.toBeNull();
+    expect(key!.getAttribute("stroke-dasharray")).toBe("4 3");
+    // And the key matches the line: exactly one of the two curves is dashed.
+    // (recharts expands the pattern while its draw-on animation runs, so match the
+    // leading "4 3" rather than the whole attribute.)
+    // And the key's stroke is the line's stroke: each legend entry maps onto exactly one
+    // of the two curves. (The curves' own stroke-dasharray is unreadable here — recharts'
+    // draw-on animation parks it at "0px 0px" under jsdom's frameless clock — so the
+    // pairing is asserted on colour, which is stable.)
+    const curveStrokes = Array.from(container.querySelectorAll("path.recharts-line-curve")).map((p) =>
+      p.getAttribute("stroke"),
+    );
+    expect(curveStrokes).toHaveLength(2);
+    expect(new Set(curveStrokes).size).toBe(2);
+    expect(curveStrokes).toContain(key!.getAttribute("stroke"));
+  });
+
+  it("says out loud that the crossing point is an artifact of two scales", async () => {
+    renderNiche();
+    expect(await screen.findByText(/Where the lines cross means nothing/)).toBeTruthy();
+  });
+
+  it("flags the partial final year rather than letting its drop read as a cliff", async () => {
+    renderNiche();
+    expect(await screen.findByText(/2026 is a partial year \(marked\)/)).toBeTruthy();
+    expect(screen.getByText(/months of data missing, not a cliff/)).toBeTruthy();
+  });
+});
+
+describe("partialTrendYear", () => {
+  it("flags the current calendar year when the series reaches it", () => {
+    expect(partialTrendYear([{ year: 2024 }, { year: 2025 }, { year: 2026 }], new Date("2026-09-01"))).toBe(2026);
+  });
+
+  it("flags nothing when the series stops before the current year", () => {
+    expect(partialTrendYear([{ year: 2023 }, { year: 2024 }], new Date("2026-09-01"))).toBeNull();
+  });
+
+  it("flags nothing on an empty series", () => {
+    expect(partialTrendYear([], new Date("2026-09-01"))).toBeNull();
+  });
+
+  it("moves with the clock — the same series is complete a year later", () => {
+    const points = [{ year: 2025 }, { year: 2026 }];
+    expect(partialTrendYear(points, new Date("2026-01-02"))).toBe(2026);
+    expect(partialTrendYear(points, new Date("2027-06-01"))).toBeNull();
   });
 });

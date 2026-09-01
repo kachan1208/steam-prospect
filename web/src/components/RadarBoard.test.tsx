@@ -958,3 +958,84 @@ describe("RadarBoard — click-to-zoom (quadrants + the strip)", () => {
     expect(dot("Open Grower")!.getAttribute("opacity")).toBe("1");
   });
 });
+
+/**
+ * A1 — IN-PLOT ANNOTATIONS PAINT OVER THE DATA.
+ *
+ * Measured on production /radar (2026-09-01): the "FLOOD BAR +15% YOY — FLOODING BELOW"
+ * label's box overlapped 10 dots at 1440, 15 at 1024 and 11 at 390, every one of them
+ * LATER in document order than the label — so the trailing words were painted out by the
+ * dense cluster that sits on the bar. SVG paints in document order, and the label lived in
+ * xy-decor, which is the first group in the plate.
+ *
+ * These assert paint ORDER rather than pixels, because document order is the whole
+ * mechanism: no viewport, no font metric and no dataset can make a group that comes first
+ * paint last.
+ */
+describe("RadarBoard — annotation labels paint over the dots (A1)", () => {
+  /** A node's index in the plate's own document order == its paint order. */
+  function paintIndex(container: HTMLElement, node: Element): number {
+    const plate = container.querySelector('svg[role="img"]')!;
+    return Array.from(plate.querySelectorAll("*")).indexOf(node);
+  }
+
+  it("puts the flood-bar label AFTER every blip dot", () => {
+    const { container } = renderBoard(
+      [
+        makeBlip("On The Bar A", { demand_trend_24m_pct: 5, saturation_yoy: 0.15, opportunity_v2: 60 }),
+        makeBlip("On The Bar B", { demand_trend_24m_pct: 12, saturation_yoy: 0.16, opportunity_v2: 58 }),
+        makeBlip("Roguelike Deckbuilder", REFERENCE),
+      ],
+      true,
+    );
+    const label = screen.getByText(/FLOOD BAR/);
+    const dots = Array.from(container.querySelectorAll('circle[data-testid^="radar-blip-"]'));
+    expect(dots.length).toBeGreaterThan(0);
+    for (const d of dots) {
+      expect(paintIndex(container, label)).toBeGreaterThan(paintIndex(container, d));
+    }
+  });
+
+  it("puts the enter-bar label and all four quadrant readings after the dots too", () => {
+    const { container } = renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    const lastDot = Array.from(container.querySelectorAll('circle[data-testid^="radar-blip-"]')).pop()!;
+    const labels = [
+      screen.getByText(/ENTER BAR/),
+      screen.getByText("GROWING · OPEN"),
+      screen.getByText("GROWING · FLOODING"),
+      screen.getByText("SHRINKING · FLOODING"),
+      screen.getByText("FLAT/SHRINKING · OPEN"),
+    ];
+    for (const label of labels) {
+      expect(paintIndex(container, label)).toBeGreaterThan(paintIndex(container, lastDot));
+    }
+  });
+
+  it("leaves the bars' own HAIRLINES under the data — a gridline belongs below it", () => {
+    const { container } = renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    const firstDot = container.querySelector('circle[data-testid^="radar-blip-"]')!;
+    expect(paintIndex(container, screen.getByTestId("xy-bar-flood"))).toBeLessThan(
+      paintIndex(container, firstDot),
+    );
+    expect(paintIndex(container, screen.getByTestId("xy-bar-demand"))).toBeLessThan(
+      paintIndex(container, firstDot),
+    );
+  });
+
+  it("keeps the annotation layer pointer-inert, so no dot loses its hover or click", () => {
+    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    expect(screen.getByTestId("xy-annotations").getAttribute("pointer-events")).toBe("none");
+    fireEvent.click(screen.getByText(/FLOOD BAR/));
+    expect(screen.queryByTestId("verdict-dossier")).toBeNull();
+    // The dot underneath still opens its dossier.
+    fireEvent.click(screen.getByTestId("radar-blip-tag:Roguelike Deckbuilder"));
+    expect(screen.getByTestId("verdict-dossier")).toBeTruthy();
+  });
+
+  it("keeps a knockout halo on the label, so glyphs stay legible where they cross a dot", () => {
+    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    const label = screen.getByText(/FLOOD BAR/);
+    expect(label.style.paintOrder).toBe("stroke");
+    expect(Number(label.style.strokeWidth)).toBeGreaterThan(0);
+  });
+});

@@ -1,7 +1,7 @@
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { useGamePriceHistory, type PricePoint } from "../../lib/api";
-import { fmtPrice, fmtUsd, monthName } from "../../lib/format";
+import { axisScale, fmtPrice, fmtUsd, monthName } from "../../lib/format";
 import { CSS_VAR } from "../../lib/palette";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 
@@ -89,6 +89,11 @@ export function PriceHistoryChart({ appid, priceInitial }: { appid: number; pric
     .filter((p) => p.final_cents !== null)
     .map((p) => ({ ...p, usd: (p.final_cents as number) / 100 }));
 
+  // The price axis is anchored at $0 (a -50% sale only reads honestly against zero) with
+  // ticks we compute rather than let recharts derive from a x1.1 headroom domain — that
+  // produced literally unevenly-spaced ticks: "$0 / $9 / $18 / $33" on a $29.99 title.
+  const y = axisScale(Math.max(0, ...data.map((d) => d.usd)), "usd", 4);
+
   // dots (1-2 points): every snapshot is a visible dot and the line stroke is hidden —
   // two points joined by a stroke would read as a month of continuous price knowledge
   // we don't have. line (>= 3): the stroke carries the series and only discount days
@@ -130,12 +135,11 @@ export function PriceHistoryChart({ appid, priceInitial }: { appid: number; pric
           />
           <YAxis
             // Anchored at $0 — price deltas (a -50% sale) only read honestly against zero.
-            domain={[0, (max: number) => Math.ceil(max * 1.1)]}
+            ticks={y.ticks}
+            interval={0}
+            domain={y.domain}
             tick={{ fontSize: 10 }}
-            // fmtUsd renders sub-$10 values with cents, so one axis mixed "$33 · $18 ·
-            // $9.00 · $0.00". Whole-dollar ticks print bare ("$9"); the rare fractional
-            // tick keeps its cents rather than get rounded onto a gridline it isn't at.
-            tickFormatter={(v: number) => (Number.isInteger(v) ? `$${v}` : `$${v.toFixed(2)}`)}
+            tickFormatter={(v: number) => y.format(v)}
             tickLine={false}
             axisLine={false}
             width={40}

@@ -240,7 +240,10 @@ describe("NicheDistribution — buckets, labels and states", () => {
   it("renders one band per bucket, keeping empty buckets", () => {
     renderChart();
     expect(bands()).toHaveLength(REVENUE.length);
-    expect(screen.getByRole("button", { name: "$1.0M – $10.0M: 0 games" })).toBeTruthy();
+    // "$1.0M – $10.0M" before the one-unit-per-axis change: these log-spaced edges span
+    // five decades, so each label now takes the largest unit whose mantissa is >= 1 with
+    // the fewest exact decimals — "$1M", never "$1.0M" beside a "$100K".
+    expect(screen.getByRole("button", { name: "$1M – $10M: 0 games" })).toBeTruthy();
   });
 
   it("marks every bucket inside the selection as pressed, empty ones included", () => {

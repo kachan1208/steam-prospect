@@ -25,7 +25,7 @@ import {
   totalRevSub,
 } from "../lib/entities";
 import { fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
-import { genreTintStyle, heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
+import { genreTintStyle, genreTintStyles, heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { CSS_VAR, MONO} from "../lib/palette";
 import { usePageTitle } from "../lib/usePageTitle";
 
@@ -217,16 +217,21 @@ export default function EntityProfile() {
               )}
             </div>
             {entity.top_genres.length > 0 && (
+              // Tinted as a GROUP — the per-name hash collided inside this very row
+              // (Action = Racing, RPG = Simulation), see lib/heat.ts.
               <div className="mt-2 flex flex-wrap gap-1">
-                {entity.top_genres.map((g) => (
-                  <span
-                    key={g}
-                    className="rounded-full border px-2 py-0.5 text-[10px] text-ink-secondary"
-                    style={genreTintStyle(g)}
-                  >
-                    {g}
-                  </span>
-                ))}
+                {(() => {
+                  const tints = genreTintStyles(entity.top_genres);
+                  return entity.top_genres.map((g, i) => (
+                    <span
+                      key={g}
+                      className="rounded-full border px-2 py-0.5 text-[10px] text-ink-secondary"
+                      style={tints[i]}
+                    >
+                      {g}
+                    </span>
+                  ));
+                })()}
               </div>
             )}
           </div>
