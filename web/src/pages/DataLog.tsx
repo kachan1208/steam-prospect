@@ -83,7 +83,7 @@ export default function DataLog() {
   usePageTitle("Data log");
   const { data, isLoading, isError } = useQuery({
     queryKey: ["refresh-history"],
-    queryFn: () => request<{ runs: Run[] }>("/refresh/history"),
+    queryFn: ({ signal }) => request<{ runs: Run[] }>("/refresh/history", { signal }),
   });
   const runs = data?.runs ?? [];
 

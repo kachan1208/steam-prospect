@@ -32,11 +32,19 @@ def refresh_history(
     runs: list[dict] = []
     if path.exists():
         try:
-            for line in path.read_text().splitlines():
-                line = line.strip()
-                if line:
-                    runs.append(json.loads(line))
-        except (OSError, ValueError):
-            runs = []
+            text = path.read_text()
+        except OSError:
+            text = ""
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                runs.append(json.loads(line))
+            except ValueError:
+                # Per-line, like the mcp-log viewer in analytics.py: ONE corrupt line
+                # (a torn append from a crash mid-write) skips itself instead of wiping
+                # the whole history.
+                continue
     runs.sort(key=lambda r: r.get("finished_at", ""), reverse=True)
     return RefreshHistory(runs=runs[:limit], total=len(runs), limit=limit)

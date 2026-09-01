@@ -23,6 +23,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates tini \
     && rm -rf /var/lib/apt/lists/*
 
+# Unprivileged user the API runs as. The image still STARTS as root — the entrypoint needs
+# it to prepare the data dir (mkdir, mart download, chown of a root-owned host mount) — and
+# its final exec drops to this user via setpriv (util-linux, in the slim base). Deliberately
+# NO `USER` directive here: it would make the entrypoint itself unprivileged and break the
+# boot-time setup on a fresh volume.
+RUN useradd --system --user-group --create-home --home-dir /home/prospect \
+        --shell /usr/sbin/nologin prospect
+
 WORKDIR /app
 
 # Python deps first (cached unless the lock changes).
@@ -59,4 +67,13 @@ ENV PROSPECT_STATIC_DIR=/app/web_dist \
     PORT=8080
 
 EXPOSE 8080
+
+# Liveness, stdlib-only (the slim image has no curl): /api/health answers 200 even in
+# degraded mode by design, so a mart-less container stays "healthy" — the degraded state
+# is the CI smoke test's contract, not a fault. Readiness is /api/health/ready, probed by
+# deploy/run-prospect.sh at deploy time; probing it here would mark every slow mart
+# download a failed container. $PORT is expanded by the shell form.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5m --retries=3 \
+    CMD python -c "import urllib.request, sys; r = urllib.request.urlopen('http://127.0.0.1:${PORT:-8080}/api/health', timeout=8); sys.exit(0 if r.status == 200 else 1)"
+
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

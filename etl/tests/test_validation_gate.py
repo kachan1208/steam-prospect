@@ -230,9 +230,13 @@ def test_absolute_floors_fail_without_any_previous_mart(tmp_path):
     build, where a structurally broken mart has nothing to be compared against."""
     new = _make_mart(tmp_path / "new.duckdb", {"mart_game": 10, "mart_niche": 5})
     failures = bm.validate_mart(new, None)
-    assert len(failures) == 2, failures
-    assert any("mart_game" in f and "floor" in f for f in failures)
-    assert any("mart_niche" in f and "floor" in f for f in failures)
+    # Assert the two marts this fixture gutted are BOTH caught, not an exact failure count:
+    # every floor added to VALIDATE_MIN_ROWS later also fires here (a table absent from the
+    # fixture reads as 0 rows), so a count assertion breaks on unrelated, correct additions.
+    # What this test is for is that the floors fire at all with no previous mart to compare to.
+    assert any("mart_game" in f and "floor" in f for f in failures), failures
+    assert any("mart_niche" in f and "floor" in f for f in failures), failures
+    assert all("floor" in f for f in failures), failures
 
 
 def test_absolute_floors_use_the_real_shipped_values():

@@ -524,6 +524,13 @@ def _require_list_capabilities(sort: str, min_reviews: int) -> None:
         )
 
 
+def _like_escape(q: str) -> str:
+    """Escape the ILIKE wildcards so a user-typed '%' or '_' matches literally instead of
+    acting as a pattern (the games.py contains(name_lower, ?) path gets this for free;
+    this ILIKE needs it explicitly). Mirrors entities.py's copy."""
+    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _build_filters(
     dimension: str,
     window: str,
@@ -536,8 +543,8 @@ def _build_filters(
     where = "WHERE dimension = ? AND win = ? AND min_reviews = ?"
     params: list = [dimension, window, min_reviews]
     if q:
-        where += " AND key ILIKE ?"
-        params.append(f"%{q}%")
+        where += " AND key ILIKE ? ESCAPE '\\'"
+        params.append(f"%{_like_escape(q)}%")
     if tiers is not None and dimension == "tag":
         wanted = [t.strip() for t in tiers.split(",") if t.strip()]
         bad = [t for t in wanted if t not in _TIERS]

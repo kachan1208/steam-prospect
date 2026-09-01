@@ -14,12 +14,18 @@ import {
   YAxis,
 } from "recharts";
 
-import { request } from "../../lib/api";
+import {
+  gamePlayersQueryOptions,
+  gameTrendsQueryOptions,
+  type GamePlayersMonthlyPoint,
+  type GamePlayersPoint,
+  type GamePlayersResponse,
+  type GameTrendPoint,
+} from "../../lib/api";
 import { fmtAxisCompact, fmtAxisUsd, fmtCompact, fmtInt, fmtPrice, fmtUsd } from "../../lib/format";
 import { channelColor, CSS_VAR } from "../../lib/palette";
 import { BulletMeter } from "../ui/Meter";
 import { TooltipPanel } from "./TooltipPanel";
-import type { GameTrendPoint } from "./GameTrendsChart";
 
 /**
  * Click-through drilldown for the Game Profile stat row: GameProfile.tsx keeps "which card is
@@ -85,43 +91,6 @@ export interface DrilldownProfile {
   total_reviews: number | null;
   owners_mid: number | null;
   live_players: number | null;
-}
-
-interface TrendsResponse {
-  appid: number;
-  eligible: boolean;
-  points: GameTrendPoint[];
-}
-
-/** GET /api/games/{appid}/players — daily CCU point samples (mart_game_players_daily). */
-interface PlayersPoint {
-  date: string; // 'YYYY-MM-DD'
-  players: number;
-}
-
-interface PlayersSummary {
-  live_players: number | null;
-  players_7d_avg: number | null;
-  players_trend_7d_pct: number | null;
-  n_days_measured: number;
-  first_date: string | null;
-  last_date: string | null;
-}
-
-interface PlayersMonthlyPoint {
-  month: string; // 'YYYY-MM-DD' (month start)
-  avg_players: number;
-  peak_players: number | null;
-}
-
-interface PlayersResponse {
-  appid: number;
-  days: number;
-  available: boolean; // false = mart predates the daily CCU marts -> fall back to monthly
-  summary: PlayersSummary | null;
-  points: PlayersPoint[];
-  // Deep monthly history via steamcharts (top-8k games; empty when uncovered/absent).
-  monthly?: PlayersMonthlyPoint[];
 }
 
 interface SeriesPoint {
@@ -409,7 +378,7 @@ function LivePlayersDrilldown({
   thin,
 }: {
   points: GameTrendPoint[];
-  daily: PlayersResponse | null;
+  daily: GamePlayersResponse | null;
   livePlayers: number | null;
   thin: boolean;
 }) {
@@ -446,7 +415,7 @@ function LivePlayersDrilldown({
                   cursor={{ stroke: "var(--baseline)" }}
                   content={({ active, payload, label }) => {
                     if (!active || !payload || payload.length === 0) return null;
-                    const p = payload[0].payload as PlayersPoint;
+                    const p = payload[0].payload as GamePlayersPoint;
                     return (
                       <TooltipPanel
                         title={String(label)}
@@ -566,7 +535,7 @@ function LivePlayersDrilldown({
                 cursor={{ stroke: "var(--baseline)" }}
                 content={({ active, payload, label }) => {
                   if (!active || !payload || payload.length === 0) return null;
-                  const p = payload[0].payload as PlayersMonthlyPoint;
+                  const p = payload[0].payload as GamePlayersMonthlyPoint;
                   return (
                     <TooltipPanel
                       title={String(label).slice(0, 7)}
@@ -630,20 +599,18 @@ export function GameMetricDrilldown({
   profile: DrilldownProfile;
   ownersPerReview: OwnersPerReview | null;
 }) {
+  // Shared factories from lib/api.ts — the trends query shares its cache entry with
+  // GameTrendsChart's self-fetch by construction (one request for both components).
   const trendsQuery = useQuery({
-    queryKey: ["game-trends", appid],
-    queryFn: () => request<TrendsResponse>(`/games/${appid}/trends`),
+    ...gameTrendsQueryOptions(appid),
     enabled: Number.isFinite(appid),
-    staleTime: 5 * 60_000,
   });
   // Daily CCU samples — only fetched for the live_players drilldown; the endpoint answers
   // available=false on marts that predate the daily CCU marts (we then fall back to the
   // monthly ccu_avg series above).
   const playersQuery = useQuery({
-    queryKey: ["game-players", appid],
-    queryFn: () => request<PlayersResponse>(`/games/${appid}/players?days=90`),
+    ...gamePlayersQueryOptions(appid),
     enabled: Number.isFinite(appid) && metric === "live_players",
-    staleTime: 5 * 60_000,
   });
 
   if (trendsQuery.isLoading) {

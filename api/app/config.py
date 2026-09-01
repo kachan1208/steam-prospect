@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # app -> api -> prospect
@@ -39,11 +40,28 @@ class Settings(BaseSettings):
     # rendered on the in-app "Data log" page. Default sits in the (mounted) data dir.
     refresh_history_path: str = str(REPO_ROOT / "data" / "refresh_history.json")
 
+    # Live collector signals SQLite file (api/app/signals_db.py) — read at query time, so
+    # an absent file degrades per request. Env var name unchanged (PROSPECT_SIGNALS_DB).
+    signals_db: str = "/app/data/signals.db"
+
     cors_origins: list[str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:4173",
     ]
+
+    @field_validator("cors_origins")
+    @classmethod
+    def _no_wildcard_origin(cls, origins: list[str]) -> list[str]:
+        # main.py registers CORSMiddleware with allow_credentials=True, where origin "*"
+        # is both rejected by browsers per the CORS spec and an open-credentials hole —
+        # fail at boot instead of misbehaving at request time.
+        if "*" in origins:
+            raise ValueError(
+                'PROSPECT_CORS_ORIGINS may not contain "*" — allow_credentials=True '
+                "requires explicit origins (list them, e.g. https://app.example.com)"
+            )
+        return origins
 
     api_title: str = "Prospect API"
     api_version: str = "0.1.0"
@@ -58,10 +76,12 @@ class Settings(BaseSettings):
     # the only part of that header a client cannot forge. Production is exactly one: Caddy on
     # the droplet terminates TLS on :443 and `reverse_proxy 127.0.0.1:8080`s into the
     # container (the port is bound to loopback, so Caddy is the only possible peer), and
-    # Caddy APPENDS the real peer to any client-supplied X-Forwarded-For. 0 = nothing
-    # trustworthy in front, ignore the header entirely and use the socket peer
-    # (env: PROSPECT_TRUSTED_PROXY_HOPS). See rate_limit._client_key.
-    trusted_proxy_hops: int = 1
+    # Caddy APPENDS the real peer to any client-supplied X-Forwarded-For — deploy/entrypoint.sh
+    # sets PROSPECT_TRUSTED_PROXY_HOPS=1 for that. The DEFAULT is 0 = nothing trustworthy
+    # in front: ignore the header entirely and use the socket peer. Trusting a hop by
+    # default would let any direct client forge its rate-limit identity, so operators
+    # behind a proxy must opt in (env: PROSPECT_TRUSTED_PROXY_HOPS). See rate_limit._client_key.
+    trusted_proxy_hops: int = 0
 
     # Observability (api/app/observability.py). Sentry is fully inert until
     # PROSPECT_SENTRY_DSN is set — local dev runs with zero Sentry footprint, no

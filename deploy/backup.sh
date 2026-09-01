@@ -39,7 +39,9 @@
 # stale" page — a false alarm on the one channel that has to stay trustworthy. Prune
 # failures are logged and set the exit code instead.
 #
-# Version-controlled at prospect/deploy/backup.sh; scp'd to /root/backup.sh.
+# Version-controlled at prospect/deploy/backup.sh; runs from the git checkout at
+# /root/prospect/deploy/backup.sh (the flat /root/backup.sh copy it used to be scp'd to
+# is retired — `git pull` in /root/prospect is the whole deploy for shell changes).
 set -uo pipefail
 
 # shellcheck source=deploy/lib.sh

@@ -1,6 +1,7 @@
 """Prospect API entrypoint."""
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import analytics_db
 from .config import settings
@@ -43,6 +45,56 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.api_title, version=settings.api_version, lifespan=lifespan)
+
+# Body-size cap for the two public WRITE surfaces (the analytics collect endpoint and the
+# /mcp mount). Everything else is read-only over precomputed marts and already bounded, so
+# it is left un-capped. Registered FIRST (add_middleware makes the LAST-added outermost),
+# i.e. innermost: a 413 still passes the rate limiter and RequestContextMiddleware on the
+# way out, so it gets an X-Request-ID + access-log line like a 429 does, and CORS (added
+# last below) still wraps it — same convention as the rate limiter's placement.
+_MAX_WRITE_BODY_BYTES = 64 * 1024
+_WRITE_PATH_PREFIXES = ("/api/analytics/collect", "/mcp")
+
+
+class BodyLimitMiddleware:
+    """Pure-ASGI (same idiom as RateLimitMiddleware — nothing here buffers bodies).
+
+    Only the declared Content-Length is checked. Requests WITHOUT a Content-Length
+    (chunked transfer) are let through: the collect body is pydantic-validated to a small
+    batch and the MCP transport bounds its own frames, and buffering the stream just to
+    measure it would spend the memory this middleware exists to save."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope.get("path", "").startswith(_WRITE_PATH_PREFIXES):
+            content_length: int | None = None
+            for name, value in scope.get("headers") or []:
+                if name == b"content-length":
+                    try:
+                        content_length = int(value.decode("latin-1"))
+                    except ValueError:
+                        content_length = None
+                    break
+            if content_length is not None and content_length > _MAX_WRITE_BODY_BYTES:
+                body = json.dumps({"detail": "request body too large"}).encode()
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 413,
+                        "headers": [
+                            (b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode()),
+                        ],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body})
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(BodyLimitMiddleware)
 
 # O3 (metrics /metrics + structured request logging + env-gated Sentry) + O4 (per-IP
 # rate limiter on POST /api/analytics/collect and /mcp — rate_limit.py, env-tunable via
@@ -112,9 +164,29 @@ if _SERVE_SPA:
     # (/niches, /devlog, …) survive a hard refresh.
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_fallback(full_path: str):
-        if full_path.startswith(("api", "docs", "redoc", "openapi.json", "metrics", "mcp")):
+        # Compare the first path SEGMENT, not a bare string prefix. startswith(("api", ...))
+        # also swallows /apiary, /metricsboard, /docsearch, /mcpx and /redocs-guide — so any
+        # future client-side route whose name merely BEGINS with one of these words would 404
+        # on a hard refresh while working fine on in-app navigation, which is a maddening
+        # class of bug to track down. These names are reserved as whole segments, not prefixes.
+        if full_path.split("/", 1)[0] in {
+            "api", "docs", "redoc", "openapi.json", "metrics", "mcp",
+        }:
+            raise HTTPException(status_code=404)
+        # Path traversal: uvicorn percent-decodes the path BEFORE routing, so a request
+        # like GET /%2e%2e/secret.txt arrives here as "../secret.txt" and the naive
+        # `_STATIC_DIR / full_path` join served any readable file on the box. Reject any
+        # ".." segment outright...
+        if ".." in full_path.split("/"):
             raise HTTPException(status_code=404)
         candidate = _STATIC_DIR / full_path
-        if full_path and candidate.is_file():
+        # ...and defense-in-depth: only ever serve a file that RESOLVES inside the static
+        # dir (symlinks and any other normalization included); anything else falls through
+        # to index.html instead of being served.
+        if (
+            full_path
+            and candidate.is_file()
+            and candidate.resolve().is_relative_to(_STATIC_DIR.resolve())
+        ):
             return FileResponse(str(candidate))
         return FileResponse(str(_INDEX_HTML))

@@ -1,12 +1,14 @@
 # shellcheck shell=bash
 # deploy/lib.sh — tiny shared helpers for the droplet ops scripts (prospect-refresh.sh,
-# light-build-cron.sh, rollback.sh, backup.sh). scp'd to /root/lib.sh next to them by
-# deploy/deploy-scripts.sh; every consumer sources it as "$(dirname "$0")/lib.sh" so the
-# same line works both in the repo (deploy/) and on the box (/root/).
+# light-build-cron.sh, rollback.sh, backup.sh). Runs from the git checkout at
+# /root/prospect/deploy/ next to them (2026-09-01: it used to be scp'd flat to /root/lib.sh
+# by deploy/deploy-scripts.sh — the checkout is canonical now, `git pull` ships it); every
+# consumer sources it as "$(dirname "$0")/lib.sh" so the same line works both in the repo
+# (deploy/) and on the box.
 #
 # Deliberately NOT sourced by cron-wrap.sh: the wrapper is the outermost guard for every
 # cron job, and it must not gain a file dependency that could turn "lib.sh missing after a
-# partial scp" into "no cron job on the box runs at all".
+# partial checkout" into "no cron job on the box runs at all".
 
 PROSPECT_VM_IMPORT="${PROSPECT_VM_IMPORT:-http://localhost:8428/api/v1/import/prometheus}"
 
@@ -25,10 +27,12 @@ prospect_push_metrics() {
 
 # prospect_http_code PATH — echo the HTTP status of PATH ("000" if nothing answered).
 # Probes INSIDE the container first (docker exec + the image's own curl against the container
-# port 8080 — immune to whatever host port mapping `docker run` used, which is not recorded in
-# this repo), then falls back to the host port.
-# NEEDS-VERIFICATION: the host-port fallback assumes -p 8080:8080; confirm with
-# `docker port prospect` on the droplet and export PROSPECT_HEALTH_HOST_PORT if different.
+# port 8080 — immune to whatever host port mapping `docker run` used), then falls back to the
+# host port.
+# The host-port assumption is CONFIRMED, not guessed: deploy/run-prospect.sh (captured from
+# the live container 2026-08-29) is the repo's record of the run flags and publishes the
+# container on 127.0.0.1:8080->8080. PROSPECT_HEALTH_HOST_PORT stays as the escape hatch if
+# that script's mapping ever changes.
 prospect_http_code() {
     local path="$1" code=""
     code=$(docker exec prospect curl -s -o /dev/null -m 5 -w '%{http_code}' \

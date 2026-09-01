@@ -259,13 +259,26 @@ function AppShell() {
 
 // Emits a page-view event on every client-side route change (the server never sees SPA
 // navigations) and wires the flush-on-unload listeners once. Rendered inside the Router.
+
+// StrictMode mounts effects twice in dev, which double-fired the MOUNT pageview (back-to-
+// back effects for the same path, microseconds apart). Module-level dedupe: the same path
+// firing again within ~100ms is the double-mount, not a real revisit — a genuine
+// navigate-away-and-back always crosses a different path in between.
+let lastTracked = { path: "", at: 0 };
+function trackPageviewOnce(path: string): void {
+  const now = Date.now();
+  if (path === lastTracked.path && now - lastTracked.at < 100) return;
+  lastTracked = { path, at: now };
+  trackPageview(path);
+}
+
 function RouteTracker() {
   const location = useLocation();
   useEffect(() => {
     initAnalytics();
   }, []);
   useEffect(() => {
-    trackPageview(location.pathname);
+    trackPageviewOnce(location.pathname);
   }, [location.pathname]);
   return null;
 }

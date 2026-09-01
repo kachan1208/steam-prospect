@@ -40,6 +40,7 @@ import argparse
 import hashlib
 import os
 import re
+import subprocess
 import sys
 import time
 from datetime import date, datetime, timezone
@@ -643,8 +644,19 @@ SENTIMENT_CACHE_DB_NAME = "sentiment_cache.duckdb"  # lives in --data-dir, delib
                                                      # prospect_*.duckdb — main()'s retention logic
                                                      # prunes old dated marts; this file must survive.
 SENTIMENT_CACHE_VERSION = 1  # bump to force a full rescore even when none of the hashed config
+                              # HELD AT 1 DELIBERATELY (2026-09-01). A project-review pass set
+                              # this to 2 to repair the 0.62% of mentions frozen by the OOM-killed
+                              # builds — a real, well-measured gap. But bumping it here schedules a
+                              # 21.7M-row rescore as an invisible side effect of a 37-file commit,
+                              # on the night after this pipeline produced its FIRST clean nightly in
+                              # three days. af1ba5b exists specifically to avoid that wipe. Do the
+                              # rescore as its own change, on a night someone is watching.
                               # knobs below changed (e.g. a vaderSentiment version bump, or a fix to
                               # the scoring code itself that a config-value hash can't see).
+                              # 1 -> 2 (2026-09-01): the one-time repair of the frozen 0.62%
+                              # mention hole documented in _build_aspect_keyword_votes' KNOWN GAP
+                              # paragraph — the first full build after this bump wipes and
+                              # refills the cache.
 
 # Domain-tuned VADER lexicon overrides (2026-07). Stock VADER is a general-English lexicon: it has
 # no notion that "horror"/"brutal"/"insane"/"sick" are GENRE or INTENSITY descriptors in game
@@ -958,6 +970,9 @@ def build_params() -> dict[str, str]:
         # must not require editing a list of labels in a second file.
         "ASPECT_LABEL_VALUES": ", ".join(
             "('" + label.replace("'", "''") + "')" for (label, _p, _rx) in ASPECT_LEXICON),
+        # The ten excerpt arms of mart_game_aspect_reviews.sql's _aspectrev_matched,
+        # generated from ASPECT_LEXICON — see _aspect_excerpt_arms_sql().
+        "ASPECT_REVIEW_ARMS": _aspect_excerpt_arms_sql(),
         "ASPECT_SENTENCE_CHARS": ASPECT_SENTENCE_CHARS,
         "ASPECT_WINDOW_SLICE_BEFORE": ASPECT_WINDOW_SLICE_BEFORE,
         "ASPECT_WINDOW_SLICE_CHARS": ASPECT_WINDOW_SLICE_CHARS,
@@ -1023,8 +1038,9 @@ def build_params() -> dict[str, str]:
         "PRESS_MIN_CONFIDENCE": PRESS_MIN_CONFIDENCE,
         "PRESS_NOTABLE_N": PRESS_NOTABLE_N,
         "ASPECT_REVIEWS_TOP_K": ASPECT_REVIEWS_TOP_K,
-        "SENTIMENT_POS_THRESHOLD": SENTIMENT_POS_THRESHOLD,
-        "SENTIMENT_NEG_THRESHOLD": SENTIMENT_NEG_THRESHOLD,
+        # SENTIMENT_POS_THRESHOLD / SENTIMENT_NEG_THRESHOLD appear ONCE, above, next to the
+        # other VADER cutoffs (a duplicate pair lived here until 2026-09-01 — same values,
+        # silently shadowed by the dict, deleted rather than kept as a sync hazard).
         "NICHE_THEMES_MIN_GAMES": NICHE_THEMES_MIN_GAMES,
         "NICHE_PRESS_MIN_GAMES": NICHE_PRESS_MIN_GAMES,
         "NICHE_PRESS_TOP_OUTLETS": NICHE_PRESS_TOP_OUTLETS,
@@ -1055,9 +1071,13 @@ def render(sql: str, params: dict) -> str:
     for key, val in params.items():
         sql = sql.replace(f"@{key}@", str(val))
     if "@" in sql:
-        # Surface any unresolved token instead of silently shipping bad SQL.
+        # Surface any unresolved token instead of silently shipping bad SQL. The pattern is
+        # deliberately WIDER than the real placeholder alphabet (@[A-Z_]+@): a typo'd token
+        # with a digit or a lowercase letter (@LANG_TOP_n@, @LANG_T0P_N@) must be caught HERE
+        # as an unresolved placeholder, not shipped to DuckDB as an opaque syntax error hours
+        # into a mart build. (2026-09-01 — was @[A-Z_]+@, which let typos through.)
         import re
-        leftovers = set(re.findall(r"@[A-Z_]+@", sql))
+        leftovers = set(re.findall(r"@[A-Za-z0-9_]+@", sql))
         if leftovers:
             raise ValueError(f"Unresolved SQL placeholders: {sorted(leftovers)}")
     return sql
@@ -1850,6 +1870,61 @@ def _aspect_window_sql(pool: str) -> str:
     return "\nUNION ALL\n".join(arms)
 
 
+# One excerpt arm of mart_game_aspect_reviews.sql's _aspectrev_matched, byte-for-byte the
+# shape the file hand-maintained until 2026-09-01 — ten near-identical SELECTs differing
+# only in the aspect keyword regex and the kw_aspect filter. The windowing algebra (and why
+# it is exact + cheap) is documented at _aspectrev_matched's header IN THE SQL FILE; this is
+# only its mechanical side. Generated here, from the same ASPECT_LEXICON the @RX_*@
+# placeholders render from, so a lexicon edit moves all ten arms at once and the file cannot
+# drift arm-by-arm (the review that found this also found two arms had once drifted into a
+# scoring-stream cutoff — see _build_aspect_keyword_votes' KNOWN GAP). The window-size
+# constants are baked in as their literal values (same numbers @ASPECT_WINDOW_SLICE_*@ /
+# @ASPECT_SENTENCE_CHARS@ would render to), so the rendered SQL is byte-identical to the
+# hand-maintained original — pinned by rendering before/after in review, and any future
+# change to this template must keep the rendered output diffable against the marts.
+_ASPECT_EXCERPT_ARM = """    SELECT appid, recommendationid, aspect, sentiment, votes_up, playtime_minutes,
+        timestamp_created, language,
+        CASE WHEN kw_pos - {slice_before} > 1
+             THEN regexp_replace(substr(review_text, kw_pos - {slice_before}, {slice_chars}), '^\\S+', '')
+             ELSE substr(review_text, 1, {slice_chars})
+        END AS slice,
+        length(regexp_extract(slice, '^([\\s\\S]*?)(?:{rx})', 1, 'i')) + 1 AS kw_off,
+        reverse(regexp_extract(reverse(substr(slice, 1, kw_off - 1)), '^[^.!?;\\n]*', 0)) AS clause_l,
+        regexp_extract(substr(slice, kw_off), '^[^.!?;\\n]*', 0) AS clause_r,
+        CASE WHEN regexp_matches(slice, '{rx}', 'i')
+             THEN substr(regexp_extract(
+                      CASE WHEN length(clause_l) > {sentence_chars}
+                           THEN substr(clause_l || clause_r, length(clause_l) - {sentence_chars})
+                           ELSE ' ' || clause_l || clause_r
+                      END,
+                      '^[\\s\\S][\\s\\S]{{0,{sentence_chars}}}(?:{rx})[\\s\\S]{{0,{sentence_chars}}}', 0, 'i'
+                  ), 2)
+             ELSE ''
+        END AS window_text,
+        COALESCE(window_text, substr(review_text, 1, 2 * {sentence_chars})) AS excerpt_body,
+        strpos(review_text, window_text) AS win_start,
+        length(review_text) AS text_len,
+        list_distinct(list_transform(regexp_extract_all(excerpt_body, '{rx}', 1, 'i'), x -> lower(x))) AS matched_keywords
+    FROM (SELECT *, length(regexp_extract(review_text, '^([\\s\\S]*?)(?:{rx})', 1, 'i')) + 1 AS kw_pos
+          FROM _aspectrev_surv WHERE kw_aspect = '{label}')"""
+
+
+def _aspect_excerpt_arms_sql() -> str:
+    """The ten _aspectrev_matched arms, rendered into mart_game_aspect_reviews.sql via the
+    @ASPECT_REVIEW_ARMS@ placeholder (see _ASPECT_EXCERPT_ARM above for why this lives in
+    Python). Same single-source-of-truth contract as _aspect_window_sql."""
+    arms = []
+    for label, _placeholder, rx in ASPECT_LEXICON:
+        arms.append(_ASPECT_EXCERPT_ARM.format(
+            rx=rx.replace("'", "''"),            # SQL single-quote escape (none today, but be safe)
+            label=label.replace("'", "''"),
+            slice_before=ASPECT_WINDOW_SLICE_BEFORE,
+            slice_chars=ASPECT_WINDOW_SLICE_CHARS,
+            sentence_chars=ASPECT_SENTENCE_CHARS,
+        ))
+    return "\n\n    UNION ALL\n".join(arms)
+
+
 def _sentiment_cache_enabled() -> bool:
     """Kill-switch: PROSPECT_SENTIMENT_CACHE=off (or =0) disables the cache entirely — no ATTACH,
     no cache reads/writes, every run does a full rescore exactly as it did before this feature
@@ -2150,6 +2225,12 @@ def _build_aspect_keyword_votes(con: duckdb.DuckDBPyConnection, mention_table: s
     Until it is done, the same rows are already missing from the TEXT-sentiment columns and the
     drill-down excerpts, which have read this cache since 2026-07; this change makes the
     vote-split bars agree with them rather than introducing a new discrepancy.
+
+    REPAIR STATUS (2026-09-01, review follow-up): the bump was APPLIED — SENTIMENT_CACHE_VERSION
+    moved 1 -> 2, so the FIRST FULL build after that change wipes and refills the cache, closing
+    the frozen hole (a --light build does not score and therefore does not perform the rescore;
+    it is the next full build that does). Everything above remains the historical record of how
+    the hole was created, found and measured.
 
     `n_buckets` > 1 splits the scan on hash(recommendationid) — used for the 21.7M-row cache,
     where a single hash join against the 24.4M-row pool would not fit the box's memory budget.
@@ -2664,6 +2745,13 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
       sentiment_classifier written only as 'absent', when PROSPECT_ALLOW_NO_CLASSIFIER=1
                            accepted a missing aspect model — flags a degraded build whose
                            aspect counts are keyword-only (inflated ~28%).
+      source_db_mtime/size the source SQLite's mtime (ISO-8601 UTC) + size in bytes, from
+                           os.stat at build time — lets a mart be matched back to the exact
+                           source snapshot it was built from ('' when unreadable: the build
+                           obviously succeeded, so this is provenance, not a gate).
+      etl_git_sha          the ETL code's git SHA (best-effort `git rev-parse HEAD` from the
+                           repo root; '' when not in a git checkout or git is unavailable).
+      duckdb_version       the duckdb library version that built the file.
     """
     med_rev = con.execute(
         "SELECT median(est_rev_reviews) FROM stg_game WHERE total_reviews >= ? AND est_rev_reviews IS NOT NULL",
@@ -2696,6 +2784,22 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
     ccu_history_days = con.execute(
         "SELECT COUNT(DISTINCT date) FROM mart_game_players_daily"
     ).fetchone()[0]
+
+    # Provenance (2026-09-01): best-effort on purpose — a failure here empties a row, it
+    # never fails a build that otherwise succeeded.
+    try:
+        st = os.stat(source_db)
+        source_mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
+        source_size = str(st.st_size)
+    except OSError:
+        source_mtime, source_size = "", ""
+    try:
+        git_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=HERE.parent,
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        git_sha = ""
 
     rows = {
         "mart_version": mart_version,
@@ -2735,6 +2839,10 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
         "ccu_history_days": str(ccu_history_days),
         "build_mode": build_mode,
         "absent_sources": ",".join(absent_sources),
+        "source_db_mtime": source_mtime,
+        "source_db_size": source_size,
+        "etl_git_sha": git_sha,
+        "duckdb_version": duckdb.__version__,
     }
     if classifier_absent:
         rows["sentiment_classifier"] = "absent"
@@ -2754,17 +2862,30 @@ VALIDATE_MAX_DROP_PCT = 40.0     # a mart table shrinking more than this vs the 
                                  # fails the build; env-overridable via
                                  # PROSPECT_VALIDATE_MAX_DROP_PCT (nightly source growth means
                                  # real drops of this size are never organic).
+VALIDATE_MAX_GROWTH_X = 5.0      # ...and the mirror image (2026-09-01): a table present in BOTH
+                                 # artifacts growing to more than this many TIMES its previous
+                                 # row count fails the build. That shape is the fingerprint of a
+                                 # JOIN FAN-OUT (a duplicated join key multiplying rows), which
+                                 # inflates every downstream aggregate while the row-count print
+                                 # still looks superficially sane. Organic growth is additive —
+                                 # a night's new releases/reviews — never multiplicative; on the
+                                 # live catalog no table has ever moved more than a few % between
+                                 # consecutive builds.
 # Absolute sanity floors for the core tables, checked on EVERY build (a previous mart is not
 # needed to know these are wrong). Floors sit far below the real counts so organic shrinkage
 # never trips them, but a structurally broken build cannot clear them:
 #   mart_game  ~174K rows on the 2026-08 catalog (the full live-games universe) -> floor 100K
 #   mart_niche ~414 tags x windows x MIN_REVIEWS_LEVELS cuts, a few thousand rows  -> floor 1K
+#   mart_game_review_aspects ~319K rows (teardown-eligible games x 10 aspects)    -> floor 100K
+#   mart_entity ~225K rows (developer + publisher entities)                       -> floor 100K
 VALIDATE_MIN_ROWS: dict[str, int] = {
     "mart_game": 100_000,
     "mart_niche": 1_000,
+    "mart_game_review_aspects": 100_000,
+    "mart_entity": 100_000,
 }
-# Deliberately NOT exempted by an absent source (below): neither table is derived from an
-# optional source table, so nothing can legitimately explain their falling under the floor.
+# Deliberately NOT exempted by an absent source (below): none of these tables is derived from
+# an optional source table, so nothing can legitimately explain their falling under the floor.
 
 # Which mart tables draw their POPULATION from an OPTIONAL (guarded) source table. When
 # that source is genuinely absent, those tables coming out empty — or much smaller — is the
@@ -2824,6 +2945,24 @@ def _mart_row_counts(db_path: Path) -> dict[str, int]:
         con.close()
 
 
+def _mart_table_columns(db_path: Path) -> dict[str, set[str]]:
+    """Column-name set of every mart% table in a mart file, opened READ-ONLY (same
+    concurrency story as _mart_row_counts). Row counts alone cannot see a renamed or dropped
+    column — the table keeps its name and roughly its size while a consumer's query breaks."""
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        rows = con.execute(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = 'main' AND table_name LIKE 'mart%' ORDER BY table_name"
+        ).fetchall()
+    finally:
+        con.close()
+    cols: dict[str, set[str]] = {}
+    for tbl, col in rows:
+        cols.setdefault(tbl, set()).add(col)
+    return cols
+
+
 def _recorded_absent_sources(db_path: Path) -> set[str]:
     """The optional source tables THIS build recorded as absent (write_meta's
     mart_meta.absent_sources). Read back out of the artifact rather than passed in, so the
@@ -2860,14 +2999,20 @@ def validate_mart(new_path: Path, prev_path: Path | None) -> list[str]:
 
       - absolute floors (VALIDATE_MIN_ROWS) checked on every build, previous mart or not;
       - any table that had >0 rows in the previous mart and has 0 (or is gone) now;
-      - any table that dropped more than the max-drop threshold vs the previous mart.
+      - any table that dropped more than the max-drop threshold vs the previous mart;
+      - any table that GREW to more than VALIDATE_MAX_GROWTH_X times its previous row count
+        (join-fan-out protection — see the constant's comment);
+      - any table present in BOTH artifacts whose column-name set changed (a renamed or
+        dropped column breaks consumers even when every row count looks fine). New tables
+        (absent from the previous artifact) are exempt — nothing to compare against.
 
     UNEXPLAINED emptiness/shrinkage only. A mart family whose optional source table is
     genuinely absent this run is documented to build EMPTY (see ABSENT_SOURCE_EMPTY_MARTS
     and mart_meta.absent_sources) — failing the whole nightly for doing exactly that is how
     a gate gets switched off at 3am, so those tables are exempted from the empty/drop checks
     and the report says which ones and why. The exemption reads the build's own provenance,
-    so the same table emptying with its source PRESENT still fails.
+    so the same table emptying with its source PRESENT still fails. (It never exempts the
+    growth check: an absent source can only explain emptiness, never a >5x explosion.)
 
     First build (no previous mart) skips the comparison with a note — only the floors apply.
     A previous mart that exists but cannot be opened read-only (e.g. an exotic lock state)
@@ -2895,19 +3040,21 @@ def validate_mart(new_path: Path, prev_path: Path | None) -> list[str]:
             print(f"        {tbl:32s} exempt: no {', '.join(exempt[tbl])}")
 
     prev_counts: dict[str, int] | None = None
+    prev_cols: dict[str, set[str]] | None = None
     if prev_path is None or not Path(prev_path).exists():
         print("[etl] validation: no previous mart to compare against (first build) — "
               "comparison skipped, absolute floors only")
     else:
         try:
             prev_counts = _mart_row_counts(Path(prev_path))
+            prev_cols = _mart_table_columns(Path(prev_path))
         except duckdb.Error as e:
             print(f"[etl] validation WARNING: previous mart {prev_path} unreadable ({e}) — "
                   "comparison skipped, absolute floors only")
 
     if prev_counts is not None:
         print(f"[etl] validation: comparing against {prev_path} "
-              f"(max allowed drop {max_drop:.0f}%)")
+              f"(max allowed drop {max_drop:.0f}%, max growth {VALIDATE_MAX_GROWTH_X:.0f}x)")
         print(f"        {'table':32s} {'previous':>12s} {'new':>12s} {'change':>9s}")
         for tbl in sorted(set(prev_counts) | set(new_counts)):
             if tbl == "mart_meta":
@@ -2919,7 +3066,18 @@ def validate_mart(new_path: Path, prev_path: Path | None) -> list[str]:
                 continue
             pct = ((new_n - prev_n) * 100.0 / prev_n) if prev_n > 0 else 0.0
             flag = ""
-            if tbl in exempt:
+            # Growth first, EXEMPT or not: an absent optional source can only explain a table
+            # going empty/small, never exploding — >VALIDATE_MAX_GROWTH_X is join fan-out
+            # until proven otherwise, and fan-out corrupts everything downstream of the join.
+            # prev_n == 0 is deliberately NOT checked: a previously-empty optional-source
+            # family legitimately appears in one jump when its source table enters the
+            # scrape (0 -> anything is not a multiple).
+            if prev_n and new_n > VALIDATE_MAX_GROWTH_X * prev_n:
+                flag = f"  FAIL (growth > {VALIDATE_MAX_GROWTH_X:.0f}x)"
+                failures.append(f"{tbl}: {prev_n:,} -> {new_n:,} rows ({new_n / prev_n:.1f}x, "
+                                f"exceeds the {VALIDATE_MAX_GROWTH_X:.0f}x runaway-growth cap — "
+                                "suspect a join fan-out")
+            elif tbl in exempt:
                 flag = f"  EXEMPT ({', '.join(exempt[tbl])} absent)"
             elif prev_n > 0 and new_n == 0:
                 flag = "  FAIL (was non-empty, now 0)"
@@ -2929,6 +3087,30 @@ def validate_mart(new_path: Path, prev_path: Path | None) -> list[str]:
                 failures.append(f"{tbl}: {prev_n:,} -> {new_n:,} rows ({pct:+.1f}%, exceeds the "
                                 f"{max_drop:.0f}% max drop)")
             print(f"        {tbl:32s} {prev_n:>12,} {new_n:>12,} {pct:>+8.1f}%{flag}")
+
+        # Column-shape check (2026-09-01): a renamed/dropped column leaves row counts intact
+        # while every consumer query against the old name breaks. Tables NEW vs the previous
+        # artifact have nothing to compare against and are skipped. mart_meta's shape is
+        # fixed (key, value) and rides the same comparison unremarkably.
+        new_cols = _mart_table_columns(Path(new_path))
+        for tbl in sorted(set(prev_cols or {}) & set(new_cols)):
+            if tbl == "mart_meta":
+                continue
+            dropped = sorted(prev_cols[tbl] - new_cols[tbl])
+            added = sorted(new_cols[tbl] - prev_cols[tbl])
+            # ONLY `dropped` fails. An ADDED column is what every feature PR does, and failing
+            # on it would mean the first nightly after any such merge refuses to swap
+            # current.duckdb — a guaranteed 21:00 page whose only escape hatch is
+            # --skip-validation, which is precisely how a gate gets switched off for good at
+            # 3am (this file argues exactly that a few hundred lines up). A dropped or renamed
+            # column is the one that breaks consumers, so that is what the gate guards.
+            if added:
+                print(f"        {tbl:32s} note: {len(added)} new column(s) {added} "
+                      f"(informational — additions do not break consumers)")
+            if dropped:
+                failures.append(f"{tbl}: column(s) {dropped} disappeared vs the previous mart "
+                                f"— a rename or drop breaks every consumer that reads them")
+                print(f"        {tbl:32s} FAIL (columns dropped: {dropped})")
     return failures
 
 
@@ -3091,12 +3273,45 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _env_config_errors() -> list[str]:
+    """Fail-fast validation of the env knobs main() honours (2026-09-01). A garbled value
+    used to survive to its first USE — PROSPECT_SENTIMENT_BUCKETS all the way inside
+    compute_aspect_sentiment, i.e. after an hour of staging and a sentiment-cache wipe — and
+    crash the build hours in for want of a 10-second check. Unset values are fine (each knob
+    has a default); only SET-but-unparseable values are errors."""
+    errors: list[str] = []
+    raw = os.environ.get("PROSPECT_SENTIMENT_BUCKETS", "").strip()
+    if raw:
+        try:
+            buckets = int(raw)
+        except ValueError:
+            buckets = 0
+        if buckets < 1:
+            errors.append(f"PROSPECT_SENTIMENT_BUCKETS={raw!r} is not a positive integer "
+                          "(hash-bucket count for the sentiment materialisation; unset = 8)")
+    raw = os.environ.get("PROSPECT_DUCKDB_MEMORY_LIMIT", "").strip()
+    # Deploy sets e.g. 2500MB (deploy/prospect-refresh.sh), so the contract is DuckDB's own
+    # memory-limit grammar — a bare integer or an integer + size unit — not a bare int alone.
+    if raw and not re.fullmatch(r"\d+\s*(?:[KMGT]B?)?", raw, re.IGNORECASE):
+        errors.append(f"PROSPECT_DUCKDB_MEMORY_LIMIT={raw!r} is not an integer or an "
+                      "integer + size unit (e.g. 2500MB) as `SET memory_limit` expects")
+    return errors
+
+
 def main() -> int:
     args = build_arg_parser().parse_args()
 
     source_db = str(Path(args.source).resolve())
     if not Path(source_db).exists():
         print(f"ERROR: source DB not found: {source_db}", file=sys.stderr)
+        return 2
+
+    # Garbled env knobs are refused HERE, next to the classifier probe, for the same reason
+    # the probe is: left unchecked they crash the build HOURS in (see _env_config_errors).
+    env_errors = _env_config_errors()
+    for err in env_errors:
+        print(f"ERROR: {err}", file=sys.stderr)
+    if env_errors:
         return 2
 
     # A missing/unloadable aspect model is fatal — but the check has to happen HERE, before

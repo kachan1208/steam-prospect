@@ -10,7 +10,7 @@
 # every day. As a script, cron's cmdline is just this file's path.
 #
 # LOCKING (2026-08-28): must be launched through cron-wrap.sh (the crontab entry does):
-#     /root/cron-wrap.sh light_build /root/light-build-cron.sh
+#     /root/prospect/deploy/cron-wrap.sh light_build /root/prospect/deploy/light-build-cron.sh
 # cron-wrap takes /root/.prospect-refresh.lock nonblocking, so a held lock (nightly
 # overrun, the 06:00 review keeper mid-backlog-drain, a manual full build under the lock)
 # SKIPS this run with a pushed prospect_cron_skipped metric instead of stacking a second

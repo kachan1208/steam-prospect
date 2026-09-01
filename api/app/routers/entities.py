@@ -195,6 +195,13 @@ class EntityProfileResponse(BaseModel):
     games: list[EntityGameRow]  # ordered by seq ASC (release order)
 
 
+def _like_escape(q: str) -> str:
+    """Escape the ILIKE wildcards so a user-typed '%' or '_' matches literally instead of
+    acting as a pattern (the games.py contains(name_lower, ?) path gets this for free;
+    this ILIKE needs it explicitly). Mirrors niches.py's copy."""
+    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 @router.get("/search", response_model=EntitySearchList)
 def search_entities(
     q: str | None = Query(None, description="Case-insensitive substring of the entity name. "
@@ -206,8 +213,8 @@ def search_entities(
 ) -> EntitySearchList:
     where, params = ["n_games >= ?"], [min_games]
     if q:
-        where.append("name ILIKE ?")
-        params.append(f"%{q}%")
+        where.append("name ILIKE ? ESCAPE '\\'")
+        params.append(f"%{_like_escape(q)}%")
     if role:
         where.append("role = ?")
         params.append(role)

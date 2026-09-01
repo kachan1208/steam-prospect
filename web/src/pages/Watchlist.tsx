@@ -4,7 +4,7 @@ import { useQueries } from "@tanstack/react-query";
 
 import { EmptyState } from "../components/ui/EmptyState";
 import { Loading } from "../components/ui/Loading";
-import { gameProfileQueryOptions, request, useHealth, type Dimension, type GameProfile, type NicheDetail, type NicheRow } from "../lib/api";
+import { gameProfileQueryOptions, nicheDetailQueryOptions, useHealth, type Dimension, type GameProfile, type NicheDetail, type NicheRow } from "../lib/api";
 import { monthName } from "../lib/format";
 import {
   defaultRuleFor,
@@ -66,17 +66,6 @@ const WATCHLIST_ICON = (
     <circle cx="12" cy="12" r="3" />
   </svg>
 );
-
-// Mirrors useNicheDetail's own queryKey/queryFn (lib/api.ts) exactly so a niche this page
-// fans out over shares its cache entry with the niche detail page, rather than double-fetching
-// when the user has already visited it. nichePath() itself isn't exported from lib/api.ts, so
-// the URL is rebuilt here the same way (dimension/key, key percent-encoded).
-function nicheDetailQueryOptions(dimension: Dimension, key: string) {
-  return {
-    queryKey: ["niche-detail", dimension, key] as const,
-    queryFn: () => request<NicheDetail>(`/niches/${dimension}/${encodeURIComponent(key)}`),
-  };
-}
 
 // The mart only materializes a handful of (window × min_reviews) cuts; 24m/50 is the app-wide
 // default (NicheFinder's own initial state) — same fallback chain NicheDetail.tsx uses to pick

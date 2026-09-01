@@ -18,6 +18,7 @@ Checks (all against http://localhost:8428):
   e) time() - prospect_backup_last_success_timestamp > 50h             (deploy/backup.sh)
   f) VictoriaMetrics itself unreachable (evaluated implicitly — it is a breach)
   g) a build hold is still active (deploy/rollback.sh left one and nobody released it)
+  h) free disk on the filesystem holding /root below DISK_MIN_FREE_PCT (default 15%)
 
 (a) covers far more than it used to: cron-wrap.sh now pushes
 prospect_pipeline_step_success{step="<job>"} for EVERY job it wraps, so the twitch
@@ -35,6 +36,14 @@ breach when a known job has not COMPLETED in ALERT_JOB_STALE_HOURS (default 36h,
 daily job missed more than one whole day), or when a job that is skipping has never
 completed at all. Persistent skipping therefore pages; a routine one does not.
 
+(h) is deliberately evaluated OUTSIDE the VictoriaMetrics queries: a full disk is one of
+the few things that can take VM itself down, so the check must survive exactly the
+condition it exists to catch. Free disk on this box is not slack — it is the ETL's spill
+ceiling (the 2026-08-30 nightly spilled 20.6GB onto a ~75%-full volume and died), and it
+has already killed builds; 15% headroom is what backup.sh's weekly copy also demands.
+The check pushes prospect_disk_free_pct every run so the approach is charted, not just
+the arrival.
+
 On any breach: ONE consolidated notification. Channels, configured in
 /root/.prospect-alerts.env (chmod 600, never in git — see ALERTING.md):
   NTFY_TOPIC   — zero-setup default: plain POST to https://ntfy.sh/<topic>
@@ -48,13 +57,16 @@ Repeat suppression: each breach key re-alerts at most once per 12h (state in
 /root/.prospect-alert-state.json); a resolved breach is forgotten, so a re-fire after
 recovery alerts immediately.
 
-Version-controlled at prospect/deploy/observability/alert_check.py; scp'd to
-/root/alert_check.py by deploy/deploy-scripts.sh.
+Version-controlled at prospect/deploy/observability/alert_check.py; runs from the git
+checkout at /root/prospect/deploy/observability/alert_check.py (the flat
+/root/alert_check.py copy deploy-scripts.sh used to ship is retired — `git pull` in
+/root/prospect is the whole deploy for script changes).
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import time
 import urllib.error
@@ -93,6 +105,32 @@ def vm_query(expr: str) -> list[dict]:
     if payload.get("status") != "success":
         raise RuntimeError(f"query failed: {expr}: {payload}")
     return payload["data"]["result"]
+
+
+def disk_free_pct(path: str = "/root") -> float | None:
+    """Free space of the filesystem holding `path`, as a percentage. None if unmeasurable
+    (path missing, exotic filesystem) — a check that cannot measure must not guess."""
+    try:
+        usage = shutil.disk_usage(path)
+    except OSError:
+        return None
+    if usage.total <= 0:
+        return None
+    return usage.free / usage.total * 100.0
+
+
+def push_disk_metric(pct: float) -> None:
+    """Best-effort free-disk gauge for the pipeline dashboard — same pattern as
+    push_heartbeat: telemetry must never take down the checker that reports it."""
+    try:
+        req = urllib.request.Request(
+            f"{VM}/api/v1/import/prometheus",
+            data=f"prospect_disk_free_pct {pct:.1f}".encode(),
+        )
+        with urllib.request.urlopen(req, timeout=8):
+            pass
+    except (urllib.error.URLError, OSError) as exc:
+        print(f"WARN: disk metric push failed: {exc}", file=sys.stderr)
 
 
 def collect_breaches(cfg: dict[str, str]) -> dict[str, str]:
@@ -209,6 +247,23 @@ def collect_breaches(cfg: dict[str, str]) -> dict[str, str]:
         # (f) if VM is down we cannot evaluate anything — that is itself an alert, and the
         # notification channels don't depend on VM, so we can still send it.
         breaches["vm_unreachable"] = f"VictoriaMetrics at {VM} unreachable/unqueryable: {exc}"
+
+    # (h) disk headroom on the filesystem holding /root. Deliberately OUTSIDE the VM query
+    # block above: this must still evaluate (and still try to push its gauge) when VM is
+    # down, because a full disk is a prime suspect for VM being down.
+    try:
+        min_free_pct = float(cfg.get("DISK_MIN_FREE_PCT", "15"))
+    except ValueError:
+        min_free_pct = 15.0
+    free_pct = disk_free_pct("/root")
+    if free_pct is not None:
+        push_disk_metric(free_pct)
+        if free_pct < min_free_pct:
+            breaches["disk_low"] = (
+                f"filesystem holding /root has {free_pct:.1f}% free "
+                f"(threshold {min_free_pct:.0f}%) — the ETL's spill ceiling is in sight; "
+                "free disk before the next nightly build"
+            )
 
     return breaches
 

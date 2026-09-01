@@ -68,12 +68,13 @@ def _client_key(scope: Scope) -> str:
     """Identify the caller by the last hop we can actually trust.
 
     X-Forwarded-For is a client-writable list: the app must only believe the entries its own
-    infrastructure appended, i.e. the right-most `settings.trusted_proxy_hops` of them. Here
-    that is 1 — Caddy on the droplet terminates TLS and reverse-proxies to 127.0.0.1:8080
-    (the container port is bound to loopback, so nothing else can reach the app), and Caddy
-    appends the real peer address to whatever the client sent. Taking the LEFT-most hop
-    instead, as this did, handed the key straight to the caller: `X-Forwarded-For: <random>`
-    on every request meant a fresh bucket every request and no limit at all.
+    infrastructure appended, i.e. the right-most `settings.trusted_proxy_hops` of them. In
+    production that is 1 (deploy/entrypoint.sh sets it) — Caddy on the droplet terminates
+    TLS and reverse-proxies to 127.0.0.1:8080 (the container port is bound to loopback, so
+    nothing else can reach the app), and Caddy appends the real peer address to whatever the
+    client sent. Taking the LEFT-most hop instead, as this did, handed the key straight to
+    the caller: `X-Forwarded-For: <random>` on every request meant a fresh bucket every
+    request and no limit at all.
 
     With trusted_proxy_hops = 0 (no trusted proxy in front — plain `uvicorn`, local dev) the
     header is ignored entirely and the socket peer is used. Same fallback whenever the chain
