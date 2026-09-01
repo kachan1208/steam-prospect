@@ -250,7 +250,9 @@ def search_games(
     sort: str = Query("total_reviews"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(25, ge=1, le=100),
-    offset: int = Query(0, ge=0),
+    # Capped: an unbounded offset lets one request force an arbitrarily large scan/skip
+    # (OFFSET N must walk N rows first), and no real paging UI goes this deep.
+    offset: int = Query(0, ge=0, le=10000),
 ) -> GameSearchList:
     if sort not in SORTABLE:
         raise HTTPException(status_code=400, detail=f"sort must be one of {sorted(SORTABLE)}")

@@ -1,21 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
-import { request, type ReviewTimelinePoint } from "../../lib/api";
+import { gameCatalogEventsQueryOptions, type GameEvent, type ReviewTimelinePoint } from "../../lib/api";
 import { fmtAxisCompact, fmtCompact, fmtPct } from "../../lib/format";
 import { markerMonths } from "../../lib/notable";
 import { CSS_VAR } from "../../lib/palette";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
-
-/** Catalog events (GET /api/games/{appid}/events ← mart_game_event) — the "what happened
- * back there" annotations this lifetime chart exists to make explainable: the release,
- * shipped updates, press coverage. Same contract as the GameTrendsChart overlay. */
-interface CatalogEvent {
-  event_date: string; // 'YYYY-MM-DD'
-  kind: "release" | "update" | "press";
-  title: string;
-  url: string | null;
-}
 
 const EVENT_COLOR = CSS_VAR.textMuted;
 
@@ -51,24 +41,17 @@ function capitalize(s: string): string {
  * carries real tick labels, so this stays an honest read, not a misleading zoom.
  */
 export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimelinePoint[]; appid?: number }) {
-  // Catalog-event overlay ("why did the curve move HERE"): optional, additive, and it
-  // swallows errors — a chart without markers is complete, just less explained.
+  // Catalog-event overlay ("why did the curve move HERE" — GET /api/games/{appid}/events,
+  // the release, shipped updates, press coverage): optional and additive on the shared
+  // factory's contract — a chart without markers is complete, just less explained. Same
+  // queryKey as GameTrendsChart's overlay, so both charts share one cached response.
   const eventsQuery = useQuery({
-    queryKey: ["game-catalog-events", appid],
-    queryFn: async () => {
-      try {
-        const r = await request<{ appid: number; items: CatalogEvent[] }>(`/games/${appid}/events`);
-        return r.items;
-      } catch {
-        return [] as CatalogEvent[];
-      }
-    },
+    ...gameCatalogEventsQueryOptions(appid ?? -1),
     enabled: appid !== undefined,
-    staleTime: 5 * 60_000,
   });
 
   const periodSet = new Set(points.map((d) => d.period));
-  const eventsByMonth = new Map<string, CatalogEvent[]>();
+  const eventsByMonth = new Map<string, GameEvent[]>();
   for (const e of eventsQuery.data ?? []) {
     const month = e.event_date.slice(0, 7);
     if (!periodSet.has(month)) continue;

@@ -61,6 +61,23 @@ def test_corrupt_file_degrades_to_empty(client, tmp_path, monkeypatch):
     assert client.get("/api/refresh/history").json()["runs"] == []
 
 
+def test_one_corrupt_line_mid_file_does_not_wipe_the_history(client, tmp_path, monkeypatch):
+    """A torn append (crash mid-write) corrupts ONE line; parsing is per-line (like the
+    mcp-log viewer), so the valid runs before and after it survive."""
+    path = tmp_path / "history.json"
+    lines = [
+        json.dumps(RUNS[0]),
+        "{torn append — not json",
+        json.dumps(RUNS[1]),
+        json.dumps(RUNS[2]),
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    monkeypatch.setattr(settings, "refresh_history_path", str(path))
+    body = client.get("/api/refresh/history").json()
+    assert [r["games_added"] for r in body["runs"]] == [30, 21, 12]  # still newest-first
+    assert body["total"] == 3  # the corrupt line counts for nothing, wipes nothing
+
+
 def test_free_form_run_keys_survive_the_response_model(client, tmp_path, monkeypatch):
     """The cron grows new delta keys without an API deploy, so run records stay dicts —
     a typed row model would silently drop tomorrow's fields."""

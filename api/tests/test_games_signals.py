@@ -23,10 +23,10 @@ def _make_signals(path):
 
 
 def test_prices_served_live(client, tmp_path, monkeypatch):
-    from app import signals_db
+    from app.config import settings
     db = tmp_path / "signals.db"
     _make_signals(db)
-    monkeypatch.setattr(signals_db, "SIGNALS_DB_PATH", str(db))
+    monkeypatch.setattr(settings, "signals_db", str(db))
 
     r = client.get("/api/games/1001/price-history")
     assert r.status_code == 200
@@ -39,19 +39,34 @@ def test_prices_served_live(client, tmp_path, monkeypatch):
 
 
 def test_absent_signals_file_degrades_to_empty(client, monkeypatch):
-    from app import signals_db
-    monkeypatch.setattr(signals_db, "SIGNALS_DB_PATH", "/nonexistent/signals.db")
+    from app.config import settings
+    monkeypatch.setattr(settings, "signals_db", "/nonexistent/signals.db")
     assert client.get("/api/games/1001/price-history").json()["items"] == []
 
 
 def test_missing_table_degrades_to_empty(client, tmp_path, monkeypatch):
     """A signals.db that exists but predates the price collector (no price_snapshots table)
     is the same contract as a missing file: an empty series."""
-    from app import signals_db
+    from app.config import settings
     db = tmp_path / "empty.db"
     sqlite3.connect(db).close()
-    monkeypatch.setattr(signals_db, "SIGNALS_DB_PATH", str(db))
+    monkeypatch.setattr(settings, "signals_db", str(db))
     assert client.get("/api/games/1001/price-history").json()["items"] == []
+
+
+def test_operational_error_degrades_but_is_logged(client, tmp_path, monkeypatch, caplog):
+    """Graceful degradation must not be SILENT: a real failure (here: no such table — the
+    same code path as a locked/corrupt DB) logs a warning via the module logger so it is
+    diagnosable, while still serving an empty series."""
+    import logging
+
+    from app.config import settings
+    db = tmp_path / "empty.db"
+    sqlite3.connect(db).close()
+    monkeypatch.setattr(settings, "signals_db", str(db))
+    with caplog.at_level(logging.WARNING, logger="app.signals_db"):
+        assert client.get("/api/games/1001/price-history").json()["items"] == []
+    assert any("signals.db query failed" in m for m in caplog.messages)
 
 
 def test_followers_endpoint_is_gone(client):

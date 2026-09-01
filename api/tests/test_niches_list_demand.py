@@ -209,14 +209,19 @@ def test_radar_feed_endpoint_is_gone(client):
     """Removed 2026-08-28: the web board computes movers from the LIST client-side and the
     MCP reads DuckDB directly (it has no HTTP client at all), so nothing called it.
 
-    With the route gone, `/api/niches/radar` falls to the `/{dimension}/{key:path}`
-    catch-all (via Starlette's trailing-slash redirect, as dimension='radar', key='') and
-    is rejected by _require_dimension — a 422 naming the real problem, not a feed. That is
-    the honest answer for a retired path under a catch-all; what matters is that it never
-    reaches the mart and never returns a radar payload."""
+    It answered 422 until the SPA static mount landed: with no exact match, Starlette's
+    trailing-slash redirect used to drop it into `/{dimension}/{key:path}` as
+    dimension='radar', key='', where _require_dimension rejected it. The SPA catch-all now
+    owns unmatched paths, so it 404s instead — which is the BETTER answer for a retired
+    endpoint. 422 was only ever an artifact of which catch-all happened to win; a client
+    asking for a route that no longer exists should be told exactly that.
+
+    What the test is really pinning is unchanged: the path never reaches the mart and never
+    returns a radar payload."""
     r = client.get("/api/niches/radar", follow_redirects=True)
-    assert r.status_code == 422
-    assert r.json()["detail"] == "dimension must be tag or genre"
+    assert r.status_code == 404
+    # Definitely not a feed: no radar payload keys leak through the SPA fallback.
+    assert "movers" not in r.text and "hero" not in r.text
 
 
 def test_list_v2_gate_is_its_own_503(client):

@@ -19,10 +19,10 @@ result is computed and NOT cached — an unversioned answer has nothing safe to 
 Bounded like the rate limiter: `genre` is a free-form query param, so an adversarial client
 could otherwise mint entries forever. Two defenses: handlers pass `cache_if` so an answer
 for an unrecognized key (an unknown genre reads as an EMPTY payload, not a 404) is computed
-but never stored, and past _MAX_ENTRIES the OLDEST entries are evicted one at a time rather
-than the table being cleared wholesale. Eviction is by insertion order, not by recency — no
-bookkeeping on the read path (which stays a single dict lookup other threads cannot race),
-and the real working set is a handful of genres that repopulate on their next request.
+but never stored, and past _MAX_ENTRIES the LEAST-RECENTLY-USED entries are evicted one at
+a time rather than the table being cleared wholesale. A hit moves its entry to the young
+end (OrderedDict.move_to_end), so a hot genre can't be evicted by a burst of one-shot
+enumeration keys, and eviction still costs O(1) on the read path.
 
 These same handlers send `Cache-Control: public, max-age=3600` (see CACHE_CONTROL): the
 data is public, identical for everyone, and at most a day old — an hour of browser/CDN
@@ -30,6 +30,7 @@ caching costs nothing and takes the repeat traffic off the box entirely.
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from typing import Any, Callable, TypeVar
 
 from . import analytics_db
@@ -40,7 +41,9 @@ CACHE_CONTROL = "public, max-age=3600"
 
 _MAX_ENTRIES = 256
 
-_cache: dict[tuple, Any] = {}
+# OrderedDict (not a plain dict): eviction is LRU, so a hit must be able to move its entry
+# to the young end — see get_or_compute.
+_cache: "OrderedDict[tuple, Any]" = OrderedDict()
 
 _MISS = object()
 
@@ -76,17 +79,30 @@ def get_or_compute(
     # concurrent clear() (the test hook, and a live DB swap would use it too).
     hit = _cache.get(key, _MISS)
     if hit is not _MISS:
+        # LRU: a hit protects its entry from the next eviction. MUST be guarded — the get()
+        # above is atomic, but between it and this line another thread's popitem() (or the
+        # clear() test hook) can evict the very key we just read, and a bare move_to_end
+        # would then raise KeyError straight out of a request handler as a 500. Handlers run
+        # in a threadpool across 2 uvicorn workers, so this is reachable, not theoretical.
+        # Losing the LRU bump on that race is free: the value is already in hand and the
+        # entry is gone anyway.
+        try:
+            _cache.move_to_end(key)
+        except KeyError:
+            pass
         return hit
     value = compute()
     if cache_if is not None and not cache_if(value):
         return value
     while len(_cache) >= _MAX_ENTRIES:
-        # Bounded: `genre` is caller-supplied and unbounded in principle. Drop the oldest
-        # entry, not the whole table — a full clear threw away every real genre's answer
-        # (and the mart-pure handlers' whole reason to exist) on one adversarial burst.
+        # Bounded: `genre` is caller-supplied and unbounded in principle. Drop the
+        # LEAST-RECENTLY-USED entry, not the whole table — a full clear threw away every
+        # real genre's answer (and the mart-pure handlers' whole reason to exist) on one
+        # adversarial burst, and plain oldest-first eviction let a burst of one-shot keys
+        # evict a hot genre that was just read.
         try:
-            del _cache[next(iter(_cache))]
-        except (StopIteration, KeyError, RuntimeError):  # emptied under us — nothing to do
+            _cache.popitem(last=False)
+        except KeyError:  # emptied under us — nothing to do
             break
     _cache[key] = value
     return value

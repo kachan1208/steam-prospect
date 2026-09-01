@@ -1,19 +1,22 @@
 """Shared pytest fixtures for the API test suite.
 
 Points the app at a SMALL, synthetic, in-repo-built DuckDB (a handful of rows in just the
-mart_* tables the tested routers read) instead of the real ~176MB data/current.duckdb, and
-at a scratch SQLite file for the control plane — so the suite runs standalone, with no
-dependency on `task etl` or any local data/ directory. Every table/column here was read
-straight off api/app/analytics_db.py + the router SQL it's paired with (see the comment
-above each CREATE TABLE) — not the full ETL schema, just what's actually queried.
+mart_* tables the tested routers read) instead of the real ~176MB data/current.duckdb — so
+the suite runs standalone, with no dependency on `task etl` or any local data/ directory.
+Every table/column here was read straight off api/app/analytics_db.py + the router SQL
+it's paired with (see the comment above each CREATE TABLE) — not the full ETL schema, just
+what's actually queried. It also points PROSPECT_STATIC_DIR at a scratch dir containing an
+index.html (plus a sibling file OUTSIDE it as the traversal target), so the app boots in
+hosted/SPA mode and the SPA-fallback tests exercise the real registered route.
 
 Ordering matters a lot in this file: api/app/config.py's `Settings` (env_prefix="PROSPECT_")
 is instantiated once at import time as a module-level singleton, and
 api/app/analytics_db.py (opened in main.py's lifespan) keys off
-`settings.analytics_db_path`. So the env vars below MUST be set, and the fixture mart file
-MUST already exist on disk, before `app.main` (or anything importing `app.config`) is
-imported anywhere in this process. That's why the env/DB setup happens at module level in
-this conftest, ahead of the `from app.main import app` at the bottom.
+`settings.analytics_db_path` while main.py's SPA registration keys off
+`settings.static_dir`. So the env vars below MUST be set, and the fixture mart + static
+files MUST already exist on disk, before `app.main` (or anything importing `app.config`)
+is imported anywhere in this process. That's why the env/DB setup happens at module level
+in this conftest, ahead of the `from app.main import app` at the bottom.
 """
 from __future__ import annotations
 
@@ -26,11 +29,25 @@ import pytest
 
 _TMP_DIR = Path(tempfile.mkdtemp(prefix="prospect_api_tests_"))
 ANALYTICS_DB_PATH = _TMP_DIR / "fixture_mart.duckdb"
-CONTROL_DB_PATH = _TMP_DIR / "fixture_control.db"
 
 os.environ["PROSPECT_ANALYTICS_DB_PATH"] = str(ANALYTICS_DB_PATH)
-os.environ["PROSPECT_CONTROL_DSN"] = f"sqlite:///{CONTROL_DB_PATH}"
-os.environ.setdefault("PROSPECT_SOLO_MODE", "true")  # already the default; explicit for CI clarity
+
+# Hosted/SPA mode for the whole suite (see test_spa_fallback.py): a static dir with an
+# index.html and one real asset, plus a secret file one level UP that the SPA fallback's
+# traversal defense must never serve. The content constants are asserted against, so keep
+# them distinctive.
+STATIC_DIR = _TMP_DIR / "static"
+STATIC_DIR.mkdir()
+INDEX_HTML_CONTENT = "<!doctype html><title>Prospect fixture SPA</title>"
+SPA_INDEX_FILE = STATIC_DIR / "index.html"
+SPA_INDEX_FILE.write_text(INDEX_HTML_CONTENT, encoding="utf-8")
+STATIC_FILE_NAME = "robots.txt"
+STATIC_FILE_CONTENT = "user-agent: test-bot"
+(STATIC_DIR / STATIC_FILE_NAME).write_text(STATIC_FILE_CONTENT, encoding="utf-8")
+SPA_SECRET_FILE = _TMP_DIR / "secret.txt"  # OUTSIDE STATIC_DIR — the traversal target
+SPA_SECRET_CONTENT = "TOP-SECRET: must never be served by the SPA fallback"
+SPA_SECRET_FILE.write_text(SPA_SECRET_CONTENT, encoding="utf-8")
+os.environ["PROSPECT_STATIC_DIR"] = str(STATIC_DIR)
 
 
 # =============================================================================================
@@ -155,11 +172,13 @@ def _build_fixture_mart(path: Path) -> None:
         _create_mart_niche(con)
         _create_mart_market_boxleiter(con)
         _create_mart_market_tiers(con)
+        _create_mart_market_distribution(con)
         _create_mart_seasonality(con)
         _create_mart_meta(con)
         _create_mart_entity(con)
         _create_mart_timing(con)
         _create_mart_game_event(con)
+        _create_mart_game_trends(con)
     finally:
         con.close()  # MUST close before analytics_db opens its own read_only connection
 
@@ -290,10 +309,10 @@ def _create_mart_niche(con: duckdb.DuckDBPyConnection) -> None:
 
 
 def _create_mart_market_boxleiter(con: duckdb.DuckDBPyConnection) -> None:
-    """api/app/routers/estimate.py's _genre_owners_per_review() reads (genre, slope) and
-    clamps it to [20, 55]. Roguelike's slope (40) is deliberately already inside that band
-    (clamp is a no-op); Action's (70) is deliberately OUTSIDE it, so a test can confirm the
-    clamp actually clamps down to 55 rather than passing 70 through."""
+    """Read by api/app/routers/market.py::market_benchmarks (the boxleiter_by_genre table)
+    and by mcp/prospect_mcp.py::estimate_revenue, which reads (genre, slope) and clamps it
+    to [20, 55]. Roguelike's slope (40) sits inside that band (clamp is a no-op); Action's
+    (70) is deliberately OUTSIDE it, pinning the clamped shape of the fixture data."""
     con.execute("""
         CREATE TABLE mart_market_boxleiter (
             genre VARCHAR, n INTEGER, owners_per_review_median DOUBLE,
@@ -325,6 +344,45 @@ def _create_mart_market_tiers(con: duckdb.DuckDBPyConnection) -> None:
             ("Hobby", 1, 3, 0.5),
             ("Small", 2, 1, 1 / 6),
             ("Middle", 3, 1, 1 / 6),
+        ],
+    )
+
+
+def _create_mart_market_distribution(con: duckdb.DuckDBPyConnection) -> None:
+    """mart_market_hist + mart_market_pct per etl/marts/mart_market.sql — what
+    api/app/routers/market.py::distribution reads. '__all__' carries both win cuts for
+    revenue so the window param is checkable; the other genres deliberately have no rows
+    (an empty 200 is the contract for a genre under the mart's floor)."""
+    con.execute("""
+        CREATE TABLE mart_market_hist (
+            metric VARCHAR, genre VARCHAR, win VARCHAR, bucket_index INTEGER,
+            x_min DOUBLE, x_max DOUBLE, count INTEGER
+        )
+    """)
+    con.executemany(
+        "INSERT INTO mart_market_hist VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            # out of bucket order on purpose — the router must ORDER BY bucket_index
+            ("revenue", "__all__", "all", 10, 100000.0, 316227.77, 3),
+            ("revenue", "__all__", "all", 8, 10000.0, 31622.78, 2),
+            ("revenue", "__all__", "24m", 10, 100000.0, 316227.77, 1),
+            ("price", "__all__", "all", 2, 5.0, 7.5, 1),
+            ("price", "__all__", "all", 3, 7.5, 10.0, 2),
+        ],
+    )
+    con.execute("""
+        CREATE TABLE mart_market_pct (
+            metric VARCHAR, genre VARCHAR, win VARCHAR, n INTEGER, pctile VARCHAR, value DOUBLE
+        )
+    """)
+    con.executemany(
+        "INSERT INTO mart_market_pct VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("revenue", "__all__", "all", 6, "p99", 900000.0),   # out of value order —
+            ("revenue", "__all__", "all", 6, "p10", 3000.0),     # the router must
+            ("revenue", "__all__", "all", 6, "p50", 150000.0),   # ORDER BY value
+            ("revenue", "__all__", "24m", 2, "p50", 135000.0),
+            ("price", "__all__", "all", 4, "p50", 14.99),
         ],
     )
 
@@ -462,11 +520,39 @@ def _create_mart_meta(con: duckdb.DuckDBPyConnection) -> None:
     )
 
 
+def _create_mart_game_trends(con: duckdb.DuckDBPyConnection) -> None:
+    """Monthly per-game series for api/app/routers/trends.py (period, n_reviews, ccu_avg
+    per etl/marts/mart_game_trends.sql). 1001/1002/1003 have rows so /trends and the
+    ?comps= overlay (cohort median/band) are testable; 1004+ deliberately have NONE, so
+    the eligible=False shape is a real fixture state. Values are picked so the cohort
+    math is checkable on paper: over comps 1002+1003, period 2026-03 has reviews 110 and
+    30 -> median 70, p25 50, p75 90 exactly, and ccu_avg MEDIAN(42, NULL) = 42.
+
+    mart_game_players_daily / mart_game_players_history are deliberately NOT created:
+    /players' available=False degrade path is the other real fixture state."""
+    con.execute("""
+        CREATE TABLE mart_game_trends (
+            appid INTEGER, period VARCHAR, n_reviews INTEGER, ccu_avg DOUBLE
+        )
+    """)
+    con.executemany(
+        "INSERT INTO mart_game_trends VALUES (?, ?, ?, ?)",
+        [
+            (1001, "2026-01", 40, 12.0),
+            (1001, "2026-02", 55, None),   # NULL = no snapshot that month (a gap, not 0)
+            (1001, "2026-03", 70, 18.0),
+            (1002, "2026-02", 90, 30.0),
+            (1002, "2026-03", 110, 42.0),
+            (1003, "2026-03", 30, None),
+        ],
+    )
+
+
 _build_fixture_mart(ANALYTICS_DB_PATH)
 
 # Import the app only AFTER the env vars + fixture DB above are in place (see module
-# docstring) — Settings() and the analytics_db/explore module-level connections all key off
-# settings.analytics_db_path/control_dsn at (or shortly after) import time.
+# docstring) — Settings() and the analytics_db module-level state all key off
+# settings.analytics_db_path / settings.static_dir at (or shortly after) import time.
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import response_cache  # noqa: E402

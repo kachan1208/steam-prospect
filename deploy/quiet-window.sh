@@ -44,7 +44,9 @@
 # labels the nightly's run_step uses, so alert_check.py's step-failure check covers them
 # with no special-casing.
 #
-# Version-controlled at prospect/deploy/quiet-window.sh; scp'd to /root/quiet-window.sh.
+# Version-controlled at prospect/deploy/quiet-window.sh; runs from the git checkout at
+# /root/prospect/deploy/quiet-window.sh (the flat /root/ copy it used to be scp'd to is
+# retired — `git pull` in /root/prospect is the whole deploy for shell changes).
 # Launched by cron through cron-wrap.sh (see deploy/crontab.txt) — it must NOT be run
 # unlocked while the nightly or a keeper backlog drain is writing steam_games.db.
 set -uo pipefail

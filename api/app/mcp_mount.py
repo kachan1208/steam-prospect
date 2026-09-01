@@ -40,6 +40,35 @@ _MAX_LOG_BYTES = 5 * 1024 * 1024
 _MCP_THREAD_LIMIT = 4
 
 
+class SDKInternalsChanged(RuntimeError):
+    """The installed mcp SDK no longer exposes the private internals load_prospect_mcp()
+    patches (server._tool_manager.call_tool / list_tools). Raised UNCAUGHT on purpose:
+    a SDK bump must fail the boot loudly instead of silently skipping the observability
+    wiring — or worse, silently mounting an un-instrumented /mcp."""
+
+
+def _tool_manager_or_raise(server: Any) -> Any:
+    """Return server._tool_manager after asserting the private surface this module patches.
+
+    The tool-call metrics/log wrapper and the sync-tool offload both monkeypatch
+    ToolManager.call_tool — the single choke point every tool invocation passes through.
+    If the SDK renamed or removed these internals, continuing would skip that wiring
+    WITHOUT SAYING SO; raise a loud, named error instead."""
+    tool_manager = getattr(server, "_tool_manager", None)
+    if (
+        tool_manager is None
+        or not callable(getattr(tool_manager, "call_tool", None))
+        or not callable(getattr(tool_manager, "list_tools", None))
+    ):
+        raise SDKInternalsChanged(
+            "FastMCP SDK internals changed: expected server._tool_manager with "
+            "call_tool() and list_tools(). mcp_mount.py patches these private "
+            "attributes for per-tool metrics, the call log and the worker-thread "
+            "offload — update it for the installed mcp SDK version."
+        )
+    return tool_manager
+
+
 def _rotate_log(path: str) -> None:
     """Roll `path` to `path`.1 under an exclusive sidecar lock (best-effort).
 
@@ -192,7 +221,11 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
             except Exception:
                 pass
 
-        _orig_call = server._tool_manager.call_tool
+        # Assert the private SDK surface BEFORE touching it (see _tool_manager_or_raise):
+        # an SDK bump that renamed these internals must fail the boot, not silently skip
+        # the metrics/log/offload wiring below.
+        tool_manager = _tool_manager_or_raise(server)
+        _orig_call = tool_manager.call_tool
 
         # Self-enforcement of the offload's CONSTRAINT (see _observed_call): a tool taking
         # a Context must stay on the SERVER event loop, because Context methods talk to
@@ -202,7 +235,7 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
         # reads. The set is empty today; a future Context tool announces itself here and
         # silently opts out of the offload instead of failing subtly at call time.
         _ctx_tools = frozenset(
-            t.name for t in server._tool_manager.list_tools() if t.context_kwarg is not None
+            t.name for t in tool_manager.list_tools() if t.context_kwarg is not None
         )
         if _ctx_tools:
             print(
@@ -269,12 +302,14 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
             _log_call(name, arguments, ok=True, ms=int((_time.monotonic() - t0) * 1000))
             return result
 
-        server._tool_manager.call_tool = _observed_call
+        tool_manager.call_tool = _observed_call
         print(f"[api] MCP: tool-call observability on (metrics={'yes' if _tool_calls else 'no'}, log={_log_path or 'off'}); sync tools offloaded to a dedicated {_MCP_THREAD_LIMIT}-thread pool.")
         asgi_app = server.streamable_http_app()  # also lazily creates server.session_manager
 
         print("[api] MCP: mounted 'prospect-market-intel' at /mcp (Streamable HTTP, stateless).")
         return server, asgi_app
+    except SDKInternalsChanged:
+        raise  # an SDK bump must fail the boot loudly, never silently skip the mount wiring
     except Exception as exc:  # noqa: BLE001 — MCP wiring must never take down the API
         print(f"[api] MCP: failed to load ({exc!r}); skipping /mcp mount.")
         close_prospect_mcp()  # module may have opened its conn before the wiring failed

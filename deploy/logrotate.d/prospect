@@ -1,0 +1,37 @@
+# Prospect cron-redirected logs. Installed by deploy/deploy-scripts.sh into
+# /etc/logrotate.d/prospect (system logrotate runs it daily from /etc/cron.daily).
+#
+# WHY copytruncate on ALL of these: every one is written by a shell `>> file 2>&1` redirect
+# (crontab lines) or an `exec >>$LOG` inside a script (prospect-refresh.sh) — the writing
+# process keeps its fd open for the whole job (up to 6h for the nightly) and none of them
+# understands a "reopen your log" signal, so rename-and-recreate rotation would send hours of
+# output to a file logrotate already moved away. copytruncate never loses a writer. Its one
+# quirk — a copy+truncate race can drop the few lines written between the two — is worth
+# far less than losing a nightly's ETL tail, the exact line that explains a failed build.
+#
+# The dated per-step logs (/var/log/prospect-steps/<step>.<timestamp>.log) are deliberately
+# NOT rotated here: prospect-refresh.sh and quiet-window.sh write one file per run and
+# prospect-refresh.sh prunes them itself (find -mtime +14 -delete), and a running step's
+# live log must never be truncated under its writer. Only the *.cron.log files in that
+# directory are append-forever.
+#
+# /var/log/prospect-backup.log joined when the 19:30 backup was re-enabled (2026-09-01;
+# see deploy/crontab.txt's history block) — it had been growing unbounded on the schedule
+# entry's redirect ever since the job first ran.
+
+/var/log/prospect-refresh.log
+/var/log/prospect-alerts.log
+/var/log/prospect-cron-wrap.log
+/var/log/prospect-backup.log
+/root/deepen_backfill.log
+/root/dev_socials_keeper.log
+/var/log/prospect-steps/*.cron.log
+{
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

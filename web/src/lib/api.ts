@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 /**
@@ -28,7 +28,13 @@ export class ApiError extends Error {
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    // Content-Type only belongs on requests WITH a body — GETs carry no payload, and some
+    // proxies/CDNs reject or misroute a bodyless request that declares one. Caller-supplied
+    // headers still win, same spread order as before.
+    headers: {
+      ...(init?.body != null ? { "Content-Type": "application/json" } : {}),
+      ...(init?.headers ?? {}),
+    },
   });
   if (!res.ok) {
     let detail: unknown = res.statusText;
@@ -133,7 +139,7 @@ export interface Health {
 export function useHealth() {
   return useQuery({
     queryKey: ["health"],
-    queryFn: () => request<Health>("/health"),
+    queryFn: ({ signal }) => request<Health>("/health", { signal }),
     staleTime: 30_000,
     retry: 1,
   });
@@ -254,8 +260,9 @@ export interface NicheListParams {
 export function useNiches(params: NicheListParams) {
   return useQuery({
     queryKey: ["niches", params],
-    queryFn: () => request<NicheList>(`/niches${qs(params)}`),
+    queryFn: ({ signal }) => request<NicheList>(`/niches${qs(params)}`, { signal }),
     placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
   });
 }
 
@@ -380,14 +387,26 @@ export interface NicheDetail {
  * matches it with a `{key:path}` converter and unquotes it back, which is exactly why the
  * encoding has to be unconditional rather than "only when it looks unsafe".
  */
-function nichePath(dimension: Dimension, key: string, suffix = ""): string {
+export function nichePath(dimension: Dimension, key: string, suffix = ""): string {
   return `/niches/${dimension}/${encodeURIComponent(key)}${suffix}`;
+}
+
+/** Shared query options for the niche deep-dive endpoint — useNicheDetail, the Watchlist's
+ * per-entry fan-out and NicheCombined's fallback sizing all read through this ONE factory,
+ * so a niche already fetched anywhere hits the same cache entry everywhere instead of each
+ * call site rebuilding the key/URL (and risking a drift between them). */
+export function nicheDetailQueryOptions(dimension: Dimension, key: string) {
+  return {
+    queryKey: ["niche-detail", dimension, key] as const,
+    queryFn: ({ signal }: { signal: AbortSignal }) =>
+      request<NicheDetail>(nichePath(dimension, key), { signal }),
+    staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
+  };
 }
 
 export function useNicheDetail(dimension: Dimension, key: string | null) {
   return useQuery({
-    queryKey: ["niche-detail", dimension, key],
-    queryFn: () => request<NicheDetail>(nichePath(dimension, key ?? "")),
+    ...nicheDetailQueryOptions(dimension, key ?? ""),
     enabled: key !== null,
   });
 }
@@ -437,11 +456,20 @@ export interface NicheGamesParams {
   price_max?: number;
 }
 
+/** A fetch aborted by react-query's cancellation signal. It is not a failure: the query has
+ * already been settled by the cancellation itself, so it must never be retried, and (see the
+ * additive-overlay queryFns) never swallowed into fallback data either. The name check is on
+ * Error rather than DOMException so it holds in every runtime (browsers, jsdom, Node/undici). */
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
 /** 503 (mart missing), 404 (no such niche) and 422 (a (win, min_reviews) cut that was never
  * materialised) are all stable answers, not blips — surface them at once instead of
- * retrying for seconds. */
+ * retrying for seconds. Cancellations never retry either. */
 function retryUnlessUnavailable(failureCount: number, error: unknown): boolean {
   return (
+    !isAbortError(error) &&
     !(
       error instanceof ApiError &&
       (error.status === 503 || error.status === 404 || error.status === 422)
@@ -449,13 +477,33 @@ function retryUnlessUnavailable(failureCount: number, error: unknown): boolean {
   );
 }
 
+/** One retry for genuinely transient failures — network errors (fetch TypeError) and 5xx —
+ * nothing else: 4xx are stable answers, and a cancelled fetch must never be re-issued. Used
+ * by the additive-overlay queries (catalog events, marketing events, price history) whose
+ * queryFns swallow only the stable misses, so a blip gets one shot before settling. */
+function retryTransientOnce(failureCount: number, error: unknown): boolean {
+  if (isAbortError(error)) return false;
+  if (error instanceof ApiError && error.status < 500) return false;
+  return failureCount < 1;
+}
+
+/** Stable "no data here" answers for the additive overlays: 404 = below the analysis floor,
+ * 503 = the mart hasn't been (re)built yet. Both degrade to an empty list; everything else
+ * is re-thrown so react-query can retry it once (retryTransientOnce) before the query
+ * settles as an error — which every consumer reads as "no overlay", same as []. */
+function isMissingOverlay(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 404 || error.status === 503);
+}
+
 export function useNicheGames(dimension: Dimension, key: string | null, params: NicheGamesParams) {
   return useQuery({
     queryKey: ["niche-games", dimension, key, params],
-    queryFn: () => request<NicheGamesList>(`${nichePath(dimension, key ?? "", "/games")}${qs(params)}`),
+    queryFn: ({ signal }) =>
+      request<NicheGamesList>(`${nichePath(dimension, key ?? "", "/games")}${qs(params)}`, { signal }),
     enabled: key !== null,
     placeholderData: keepPreviousData,
     retry: retryUnlessUnavailable,
+    staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
   });
 }
 
@@ -482,13 +530,15 @@ export function useNicheDistribution(
 ) {
   return useQuery({
     queryKey: ["niche-distribution", dimension, key, metric, params],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       request<NicheDistributionResponse>(
         `${nichePath(dimension, key ?? "", "/distribution")}${qs({ metric, ...params })}`,
+        { signal },
       ),
     enabled: key !== null,
     placeholderData: keepPreviousData,
     retry: retryUnlessUnavailable,
+    staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
   });
 }
 
@@ -538,8 +588,10 @@ export type DistributionMetric = "revenue" | "reviews" | "owners" | "price";
 export function useMarketDistribution(metric: DistributionMetric, genre: string, window: Window) {
   return useQuery({
     queryKey: ["market-distribution", metric, genre, window],
-    queryFn: () => request<MarketDistribution>(`/market/distribution${qs({ metric, genre, window })}`),
+    queryFn: ({ signal }) =>
+      request<MarketDistribution>(`/market/distribution${qs({ metric, genre, window })}`, { signal }),
     placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
   });
 }
 
@@ -597,7 +649,7 @@ export interface MarketBenchmarks {
 export function useMarketBenchmarks() {
   return useQuery({
     queryKey: ["market-benchmarks"],
-    queryFn: () => request<MarketBenchmarks>("/market/benchmarks"),
+    queryFn: ({ signal }) => request<MarketBenchmarks>("/market/benchmarks", { signal }),
     staleTime: 5 * 60_000,
   });
 }
@@ -607,14 +659,19 @@ export interface GenreOption {
   label: string;
 }
 
-/** Genre list derived from the Boxleiter-by-genre breakdown (real catalog data, no fake list). */
+/** Genre list derived from the Boxleiter-by-genre breakdown (real catalog data, no fake
+ * list). Memoized over the benchmark rows so a re-render doesn't hand callers a FRESH array
+ * identity every time (which would churn useMemo/dependency chains downstream). */
 export function useGenres(): GenreOption[] {
   const { data } = useMarketBenchmarks();
-  const genres = (data?.boxleiter_by_genre ?? [])
-    .map((b) => b.genre)
-    .filter((g) => g !== "__all__")
-    .sort((a, b) => a.localeCompare(b));
-  return [{ value: "__all__", label: "All genres" }, ...genres.map((g) => ({ value: g, label: g }))];
+  const rows = data?.boxleiter_by_genre;
+  return useMemo(() => {
+    const genres = (rows ?? [])
+      .map((b) => b.genre)
+      .filter((g) => g !== "__all__")
+      .sort((a, b) => a.localeCompare(b));
+    return [{ value: "__all__", label: "All genres" }, ...genres.map((g) => ({ value: g, label: g }))];
+  }, [rows]);
 }
 
 // ---- seasonality / launch curve ----------------------------------------------------------
@@ -641,8 +698,9 @@ export interface Seasonality {
 export function useSeasonality(genre: string) {
   return useQuery({
     queryKey: ["seasonality", genre],
-    queryFn: () => request<Seasonality>(`/seasonality${qs({ genre })}`),
+    queryFn: ({ signal }) => request<Seasonality>(`/seasonality${qs({ genre })}`, { signal }),
     placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
   });
 }
 
@@ -662,7 +720,8 @@ export interface LaunchCurve {
 export function launchCurveQueryOptions(genre: string) {
   return {
     queryKey: ["launch-curve", genre] as const,
-    queryFn: () => request<LaunchCurve>(`/launch-curve${qs({ genre })}`),
+    queryFn: ({ signal }: { signal: AbortSignal }) =>
+      request<LaunchCurve>(`/launch-curve${qs({ genre })}`, { signal }),
     staleTime: 5 * 60_000,
   };
 }
@@ -746,12 +805,13 @@ export interface TimingOverview {
 export function useTimingOverview(genre: string) {
   return useQuery({
     queryKey: ["timing-overview", genre],
-    queryFn: () => request<TimingOverview>(`/timing/overview${qs({ genre })}`),
+    queryFn: ({ signal }) => request<TimingOverview>(`/timing/overview${qs({ genre })}`, { signal }),
     placeholderData: keepPreviousData,
     staleTime: 5 * 60_000,
     // 503 = marts not built yet, 404 = genre below the size floors — both are stable
     // answers; surface them immediately instead of retrying for seconds.
     retry: (failureCount, error) =>
+      !isAbortError(error) &&
       !(error instanceof ApiError && (error.status === 503 || error.status === 404)) &&
       failureCount < 2,
   });
@@ -848,8 +908,9 @@ export interface GameSearchParams {
 export function useGameSearch(params: GameSearchParams) {
   return useQuery({
     queryKey: ["games-search", params],
-    queryFn: () => request<GameSearchList>(`/games/search${qs(params)}`),
+    queryFn: ({ signal }) => request<GameSearchList>(`/games/search${qs(params)}`, { signal }),
     placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
   });
 }
 
@@ -868,7 +929,7 @@ export interface TagSuggestList {
 export function useTagSuggest(q: string, enabled = true) {
   return useQuery({
     queryKey: ["tag-suggest", q],
-    queryFn: () => request<TagSuggestList>(`/games/tags/suggest${qs({ q, limit: 10 })}`),
+    queryFn: ({ signal }) => request<TagSuggestList>(`/games/tags/suggest${qs({ q, limit: 10 })}`, { signal }),
     enabled,
     staleTime: 5 * 60_000, // the tag universe only changes on the nightly ETL
     placeholderData: keepPreviousData,
@@ -944,7 +1005,7 @@ export interface GameProfile {
 export function gameProfileQueryOptions(appid: number) {
   return {
     queryKey: ["game-profile", appid] as const,
-    queryFn: () => request<GameProfile>(`/games/${appid}`),
+    queryFn: ({ signal }: { signal: AbortSignal }) => request<GameProfile>(`/games/${appid}`, { signal }),
     staleTime: 5 * 60_000,
   };
 }
@@ -985,8 +1046,9 @@ export interface GameComparablesResponse {
 export function useGameComparables(appid: number | null) {
   return useQuery({
     queryKey: ["game-comparables", appid],
-    queryFn: () => request<GameComparablesResponse>(`/games/${appid}/comparables`),
+    queryFn: ({ signal }) => request<GameComparablesResponse>(`/games/${appid}/comparables`, { signal }),
     enabled: appid !== null,
+    staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
   });
 }
 
@@ -1030,8 +1092,9 @@ export interface GameReviewsSummary {
 export function useGameReviewsSummary(appid: number | null) {
   return useQuery({
     queryKey: ["game-reviews-summary", appid],
-    queryFn: () => request<GameReviewsSummary>(`/games/${appid}/reviews-summary`),
+    queryFn: ({ signal }) => request<GameReviewsSummary>(`/games/${appid}/reviews-summary`, { signal }),
     enabled: appid !== null,
+    staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
   });
 }
 
@@ -1043,23 +1106,33 @@ export interface GameEvent {
   url: string | null;
 }
 
-/** Catalog events for chart annotation. Same queryKey as the chart-local fetches in
- * GameTrendsChart / ReviewsTimelineChart, so however many charts on a page want the
- * overlay, react-query collapses them into one network request. Errors resolve to []
- * — markers are additive, and a chart without them is complete, just less explained. */
-export function useGameEvents(appid: number | null) {
-  return useQuery({
-    queryKey: ["game-catalog-events", appid],
-    queryFn: async () => {
+/** Shared options for the catalog-events overlay (GET /games/{appid}/events) — useGameEvents
+ * and the chart-local overlays in GameTrendsChart / ReviewsTimelineChart all read through it,
+ * so however many charts on a page want the markers, react-query collapses them into one
+ * network request under one queryKey. The contract is ADDITIVE: a stable miss (404/503)
+ * resolves to [] so a chart without markers is complete, just less explained; transient
+ * failures get one retry first, and a cancelled fetch never resolves to data. */
+export function gameCatalogEventsQueryOptions(appid: number) {
+  return {
+    queryKey: ["game-catalog-events", appid] as const,
+    queryFn: async ({ signal }: { signal: AbortSignal }) => {
       try {
-        const r = await request<{ appid: number; items: GameEvent[] }>(`/games/${appid}/events`);
+        const r = await request<{ appid: number; items: GameEvent[] }>(`/games/${appid}/events`, { signal });
         return r.items;
-      } catch {
-        return [] as GameEvent[];
+      } catch (error) {
+        if (isMissingOverlay(error)) return [] as GameEvent[];
+        throw error; // transient → retryed once (retryTransientOnce); AbortError → never data
       }
     },
-    enabled: appid !== null,
     staleTime: 5 * 60_000,
+    retry: retryTransientOnce,
+  };
+}
+
+export function useGameEvents(appid: number | null) {
+  return useQuery({
+    ...gameCatalogEventsQueryOptions(appid ?? -1),
+    enabled: appid !== null,
   });
 }
 
@@ -1074,21 +1147,31 @@ export interface PricePoint {
 }
 
 /** Daily price snapshots (signals.db, collection live since 2026-08-24 — a days-deep
- * series that grows by one point per day). Errors resolve to [] on the same contract as
- * useGameEvents: the panel renders its honest "tracking just started" state either way. */
-export function useGamePriceHistory(appid: number | null) {
-  return useQuery({
-    queryKey: ["game-price-history", appid],
-    queryFn: async () => {
+ * series that grows by one point per day). Same ADDITIVE contract as the catalog events:
+ * a stable miss (404/503) resolves to [] so the panel renders its honest "tracking just
+ * started" state; transient failures get one retry first, and a cancelled fetch never
+ * resolves to data. */
+export function gamePriceHistoryQueryOptions(appid: number) {
+  return {
+    queryKey: ["game-price-history", appid] as const,
+    queryFn: async ({ signal }: { signal: AbortSignal }) => {
       try {
-        const r = await request<{ appid: number; items: PricePoint[] }>(`/games/${appid}/price-history`);
+        const r = await request<{ appid: number; items: PricePoint[] }>(`/games/${appid}/price-history`, { signal });
         return r.items;
-      } catch {
-        return [] as PricePoint[];
+      } catch (error) {
+        if (isMissingOverlay(error)) return [] as PricePoint[];
+        throw error; // transient → retryed once (retryTransientOnce); AbortError → never data
       }
     },
-    enabled: appid !== null,
     staleTime: 5 * 60_000,
+    retry: retryTransientOnce,
+  };
+}
+
+export function useGamePriceHistory(appid: number | null) {
+  return useQuery({
+    ...gamePriceHistoryQueryOptions(appid ?? -1),
+    enabled: appid !== null,
   });
 }
 
@@ -1180,8 +1263,9 @@ export interface GameTeardown {
 export function useGameTeardown(appid: number | null) {
   return useQuery({
     queryKey: ["game-teardown", appid],
-    queryFn: () => request<GameTeardown>(`/games/${appid}/teardown`),
+    queryFn: ({ signal }) => request<GameTeardown>(`/games/${appid}/teardown`, { signal }),
     enabled: appid !== null,
+    staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
   });
 }
 
@@ -1207,16 +1291,17 @@ export interface GameChannelMix {
 export function useGameChannelMix(appid: number | null) {
   return useQuery({
     queryKey: ["game-channel-mix", appid],
-    queryFn: () => request<GameChannelMix>(`/games/${appid}/channel-mix`),
+    queryFn: ({ signal }) => request<GameChannelMix>(`/games/${appid}/channel-mix`, { signal }),
     enabled: appid !== null,
     staleTime: 5 * 60_000,
   });
 }
 
 // ---- game trends (+ compare overlay) ----------------------------------------------------
-// Mirrors api/app/routers/trends.py. GameTrendsChart keeps its own local copy of the base
-// point shape (it self-fetches without comps); these typed hooks exist for the /compare
-// page, which needs the `comps` block (each comp's own monthly series).
+// Mirrors api/app/routers/trends.py. This is the CANONICAL response shape: the chart
+// components (GameTrendsChart, GameMetricDrilldown) all fetch through
+// gameTrendsQueryOptions below, and the /compare page uses useGameTrendsWithComps, which
+// needs the `comps` block (each comp's own monthly series).
 export interface GameTrendPoint {
   period: string; // 'YYYY-MM'
   n_reviews: number;
@@ -1242,18 +1327,103 @@ export interface GameTrendsResponse {
   comps: GameTrendsComps | null;
 }
 
+/** Shared query options for the base trends endpoint (no comps) — GameTrendsChart's
+ * self-fetching mode and GameMetricDrilldown BOTH read through this one factory, so the
+ * matching queryKeys are guaranteed by construction (they used to be rebuilt in each
+ * component and match only by convention) and one cached response serves both. */
+export function gameTrendsQueryOptions(appid: number) {
+  return {
+    queryKey: ["game-trends", appid] as const,
+    queryFn: ({ signal }: { signal: AbortSignal }) =>
+      request<GameTrendsResponse>(`/games/${appid}/trends`, { signal }),
+    staleTime: 5 * 60_000,
+  };
+}
+
 /** Primary game's monthly trends with the rest overlaid via ?comps= (one request total). */
 export function useGameTrendsWithComps(appid: number | null, comps: number[]) {
   const compsKey = comps.join(",");
   return useQuery({
     queryKey: ["game-trends-comps", appid, compsKey],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       request<GameTrendsResponse>(
         `/games/${appid}/trends${qs({ comps: compsKey || undefined })}`,
+        { signal },
       ),
     enabled: appid !== null,
     staleTime: 5 * 60_000,
   });
+}
+
+// ---- game players (daily CCU point samples — the live_players drilldown) ----------------
+/** GET /api/games/{appid}/players — daily CCU point samples (mart_game_players_daily). */
+export interface GamePlayersPoint {
+  date: string; // 'YYYY-MM-DD'
+  players: number;
+}
+
+export interface GamePlayersSummary {
+  live_players: number | null;
+  players_7d_avg: number | null;
+  players_trend_7d_pct: number | null;
+  n_days_measured: number;
+  first_date: string | null;
+  last_date: string | null;
+}
+
+export interface GamePlayersMonthlyPoint {
+  month: string; // 'YYYY-MM-DD' (month start)
+  avg_players: number;
+  peak_players: number | null;
+}
+
+export interface GamePlayersResponse {
+  appid: number;
+  days: number;
+  available: boolean; // false = mart predates the daily CCU marts -> fall back to monthly
+  summary: GamePlayersSummary | null;
+  points: GamePlayersPoint[];
+  // Deep monthly history via steamcharts (top-8k games; empty when uncovered/absent).
+  monthly?: GamePlayersMonthlyPoint[];
+}
+
+/** Shared query options for the daily-CCU endpoint (GameMetricDrilldown's live_players
+ * drilldown fetches through it). `days=90` is the only window asked for today. */
+export function gamePlayersQueryOptions(appid: number) {
+  return {
+    queryKey: ["game-players", appid] as const,
+    queryFn: ({ signal }: { signal: AbortSignal }) =>
+      request<GamePlayersResponse>(`/games/${appid}/players${qs({ days: 90 })}`, { signal }),
+    staleTime: 5 * 60_000,
+  };
+}
+
+// ---- marketing events (the org's own marketing log — GameTrendsChart annotations) -------
+export interface MarketingEvent {
+  id: number;
+  appid: number;
+  event_date: string; // 'YYYY-MM-DD'
+  kind: string; // trailer | festival | press | update | other
+  note: string | null;
+}
+
+/** "My marketing events" overlay (GET /api/inputs/events?appid=…) — additive on the same
+ * contract as the catalog events: a stable miss resolves to [], transient failures get one
+ * retry, and a cancelled fetch never resolves to data. */
+export function gameMarketingEventsQueryOptions(appid: number) {
+  return {
+    queryKey: ["game-events", appid] as const,
+    queryFn: async ({ signal }: { signal: AbortSignal }) => {
+      try {
+        return await request<MarketingEvent[]>(`/inputs/events${qs({ appid })}`, { signal });
+      } catch (error) {
+        if (isMissingOverlay(error)) return [] as MarketingEvent[];
+        throw error; // transient → retryed once (retryTransientOnce); AbortError → never data
+      }
+    },
+    staleTime: 5 * 60_000,
+    retry: retryTransientOnce,
+  };
 }
 
 // ---- entities (developer/publisher profiles) --------------------------------------------
@@ -1288,14 +1458,17 @@ export function useEntitySearch(q: string, role: EntityRole | null, minGames = 1
   const query = q.trim();
   return useQuery({
     queryKey: ["entity-search", query, role, minGames, limit],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       request<EntitySearchList>(
         `/entities/search${qs({ q: query || undefined, role, min_games: minGames, limit })}`,
+        { signal },
       ),
     placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
     // 503 means "marts not built yet" — a stable answer; surface the refreshing state
     // immediately instead of retrying for seconds.
     retry: (failureCount, error) =>
+      !isAbortError(error) &&
       !(error instanceof ApiError && error.status === 503) && failureCount < 2,
   });
 }
@@ -1347,12 +1520,14 @@ export interface EntityNotFoundDetail {
 export function useEntityProfile(role: EntityRole | null, name: string | null) {
   return useQuery({
     queryKey: ["entity-profile", role, name],
-    queryFn: () =>
-      request<EntityProfileResponse>(`/entities/profile${qs({ role, name })}`),
+    queryFn: ({ signal }) =>
+      request<EntityProfileResponse>(`/entities/profile${qs({ role, name })}`, { signal }),
     enabled: !!role && !!name,
+    staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
     // 404 carries did-you-mean suggestions and 503 means "marts not built yet" — both are
     // stable answers, so surface them immediately instead of retrying for seconds.
     retry: (failureCount, error) =>
+      !isAbortError(error) &&
       !(error instanceof ApiError && (error.status === 404 || error.status === 503)) &&
       failureCount < 2,
   });
@@ -1393,9 +1568,10 @@ export function useAspectReviews(
 ) {
   return useQuery({
     queryKey: ["aspect-reviews", appid, aspect, sentiment],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       request<AspectReviewsResponse>(
         `/games/${appid}/aspect-reviews${qs({ aspect: aspect ?? "", sentiment, limit: 4 })}`,
+        { signal },
       ),
     enabled: enabled && appid !== null && !!aspect,
     staleTime: 5 * 60_000,
@@ -1493,10 +1669,12 @@ function combinedQs(p: NicheCombinedParams): string {
 export function useNichesCombined(params: NicheCombinedParams) {
   return useQuery({
     queryKey: ["niches-combined", params],
-    queryFn: () => request<NicheCombined>(`/niches/combined${combinedQs(params)}`),
+    queryFn: ({ signal }) => request<NicheCombined>(`/niches/combined${combinedQs(params)}`, { signal }),
     enabled: params.niches.length >= 2,
     placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
     retry: (failureCount, error) =>
+      !isAbortError(error) &&
       !(
         error instanceof ApiError &&
         (error.status === 503 || error.status === 404 || error.status === 422 || error.status === 400)

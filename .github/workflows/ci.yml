@@ -25,6 +25,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Least privilege for the whole workflow: read the checkout, nothing else. Jobs that need
+# more would widen ONLY themselves via a job-level block —
+# GITHUB_TOKEN should never arrive with write scopes it isn't going to use.
+permissions:
+  contents: read
+
 jobs:
   web:
     name: Web (typecheck, build, vitest)
@@ -34,7 +40,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # Must match the image's build stage (Dockerfile: node:22-slim) — a lockfile that
+          # installs under one major can still bite the other on engine-gated transitive deps.
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: web/package-lock.json
 
@@ -66,6 +74,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
+          cache: "pip"
 
       # Install the PINNED set the image installs, so CI tests what production runs.
       - name: Install API dependencies (locked)
@@ -115,6 +124,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
+          cache: "pip"
 
       - name: Install uv (pinned)
         run: pip install "uv==${UV_VERSION}"
@@ -153,6 +163,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
+          cache: "pip"
 
       # pytest is NOT in etl/requirements.txt on purpose: that file describes what the droplet's
       # ETL venv installs, and it is kept deliberately thin (the aspect classifier is
@@ -178,6 +189,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
+          cache: "pip"
 
       # From the LOCK, like the api/etl jobs: the whole point of locking mcp/ is that CI
       # exercises the same resolved SDK the image would get, not whatever PyPI serves today.
@@ -191,12 +203,39 @@ jobs:
           PROSPECT_ANALYTICS_DB_PATH: ${{ github.workspace }}/.github/fixtures/mcp_smoke_mart.db
         run: python smoke_test.py
 
+  ruff:
+    name: "Python lint (ruff: hard errors)"
+    runs-on: ubuntu-latest
+    # The catch-the-hard-errors net: syntax errors, undefined names, redefinitions and the
+    # rest of pyflakes, across every Python tree the image ships. Deliberately a SEPARATE
+    # job: it must stay green for reasons it controls, never blocked on pytest runtime.
+    env:
+      # PINNED, same discipline as UV_VERSION/SHELLCHECK_VERSION — an unpinned linter means
+      # a new release's rule tweaks fail every unrelated PR. 0.13.1 is the version the
+      # ruleset below was verified clean against (locally, on this tree, 2026-09-01).
+      RUFF_VERSION: "0.13.1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ruff (pinned)
+        run: pip install "ruff==${RUFF_VERSION}"
+
+      - name: Run ruff (E9 + pyflakes, minus the pre-existing etl debt below)
+        # E9,F was the starting candidate and is NOT clean on this tree: etl/ carries four
+        # F401 unused imports, one F541 placeholder-less f-string, and two F601 duplicate
+        # dict-key literals. The first two are cosmetic; F601 (both in etl/build_marts.py)
+        # is a real latent bug — the later key silently wins. They live in a tree this
+        # check was not allowed to edit, so they are IGNORED here rather than fixed, and
+        # dropping each ignore is the follow-up: clean the finding, remove it from
+        # --ignore, nothing else. Until then this job still catches every NEW hard error.
+        run: ruff check --select E9,F --ignore F401,F541,F601 api etl mcp
+
   shellcheck:
     name: Shellcheck (deploy scripts)
     runs-on: ubuntu-latest
     # These scripts ARE production: the nightly pipeline, the cron lock wrapper, backups and
-    # rollback all run from /root/ on the droplet, where a typo is discovered at 21:00 UTC by
-    # a missing mart. -x follows the sourced deploy/lib.sh.
+    # rollback all run from the /root/prospect/deploy checkout on the droplet, where a typo
+    # is discovered at 21:00 UTC by a missing mart. -x follows the sourced deploy/lib.sh.
     env:
       # PINNED, for the same reason UV_VERSION is. `apt install shellcheck` gave 0.9.0, whose
       # SC2317 ("command appears to be unreachable") fires on every line of a trap handler —
@@ -204,31 +243,71 @@ jobs:
       # newer shellcheck does not emit. An unpinned linter means the runner image decides
       # whether CI is green, which is how a check stops meaning anything.
       SHELLCHECK_VERSION: "v0.11.0"
+      # INTEGRITY: upstream publishes NO checksum file for its release assets (checked via
+      # the GitHub release API 2026-09-01: 13 binaries, no SHA256SUMS among them), and none
+      # could be computed at the time this was added, so the download is pinned by exact
+      # version + exact asset URL over TLS to github.com only. The step below verifies
+      # against this value the moment it is non-empty — if upstream ever ships a checksum
+      # (or one is recorded by hand from a trusted download), paste it here and stop
+      # trusting the pipe.
+      SHELLCHECK_SHA256: ""
     steps:
       - uses: actions/checkout@v4
 
       - name: Run shellcheck
         run: |
           set -euo pipefail
-          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
-            | tar -xJf - -C /tmp
+          archive="/tmp/shellcheck.tar.xz"
+          curl -fsSL -o "$archive" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          if [ -n "$SHELLCHECK_SHA256" ]; then
+            echo "${SHELLCHECK_SHA256}  ${archive}" | sha256sum -c -
+          else
+            echo "::warning::shellcheck ${SHELLCHECK_VERSION} accepted without sha256 — upstream publishes none; see SHELLCHECK_SHA256 in the workflow"
+          fi
+          tar -xJf "$archive" -C /tmp
+          rm -f "$archive"
           SC="/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck"
           "$SC" --version
           "$SC" -x deploy/*.sh
 
   docker:
-    name: Docker image builds
+    name: Docker image (build + smoke)
     runs-on: ubuntu-latest
+    # No packages:write — nothing is published (see below). The workflow-level
+    # `contents: read` is all this job needs, so it does not widen anything.
     # The Dockerfile had never been built in CI, and an unpinned dependency resolving
     # differently on a rebuild (mcp>=1.2 -> 2.0) already took /mcp down in production once.
-    # Build only — nothing is pushed; the droplet builds its own image on deploy.
+    #
+    # BUILD AND SMOKE ONLY — deliberately NO registry push (2026-09-01). A push to ghcr.io
+    # was drafted here alongside a comment saying "the droplet's deploy is a `docker pull`".
+    # There is no `docker pull` anywhere: deploy/run-prospect.sh:24 does
+    # `docker image inspect "$IMAGE" || exit 2`, refusing an image that is not already local,
+    # and DEPLOY.md still documents building on the box. Publishing artefacts nothing consumes
+    # costs multi-GB per merge with no retention policy, and documents a deploy path that does
+    # not exist — worse than not publishing at all.
+    #
+    # Registry-based deploy is still the RIGHT direction and worth doing properly: the droplet
+    # builds its own image today on a 3.9GB box, which is why builds are banned 06:00-19:00 UTC
+    # (they fight the keepers for RAM, and doing it anyway once took production down). Wiring
+    # it needs three things this change does not have: registry auth on the box, an image
+    # retention policy, and a pull branch in run-prospect.sh. Do those together, deliberately.
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build the image
-        env:
-          DOCKER_BUILDKIT: "1"   # the Dockerfile's `# syntax=` directive needs BuildKit
-        run: docker build -t prospect:ci .
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the image (loaded for the smoke tests below)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # load (not just cache export) so the built image is in the local daemon and the
+          # MCP-SDK assertion + boot smoke run against the EXACT artifact that gets pushed.
+          load: true
+          tags: prospect:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       # THE regression this job exists for, asserted directly. `mcp>=1.2` resolving to 2.0.0
       # on a routine rebuild dropped `mcp.server.fastmcp` — the module mcp/prospect_mcp.py
@@ -268,3 +347,4 @@ jobs:
           echo "::error::image never answered /api/health"
           docker logs prospect-ci
           exit 1
+

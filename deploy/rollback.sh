@@ -13,7 +13,9 @@
 # NEEDS-VERIFICATION: confirm the live symlink is relative (`readlink
 # /root/prospect/data/current.duckdb` should print a bare filename, no leading /).
 #
-# Version-controlled at prospect/deploy/rollback.sh; scp'd to /root/rollback.sh.
+# Version-controlled at prospect/deploy/rollback.sh; runs from the git checkout at
+# /root/prospect/deploy/rollback.sh (the flat /root/ copy it used to be scp'd to is
+# retired — `git pull` in /root/prospect is the whole deploy for shell changes).
 set -euo pipefail
 
 DATA_DIR=${PROSPECT_DATA_DIR:-/root/prospect/data}
@@ -30,7 +32,8 @@ if [ ! -f "$(dirname "$0")/lib.sh" ]; then
     echo "ERROR: $(dirname "$0")/lib.sh is missing — refusing to run." >&2
     echo "       Without it this script cannot verify the app came back, and a rollback that" >&2
     echo "       reports success without checking is worse than no rollback." >&2
-    echo "       Fix: deploy/deploy-scripts.sh --execute  (or scp deploy/lib.sh to /root/)." >&2
+    echo "       Fix: cd /root/prospect && git pull  (lib.sh lives next to this script in the" >&2
+    echo "       checkout; deploy/deploy-scripts.sh verifies the checkout is complete)." >&2
     exit 1
 fi
 # shellcheck source=deploy/lib.sh

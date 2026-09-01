@@ -32,7 +32,9 @@
 # COMMAND is run, not exec'd, so this wrapper survives to push that outcome. It forwards
 # SIGTERM/SIGINT to COMMAND so `kill <cron-wrap pid>` still stops the job.
 #
-# Version-controlled at prospect/deploy/cron-wrap.sh; scp'd to /root/cron-wrap.sh.
+# Version-controlled at prospect/deploy/cron-wrap.sh; runs from the git checkout at
+# /root/prospect/deploy/cron-wrap.sh (the flat /root/ copy it used to be scp'd to is
+# retired — `git pull` in /root/prospect is the whole deploy for shell changes).
 set -uo pipefail
 
 LOCK=/root/.prospect-refresh.lock

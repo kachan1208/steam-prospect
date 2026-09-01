@@ -20,6 +20,7 @@ pins it — two more always-on containers is exactly the wrong trade.
 | e | age of `prospect_backup_last_success_timestamp` (pushed by `backup.sh`) | > 50h |
 | f | VictoriaMetrics itself unreachable | immediate |
 | g | `prospect_build_hold_active` (a `rollback.sh` hold nobody released) | latest sample is 1 |
+| h | free disk on the filesystem holding `/root` (pushes `prospect_disk_free_pct`; evaluated even when VM is down) | < `DISK_MIN_FREE_PCT` (default 15%) |
 
 **Every wrapped cron job is covered by (a).** `cron-wrap.sh` pushes
 `prospect_pipeline_step_success{step="<job>"}` for whatever it runs, so the twitch
@@ -58,8 +59,9 @@ missed run is normal jitter and two in a row is not.
 
 ## Setup (one-time, on the droplet)
 
-1. `deploy/deploy-scripts.sh` copies `alert_check.py` to `/root/alert_check.py` and
-   `deploy/crontab.txt` carries the `*/30` entry — install with `crontab /root/crontab.txt`.
+1. The script runs from the git checkout at `/root/prospect/deploy/observability/`
+   (`git pull` in `/root/prospect` keeps it current), and `deploy/crontab.txt` carries
+   the `*/30` entry — install with `crontab /root/prospect/deploy/crontab.txt`.
 2. Create `/root/.prospect-alerts.env` (chmod 600, never in git):
 
    ```sh
@@ -86,14 +88,21 @@ missed run is normal jitter and two in a row is not.
    # multi-day drain is normal for you — otherwise leave it monitored.
    # (ALERT_IGNORE_SKIPPED_JOBS is accepted as an alias for this.)
    #ALERT_IGNORE_JOBS=light_build
+   # Breach when the filesystem holding /root has less than this percent free. 15 = the
+   # headroom backup.sh's weekly copy demands and the ETL's spill ceiling needs.
+   #DISK_MIN_FREE_PCT=15
+   # When the 19:30 backup job is deliberately NOT scheduled, silence its staleness check
+   # with this (otherwise remove it — see the history block in deploy/crontab.txt).
+   #ALERT_CHECK_BACKUPS=0
    ```
 
 3. Test end-to-end without waiting for a real failure:
 
    ```sh
-   /root/alert_check.py                     # prints ok / breaches; exit 0-1
+   /root/prospect/deploy/observability/alert_check.py     # prints ok / breaches; exit 0-1
    # force a send: point it at a bogus VM so 'vm_unreachable' fires
-   PROSPECT_VM_URL=http://127.0.0.1:1 PROSPECT_ALERT_STATE=/tmp/s.json /root/alert_check.py
+   PROSPECT_VM_URL=http://127.0.0.1:1 PROSPECT_ALERT_STATE=/tmp/s.json \
+       /root/prospect/deploy/observability/alert_check.py
    ```
 
 Cron output lands in `/var/log/prospect-alerts.log` (see the crontab entry).
@@ -115,3 +124,5 @@ Cron output lands in `/var/log/prospect-alerts.log` (see the crontab entry).
   `light-build-cron.sh`; both feed check (a) automatically.
 - `prospect_alert_check_last_run_timestamp` — the checker's own heartbeat. If it flatlines
   on the pipeline dashboard, the watcher itself is dead (cron removed, python broken).
+- `prospect_disk_free_pct` — pushed by `alert_check.py` itself on every run (check h), so
+  the dashboard shows disk headroom approaching the ETL's spill ceiling before it arrives.

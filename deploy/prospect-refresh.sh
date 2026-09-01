@@ -12,7 +12,9 @@
 #  - Discovery runs WEEKLY (Sundays) not nightly — enumerating the whole storefront + enriching
 #    thousands of obscure games every night made nightlies 5h+.
 #
-# Version-controlled at prospect/deploy/prospect-refresh.sh; scp'd to /root/prospect-refresh.sh.
+# Version-controlled at prospect/deploy/prospect-refresh.sh; runs from the git checkout at
+# /root/prospect/deploy/prospect-refresh.sh (the flat /root/ copy it used to be scp'd to is
+# retired — `git pull` in /root/prospect is the whole deploy for shell changes).
 set -uo pipefail
 export PATH=/root/steam-scraper/.venv/bin:/root/.local/bin:$PATH
 export PROSPECT_DUCKDB_MEMORY_LIMIT=2500MB   # cap DuckDB on the 4GB box
@@ -29,15 +31,15 @@ export PROSPECT_DUCKDB_TEMP_MAX=15GiB
 [ -f /root/.prospect-env ] && . /root/.prospect-env
 
 # Shared helpers (prospect_restart_verify / prospect_health_wait / prospect_push_metrics).
-# Lives next to this script both in the repo (deploy/lib.sh) and on the box (/root/lib.sh —
-# deploy/deploy-scripts.sh copies it). If it's missing (partial scp), degrade LOUDLY to a
+# Lives next to this script in the checkout (deploy/lib.sh — on the box,
+# /root/prospect/deploy/lib.sh). If it's missing (damaged checkout), degrade LOUDLY to a
 # blind restart rather than kill the whole nightly over a helper file.
 # shellcheck source=deploy/lib.sh
 if [ -f "$(dirname "$0")/lib.sh" ]; then
     . "$(dirname "$0")/lib.sh"
 else
     echo "WARN: $(dirname "$0")/lib.sh missing — restart verification DEGRADED to a blind" \
-         "restart; scp deploy/lib.sh to /root/ (deploy/deploy-scripts.sh does)"
+         "restart; restore the checkout (cd /root/prospect && git pull)"
     prospect_restart_verify() { docker restart prospect && sleep 15; }
 fi
 # Unbuffered stdout for EVERY python step. Not cosmetic: a step killed by `timeout` never gets to

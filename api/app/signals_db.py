@@ -14,26 +14,35 @@ not yet run) returns empty rows — the endpoints treat "no signals yet" as data
 """
 from __future__ import annotations
 
-import os
+import logging
 import sqlite3
 from pathlib import Path
 
-SIGNALS_DB_PATH = os.environ.get("PROSPECT_SIGNALS_DB", "/app/data/signals.db")
+from .config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def query(sql: str, params: tuple = ()) -> list[dict]:
-    if not Path(SIGNALS_DB_PATH).exists():
+    # Read at query time (settings, not a module constant): the path is then overridable
+    # per process via PROSPECT_SIGNALS_DB / Settings without an import-order constraint.
+    db_path = settings.signals_db
+    if not Path(db_path).exists():
         return []
     try:
-        con = sqlite3.connect(f"file:{SIGNALS_DB_PATH}?mode=ro", uri=True, timeout=5)
-    except sqlite3.Error:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error as exc:
+        logger.warning("signals.db connect failed at %s: %s", db_path, exc)
         return []
     try:
         con.row_factory = sqlite3.Row
         try:
             return [dict(r) for r in con.execute(sql, params).fetchall()]
-        except sqlite3.OperationalError:
-            # table not created yet (collector never ran) — same contract as a missing file
+        except sqlite3.OperationalError as exc:
+            # Graceful degradation (the benign case: table not created yet because the
+            # collector never ran — same contract as a missing file), but never SILENT:
+            # a locked or corrupt DB must be visible in the logs, not invisible.
+            logger.warning("signals.db query failed (%s): %s", db_path, exc)
             return []
     finally:
         con.close()

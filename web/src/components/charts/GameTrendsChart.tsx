@@ -11,7 +11,14 @@ import {
   YAxis,
 } from "recharts";
 
-import { request } from "../../lib/api";
+import {
+  gameCatalogEventsQueryOptions,
+  gameMarketingEventsQueryOptions,
+  gameTrendsQueryOptions,
+  type GameEvent,
+  type GameTrendPoint,
+  type MarketingEvent,
+} from "../../lib/api";
 import { fmtAxisCompact, fmtCompact } from "../../lib/format";
 import { markerMonths } from "../../lib/notable";
 import { CSS_VAR } from "../../lib/palette";
@@ -38,39 +45,11 @@ import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
  * caveat line below and the mart header. ccu_avg is NULL (a gap, not zero) for any month with no snapshot;
  * connectNulls keeps a single reading visible as a dot.
  *
- * Self-fetches by `appid` (via react-query + the exported `request`) unless `points` is
- * passed in, so it can be embedded as just <GameTrendsChart appid={appid} />. The event
- * overlay is only wired in that self-fetching mode.
+ * Self-fetches by `appid` (via react-query + the shared queryOptions factories in
+ * lib/api.ts) unless `points` is passed in, so it can be embedded as just
+ * <GameTrendsChart appid={appid} />. The event overlay is only wired in that
+ * self-fetching mode.
  */
-export interface GameTrendPoint {
-  period: string; // 'YYYY-MM'
-  n_reviews: number;
-  ccu_avg: number | null;
-}
-
-interface GameTrendsResponse {
-  appid: number;
-  eligible: boolean;
-  points: GameTrendPoint[];
-}
-
-interface MarketingEvent {
-  id: number;
-  appid: number;
-  event_date: string; // 'YYYY-MM-DD'
-  kind: string; // trailer | festival | press | update | other
-  note: string | null;
-}
-
-/** Catalog events (GET /api/games/{appid}/events ← mart_game_event): the release, developer
- * patch notes, journalist coverage — the "why did the curve move HERE" annotations, capped at
- * 40/game by the ETL with the release always kept. */
-interface CatalogEvent {
-  event_date: string; // 'YYYY-MM-DD'
-  kind: "release" | "update" | "press";
-  title: string;
-  url: string | null;
-}
 
 // "My marketing events" are user milestones, not a data series — brand-toned so they read
 // as annotations distinct from the aqua review bars and blue player line.
@@ -128,42 +107,26 @@ export function GameTrendsChart({
 }) {
   const selfFetch = points === undefined && Number.isFinite(appid);
 
+  // All three queries come from the shared factories in lib/api.ts (one canonical contract
+  // per endpoint; the queryKeys match GameMetricDrilldown / useGameEvents by construction
+  // so every chart on the page shares one cached response per endpoint).
   const trendsQuery = useQuery({
-    queryKey: ["game-trends", appid],
-    queryFn: () => request<GameTrendsResponse>(`/games/${appid}/trends`),
+    ...gameTrendsQueryOptions(appid),
     enabled: selfFetch,
-    staleTime: 5 * 60_000,
   });
 
-  // Marketing annotations are additive — a failing/empty events endpoint must never blank
-  // the chart, so this query swallows errors into an empty list rather than surfacing them.
+  // Marketing annotations are additive — the factory's contract (stable miss → [], one
+  // retry on a transient blip) keeps a failing endpoint from blanking the chart.
   const eventsQuery = useQuery({
-    queryKey: ["game-events", appid],
-    queryFn: async () => {
-      try {
-        return await request<MarketingEvent[]>(`/inputs/events?appid=${appid}`);
-      } catch {
-        return [] as MarketingEvent[];
-      }
-    },
+    ...gameMarketingEventsQueryOptions(appid),
     enabled: selfFetch,
-    staleTime: 5 * 60_000,
   });
 
-  // Same swallow-errors contract as the marketing overlay: catalog annotations are additive,
-  // and an old mart (no mart_game_event yet) answers items=[] server-side anyway.
+  // Same additive contract for the catalog annotations: an old mart (no mart_game_event
+  // yet) answers items=[] server-side anyway.
   const catalogQuery = useQuery({
-    queryKey: ["game-catalog-events", appid],
-    queryFn: async () => {
-      try {
-        const r = await request<{ appid: number; items: CatalogEvent[] }>(`/games/${appid}/events`);
-        return r.items;
-      } catch {
-        return [] as CatalogEvent[];
-      }
-    },
+    ...gameCatalogEventsQueryOptions(appid),
     enabled: selfFetch,
-    staleTime: 5 * 60_000,
   });
 
   const basePoints = points ?? trendsQuery.data?.points ?? [];
@@ -203,7 +166,7 @@ export function GameTrendsChart({
 
   // Catalog events bucket by charted month exactly like the marketing ones. The release month
   // is singled out: it is the one marker whose label earns axis space.
-  const catalogByMonth = new Map<string, CatalogEvent[]>();
+  const catalogByMonth = new Map<string, GameEvent[]>();
   for (const e of catalogQuery.data ?? []) {
     const month = e.event_date.slice(0, 7);
     if (!periodSet.has(month)) continue;
