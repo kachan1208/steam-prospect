@@ -175,6 +175,12 @@ export default function Watchlist() {
         <Header count={0} builtAt={null} />
         <div className="blueprint">
           <i className="bp-corner" />
+          {/* The copy names the "+ Watchlist" button but that button lives on a page the
+              reader has to already be on, so this state told them what to do and gave them
+              no way to do it — a dead end (measured on production 2026-09-01: zero links,
+              zero buttons in the empty state). /compare's equivalent already ships a
+              "Browse games" button out; this borrows it, plus the niche route, because a
+              watchlist takes both kinds of entry. */}
           <EmptyState
             icon={WATCHLIST_ICON}
             title="Nothing on your watchlist yet"
@@ -184,6 +190,24 @@ export default function Watchlist() {
                 It'll show up here with a starter alert rule you can tune — evaluated live against Prospect's current data, not on a
                 schedule.
               </>
+            }
+            action={
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <Link
+                  to="/games"
+                  style={CONDENSED}
+                  className="bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg transition-colors hover:bg-brand-hover"
+                >
+                  Browse games
+                </Link>
+                <Link
+                  to="/niches"
+                  style={CONDENSED}
+                  className="border border-borderstrong px-3 py-1.5 text-xs text-ink-primary transition-colors hover:bg-ink-primary/[0.08]"
+                >
+                  Browse niches
+                </Link>
+              </div>
             }
           />
         </div>

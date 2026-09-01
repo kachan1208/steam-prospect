@@ -24,6 +24,7 @@ import { SaturationTrend } from "../components/charts/SaturationTrend";
 import { TooltipPanel } from "../components/charts/TooltipPanel";
 import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { KpiCell } from "../components/ui/KpiCell";
 import { Loading } from "../components/ui/Loading";
 import { BulletMeter } from "../components/ui/Meter";
@@ -35,6 +36,7 @@ import { estimatedUnits } from "../lib/estimates";
 import { nicheWatchlistId, toggleNicheWatchlist, useWatchlist, WATCHLIST_CAP } from "../lib/watchlist";
 import {
   ApiError,
+  isNotFound,
   nicheExportCsvUrl,
   notFoundReason,
   useMarketBenchmarks,
@@ -553,6 +555,29 @@ export default function NicheDetail() {
   }
 
   if (detailQ.isError || !detail || !activeVariant) {
+    const backToFinder = (
+      <Link
+        to="/niches"
+        className="border border-borderstrong px-3 py-1.5 text-xs font-medium text-ink-primary transition-colors hover:bg-ink-primary/[0.08]"
+      >
+        Back to the Niche Finder
+      </Link>
+    );
+    // Only a 404 means the niche is genuinely absent. With the API unreachable this branch
+    // rendered "Niche not found: Failed to fetch" (measured on production 2026-09-01) —
+    // the same lie GameProfile told, and the reason both now gate the copy on isNotFound().
+    if (!isNotFound(detailQ.error)) {
+      return (
+        <Card>
+          <ErrorState
+            title="Couldn't load this niche"
+            error={detailQ.error}
+            onRetry={() => void detailQ.refetch()}
+            action={backToFinder}
+          />
+        </Card>
+      );
+    }
     // The API's own 404 detail already reads "niche not found: tag/Foo" — don't stutter it.
     // Shared with GameProfile, which had the same 404 shape and NOT the same regex (it
     // rendered "Game not found: game not found: 999999999" until this moved into lib/api).
@@ -621,12 +646,17 @@ export default function NicheDetail() {
       <div className="flex flex-col gap-3">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div className="min-w-0">
+            {/* No trailing separator: the niche name is the <h1> BELOW this line, not the
+                next crumb on it, so "Niches / Tag /" rendered a slash with nothing after it
+                (measured on production 2026-09-01). /niches/combined already ends its trail
+                on the last crumb — "Niches / Combined" — which is what proved this a bug
+                rather than a house style. */}
             <div className="text-[11px] text-ink-primary/55">
               <Link to="/niches" className="hover:text-ink-primary">
                 Niches
               </Link>
               {" / "}
-              {titleCase(dimension)} /
+              {titleCase(dimension)}
             </div>
             <h1 className="mt-0.5 truncate text-[28px] text-ink-primary sm:text-[32px]">{nicheKey}</h1>
             <div className="mt-2 flex flex-wrap gap-1.5">
@@ -809,6 +839,39 @@ export default function NicheDetail() {
           }
         />
       </div>
+
+      {/* MOVED here from below the top-games table (2026-09-01). This card carries the
+          counter-argument to the score in the strip directly above it — "Release pipeline
+          shrinking 7.4%/yr — 'low competition' here is everyone leaving, not an open
+          market" against an OPPORTUNITY V2 of 87. On /niches/tag/Action RTS at 1440 the
+          score sat at y≈228 and this box at y≈1066 of a 1233px page: a reader had to scroll
+          past the whole overview and the table to find the sentence that qualifies the
+          headline, and most never did. A falsification the reader doesn't reach is not a
+          falsification. It also leaves the overview tab, because the KPI strip it argues
+          with is on every tab. */}
+      <Card title="Read this first">
+        {flags.length > 0 ? (
+          <div className="flex flex-col gap-1.5">
+            {flags.map((f) => (
+              <div key={f.text} className="flex items-start gap-2 text-xs text-ink-secondary">
+                <span
+                  aria-hidden
+                  className={clsx(
+                    "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
+                    f.serious ? "bg-[var(--text-primary)]" : "bg-[color-mix(in_srgb,var(--text-primary)_50%,transparent)]",
+                  )}
+                />
+                {f.text}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-xs text-ink-secondary">
+            No decline flags at this cut — pipeline, entrant economics, concentration and solo-viability all read
+            normal.
+          </div>
+        )}
+      </Card>
 
       {/* Plain toggled buttons, not ARIA tabs — same call as GameProfile: half a tab widget
           is worse for screen readers than honest pressed-state buttons. */}
@@ -1196,32 +1259,6 @@ export default function NicheDetail() {
               </TableScroll>
             )}
           </div>
-
-          {/* Not part of §4b — the app's pre-existing bearish-read card, kept but moved below
-              the mockup's own composition (header/KPI/panels/table) rather than ahead of it. */}
-          <Card title="Read this first">
-            {flags.length > 0 ? (
-              <div className="flex flex-col gap-1.5">
-                {flags.map((f) => (
-                  <div key={f.text} className="flex items-start gap-2 text-xs text-ink-secondary">
-                    <span
-                      aria-hidden
-                      className={clsx(
-                        "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
-                        f.serious ? "bg-[var(--text-primary)]" : "bg-[color-mix(in_srgb,var(--text-primary)_50%,transparent)]",
-                      )}
-                    />
-                    {f.text}
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="text-xs text-ink-secondary">
-                No decline flags at this cut — pipeline, entrant economics, concentration and solo-viability all read
-                normal.
-              </div>
-            )}
-          </Card>
 
           {/* The chart-heavy expert cards live under the Detailed toggle; Simple keeps the
               plain-language reads (header, stat tiles, flags, opportunity) only — same split

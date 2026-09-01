@@ -47,6 +47,90 @@ export function notFoundReason(error: unknown): string {
   return error.message.replace(/^[a-z]*\s*not found:?\s*/i, "").trim();
 }
 
+/** One pydantic validation error out of FastAPI's 422 body. */
+interface ValidationDetail {
+  loc?: unknown[];
+  msg?: string;
+}
+
+function isValidationDetail(v: unknown): v is ValidationDetail {
+  return typeof v === "object" && v !== null && typeof (v as ValidationDetail).msg === "string";
+}
+
+/**
+ * A readable sentence for a non-string API `detail`.
+ *
+ * FastAPI rejects an out-of-range query param with a LIST of pydantic errors, and
+ * `JSON.stringify(detail)` put that list on screen verbatim. Measured on production
+ * 2026-09-01, /games?offset=10025 rendered:
+ *
+ *   Failed to load games: [{"type":"less_than_equal","loc":["query","offset"],"msg":"Input
+ *   should be less than or equal to 10000","input":"10025","ctx":{"le":10000}}]
+ *
+ * and /games?after=202 the same shape for released_after. The `msg` IS the explanation and
+ * `loc`'s last element names the field; everything else is machine detail. `ApiError.detail`
+ * still carries the raw payload, so the entity-profile 404's `{error, suggestions}` keeps
+ * driving its did-you-mean links off the object rather than off this string.
+ */
+function detailToMessage(detail: unknown): string {
+  if (Array.isArray(detail) && detail.length > 0 && detail.every(isValidationDetail)) {
+    return detail
+      .map((d) => {
+        const field = Array.isArray(d.loc) ? d.loc[d.loc.length - 1] : undefined;
+        return typeof field === "string" ? `${field}: ${d.msg}` : String(d.msg);
+      })
+      .join("; ");
+  }
+  if (isValidationDetail(detail)) return detail.msg as string;
+  const asRecord = detail as { error?: unknown } | null;
+  if (asRecord && typeof asRecord.error === "string") return asRecord.error;
+  return JSON.stringify(detail);
+}
+
+/**
+ * Copy for a request that never got an answer. Deliberately says nothing about the
+ * resource: a transport failure is not evidence about whether the thing exists.
+ */
+export const TRANSPORT_FAILURE_MESSAGE = "Couldn't reach the API — check your connection, then retry.";
+
+/**
+ * True when the request never reached the API, or reached it and came back unusable.
+ *
+ * `fetch` rejects with a bare `TypeError: Failed to fetch` for a dropped connection, DNS
+ * failure, offline client or blocked request — no status, no body. An ApiError means the
+ * exact opposite: the server understood the request and answered it. Everything downstream
+ * of this distinction is the difference between "we couldn't ask" and "the answer is no",
+ * and the app used to collapse the two: with `**\/api\/**` aborted, /games/1962700 read
+ * "Game not found: Failed to fetch" and /compare labelled live columns "Not in catalog"
+ * (measured on production 2026-09-01). Both are false statements about the user's data.
+ */
+export function isTransportFailure(error: unknown): boolean {
+  return error != null && !(error instanceof ApiError) && !isAbortError(error);
+}
+
+/**
+ * True only when the API positively answered "there is no such thing".
+ *
+ * A 5xx, a rejected query param and a network blip are all failures to ANSWER — none of
+ * them is evidence the game/niche/studio is missing, so none of them may be reported with
+ * not-found copy.
+ */
+export function isNotFound(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404;
+}
+
+/**
+ * The one sentence the user sees for a failed query. Never a raw exception: `String(error)`
+ * on a network failure yields "TypeError: Failed to fetch", which four cards on /timing
+ * printed verbatim (measured on production 2026-09-01).
+ */
+export function errorMessage(error: unknown): string {
+  if (error == null) return "";
+  if (isTransportFailure(error)) return TRANSPORT_FAILURE_MESSAGE;
+  if (error instanceof ApiError) return error.message;
+  return "Something went wrong on our side.";
+}
+
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -68,7 +152,7 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(
       res.status,
-      typeof detail === "string" ? detail : JSON.stringify(detail),
+      typeof detail === "string" ? detail : detailToMessage(detail),
       typeof detail === "string" ? undefined : detail,
     );
   }

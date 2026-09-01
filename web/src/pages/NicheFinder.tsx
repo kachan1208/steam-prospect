@@ -4,6 +4,7 @@ import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "
 import clsx from "clsx";
 
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { Loading } from "../components/ui/Loading";
 import { TableScroll } from "../components/ui/TableScroll";
 import { trackEvent } from "../lib/analytics";
@@ -51,6 +52,11 @@ const PAPER_30 = "color-mix(in srgb, var(--text-primary) 30%, transparent)";
 const PAPER_35 = "color-mix(in srgb, var(--text-primary) 35%, transparent)";
 const PAPER_45 = "color-mix(in srgb, var(--text-primary) 45%, transparent)";
 const PAPER_50 = "color-mix(in srgb, var(--text-primary) 50%, transparent)";
+// The floor for de-emphasized BODY TEXT on this page. PAPER_50 is a fine hairline/fill
+// alpha but fails AA as 10px type: the ×0.87 supply-brake annotation measured 4.32:1 on
+// the dark page plane (2026-09-01), against 4.5. 60% reads 5.60:1 there and still sits a
+// clear step below the PAPER_80 score it annotates.
+const PAPER_60 = "color-mix(in srgb, var(--text-primary) 60%, transparent)";
 const PAPER_80 = "color-mix(in srgb, var(--text-primary) 80%, transparent)";
 const CONDENSED = '"Barlow Condensed", "Barlow", system-ui, sans-serif';
 
@@ -400,7 +406,7 @@ export default function NicheFinder() {
   );
 
   const tiersParam = dimension === "tag" ? tiers.join(",") : undefined;
-  const { data, isLoading, isFetching, isError, error } = useNiches({
+  const { data, isLoading, isFetching, isError, error, refetch } = useNiches({
     dimension,
     window: windowParam,
     min_reviews: minReviews,
@@ -589,7 +595,7 @@ export default function NicheFinder() {
               {brake != null && brake < 0.995 && (
                 <span
                   className="tabular"
-                  style={{ fontSize: 10, color: PAPER_50 }}
+                  style={{ fontSize: 10, color: PAPER_60 }}
                   title={(() => {
                     // supply_room = MIN(flood_room, entrant_room), so the driver is
                     // whichever of the two is LOWER — not whichever raw signal looks bad.
@@ -894,10 +900,15 @@ export default function NicheFinder() {
       <div className={clsx("blueprint", isFetching && "opacity-90 transition-opacity")}>
         <i className="bp-corner" />
         {isLoading && <Loading label="Loading niches…" className="p-8 text-sm" />}
+        {/* Was `error.message` in raw — "Failed to load niches: Failed to fetch" with the
+            API unreachable (measured on production 2026-09-01), and no way to try again. */}
         {isError && (
-          <div className="p-8 text-center text-sm text-status-serious">
-            Failed to load niches{error instanceof Error ? `: ${error.message}` : "."}
-          </div>
+          <ErrorState
+            title="Couldn't load niches"
+            error={error}
+            onRetry={() => void refetch()}
+            className="p-8"
+          />
         )}
         {data && data.items.length === 0 && (
           <EmptyState

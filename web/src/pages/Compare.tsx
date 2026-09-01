@@ -10,9 +10,10 @@ import {
   seriesShapePath,
 } from "../components/charts/CompareTrendsChart";
 import { EmptyState } from "../components/ui/EmptyState";
+import { RetryButton } from "../components/ui/ErrorState";
 import { Loading } from "../components/ui/Loading";
 import { TableScroll } from "../components/ui/TableScroll";
-import { gameProfileQueryOptions, type GameProfile } from "../lib/api";
+import { errorMessage, gameProfileQueryOptions, isNotFound, type GameProfile } from "../lib/api";
 import { COMPARE_CAP, removeFromCompare, useCompareList } from "../lib/compareList";
 import { estimatedUnits } from "../lib/estimates";
 import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtRevenue } from "../lib/format";
@@ -163,6 +164,21 @@ export default function Compare() {
     if (r.data) profiles.set(ids[i], r.data);
   });
 
+  // A column with no profile has two very different causes and this page used to print the
+  // same words for both: with the API unreachable it labelled every column
+  // "App 730 · Not in catalog" (measured on production 2026-09-01) — asserting that
+  // Counter-Strike 2 is absent from Steam because a fetch failed. Only a 404 licenses that
+  // claim; everything else is "we couldn't ask", which is retryable and is not about the
+  // game. Keyed by appid so a column reads its OWN query's outcome.
+  const failedById = new Map<number, unknown>();
+  results.forEach((r, i) => {
+    if (r.isError && !r.data) failedById.set(ids[i], r.error);
+  });
+  const unreachable = [...failedById.values()].some((e) => !isNotFound(e));
+  const retryFailed = () => {
+    for (const r of results) if (r.isError && !r.data) void r.refetch();
+  };
+
   // Remove from BOTH the URL ids and the stored tray list, so the two stay in step.
   function remove(appid: number) {
     removeFromCompare(appid);
@@ -219,6 +235,22 @@ export default function Compare() {
   return (
     <div className="flex flex-col gap-6">
       <PageHeading ids={ids} />
+
+      {/* One banner rather than a retry per column: when the API is unreachable EVERY
+          column fails at once, and six identical retry buttons would be six ways to do the
+          same thing. The grid below still renders — a comparison with one unloadable column
+          is worth reading — this just stops the dashes from being unexplained. */}
+      {unreachable && (
+        <div className="flex flex-wrap items-center gap-3 border border-verdict-serious/40 px-4 py-3 text-xs text-ink-secondary">
+          <span className="text-verdict-serious">
+            {failedById.size === ids.length
+              ? "Couldn't load any of these games."
+              : `Couldn't load ${failedById.size} of ${ids.length} games.`}{" "}
+            {errorMessage([...failedById.values()].find((e) => !isNotFound(e)))}
+          </span>
+          <RetryButton onClick={retryFailed} />
+        </div>
+      )}
 
       {ids.length === 1 && (
         <Panel className="p-8">
@@ -344,7 +376,11 @@ export default function Compare() {
                             </span>
                           ) : (
                             <span className="text-[11px] text-verdict-serious">
-                              {anyLoading ? "Loading…" : "Not in catalog"}
+                              {anyLoading
+                                ? "Loading…"
+                                : isNotFound(failedById.get(id))
+                                  ? "Not in catalog"
+                                  : "Couldn't load"}
                             </span>
                           )}
                         </div>

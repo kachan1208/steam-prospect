@@ -4,6 +4,7 @@ import clsx from "clsx";
 
 import { TagAutocomplete } from "../components/TagAutocomplete";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { Loading } from "../components/ui/Loading";
 import { useGameSearch, useGenres, type GameSearchRow, type GameSortKey } from "../lib/api";
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
@@ -12,6 +13,21 @@ import { useDebounced } from "../lib/useDebounced";
 import { usePageTitle } from "../lib/usePageTitle";
 
 const LIMIT = 25;
+
+// Mirrors api/app/routers/games.py: `offset: int = Query(0, ge=0, le=10000)`. Paging past
+// it is a 422, and the page used to walk straight off that cliff — at ?offset=10000 with
+// 174,265 matches the Next button was still enabled, and one click rendered "0 matches"
+// plus the API's raw pydantic error array (measured on production 2026-09-01). The cap is
+// deliberate server-side (a large OFFSET must walk every skipped row), so the UI's job is
+// to stop at the last reachable page and SAY the deep tail needs a narrower query, not to
+// advertise 6,971 pages when 401 exist.
+const MAX_OFFSET = 10000;
+// Same file: `released_after` / `released_before` are Query(None, ge=1970, le=2100). These
+// two were the only filters on the page that passed a raw draft through — every sibling
+// already clamped (min_metacritic and min_positive to their maxima, price_min/min_reviews
+// at 0), so typing "2020" one digit at a time fired `after=2` and `after=202`, each a 422.
+const MIN_YEAR = 1970;
+const MAX_YEAR = 2100;
 
 // "New releases" windows for the release-date filter. `days` is sent as released_within_days;
 // the API bounds the match to <= today, so upcoming / placeholder-dated titles are excluded.
@@ -102,14 +118,24 @@ function readFilters(sp: URLSearchParams): Filters {
     minPositive: num(sp, "min_positive"),
     minMetacritic: num(sp, "min_metacritic"),
     minRevenue: num(sp, "min_revenue"),
-    after: num(sp, "after"),
-    before: num(sp, "before"),
+    // The URL is the funnel every request goes through, so the API's bounds are enforced
+    // HERE, not only on the draft inputs — otherwise a shared/back-navigated
+    // /games?after=202 or /games?offset=10025 sails straight into a 422 that no keystroke
+    // can undo. Both were reproduced on production 2026-09-01.
+    after: yearOrUndefined(num(sp, "after")),
+    before: yearOrUndefined(num(sp, "before")),
     selfPub: bool(sp, "self_pub"),
     indie: bool(sp, "indie"),
     sort: sortRaw && SORT_KEYS.includes(sortRaw) ? sortRaw : "total_reviews",
     order: sp.get("order") === "asc" ? "asc" : "desc",
-    offset: Math.max(0, num(sp, "offset") ?? 0),
+    offset: Math.min(MAX_OFFSET, Math.max(0, num(sp, "offset") ?? 0)),
   };
+}
+
+/** Undefined (no filter) unless the value is a usable year — see canonicalYear. */
+function yearOrUndefined(v: number | undefined): number | undefined {
+  if (v === undefined || v < 1000) return undefined;
+  return Math.min(MAX_YEAR, Math.max(MIN_YEAR, Math.round(v)));
 }
 
 /** The draft (text-input) slice of the filters, as canonical strings ("" = unset). */
@@ -162,9 +188,27 @@ function canonicalizeDrafts(d: Drafts): Drafts {
       return String(Math.min(100, Math.round(v)));
     })(),
     minRevenue: n(d.minRevenue, true),
-    after: n(d.after, true),
-    before: n(d.before, true),
+    after: canonicalYear(n(d.after, true)),
+    before: canonicalYear(n(d.before, true)),
   };
+}
+
+/**
+ * A year draft, canonicalized the way every other numeric filter on this page already is.
+ *
+ * Years are the one filter whose PREFIXES are all invalid: typing 2020 passes through "2",
+ * "20" and "202", and each of those was committed and rejected (422) on its own — verified
+ * against production 2026-09-01. Under four digits the value is still being typed, so it is
+ * DROPPED rather than clamped: unfiltered results while you type beat results that swing to
+ * "everything since 1970" and back. Dropping an unusable bound is the same call this page
+ * already makes for a negative price_min. A complete year is then clamped into the API's
+ * own 1970-2100 band, exactly as minRating/minMetacritic clamp to 0-100 above.
+ */
+function canonicalYear(s: string): string {
+  if (s === "") return "";
+  const v = Number(s);
+  if (!Number.isFinite(v) || v < 1000) return "";
+  return String(Math.min(MAX_YEAR, Math.max(MIN_YEAR, Math.round(v))));
 }
 
 function urlPatchFromDrafts(d: Drafts): Record<string, string | null> {
@@ -422,7 +466,7 @@ export default function GameSearch() {
     }
   };
 
-  const { data, isLoading, isFetching, isError, error } = useGameSearch({
+  const { data, isLoading, isFetching, isError, error, refetch } = useGameSearch({
     q: filters.q || undefined,
     tag: filters.tag || undefined,
     genre: filters.genre === "__all__" ? undefined : filters.genre,
@@ -508,6 +552,13 @@ export default function GameSearch() {
   const total = data?.total ?? 0;
   const rangeStart = total === 0 ? 0 : filters.offset + 1;
   const rangeEnd = Math.min(filters.offset + LIMIT, total);
+  // The last offset the API will actually serve for this result set. `total` alone drove
+  // the Next button and it lies about reachability past MAX_OFFSET: with 174,265 matches it
+  // kept Next enabled at offset 10,000, and the click landed on a 422 (production,
+  // 2026-09-01). Deep results are still reachable — by narrowing or re-sorting, which is
+  // what the note below says instead of leaving the reader to guess.
+  const lastOffset = Math.min(MAX_OFFSET, Math.max(0, total - 1));
+  const atPagingCap = filters.offset + LIMIT > lastOffset && total > filters.offset + LIMIT;
 
   return (
     <div className="flex flex-col gap-4">
@@ -699,10 +750,11 @@ export default function GameSearch() {
       {/* Result rows — hairline top rules, not cards (4e). */}
       <div className={clsx(isFetching && "opacity-90 transition-opacity")}>
         {isLoading && <Loading label="Loading games…" className="py-6 text-sm" />}
+        {/* Was `error.message` in raw, which printed the API's whole pydantic 422 array on
+            /games?offset=10025 and /games?after=202 (both measured on production
+            2026-09-01) and a bare "Failed to fetch" with the API unreachable. */}
         {isError && (
-          <div className="py-6 text-sm text-verdict-serious">
-            Failed to load games{error instanceof Error ? `: ${error.message}` : "."}
-          </div>
+          <ErrorState title="Couldn't load games" error={error} onRetry={() => void refetch()} className="py-6" />
         )}
         {data && data.items.length === 0 && (
           <EmptyState
@@ -712,6 +764,46 @@ export default function GameSearch() {
         )}
         {data && data.items.length > 0 && (
           <div className="border-b border-line-grid">
+            {/* Column headers. 4e draws none — it shows one annotated row on a designer's
+                canvas, where "86% · 9.8M / $464.6M / 841.9K live" is legible because the
+                annotations are on the artboard. Shipped, they aren't: a cold visitor got
+                four unlabelled numbers and an <h1> that is sr-only, so the page had no
+                visible title either (measured on production 2026-09-01). /studios and
+                /niches both label every metric column and explain it on hover; this page
+                was the outlier, so it borrows their pattern rather than inventing one.
+                Widths/gaps mirror the metric group below EXACTLY — change one, change both.
+                sm-only for the same reason the row itself stacks below sm: there is no
+                column layout to head there. */}
+            <div
+              className="hidden items-center gap-4 px-1 pb-2 text-[11px] uppercase tracking-[0.08em] text-ink-secondary sm:flex"
+              style={{ fontFamily: HEADING_FONT }}
+            >
+              <span className="flex-1">Game</span>
+              <div className="flex items-center justify-end gap-4">
+                <span
+                  className="w-[90px] shrink-0"
+                  title="Share of reviews that are positive, then the total review count backing it."
+                >
+                  Rating · reviews
+                </span>
+                <span
+                  className="w-20 shrink-0"
+                  title="Estimated gross lifetime revenue: review count × a genre-fitted owners-per-review ratio × launch price. An estimate, not reported sales."
+                >
+                  Est. gross
+                </span>
+                <span
+                  className="w-[70px] shrink-0"
+                  title="Concurrent players at the latest nightly sample — a point reading, not a daily peak."
+                >
+                  Live players
+                </span>
+                <span className="w-6 shrink-0 text-center" title="Add to the compare tray.">
+                  <span className="sr-only">Compare</span>
+                  <span aria-hidden>+</span>
+                </span>
+              </div>
+            </div>
             {data.items.map((g, i) => {
               const isTop = i === 0 && filters.offset === 0;
               const metaParts = [
@@ -813,6 +905,11 @@ export default function GameSearch() {
         <div className="flex items-center justify-between border-t border-chartborder pt-3 text-xs text-ink-muted">
           <span>
             {total > 0 ? `${rangeStart.toLocaleString()}–${rangeEnd.toLocaleString()} of ${total.toLocaleString()}` : "0 results"}
+            {atPagingCap && (
+              <span className="ml-2 text-ink-secondary">
+                paging stops at {MAX_OFFSET.toLocaleString()} — narrow the filters or change the sort to reach the rest
+              </span>
+            )}
           </span>
           <div className="flex items-center gap-2">
             <button
@@ -830,8 +927,13 @@ export default function GameSearch() {
             </button>
             <button
               type="button"
-              disabled={filters.offset + LIMIT >= total}
-              onClick={() => patchParams({ offset: String(filters.offset + LIMIT) }, { keepOffset: true })}
+              disabled={filters.offset + LIMIT >= total || filters.offset + LIMIT > lastOffset}
+              onClick={() =>
+                patchParams(
+                  { offset: String(Math.min(filters.offset + LIMIT, lastOffset)) },
+                  { keepOffset: true },
+                )
+              }
               className="border border-chartborder px-2.5 py-1 font-medium text-ink-secondary transition-colors hover:bg-surface2 hover:text-ink-primary disabled:opacity-45 disabled:hover:bg-transparent"
             >
               Next

@@ -12,6 +12,7 @@ import {
 } from "recharts";
 
 import {
+  errorMessage,
   gameCatalogEventsQueryOptions,
   gameMarketingEventsQueryOptions,
   gameTrendsQueryOptions,
@@ -22,6 +23,7 @@ import {
 import { fmtAxisCompact, fmtCompact } from "../../lib/format";
 import { markerMonths } from "../../lib/notable";
 import { CSS_VAR } from "../../lib/palette";
+import { RetryButton } from "../ui/ErrorState";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 
 /**
@@ -135,9 +137,12 @@ export function GameTrendsChart({
     return <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading trends…</div>;
   }
   if (selfFetch && trendsQuery.isError) {
+    // Was `error.message` — the raw exception, i.e. a bare "Failed to fetch" on any network
+    // blip. errorMessage() keeps the API's own words when the API actually answered.
     return (
-      <div className="flex h-24 items-center justify-center text-center text-xs text-verdict-serious">
-        {trendsQuery.error instanceof Error ? trendsQuery.error.message : "Failed to load trends."}
+      <div className="flex h-24 flex-col items-center justify-center gap-2 text-center text-xs text-verdict-serious">
+        <span>Couldn&apos;t load trends. {errorMessage(trendsQuery.error)}</span>
+        <RetryButton onClick={() => void trendsQuery.refetch()} />
       </div>
     );
   }

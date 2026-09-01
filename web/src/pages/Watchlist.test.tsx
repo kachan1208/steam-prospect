@@ -108,6 +108,22 @@ describe("empty state", () => {
     expect(screen.getByText("+ Watchlist", { exact: false })).toBeTruthy();
     expect(screen.queryByRole("row")).toBeNull();
   });
+
+  it("gets the reader to a page where that + Watchlist button exists", async () => {
+    // Naming a button that lives elsewhere and linking nowhere made this a dead end: a live
+    // audit on 2026-09-01 found ZERO links and ZERO buttons inside this empty state, while
+    // /compare's equivalent already shipped a "Browse games" button out of its own.
+    vi.stubGlobal("fetch", mockFetch({}));
+    renderWatchlist();
+    await screen.findByText("Nothing on your watchlist yet");
+    const hrefs = screen
+      .getAllByRole("link")
+      .map((a) => a.getAttribute("href"))
+      .filter((h): h is string => h !== null);
+    // Both entry kinds the copy mentions ("a niche or a game") are reachable.
+    expect(hrefs).toContain("/games");
+    expect(hrefs).toContain("/niches");
+  });
 });
 
 describe("alerts section honesty (pending / failed / resolved)", () => {

@@ -35,6 +35,17 @@ export function KpiCell({
       {/* Only one text-color utility ever applies: two same-specificity color classes race on
           Tailwind's generated-CSS order, not className string order, so the default has to be
           the FALLBACK (via ??), not a base class the override tries to beat. */}
+      {/* NOT a clipping bug, though it measures like one: `truncate leading-none` reports
+          scrollHeight 41 against clientHeight 38 here, and that 3px is the FONT METRIC box
+          (Barlow Condensed at 38px declares ascent 37 + descent 8 = 45, so line-height:1
+          leaves -3.5px half-leading), not ink. Canvas ink extents at this exact size, both
+          in Barlow Condensed and in the fallback stack: `$` descends 2.69px below a baseline
+          that sits 33.50px down, so it ends at 36.19 of 38 — 1.8px INSIDE the box. `87`
+          reports the identical 41/38 with a 0.46px descent. Forcing the block axis visible
+          changes zero pixels (verified by a 4x screenshot diff of a `$3.1K` tile: 0 of
+          216,320 pixels differ), so leave it alone. Only a true lowercase descender would
+          clip (inkBot 40.39 for "gjpqy") and no KPI formatter can emit one — every value
+          here comes from fmtUsd/fmtInt/fmtPrice/fmtCompact/fmtPct/fmtSigned. */}
       <div
         className={clsx("mt-1 truncate leading-none", valueClassName ?? "text-ink-primary")}
         style={{ fontFamily: CONDENSED, fontWeight: 600, fontSize: 38 }}

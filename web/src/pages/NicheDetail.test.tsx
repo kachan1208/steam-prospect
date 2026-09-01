@@ -992,3 +992,106 @@ describe("partialTrendYear", () => {
     expect(partialTrendYear(points, new Date("2027-06-01"))).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------------------
+// Page chrome — two defects a live browser audit found on 2026-09-01 that no happy-path
+// assertion could see, because both are about WHERE something is rather than whether it is.
+// ---------------------------------------------------------------------------------------
+
+describe("NicheDetail — breadcrumb and falsification placement", () => {
+  const ACTION_RTS = {
+    dimension: "tag",
+    key: "Action RTS",
+    tier: "micro",
+    variants: [
+      {
+        dimension: "tag",
+        key: "Action RTS",
+        window: "24m",
+        min_reviews: 50,
+        n_games: 86,
+        opportunity_v2: 87,
+        // -7.4%/yr is the reading behind the shipped warning line.
+        saturation_yoy: -0.074,
+        supply_brake: 1,
+        median_rev: 100_000,
+        p90_rev: 9_700_000,
+        median_price: 14.99,
+      },
+    ],
+    saturation_trend: [],
+    revenue_histogram: [],
+    representative_games: [],
+    players: null,
+    themes: [],
+    press: null,
+    hit_rates: { hit_rate_200k: null, hit_rate_500k: null, median_rev: null, n_games: null, winner_concentration: null },
+  };
+
+  function renderActionRts() {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    return render(
+      <QueryClientProvider client={client}>
+        <ThemeProvider>
+          <MemoryRouter initialEntries={["/niches/tag/Action%20RTS"]}>
+            <Routes>
+              <Route path={NICHE_ROUTE_PATH} element={<NicheDetail />} />
+            </Routes>
+          </MemoryRouter>
+        </ThemeProvider>
+      </QueryClientProvider>,
+    );
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        const body = url.includes("/niches/tag/")
+          ? ACTION_RTS
+          : url.includes("/market/benchmarks")
+            ? { cited: { pct_new_releases_over_100k: 0.085, revenue_benchmark_marks: [], dev_tiers: [] } }
+            : {};
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("ends the breadcrumb on its last crumb, with no dangling separator", async () => {
+    // Shipped: "Niches / Tag /" — a slash with nothing after it, because the niche name is
+    // the <h1> BELOW the trail, not the next crumb on it. /niches/combined renders
+    // "Niches / Combined" correctly, which is what made this a bug and not a house style.
+    renderActionRts();
+    // The trail is one <a> plus loose text nodes, so read the whole crumb line off the
+    // link's container rather than through a text matcher (which only sees direct children).
+    const home = await screen.findByRole("link", { name: "Niches" });
+    const crumb = home.parentElement!.textContent!.replace(/\s+/g, " ").trim();
+    expect(crumb).toBe("Niches / Tag");
+    expect(crumb.endsWith("/")).toBe(false);
+  });
+
+  it("puts the falsification next to the score it argues with, not at the end of the page", async () => {
+    renderActionRts();
+    const warning = await screen.findByText("Read this first");
+    const score = screen.getByText("Opportunity v2");
+    const table = screen.getByText("Top games in the niche");
+
+    // DOM order stands in for reading order (jsdom has no layout). On production the box sat
+    // at y≈1066 of a 1233px page — BELOW the top-games table — while the OPPORTUNITY V2 87 it
+    // qualifies was at y≈228. Both relations are asserted so moving it too far up (above the
+    // score) fails too.
+    expect(score.compareDocumentPosition(warning) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(warning.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("still says the thing it exists to say", async () => {
+    renderActionRts();
+    expect(await screen.findByText(/Release pipeline shrinking/)).toBeTruthy();
+  });
+});
