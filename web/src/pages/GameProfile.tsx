@@ -24,6 +24,7 @@ import { ViewToggle } from "../components/ui/ViewToggle";
 import { trackEvent } from "../lib/analytics";
 import { gameWatchlistId, toggleGameWatchlist, useWatchlist, WATCHLIST_CAP } from "../lib/watchlist";
 import {
+  notFoundReason,
   useGameChannelMix,
   useGameComparables,
   useGameEvents,
@@ -497,12 +498,14 @@ export default function GameProfile() {
   }
 
   if (profileQ.isError || !profile) {
+    // The API's own 404 detail already reads "game not found: 999999999" — appending it raw
+    // rendered "Game not found: game not found: 999999999". notFoundReason() keeps just the
+    // appid (or the real message for a non-404 failure); same helper NicheDetail uses.
+    const reason = notFoundReason(profileQ.error);
     return (
       <BlueprintPanel>
         <div className="flex flex-col items-center gap-2 py-8 text-center text-sm">
-          <span className="text-verdict-serious">
-            Game not found{profileQ.error instanceof Error ? `: ${profileQ.error.message}` : "."}
-          </span>
+          <span className="text-verdict-serious">Game not found{reason ? `: ${reason}` : "."}</span>
           <Link to="/games" className="text-brand hover:underline">
             Back to search
           </Link>

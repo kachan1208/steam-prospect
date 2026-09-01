@@ -14,11 +14,17 @@ and hands the matched string to `_STATIC_DIR / full_path`. That combination had 
    `full_path` is absolute (`Path("/app/web/dist") / "/etc/passwd" == Path("/etc/passwd")`)
    — a vector with no ".." in it at all. main.py now rejects any ".." segment AND, defence
    in depth, only serves a file whose `.resolve()` is still inside `_STATIC_DIR.resolve()`.
-2. SHADOWING. Being registered last is what keeps /api/*, /docs, /openapi.json and /metrics
-   reachable — but /mcp is mounted CONDITIONALLY (settings.enable_mcp, off in this suite),
-   so with the mount absent the catch-all would happily answer /mcp with index.html and a
-   hosted user's MCP client would parse HTML as a JSON-RPC stream. main.py carries an
+2. SHADOWING. Being registered last is what keeps /api/*, /api/docs, /api/openapi.json and
+   /metrics reachable — but /mcp is mounted CONDITIONALLY (settings.enable_mcp, off in this
+   suite), so with the mount absent the catch-all would happily answer /mcp with index.html
+   and a hosted user's MCP client would parse HTML as a JSON-RPC stream. main.py carries an
    explicit prefix guard for exactly that; these tests pin it.
+3. THE /docs COLLISION (fixed 2026-09). FastAPI's explorer used to sit at /docs, /redoc and
+   /openapi.json, and the guard in (2) reserved those same names — but the SPA ALSO routes
+   /docs and /docs/:slug (the human-facing methodology guide). Same URL, two owners: an
+   in-app click rendered React, a reload or a shared link served Swagger UI, and
+   /docs/glossary 404'd as JSON. The explorer moved under /api; the guard dropped the three
+   names. Both halves are pinned below — either one alone re-breaks the page.
 
 The whole suite runs in hosted/SPA mode because conftest.py points PROSPECT_STATIC_DIR at a
 scratch dir holding index.html + one real asset, with the traversal target (SPA_SECRET_FILE)
@@ -287,24 +293,88 @@ def test_api_path_with_a_bad_param_still_validates(client):
 @pytest.mark.parametrize(
     ("path", "must_contain"),
     [
-        ("/docs", "swagger"),          # Swagger UI shell
-        ("/redoc", "redoc"),           # ReDoc shell
-        ("/openapi.json", "openapi"),  # the schema itself
-        ("/metrics", "# HELP"),        # Prometheus exposition (observability.py)
+        ("/api/docs", "swagger"),          # Swagger UI shell
+        ("/api/redoc", "redoc"),           # ReDoc shell
+        ("/api/openapi.json", "openapi"),  # the schema itself
+        ("/metrics", "# HELP"),            # Prometheus exposition (observability.py)
     ],
 )
 def test_builtin_endpoints_are_not_shadowed_by_the_spa(client, path, must_contain):
-    """/docs, /redoc, /openapi.json and /metrics each own a real route, so registration
+    """The API explorer (under /api) and /metrics each own a real route, so registration
     order is what protects them — but "registered last" is a property of main.py's file
     layout, and a future edit that moves the SPA block above `setup_observability(app)` or
     the router includes would silently swallow all four. /metrics is the one that hurts
     quietly: Prometheus would scrape 200 text/html forever and the dashboards would just
-    stop updating."""
+    stop updating.
+
+    The explorer paths are ALSO the assertion that the FastAPI() constructor still carries
+    docs_url/redoc_url/openapi_url — revert those and these three 404, because "api" is a
+    reserved segment in the catch-all's guard."""
     r = client.get(path)
     assert r.status_code == 200, f"{path} returned {r.status_code}"
     assert r.text != INDEX_HTML_CONTENT, f"{path} was answered by the SPA catch-all"
     assert must_contain.lower() in r.text.lower(), (
         f"{path} did not look like itself — got {r.text[:120]!r}"
+    )
+
+
+# ---- /docs belongs to the SPA, not to Swagger UI -----------------------------------------
+
+@pytest.mark.parametrize("path", ["/docs", "/docs/glossary", "/docs/methodology"])
+def test_docs_routes_belong_to_the_spa(client, path):
+    """THE regression this suite exists to prevent from coming back.
+
+    /docs and /docs/:slug are live client-side routes (web/src/App.tsx) — the methodology
+    guide a user actually bookmarks and shares. They must serve index.html like every other
+    client route. Two independent edits can break this and BOTH look innocent in review:
+
+      * dropping docs_url/redoc_url/openapi_url from the FastAPI() constructor, which puts
+        a real Swagger UI route back at /docs — it wins outright, because it is registered
+        long before the catch-all. `/docs` then returns ~1KB of "Prospect API - Swagger UI"
+        to anyone who reloads the page.
+      * re-adding "docs" to spa_fallback's reserved-segment set, which makes /docs and
+        /docs/glossary 404 as JSON.
+
+    Asserting on the BODY (not just a 200) is what catches the first one: Swagger UI is
+    also a 200 text/html response."""
+    r = client.get(path)
+    assert r.status_code == 200, (
+        f"{path} returned {r.status_code} — a live client-side route must survive a hard "
+        "refresh; check spa_fallback's reserved-segment guard in main.py"
+    )
+    assert r.text == INDEX_HTML_CONTENT, (
+        f"{path} did not return index.html — got {r.text[:120]!r}. If this looks like "
+        "Swagger UI, the FastAPI() constructor lost its docs_url/redoc_url/openapi_url "
+        "overrides and the API explorer has taken the SPA's URL back."
+    )
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+def test_fastapi_default_explorer_paths_are_vacated(client, path):
+    """The complement of the test above, stated from the API's side: FastAPI's DEFAULT
+    explorer paths must no longer be served by FastAPI at all.
+
+    /openapi.json and /redoc are not client routes either, so the SPA shell is the correct
+    (and only) answer for them — what matters is that none of the three returns the
+    explorer. A schema served from the site root is also how the collision started."""
+    r = client.get(path)
+    assert r.text == INDEX_HTML_CONTENT, (
+        f"{path} is still being answered by FastAPI's own explorer/schema — the "
+        "docs_url/redoc_url/openapi_url overrides on FastAPI() are gone"
+    )
+
+
+def test_openapi_schema_is_served_only_from_the_api_prefix(client):
+    """Pins the schema URL itself, since it is what every generated client and the two UI
+    shells above fetch. A Swagger UI at /api/docs pointed at a schema that 404s is a green
+    smoke test and a broken explorer."""
+    r = client.get("/api/openapi.json")
+    assert r.status_code == 200
+    schema = r.json()
+    assert schema["openapi"].startswith("3."), "not an OpenAPI document"
+    # The explorer shell must reference the SAME url this test just fetched.
+    assert "/api/openapi.json" in client.get("/api/docs").text, (
+        "the Swagger UI shell is pointing at a different schema URL than the one served"
     )
 
 

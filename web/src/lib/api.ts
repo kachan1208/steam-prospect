@@ -25,6 +25,28 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * The REASON inside an API error message, with the API's own "<noun> not found:" lead-in
+ * removed.
+ *
+ * The API answers a missing game with `{"detail": "game not found: 999999999"}` and a
+ * missing niche with `"niche not found: tag/Foo"` — already complete sentences. The pages
+ * that render them add their own heading ("Game not found"), so pasting `error.message` in
+ * raw stutters: **"Game not found: game not found: 999999999"** is what /games/999999999
+ * actually showed. Only the id/key the user typed is worth appending, so strip the lead-in
+ * here, once, instead of leaving each page to remember its own regex (NicheDetail carried
+ * one; GameProfile did not, which is exactly how the two drifted).
+ *
+ * Returns "" when nothing but the lead-in was there — FastAPI's bare `"Not Found"` for an
+ * unrouted path leaves no reason to show, and the caller's heading already says it. Any
+ * message that is not a not-found sentence ("Internal Server Error", a network failure) is
+ * passed through untouched: there the detail IS the information.
+ */
+export function notFoundReason(error: unknown): string {
+  if (!(error instanceof Error)) return "";
+  return error.message.replace(/^[a-z]*\s*not found:?\s*/i, "").trim();
+}
+
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -141,7 +163,9 @@ export function useHealth() {
     queryKey: ["health"],
     queryFn: ({ signal }) => request<Health>("/health", { signal }),
     staleTime: 30_000,
-    retry: 1,
+    // Was a bare `retry: 1`, which re-issued 4xx too. Function declarations hoist, so the
+    // shared predicate is usable here even though it is defined further down the file.
+    retry: retryTransientOnce,
   });
 }
 
@@ -464,28 +488,59 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
-/** 503 (mart missing), 404 (no such niche) and 422 (a (win, min_reviews) cut that was never
- * materialised) are all stable answers, not blips — surface them at once instead of
- * retrying for seconds. Cancellations never retry either. */
+/**
+ * A 4xx is a FACT, not a blip: the server understood the request and answered it. Re-issuing
+ * it cannot change the answer — it only multiplies failing requests and holds the page on a
+ * blank loading state until every attempt has drained.
+ *
+ * This is not hypothetical. React Query's app-wide `retry: 1` default (main.tsx) used to
+ * apply to 404s, so /games/999999999 fired five endpoints TWICE each — ten doomed requests —
+ * and rendered header+footer and nothing else for 6-9 seconds before showing the "not found"
+ * copy it had ready from the very first response. Same shape on /niches/tag/<bogus> and
+ * /entity/<bogus>. Both retry predicates below start from this check, and `retryTransientOnce`
+ * is now the app-wide default (main.tsx) so a query that declares no `retry` inherits it.
+ */
+function isClientError(error: unknown): boolean {
+  return error instanceof ApiError && error.status >= 400 && error.status < 500;
+}
+
+/** 503 (mart missing) is the one 5xx that is also a stable answer here — the nightly mart
+ * simply has not been rebuilt yet — so it joins every 4xx (404 no such niche, 422 a
+ * (win, min_reviews) cut that was never materialised, …) in being surfaced at once instead
+ * of retried for seconds. Genuine blips (other 5xx, network errors) still get two attempts.
+ * Cancellations never retry. */
 function retryUnlessUnavailable(failureCount: number, error: unknown): boolean {
   return (
     !isAbortError(error) &&
-    !(
-      error instanceof ApiError &&
-      (error.status === 503 || error.status === 404 || error.status === 422)
-    ) && failureCount < 2
+    !isClientError(error) &&
+    !(error instanceof ApiError && error.status === 503) &&
+    failureCount < 2
   );
 }
 
 /** One retry for genuinely transient failures — network errors (fetch TypeError) and 5xx —
  * nothing else: 4xx are stable answers, and a cancelled fetch must never be re-issued. Used
  * by the additive-overlay queries (catalog events, marketing events, price history) whose
- * queryFns swallow only the stable misses, so a blip gets one shot before settling. */
-function retryTransientOnce(failureCount: number, error: unknown): boolean {
+ * queryFns swallow only the stable misses, so a blip gets one shot before settling — and,
+ * since it encodes exactly the policy every query wants by default, as the QueryClient's
+ * `retry` in main.tsx. */
+export function retryTransientOnce(failureCount: number, error: unknown): boolean {
   if (isAbortError(error)) return false;
-  if (error instanceof ApiError && error.status < 500) return false;
+  if (isClientError(error)) return false;
   return failureCount < 1;
 }
+
+/**
+ * The QueryClient's `defaultOptions.queries` — the policy every hook that declares nothing
+ * of its own inherits. It lives HERE rather than inline in main.tsx so it is importable by
+ * tests: the retry-storm bug was a property of this object, not of any one hook, and a test
+ * that builds its own client with its own retry setting cannot see it.
+ */
+export const DEFAULT_QUERY_OPTIONS = {
+  refetchOnWindowFocus: false,
+  staleTime: 30_000,
+  retry: retryTransientOnce,
+};
 
 /** Stable "no data here" answers for the additive overlays: 404 = below the analysis floor,
  * 503 = the mart hasn't been (re)built yet. Both degrade to an empty list; everything else
@@ -810,10 +865,7 @@ export function useTimingOverview(genre: string) {
     staleTime: 5 * 60_000,
     // 503 = marts not built yet, 404 = genre below the size floors — both are stable
     // answers; surface them immediately instead of retrying for seconds.
-    retry: (failureCount, error) =>
-      !isAbortError(error) &&
-      !(error instanceof ApiError && (error.status === 503 || error.status === 404)) &&
-      failureCount < 2,
+    retry: retryUnlessUnavailable,
   });
 }
 
@@ -1466,10 +1518,8 @@ export function useEntitySearch(q: string, role: EntityRole | null, minGames = 1
     placeholderData: keepPreviousData,
     staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
     // 503 means "marts not built yet" — a stable answer; surface the refreshing state
-    // immediately instead of retrying for seconds.
-    retry: (failureCount, error) =>
-      !isAbortError(error) &&
-      !(error instanceof ApiError && error.status === 503) && failureCount < 2,
+    // immediately instead of retrying for seconds. So is any 4xx.
+    retry: retryUnlessUnavailable,
   });
 }
 
@@ -1526,10 +1576,7 @@ export function useEntityProfile(role: EntityRole | null, name: string | null) {
     staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
     // 404 carries did-you-mean suggestions and 503 means "marts not built yet" — both are
     // stable answers, so surface them immediately instead of retrying for seconds.
-    retry: (failureCount, error) =>
-      !isAbortError(error) &&
-      !(error instanceof ApiError && (error.status === 404 || error.status === 503)) &&
-      failureCount < 2,
+    retry: retryUnlessUnavailable,
   });
 }
 
@@ -1673,11 +1720,8 @@ export function useNichesCombined(params: NicheCombinedParams) {
     enabled: params.niches.length >= 2,
     placeholderData: keepPreviousData,
     staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
-    retry: (failureCount, error) =>
-      !isAbortError(error) &&
-      !(
-        error instanceof ApiError &&
-        (error.status === 503 || error.status === 404 || error.status === 422 || error.status === 400)
-      ) && failureCount < 2,
+    // 503 (mart not rebuilt) plus every 4xx the combine endpoint can answer with — 400 for
+    // a malformed combination, 404/422 for a cut that does not exist — are stable answers.
+    retry: retryUnlessUnavailable,
   });
 }
