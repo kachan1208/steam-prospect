@@ -370,10 +370,24 @@ _GAME_SORT = {
 
 # The NicheGameRow projection. mart_niche_game carries keys only, so every attribute comes
 # from the mart_game join.
+#
+# positive_ratio / live_players / header_image ride along for the niche page's OVERVIEW
+# "Top games in the niche" panel. That panel used to render mart_niche_top, which is ONE
+# cut-independent top-8 per (dimension, key) — under a header that names the cut. Measured
+# on tag/Souls-like at win=24m, min_reviews=50 (223 games, live API 2026-09-01): the panel
+# listed Black Myth $2.2B and ELDEN RING $2.1B, and neither appid (2358720 / 1245620) is in
+# that cut at all, while the cut's real top game is Clair Obscur at $414.3M — panel top-1
+# read 5.24x the truth and its top-5 sum 4.82x. Serving these three columns here is what
+# lets that panel read the SAME cut-aware population as the Games & distribution table
+# below it instead of a separate, unfiltered mart. live_players additionally replaces the
+# top-8-by-players join that printed "—" for DARK SOULS III on a page where /games/374320
+# says 3,849.
 _GAME_SELECT = (
     "g.appid AS appid, g.name AS name, g.release_year AS release_year, "
     "g.price_initial AS price_initial, g.est_rev_reviews AS est_revenue, "
-    "g.total_reviews AS total_reviews, g.owners_mid AS owners_est"
+    "g.total_reviews AS total_reviews, g.owners_mid AS owners_est, "
+    "g.positive_ratio AS positive_ratio, g.live_players AS live_players, "
+    "g.header_image AS header_image"
 )
 
 # mart_niche_hist is materialised for exactly ONE cut — win='all' and

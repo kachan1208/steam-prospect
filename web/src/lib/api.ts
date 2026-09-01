@@ -450,6 +450,14 @@ export interface NicheGameRow {
   est_revenue: number | null;
   total_reviews: number | null;
   owners_est: number | null;
+  /** Optional because an API older than the overview-panel fix doesn't send them (the mart
+   * columns always existed — see routers/niches.py `_GAME_SELECT`). They exist so the
+   * overview "Top games" panel can render off this CUT-AWARE list rather than the
+   * cut-independent representative_games top-8, which on tag/Souls-like at 24m/≥50 showed
+   * two games (Black Myth, ELDEN RING) that are not in the 223-game cut at all. */
+  positive_ratio?: number | null;
+  live_players?: number | null;
+  header_image?: string | null;
 }
 
 export interface NicheGamesList {
