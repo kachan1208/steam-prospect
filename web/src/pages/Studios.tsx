@@ -1,5 +1,5 @@
-import { Link, useNavigate } from "react-router-dom";
-import { useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 
 import { Badge } from "../components/ui/Badge";
@@ -39,13 +39,64 @@ function fmtYears(first: number | null, last: number | null): string {
  * Browse + search developer/publisher track records. Publishers is the default role —
  * publisher scouting (who ships games like mine, and how do those releases do?) is the
  * page's reason to exist. Rows open the full career profile at /entity/:role?name=.
+ *
+ * BOTH CONTROLS RIDE THE URL (?role=developer&q=larian). They used to be useState, so
+ * the reproduction was: click Developers (first row → "FromSoftware, Inc."), type
+ * "larian" (→ "Larian Studios"), reload — and you were back on Publishers with an empty
+ * box and Electronic Arts / Bandai Namco / Ubisoft. /niches/:dim/:key tells the user on
+ * screen that its filter lives in the URL; a sibling table page that silently drops
+ * yours is the inconsistency that costs work. Same contract as /games: DEFAULTS ARE
+ * OMITTED (pristine /studios stays a clean URL), unknown values fall back to the
+ * default, the role toggle PUSHES (back returns you to Publishers) and the debounced
+ * search box writes with `replace` so typing doesn't spam history.
+ *
+ * No `offset` here, deliberately: /api/entities/search takes only `limit` (max 100), so
+ * this is a top-50 leaderboard by design — the footer says so. There is no paging state
+ * to put in the URL.
  */
 export default function Studios() {
   usePageTitle("Studios");
   const navigate = useNavigate();
-  const [role, setRole] = useState<EntityRole>("publisher");
-  const [q, setQ] = useState("");
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const role: EntityRole = searchParams.get("role") === "developer" ? "developer" : "publisher";
+  const urlQ = searchParams.get("q") ?? "";
+  // The box keeps a local draft (a request/history entry per keystroke would be absurd);
+  // the debounce below commits it to the URL.
+  const [q, setQ] = useState(urlQ);
   const debouncedQ = useDebounced(q, 300);
+
+  function patchParams(patch: Record<string, string | null>, opts?: { replace?: boolean }) {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        for (const [k, v] of Object.entries(patch)) {
+          if (v === null || v === "") next.delete(k);
+          else next.set(k, v);
+        }
+        return next;
+      },
+      { replace: opts?.replace },
+    );
+  }
+
+  // The last query string we and the URL agreed on — it tells our own commit's echo apart
+  // from an external navigation (back/forward, a shared link).
+  const lastCommitted = useRef(urlQ);
+  useEffect(() => {
+    const committed = debouncedQ.trim();
+    if (committed === lastCommitted.current) return;
+    lastCommitted.current = committed;
+    patchParams({ q: committed || null }, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedQ]);
+  useEffect(() => {
+    if (urlQ === lastCommitted.current) return;
+    lastCommitted.current = urlQ;
+    setQ(urlQ);
+  }, [urlQ]);
+
+  const setRole = (next: EntityRole) => patchParams({ role: next === "publisher" ? null : next });
 
   const browsing = debouncedQ.trim().length === 0;
   const { data, isLoading, isFetching, isError, error } = useEntitySearch(
