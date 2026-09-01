@@ -1,8 +1,8 @@
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { useGameTrendsWithComps, type GameTrendPoint } from "../../lib/api";
-import { fmtAxisCompact, fmtCompact } from "../../lib/format";
-import { MONO } from "../../lib/palette";
+import { axisScale, fmtCompact } from "../../lib/format";
+import { compareSeries, type CompareSeriesShape, type CompareSeriesStyle } from "../../lib/palette";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 
 /**
@@ -13,21 +13,15 @@ import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
  * a purpose-built multi-series line using the house chart tokens: gridline/baseline vars,
  * TooltipPanel, neutral-ink legend labels with color only on the marks.
  *
- * Color is MONO STEEL, not categorical — a deliberate deviation from this file's old
- * fixed --series-N slot order, and the one place in the chart layer where a genuinely
- * multi-entity overlay (up to COMPARE_CAP games) still goes mono rather than categorical.
- * This isn't a judgment call so much as a direct read of the design handoff's own
- * mockup (Prospect Mockups.dc.html, #4d "Compare"): its three-game overlay chart is
- * drawn with exactly `var(--color-accent-300)`, `rgba(242,242,243,.75)`,
- * `rgba(242,242,243,.35)` — solid lines (no dashing), decreasing paper alpha by rank,
- * not per-game hue. The rationale reads the same as the D/C/Q bars: "3 of 4 slots" is
- * few enough, and consistently ordered enough (slot 1 is always the primary/pinned
- * game), that rank-by-recession communicates identity better than 4 arbitrary hues
- * would, and it keeps Compare visually consistent with every other mono chart on the
- * page rather than being the one categorical outlier. Slots past the mockup's three
- * aren't in the handoff — the compare cap is 6, so the extra tones are interpolated in
- * even steps between the two paper values the mockup DOES show (75% and 35%) rather
- * than invented from nothing.
+ * Series identity is COLOUR + DASH + MARKER SHAPE, from lib/palette.ts COMPARE_SERIES
+ * (which carries the contrast arithmetic and the reason the mono ramp was withdrawn from
+ * this one chart). The short version: the previous mono ramp — the design handoff's own
+ * #4d mockup tones, accent-300 / paper 75% / paper 65% — measured 1.24:1 and 1.25:1
+ * between neighbouring lines on production, against WCAG 1.4.11's 3:1, and the two grey
+ * lines cross around 2026-08. Rank-by-recession is a POLARITY language; three independent
+ * games need an IDENTITY one. Every consecutive pair now clears 3:1, and because a 3:1
+ * chain of three is arithmetically impossible on a 14:1 ground, dash and marker shape
+ * carry identity where luminance cannot — so the chart also survives greyscale.
  *
  * Review velocity is the only series deep enough to compare across months today (CCU/
  * player snapshots are typically a single current month — see GameTrendsChart's caveat),
@@ -35,16 +29,70 @@ import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
  * (connectNulls off), not zeros.
  */
 
-// Mono steel ramp, rank order (1st = the pinned/primary game) — see module doc above.
-// One distinct tone per COMPARE_CAP (6) slot: the ramp interpolates 10%-alpha steps
-// between the mockup's own paper values (75% and 35%). Before this the array held 4 and
-// wrapped with i % length, so a 5th compared game came out in the SAME accent as the
-// primary — two different games, one color. Defensive modulo stays for safety, but every
-// reachable slot now has its own tone.
-const SERIES_VARS = [MONO.primary, MONO.paper75, MONO.paper65, MONO.paper55, MONO.paper45, MONO.paper35];
-
+/** Kept as a named export: Compare.tsx paints its column dots and legend from it. */
 export function compareSeriesColor(i: number): string {
-  return SERIES_VARS[i % SERIES_VARS.length];
+  return compareSeries(i).color;
+}
+
+/**
+ * The marker glyph, centred on (cx, cy). Filled paths only — a 5px outline would vanish
+ * at this size, and a filled mark keeps the same ink weight as the line it belongs to.
+ */
+export function seriesShapePath(shape: CompareSeriesShape, cx: number, cy: number, r: number): string {
+  const t = r * 0.42; // arm half-width for plus/cross
+  switch (shape) {
+    case "square":
+      return `M ${cx - r} ${cy - r} H ${cx + r} V ${cy + r} H ${cx - r} Z`;
+    case "triangle":
+      return `M ${cx} ${cy - r * 1.15} L ${cx + r} ${cy + r * 0.8} L ${cx - r} ${cy + r * 0.8} Z`;
+    case "diamond":
+      return `M ${cx} ${cy - r * 1.25} L ${cx + r * 1.25} ${cy} L ${cx} ${cy + r * 1.25} L ${cx - r * 1.25} ${cy} Z`;
+    case "plus":
+      return (
+        `M ${cx - t} ${cy - r} H ${cx + t} V ${cy - t} H ${cx + r} V ${cy + t} H ${cx + t} ` +
+        `V ${cy + r} H ${cx - t} V ${cy + t} H ${cx - r} V ${cy - t} H ${cx - t} Z`
+      );
+    case "cross": {
+      // A saltire (X): the plus's arms swung 45 degrees, written out rather than applied
+      // as an SVG transform so the whole glyph stays one `d` string that tests can read.
+      const a = r * 0.8;
+      const b = t * 0.9;
+      return (
+        `M ${cx - a} ${cy - a + b} L ${cx - a + b} ${cy - a} L ${cx} ${cy - b} L ${cx + a - b} ${cy - a} ` +
+        `L ${cx + a} ${cy - a + b} L ${cx + b} ${cy} L ${cx + a} ${cy + a - b} L ${cx + a - b} ${cy + a} ` +
+        `L ${cx} ${cy + b} L ${cx - a + b} ${cy + a} L ${cx - a} ${cy + a - b} L ${cx - b} ${cy} Z`
+      );
+    }
+    default:
+      return `M ${cx - r} ${cy} a ${r} ${r} 0 1 0 ${2 * r} 0 a ${r} ${r} 0 1 0 ${-2 * r} 0 Z`;
+  }
+}
+
+/** One legend key: the series' own dash pattern with its own marker stamped mid-line, so
+ *  the legend is readable by the same three channels the chart is. */
+export function SeriesKey({ style: s, size = 22 }: { style: CompareSeriesStyle; size?: number }) {
+  const h = 10;
+  return (
+    <svg
+      data-testid="series-key"
+      width={size}
+      height={h}
+      viewBox={`0 0 ${size} ${h}`}
+      aria-hidden
+      className="shrink-0 overflow-visible"
+    >
+      <line
+        x1={0}
+        y1={h / 2}
+        x2={size}
+        y2={h / 2}
+        stroke={s.color}
+        strokeWidth={1.75}
+        strokeDasharray={s.dash}
+      />
+      <path d={seriesShapePath(s.shape, size / 2, h / 2, 3.1)} fill={s.color} />
+    </svg>
+  );
 }
 
 interface MergedRow {
@@ -109,6 +157,19 @@ export function CompareTrendsChart({
 
   const nameOf = (id: number) => names.get(id) ?? `App ${id}`;
 
+  // One unit for the whole y-axis: the ticks are computed here (not left to recharts) so
+  // the formatter is sized for exactly the values that will be printed — see
+  // lib/format.ts axisScale. Before this the same axis printed "60.0K" above "120K".
+  const peak = Math.max(
+    0,
+    ...data.flatMap((row) => chartIds.map((id) => (typeof row[`g${id}`] === "number" ? (row[`g${id}`] as number) : 0))),
+  );
+  const y = axisScale(peak, "count");
+
+  // Markers are stamped on a sampled subset of points, not on all ~170 months: enough to
+  // read the shape as a series, few enough that the line stays a line.
+  const markerEvery = Math.max(1, Math.round(data.length / 9));
+
   return (
     <div>
       <ResponsiveContainer width="100%" height={220}>
@@ -124,7 +185,10 @@ export function CompareTrendsChart({
           />
           <YAxis
             tick={{ fontSize: 10 }}
-            tickFormatter={(v: number) => fmtAxisCompact(v)}
+            ticks={y.ticks}
+            interval={0}
+            domain={y.domain}
+            tickFormatter={(v: number) => y.format(v)}
             tickLine={false}
             axisLine={false}
             width={40}
@@ -145,26 +209,46 @@ export function CompareTrendsChart({
               return <TooltipPanel title={String(label)} rows={rows} />;
             }}
           />
-          {chartIds.map((id, i) => (
-            <Line
-              key={id}
-              type="linear"
-              dataKey={`g${id}`}
-              stroke={compareSeriesColor(i)}
-              strokeWidth={1.5}
-              dot={false}
-              connectNulls={false}
-            />
-          ))}
+          {chartIds.map((id, i) => {
+            const s = compareSeries(i);
+            return (
+              <Line
+                key={id}
+                type="linear"
+                dataKey={`g${id}`}
+                stroke={s.color}
+                strokeDasharray={s.dash}
+                strokeWidth={1.5}
+                connectNulls={false}
+                isAnimationActive={false}
+                dot={(props: { cx?: number; cy?: number; index?: number; value?: number | null }) => {
+                  const { cx, cy, index } = props;
+                  // A gap (null month) has no coordinates — draw nothing rather than a
+                  // marker parked at the origin.
+                  if (cx == null || cy == null || index == null || index % markerEvery !== 0) {
+                    return <g key={`m${id}-${index}`} />;
+                  }
+                  return (
+                    <path
+                      key={`m${id}-${index}`}
+                      data-testid={`compare-marker-${i}`}
+                      d={seriesShapePath(s.shape, cx, cy, 3)}
+                      fill={s.color}
+                    />
+                  );
+                }}
+              />
+            );
+          })}
         </LineChart>
       </ResponsiveContainer>
       {!hideLegend && (
         <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-ink-muted">
           {chartIds.map((id, i) => (
             <span key={id} className="inline-flex items-center gap-1.5">
-              {/* 14x2px line-key swatch (design handoff: "Legend swatches 14×2px"), matching
-                  the #4d mockup's own inline legend markup exactly. */}
-              <span className="h-0.5 w-3.5 shrink-0" style={{ backgroundColor: compareSeriesColor(i) }} />
+              {/* The key repeats all three channels the line uses — colour, dash pattern
+                  AND marker — so two games are never told apart by colour alone. */}
+              <SeriesKey style={compareSeries(i)} />
               {nameOf(id)}
             </span>
           ))}

@@ -9,7 +9,7 @@ import { Loading } from "../components/ui/Loading";
 import { TableScroll } from "../components/ui/TableScroll";
 import { ApiError, useEntitySearch, type EntityRole, type EntitySearchRow } from "../lib/api";
 import { fmtInt, fmtPct, fmtUsd } from "../lib/format";
-import { genreTintStyle, heatDomain, heatStyle } from "../lib/heat";
+import { genreTintStyles, heatDomain, heatStyle } from "../lib/heat";
 import { CSS_VAR, MONO} from "../lib/palette";
 import { useDebounced } from "../lib/useDebounced";
 import { usePageTitle } from "../lib/usePageTitle";
@@ -261,16 +261,24 @@ export default function Studios() {
                       {/* nowrap, not wrap: every other cell in this table is whitespace-nowrap and rides the
                           horizontal scroll. Wrapping three badges onto three lines here dragged the
                           WHOLE row to 103px at 390px, because table cells share a row height. */}
+                      {/* genreTintStyles (plural) tints the row as a GROUP: the hash alone
+                          put Action and Racing, and RPG and Simulation, on the same slot,
+                          so rows like "Action · Simulation · RPG" printed two identical
+                          chips. See lib/heat.ts. */}
                       <div className="flex max-w-[220px] flex-nowrap gap-1">
-                        {e.top_genres.slice(0, 3).map((g) => (
-                          <span
-                            key={g}
-                            className="whitespace-nowrap border px-1.5 py-0.5 text-[10px] text-ink-secondary"
-                            style={genreTintStyle(g)}
-                          >
-                            {g}
-                          </span>
-                        ))}
+                        {(() => {
+                          const genres = e.top_genres.slice(0, 3);
+                          const tints = genreTintStyles(genres);
+                          return genres.map((g, i) => (
+                            <span
+                              key={g}
+                              className="whitespace-nowrap border px-1.5 py-0.5 text-[10px] text-ink-secondary"
+                              style={tints[i]}
+                            >
+                              {g}
+                            </span>
+                          ));
+                        })()}
                       </div>
                     </td>
                   </tr>

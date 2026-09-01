@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import type { LaunchCurvePoint } from "../../lib/api";
+import { axisScale } from "../../lib/format";
 import { CSS_VAR } from "../../lib/palette";
 import { TooltipPanel } from "./TooltipPanel";
 
@@ -61,6 +62,10 @@ export function LaunchShapeBars({ points, height = 200 }: { points: LaunchCurveP
     return { label: w.label, share: a != null && b != null ? Math.max(0, (b - a) * 100) : 0 };
   });
 
+  // Percent axis through the shared scale, like every other chart on /timing: these minis
+  // printed "32%" beside big charts printing "20.0%" on the same page.
+  const y = axisScale(Math.max(0, ...data.map((d) => d.share)), "pct", 4);
+
   // The chart is sized by its CONTAINER, not by the viewport: /timing lays these out four
   // to a row at 1440, which is narrower (292px) than the single column at 1024 (417px). So
   // the axis has to react to its own measured width, never to a breakpoint.
@@ -94,7 +99,10 @@ export function LaunchShapeBars({ points, height = 200 }: { points: LaunchCurveP
           />
           <YAxis
             tick={{ fontSize: 10 }}
-            tickFormatter={(v: number) => `${v.toFixed(0)}%`}
+            ticks={y.ticks}
+            interval={0}
+            domain={y.domain}
+            tickFormatter={(v: number) => y.format(v)}
             tickLine={false}
             axisLine={false}
             width={Y_AXIS_WIDTH}

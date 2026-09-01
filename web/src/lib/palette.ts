@@ -59,7 +59,9 @@ import type { Theme } from "./theme";
 export const MONO = {
   /** Up / positive / primary series. */
   primary: "var(--accent-300)",
-  /** Multi-series overlays (CompareTrendsChart): decreasing recession by rank. */
+  /** Receding paper alphas. NOTE: these are a MAGNITUDE/polarity vocabulary, not an
+   * identity one — see COMPARE_SERIES below for why they were withdrawn from the
+   * multi-entity Compare overlay. */
   paper75: "color-mix(in srgb, var(--text-primary) 75%, transparent)",
   paper65: "color-mix(in srgb, var(--text-primary) 65%, transparent)",
   paper55: "color-mix(in srgb, var(--text-primary) 55%, transparent)", // == --text-muted
@@ -69,6 +71,87 @@ export const MONO = {
   paper45: "color-mix(in srgb, var(--text-primary) 45%, transparent)",
   paper35: "color-mix(in srgb, var(--text-primary) 35%, transparent)",
 } as const;
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────────────
+ * COMPARE OVERLAY — the second sanctioned exception to the mono rule (2026-09-01).
+ *
+ * The Compare page's review-velocity overlay is the app's ONLY chart where several
+ * INDEPENDENT ENTITIES share one plot, and it used to draw them on the paper-alpha ramp
+ * above (accent-300 / paper 75% / paper 65% / …). Measured on production, three games at
+ * /compare?ids=730,1962700,2393160 against the chart ground #1d2d3d:
+ *
+ *     series 1  #b5d9fd            9.57:1 vs ground
+ *     series 2  paper 75% -> #bdc1c6   7.74:1 vs ground   series 1 vs 2 = 1.24:1
+ *     series 3  paper 65% -> #a7adb3   6.21:1 vs ground   series 2 vs 3 = 1.25:1
+ *     (slot 6, paper 35% -> #68727d, did not even clear the ground: 2.86:1)
+ *
+ * WCAG 1.4.11 wants 3:1 between adjacent graphical objects. 1.25:1 is not a near miss —
+ * the two grey lines cross around 2026-08 and cannot be told apart, and the legend keys
+ * are the same two greys. Rank-by-recession works for POLARITY (good vs downside, where
+ * the reader only has to sort two tones) and it is still the rule everywhere else; it
+ * does not work for IDENTITY, which is what a multi-game line chart asks of colour.
+ *
+ * Why this ramp looks the way it does — the arithmetic first, because it is what forces
+ * the design (scripts/audit/pick-compare-ramp.mjs recomputes all of it):
+ *
+ *   - White vs the #1d2d3d ground is 14.05:1. A chain of N marks that each clear 3:1 on
+ *     the ground AND 3:1 on EVERY other mark needs 3^(N-1) of luminance headroom, so the
+ *     best achievable all-pairs separation is 4.68:1 at N=2, 2.16:1 at N=3, 1.67:1 at
+ *     N=4. Three co-plotted series that are all 3:1 apart are arithmetically impossible
+ *     on any single ground under 27:1. This is not a palette failure; it is why WCAG's
+ *     own Understanding text lets a chart meet 1.4.11 on the BACKGROUND alone once the
+ *     series are told apart by something other than colour.
+ *   - What IS reachable is 3:1 on every ADJACENT pair, by alternating a near-white tier
+ *     with a mid-dark tier. That is the ordering below: every consecutive pair measures
+ *     >= 3.04:1 and every slot clears 3:1 on the ground (worst 3.56:1, vs the old 2.86:1
+ *     — the old slot 6 was not even legible against the plate).
+ *   - The remaining weak pairs are the skip pairs INSIDE a tier (the near-whites sit
+ *     within 1.03-1.12:1 of each other — see the arithmetic above; nothing can change
+ *     that). Those are carried by hue plus the two non-colour channels below, so the chart is
+ *     still readable printed in greyscale or under any colour-vision deficiency:
+ *       · a unique DASH pattern per slot, and
+ *       · a unique MARKER SHAPE, stamped on a sampled subset of points.
+ *     Colour never carries series identity alone here — which is exactly the guard-rail
+ *     the radar-verdict exception is held to, and the reason this one is safe too.
+ *
+ * Tones are existing index.css tokens; nothing new was minted and no --series-N value
+ * changed. Slot 1 stays in the accent family so the pinned/primary game still reads as
+ * the house accent.
+ * ─────────────────────────────────────────────────────────────────────────────────────
+ */
+export type CompareSeriesShape = "circle" | "square" | "triangle" | "diamond" | "plus" | "cross";
+
+export interface CompareSeriesStyle {
+  /** CSS var reference — resolved by the browser, so it tracks the theme. */
+  color: string;
+  /** Literal hex of the token above, for contrast assertions in tests. */
+  hex: string;
+  /** SVG stroke-dasharray, or undefined for a solid stroke. */
+  dash?: string;
+  shape: CompareSeriesShape;
+}
+
+/** COMPARE_CAP is 6, so there are exactly six slots and none of them repeat. */
+export const COMPARE_SERIES: readonly CompareSeriesStyle[] = [
+  // light tier — 12.88:1 on the ground
+  { color: "var(--accent-100)", hex: "#eef6ff", shape: "circle" },
+  // dark tier — 4.12:1 on the ground, 3.12:1 against slot 1
+  { color: "var(--series-2)", hex: "#199e70", dash: "6 3", shape: "square" },
+  // light tier — 12.56:1 on the ground, 3.04:1 against slot 2
+  { color: "var(--text-primary)", hex: "#f2f2f3", dash: "2 3", shape: "triangle" },
+  // dark tier — 3.62:1 on the ground, 3.47:1 against slot 3
+  { color: "var(--series-8)", hex: "#d95926", dash: "10 3 2 3", shape: "diamond" },
+  // light tier — 11.50:1 on the ground, 3.18:1 against slot 4
+  { color: "var(--accent-200)", hex: "#d6ebff", dash: "1 4", shape: "plus" },
+  // dark tier — 3.56:1 on the ground, 3.23:1 against slot 5
+  { color: "var(--series-7)", hex: "#d55181", dash: "14 4", shape: "cross" },
+] as const;
+
+/** The style for compare slot `i` (defensive modulo — every reachable slot has its own). */
+export function compareSeries(i: number): CompareSeriesStyle {
+  return COMPARE_SERIES[((i % COMPARE_SERIES.length) + COMPARE_SERIES.length) % COMPARE_SERIES.length];
+}
 
 /**
  * Fixed slot order used throughout the app for the opportunity-score trio. Values are

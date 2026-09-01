@@ -37,22 +37,73 @@ export function heatStyle(
 /**
  * Stable categorical tint for genre/tag chips — hashes the name into one of the app's
  * series slots and returns border+background tints (low alpha, neutral text on top), so
- * the same genre wears the same hue on every page. With far more genres than slots,
- * collisions are the norm: same hue does NOT imply same genre — color here is only a
- * recognition aid, never the sole encoding; the chip text always names the genre.
+ * the same genre wears the same hue on every page.
  * Slot 4 (#008300) is excluded: it is visually near status-good, and a green-hashed chip
  * sitting beside an "Active" badge or verdict text would read as a status signal.
+ *
+ * WITHIN ONE ROW THE SLOTS ARE MADE UNIQUE (2026-09-01). The hash alone shipped literal
+ * duplicates in a single chip group — measured on production /studios and /entity/*:
+ *
+ *     Action  = Racing     -> slot 7, #d55181
+ *     RPG     = Simulation -> slot 8, #d95926
+ *
+ * so Ubisoft's row rendered "Action · Simulation · RPG" with two identical orange chips.
+ * "Same hue does not imply same genre" was the standing defence, and it holds ACROSS
+ * pages, where you never see the two chips together. It does not hold inside one row,
+ * which is exactly where a reader reads colour as a discriminator — categorical colour
+ * that isn't categorical.
+ *
+ * genreTintStyles() therefore assigns per GROUP: each name keeps its hashed slot when
+ * that slot is still free, and otherwise walks the ring to the next free one.
+ * Deterministic (same input order in, same colours out). Cross-page stability is unchanged
+ * for every name that doesn't collide; a name that does gives up its global hue to keep
+ * the row honest, which is the right trade — the chip always prints its name, so a shifted
+ * hue costs recognition while a duplicated hue costs correctness.
+ *
+ * Groups of 8+ (Compare's top-tags cells) still exhaust the 7 slots by pigeonhole; those
+ * fall back to the hashed slot rather than inventing a hue. The rows this defect was
+ * reported on print 3, and every group up to 7 is now duplicate-free.
  */
 const GENRE_SLOTS = [1, 2, 3, 5, 6, 7, 8] as const;
 
-export function genreTintStyle(name: string): CSSProperties {
+/** The hashed (preferred) slot for a name, before any in-row collision resolution. */
+export function genreSlot(name: string): number {
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-  const slot = GENRE_SLOTS[h % GENRE_SLOTS.length];
+  return GENRE_SLOTS[h % GENRE_SLOTS.length];
+}
+
+function tintFor(slot: number): CSSProperties {
   return {
     borderColor: `color-mix(in srgb, var(--series-${slot}) 55%, transparent)`,
     backgroundColor: `color-mix(in srgb, var(--series-${slot}) 13%, transparent)`,
   };
+}
+
+/** Tints for one chip GROUP, in input order, with no slot used twice. */
+export function genreTintStyles(names: readonly string[]): CSSProperties[] {
+  const taken = new Set<number>();
+  return names.map((name) => {
+    const preferred = genreSlot(name);
+    let slot = preferred;
+    if (taken.has(slot)) {
+      const start = GENRE_SLOTS.indexOf(preferred as (typeof GENRE_SLOTS)[number]);
+      for (let step = 1; step <= GENRE_SLOTS.length; step++) {
+        const candidate = GENRE_SLOTS[(start + step) % GENRE_SLOTS.length];
+        if (!taken.has(candidate)) {
+          slot = candidate;
+          break;
+        }
+      }
+    }
+    taken.add(slot);
+    return tintFor(slot);
+  });
+}
+
+/** Single-chip convenience — identical to the old behaviour (nothing to collide with). */
+export function genreTintStyle(name: string): CSSProperties {
+  return tintFor(genreSlot(name));
 }
 
 /** Min/max over the non-null positive values of one column — feed to heatStyle per row. */

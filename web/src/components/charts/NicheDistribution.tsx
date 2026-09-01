@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type Keyboard
 import clsx from "clsx";
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, XAxis, YAxis } from "recharts";
 
-import { fmtAxisCompact, fmtCompact, fmtInt, fmtPct, fmtUsd } from "../../lib/format";
+import { axisFormatter, axisScale, fmtCompact, fmtInt, fmtPct } from "../../lib/format";
 import { CSS_VAR } from "../../lib/palette";
 import { TooltipPanel } from "./TooltipPanel";
 
@@ -103,12 +103,22 @@ export function selectedCount(ordered: DistributionBucket[], selection: BucketSe
 
 // ---- labels ------------------------------------------------------------------------------
 
-/** A single axis VALUE. Never fmtPrice() here: it renders 0 as "Free", which is a lie on
- *  the right-hand edge of a range ("Free – $4.99"), and fmtUsd rounds $19.99 to "$20". */
-function fmtEdge(metric: DistributionMetric, v: number): string {
-  if (v === 0) return "$0";
-  if (metric === "price") return Number.isInteger(v) ? `$${v}` : `$${v.toFixed(2)}`;
-  return fmtUsd(v);
+/**
+ * A single axis VALUE, formatted in the ONE unit the whole axis speaks. Never fmtPrice()
+ * here: it renders 0 as "Free", which is a lie on the right-hand edge of a range
+ * ("Free – $4.99").
+ *
+ * `edges` is every value this axis can print, so the unit and decimal count are chosen
+ * once for the axis instead of per tick — the same defect as the /timing price histogram's
+ * "$0.00 / $5.00 / $10 / $1.9K". A price axis keeps its cents when any edge needs them
+ * ($19.99 must not round to $20) and drops them for every tick when none do.
+ */
+type EdgeFmt = (v: number) => string;
+
+function makeFmtEdge(edges: number[]): EdgeFmt {
+  // maxDecimals 2: a price axis has to be able to say $19.99.
+  const fmt = axisFormatter(edges, "usd", 2);
+  return (v: number) => (v === 0 ? "$0" : fmt(v));
 }
 
 /** True for the degenerate [0, 0] bucket the price mart emits for free-to-play titles. */
@@ -117,21 +127,21 @@ function isFreeBucket(metric: DistributionMetric, b: DistributionBucket): boolea
 }
 
 /** The tick under a band: its lower edge, except free-to-play, which is named, not numbered. */
-function bucketTick(metric: DistributionMetric, b: DistributionBucket): string {
+function bucketTick(metric: DistributionMetric, b: DistributionBucket, edge: EdgeFmt): string {
   if (isFreeBucket(metric, b)) return "Free";
-  return fmtEdge(metric, b.x_min);
+  return edge(b.x_min);
 }
 
 /** The full range, for tooltips and accessible names. */
-function bucketRange(metric: DistributionMetric, b: DistributionBucket): string {
+function bucketRange(metric: DistributionMetric, b: DistributionBucket, edge: EdgeFmt): string {
   if (isFreeBucket(metric, b)) return "Free ($0)";
-  if (b.x_min === b.x_max) return fmtEdge(metric, b.x_min);
-  return `${fmtEdge(metric, b.x_min)} – ${fmtEdge(metric, b.x_max)}`;
+  if (b.x_min === b.x_max) return edge(b.x_min);
+  return `${edge(b.x_min)} – ${edge(b.x_max)}`;
 }
 
-function selectionRangeText(metric: DistributionMetric, selection: NonNullable<BucketSelection>): string {
+function selectionRangeText(selection: NonNullable<BucketSelection>, edge: EdgeFmt): string {
   if (selection.min === 0 && selection.max === 0) return "Free ($0)";
-  return `${fmtEdge(metric, selection.min)} – ${fmtEdge(metric, selection.max)}`;
+  return `${edge(selection.min)} – ${edge(selection.max)}`;
 }
 
 const METRIC_META: Record<DistributionMetric, { title: string; short: string; noun: string }> = {
@@ -145,7 +155,7 @@ const METRIC_META: Record<DistributionMetric, { title: string; short: string; no
  * keeps the long tail readable, and the one Histogram.tsx already established. That trade is
  * only honest if the chart says so out loud, which is what this sentence is for.
  */
-function axisNote(metric: DistributionMetric, ordered: DistributionBucket[]): string {
+function axisNote(metric: DistributionMetric, ordered: DistributionBucket[], edge: EdgeFmt): string {
   const widths = ordered.filter((b) => b.x_max > b.x_min).map((b) => b.x_max - b.x_min);
   const parts: string[] = [];
 
@@ -157,7 +167,7 @@ function axisNote(metric: DistributionMetric, ordered: DistributionBucket[]): st
         `Equal-width bands, unequal ${metric === "price" ? "price" : "dollar"} ranges — edges widen to the right, so compare heights, not widths.`,
       );
     } else {
-      parts.push(`Each band covers an equal ${fmtEdge(metric, min)} range.`);
+      parts.push(`Each band covers an equal ${edge(min)} range.`);
     }
   }
 
@@ -228,6 +238,11 @@ export function NicheDistribution({
 }) {
   const ordered = useMemo(() => orderBuckets(buckets), [buckets]);
   const meta = METRIC_META[metric];
+  // ONE unit and one decimal count for every edge this chart prints — ticks, tooltip
+  // ranges, the selection chip and the axis note all come from the same formatter.
+  const edge = useMemo(() => makeFmtEdge(ordered.flatMap((b) => [b.x_min, b.x_max])), [ordered]);
+  // Same for the count axis, which used to read "0 / 7,000 / 14.0K / 21.0K / 28.0K".
+  const countAxis = useMemo(() => axisScale(Math.max(0, ...ordered.map((b) => b.count ?? 0)), "count"), [ordered]);
 
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [rovingIndex, setRovingIndex] = useState(0);
@@ -319,7 +334,7 @@ export function NicheDistribution({
   }
 
   const hasData = ordered.length > 0;
-  const chartData = ordered.map((b) => ({ ...b, label: bucketTick(metric, b) }));
+  const chartData = ordered.map((b) => ({ ...b, label: bucketTick(metric, b, edge) }));
   const activeBucket = activeIndex !== null ? ordered[activeIndex] : undefined;
 
   return (
@@ -333,7 +348,7 @@ export function NicheDistribution({
           <div className="flex shrink-0 items-center gap-2 rounded-lg border border-chartborder bg-surface2 px-2 py-1 text-[11px]">
             <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: BAR_COLOR }} />
             <span className="text-ink-secondary">{meta.short}</span>
-            <span className="tabular font-medium text-ink-primary">{selectionRangeText(metric, previewSelection)}</span>
+            <span className="tabular font-medium text-ink-primary">{selectionRangeText(previewSelection, edge)}</span>
             <button
               type="button"
               onClick={() => onSelectionChange(null)}
@@ -394,7 +409,10 @@ export function NicheDistribution({
                   <YAxis
                     width={Y_AXIS_WIDTH}
                     tick={{ fontSize: 10 }}
-                    tickFormatter={(v: number) => fmtAxisCompact(v)}
+                    ticks={countAxis.ticks}
+                    interval={0}
+                    domain={countAxis.domain}
+                    tickFormatter={(v: number) => countAxis.format(v)}
                     tickLine={false}
                     axisLine={false}
                     allowDecimals={false}
@@ -440,7 +458,7 @@ export function NicheDistribution({
                   style={tooltipAnchor(activeIndex as number, ordered.length)}
                 >
                   <TooltipPanel
-                    title={bucketRange(metric, activeBucket)}
+                    title={bucketRange(metric, activeBucket, edge)}
                     rows={[
                       { label: "Games", value: fmtCompact(activeBucket.count), color: BAR_COLOR },
                       { label: "Share", value: charted > 0 ? fmtPct(activeBucket.count / charted, 1) : "—" },
@@ -470,7 +488,7 @@ export function NicheDistribution({
                       type="button"
                       tabIndex={i === Math.min(rovingIndex, ordered.length - 1) ? 0 : -1}
                       aria-pressed={isSel}
-                      aria-label={`${bucketRange(metric, b)}: ${fmtInt(b.count)} games`}
+                      aria-label={`${bucketRange(metric, b, edge)}: ${fmtInt(b.count)} games`}
                       onMouseDown={() => handleMouseDown(i)}
                       onMouseOver={() => handleMouseOver(i)}
                       onFocus={() => {
@@ -501,7 +519,7 @@ export function NicheDistribution({
               : "Click a band to filter the niche; drag across bands for a range. "}
           </span>
         )}
-        {axisNote(metric, ordered)}
+        {axisNote(metric, ordered, edge)}
       </p>
     </div>
   );

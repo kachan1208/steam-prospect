@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import clsx from "clsx";
-import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Line,
+  LineChart,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import { Histogram } from "../components/charts/Histogram";
 import {
@@ -41,9 +52,9 @@ import {
   type TrendPoint,
   type Window,
 } from "../lib/api";
-import { fmtAxisCompact, fmtCompact, fmtInt, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtSigned, fmtUsd, titleCase } from "../lib/format";
+import { axisScale, fmtCompact, fmtInt, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtSigned, fmtUsd, titleCase } from "../lib/format";
 import { heatDomain, heatStyle } from "../lib/heat";
-import { CSS_VAR } from "../lib/palette";
+import { CSS_VAR, MONO } from "../lib/palette";
 import { usePageTitle } from "../lib/usePageTitle";
 import { useDetailView } from "../lib/viewMode";
 import { DEFAULT_NICHE_CUT, nicheCombinedPath } from "../lib/nicheSelection";
@@ -78,6 +89,26 @@ export const GAMES_PAGE_SIZE = 25;
 export const TOP_GAMES_PANEL_SIZE = 5;
 
 const DIMENSIONS: Dimension[] = ["tag", "genre"];
+
+/** The "Demand vs. pipeline" releases line — the same paper tone the two-series line-chart
+ *  convention uses for a secondary series (lib/palette.ts MONO.paper45). Named because the
+ *  legend key has to draw the SAME stroke, and the previous legend used a Tailwind opacity
+ *  modifier on a var()-valued colour, which silently produced no swatch at all. */
+const TREND_RELEASES_STROKE = MONO.paper45;
+
+/**
+ * The year in a yearly trend series that is still being filled in, or null if the series
+ * stops before the current one.
+ *
+ * A yearly series always ends on a partial year for eight months out of twelve, and the
+ * final point then plots a few months of releases beside twelve-month neighbours — the
+ * "2026 cliff" the niche charts show is that artifact, not a market event. `now` is a
+ * parameter so the rule is testable without freezing the clock.
+ */
+export function partialTrendYear(points: { year: number }[], now: Date = new Date()): number | null {
+  const currentYear = now.getFullYear();
+  return points.some((p) => p.year === currentYear) ? currentYear : null;
+}
 
 export type DistMetric = "revenue" | "price";
 
@@ -230,6 +261,7 @@ function PlayersSeriesChart({ points }: { points: NichePlayersPoint[] }) {
       </div>
     );
   }
+  const y = axisScale(Math.max(0, ...points.map((p) => p.total_players ?? 0)), "count");
   return (
     <ResponsiveContainer width="100%" height={150}>
       <LineChart data={points} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
@@ -245,7 +277,10 @@ function PlayersSeriesChart({ points }: { points: NichePlayersPoint[] }) {
         />
         <YAxis
           tick={{ fontSize: 10 }}
-          tickFormatter={(v: number) => fmtAxisCompact(v)}
+          ticks={y.ticks}
+          interval={0}
+          domain={y.domain}
+          tickFormatter={(v: number) => y.format(v)}
           tickLine={false}
           axisLine={false}
           width={44}
@@ -823,13 +858,29 @@ export default function NicheDetail() {
               <div className="mb-3.5 flex items-baseline gap-4">
                 <h3 className="text-ink-primary">Demand vs. pipeline, by year</h3>
                 <div className="ml-auto flex gap-4 text-[11px] text-ink-primary/60">
+                  {/* Line keys, not colour bars: the Releases series is DASHED, and its
+                      old `bg-ink-primary/45` swatch rendered as nothing at all (Tailwind's
+                      opacity modifier does not apply to a var()-valued colour), so the
+                      chart had two lines and one visible key. */}
                   <span className="inline-flex items-center gap-1.5">
-                    <span className="inline-block h-[2px] w-3.5 bg-brand" aria-hidden />
-                    {hasP90Trend ? "P90 revenue" : "Median revenue"}
+                    <svg width="16" height="6" viewBox="0 0 16 6" aria-hidden className="shrink-0">
+                      <line x1="0" y1="3" x2="16" y2="3" stroke="var(--brand)" strokeWidth="2" />
+                    </svg>
+                    {hasP90Trend ? "P90 revenue" : "Median revenue"} ($, left)
                   </span>
                   <span className="inline-flex items-center gap-1.5">
-                    <span className="inline-block h-[2px] w-3.5 bg-ink-primary/45" aria-hidden />
-                    Releases
+                    <svg width="16" height="6" viewBox="0 0 16 6" aria-hidden className="shrink-0">
+                      <line
+                        x1="0"
+                        y1="3"
+                        x2="16"
+                        y2="3"
+                        stroke={TREND_RELEASES_STROKE}
+                        strokeWidth="2"
+                        strokeDasharray="4 3"
+                      />
+                    </svg>
+                    Releases (count, right)
                   </span>
                 </div>
               </div>
@@ -838,57 +889,128 @@ export default function NicheDetail() {
                   No yearly trend for this niche.
                 </div>
               ) : (
-                <ResponsiveContainer width="100%" height={180}>
-                  <LineChart data={detail.saturation_trend} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-                    <CartesianGrid stroke="var(--gridline)" vertical={false} />
-                    <XAxis
-                      dataKey="year"
-                      tick={{ fontSize: 10 }}
-                      tickLine={false}
-                      axisLine={{ stroke: "var(--baseline)" }}
-                    />
-                    <YAxis yAxisId="revenue" hide domain={["auto", "auto"]} />
-                    <YAxis yAxisId="releases" orientation="right" hide domain={[0, "auto"]} />
-                    <Tooltip
-                      cursor={{ stroke: "var(--baseline)" }}
-                      content={({ active, payload, label }) => {
-                        if (!active || !payload || payload.length === 0) return null;
-                        const p = payload[0].payload as TrendPoint;
-                        return (
-                          <TooltipPanel
-                            title={String(label)}
-                            rows={[
-                              {
-                                label: hasP90Trend ? "P90 revenue" : "Median revenue",
-                                value: fmtUsd(hasP90Trend ? (p.p90_rev ?? null) : p.median_rev),
-                                color: "var(--brand)",
-                              },
-                              { label: "Releases", value: fmtCompact(p.n_releases) },
-                            ]}
+                (() => {
+                  // TWO SERIES, TWO UNITS, so TWO LABELLED AXES. This chart shipped with
+                  // `hide` on both y-axes: dollars and release counts were drawn against no
+                  // ticks and no units at all, which makes the crossing point read as a
+                  // meeting of two quantities when it is an artifact of two invisible
+                  // scales. Each axis now prints its own ticks in its own unit, through the
+                  // shared single-unit axis formatter (lib/format.ts).
+                  const revKey = hasP90Trend ? "p90_rev" : "median_rev";
+                  const revMax = Math.max(
+                    0,
+                    ...detail.saturation_trend.map((p) => (typeof p[revKey] === "number" ? (p[revKey] as number) : 0)),
+                  );
+                  const relMax = Math.max(0, ...detail.saturation_trend.map((p) => p.n_releases ?? 0));
+                  const revAxis = axisScale(revMax, "usd", 4);
+                  const relAxis = axisScale(relMax, "count", 4);
+                  const partialYear = partialTrendYear(detail.saturation_trend);
+                  return (
+                    <>
+                      <ResponsiveContainer width="100%" height={180}>
+                        <LineChart data={detail.saturation_trend} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                          <CartesianGrid stroke="var(--gridline)" vertical={false} />
+                          <XAxis
+                            dataKey="year"
+                            tick={{ fontSize: 10 }}
+                            tickLine={false}
+                            axisLine={{ stroke: "var(--baseline)" }}
                           />
-                        );
-                      }}
-                    />
-                    <Line
-                      yAxisId="revenue"
-                      type="linear"
-                      dataKey={hasP90Trend ? "p90_rev" : "median_rev"}
-                      stroke="var(--brand)"
-                      strokeWidth={1.5}
-                      dot={false}
-                      connectNulls
-                    />
-                    <Line
-                      yAxisId="releases"
-                      type="linear"
-                      dataKey="n_releases"
-                      stroke="color-mix(in srgb, var(--text-primary) 45%, transparent)"
-                      strokeWidth={1.5}
-                      strokeDasharray="4 3"
-                      dot={false}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
+                          <YAxis
+                            yAxisId="revenue"
+                            tick={{ fontSize: 10 }}
+                            ticks={revAxis.ticks}
+                            interval={0}
+                            domain={revAxis.domain}
+                            tickFormatter={(v: number) => revAxis.format(v)}
+                            tickLine={false}
+                            axisLine={false}
+                            width={48}
+                          />
+                          <YAxis
+                            yAxisId="releases"
+                            orientation="right"
+                            tick={{ fontSize: 10 }}
+                            ticks={relAxis.ticks}
+                            interval={0}
+                            domain={relAxis.domain}
+                            tickFormatter={(v: number) => relAxis.format(v)}
+                            tickLine={false}
+                            axisLine={false}
+                            width={38}
+                          />
+                          {/* The current calendar year is a PARTIAL year in a yearly series:
+                              its release count and revenue are a few months of data drawn
+                              beside twelve-month points, which is what produces the "cliff"
+                              at the right edge. Shade it and say so rather than let the drop
+                              read as a market collapse. */}
+                          {partialYear !== null && (
+                            <ReferenceLine
+                              yAxisId="revenue"
+                              x={partialYear}
+                              stroke="var(--text-muted)"
+                              strokeDasharray="2 3"
+                              label={{
+                                value: "PARTIAL",
+                                position: "insideTopLeft",
+                                fontSize: 9,
+                                fill: "var(--text-muted)",
+                                // Dropped clear of the right-hand axis' top tick, which
+                                // sits at the same height as this line's own top.
+                                dy: 14,
+                                dx: -2,
+                              }}
+                            />
+                          )}
+                          <Tooltip
+                            cursor={{ stroke: "var(--baseline)" }}
+                            content={({ active, payload, label }) => {
+                              if (!active || !payload || payload.length === 0) return null;
+                              const p = payload[0].payload as TrendPoint;
+                              return (
+                                <TooltipPanel
+                                  title={`${label}${p.year === partialYear ? " · partial year" : ""}`}
+                                  rows={[
+                                    {
+                                      label: hasP90Trend ? "P90 revenue" : "Median revenue",
+                                      value: fmtUsd(hasP90Trend ? (p.p90_rev ?? null) : p.median_rev),
+                                      color: "var(--brand)",
+                                    },
+                                    { label: "Releases", value: fmtCompact(p.n_releases) },
+                                  ]}
+                                />
+                              );
+                            }}
+                          />
+                          <Line
+                            yAxisId="revenue"
+                            type="linear"
+                            dataKey={revKey}
+                            stroke="var(--brand)"
+                            strokeWidth={1.5}
+                            dot={false}
+                            connectNulls
+                          />
+                          <Line
+                            yAxisId="releases"
+                            type="linear"
+                            dataKey="n_releases"
+                            stroke={TREND_RELEASES_STROKE}
+                            strokeWidth={1.5}
+                            strokeDasharray="4 3"
+                            dot={false}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                      <p className="mt-2 text-[11px] text-ink-muted">
+                        Two units, two scales — the left axis is dollars, the right is a count of releases. Where the
+                        lines cross means nothing; only each line&apos;s own slope does.
+                        {partialYear !== null &&
+                          ` ${partialYear} is a partial year (marked) — its drop is months of data missing, not a cliff.`}
+                      </p>
+                    </>
+                  );
+                })()
               )}
             </div>
 
@@ -1178,13 +1300,24 @@ export default function NicheDetail() {
                           tickLine={false}
                           axisLine={{ stroke: "var(--baseline)" }}
                         />
-                        <YAxis
-                          tick={{ fontSize: 10 }}
-                          tickFormatter={(v: number) => fmtAxisCompact(v)}
-                          tickLine={false}
-                          axisLine={false}
-                          width={44}
-                        />
+                        {(() => {
+                          const y = axisScale(
+                            Math.max(0, ...(players?.monthly ?? []).map((p) => p.avg_players_sum ?? 0)),
+                            "count",
+                          );
+                          return (
+                            <YAxis
+                              tick={{ fontSize: 10 }}
+                              ticks={y.ticks}
+                              interval={0}
+                              domain={y.domain}
+                              tickFormatter={(v: number) => y.format(v)}
+                              tickLine={false}
+                              axisLine={false}
+                              width={44}
+                            />
+                          );
+                        })()}
                         <Tooltip
                           cursor={{ stroke: "var(--baseline)" }}
                           content={({ active, payload, label }) => {
@@ -1274,7 +1407,7 @@ export default function NicheDetail() {
                         <Histogram
                           buckets={players.distribution.histogram}
                           color={CSS_VAR.competition}
-                          formatX={fmtCompact}
+                          xKind="count"
                           height={140}
                         />
                       </div>
@@ -1557,7 +1690,7 @@ export default function NicheDetail() {
                 // revenue histogram, so the revenue SHAPE survives the mart rebuild window —
                 // only the click-to-filter interaction is missing.
                 <>
-                  <Histogram buckets={detail.revenue_histogram} color={CSS_VAR.demand} formatX={fmtUsd} height={200} />
+                  <Histogram buckets={detail.revenue_histogram} color={CSS_VAR.demand} xKind="usd" height={200} />
                   <DegradedNote
                     what="Bucket filtering"
                     status={revenueDistQ.error instanceof ApiError ? revenueDistQ.error.status : null}

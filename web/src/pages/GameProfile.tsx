@@ -42,7 +42,7 @@ import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
 import { estimatedUnits } from "../lib/estimates";
 import { DEFAULT_NICHE_CUT, findNicheVariant } from "../lib/nicheSelection";
-import { fmtAxisCompact, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName } from "../lib/format";
+import { axisScale, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName } from "../lib/format";
 import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { markerMonths } from "../lib/notable";
 import { CSS_VAR, MONO} from "../lib/palette";
@@ -307,6 +307,10 @@ function ReviewVelocityBars({
   }
 
   const peak = points.reduce((best, p) => (p.n_reviews > best.n_reviews ? p : best), points[0]);
+  // One unit for the whole review-velocity axis — it used to read "0 / 30.0K / 60.0K /
+  // 90.0K / 120K", losing its decimal at exactly the tick where fmtAxisCompact's clipping
+  // guard kicks in. See lib/format.ts axisScale.
+  const reviewsAxis = axisScale(peak.n_reviews, "count");
 
   // Catalog events bucketed onto charted months — same overlay language as the lifetime and
   // trends charts: muted plumb lines, release month labelled, titles in the tooltip.
@@ -349,7 +353,10 @@ function ReviewVelocityBars({
           />
           <YAxis
             tick={{ fontSize: 10 }}
-            tickFormatter={(v: number) => fmtAxisCompact(v)}
+            ticks={reviewsAxis.ticks}
+            interval={0}
+            domain={reviewsAxis.domain}
+            tickFormatter={(v: number) => reviewsAxis.format(v)}
             tickLine={false}
             axisLine={false}
             width={40}
