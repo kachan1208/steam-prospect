@@ -140,7 +140,9 @@ def test_benchmarks_is_a_typed_response(client):
 def test_benchmarks_is_in_the_openapi_schema(client):
     """The point of the response_model: the endpoint stops being a shapeless dict in the
     generated docs that the web client and MCP both read."""
-    schema = client.get("/openapi.json").json()
+    # /api/openapi.json, not the FastAPI default /openapi.json: the explorer moved under the
+    # /api prefix so the SPA could keep /docs (see test_spa_fallback.py).
+    schema = client.get("/api/openapi.json").json()
     ref = schema["paths"]["/api/market/benchmarks"]["get"]["responses"]["200"]["content"][
         "application/json"
     ]["schema"]["$ref"]

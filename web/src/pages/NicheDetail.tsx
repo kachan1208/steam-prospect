@@ -23,6 +23,7 @@ import { nicheWatchlistId, toggleNicheWatchlist, useWatchlist, WATCHLIST_CAP } f
 import {
   ApiError,
   nicheExportCsvUrl,
+  notFoundReason,
   useMarketBenchmarks,
   useNicheDetail,
   useNicheDistribution,
@@ -494,10 +495,9 @@ export default function NicheDetail() {
 
   if (detailQ.isError || !detail || !activeVariant) {
     // The API's own 404 detail already reads "niche not found: tag/Foo" — don't stutter it.
-    const reason =
-      detailQ.error instanceof Error
-        ? detailQ.error.message.replace(/^niche not found:\s*/i, "").trim()
-        : "";
+    // Shared with GameProfile, which had the same 404 shape and NOT the same regex (it
+    // rendered "Game not found: game not found: 999999999" until this moved into lib/api).
+    const reason = notFoundReason(detailQ.error);
     return (
       <Card>
         <div className="flex flex-col items-center gap-2 py-8 text-center text-sm">

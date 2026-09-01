@@ -59,11 +59,35 @@ export default function EntityProfile() {
   );
 
   if (!role || !name) {
+    // A malformed URL is still a dead end, so it gets the same shape and the same way OUT as
+    // the 404/503 states below — it used to be a bare red sentence with no link at all, which
+    // left anyone who mistyped /entity/:role stranded on a page with only the chrome to click.
+    // When the role is the broken half and ?name= survived, the two valid spellings of this
+    // exact URL are the most useful thing we can offer: one click recovers the request.
     return (
       <Card>
-        <div className="py-8 text-center text-sm text-verdict-serious">
-          {!role ? "Invalid entity role in the URL (expected developer or publisher)." : "Missing ?name= in the URL."}
-        </div>
+        <EmptyState
+          title={!role ? "Invalid entity role in the URL" : "Missing ?name= in the URL"}
+          description={
+            !role
+              ? "A studio profile lives at /entity/developer or /entity/publisher — that segment of the URL is neither."
+              : "A studio profile is addressed by name, e.g. /entity/developer?name=Valve."
+          }
+          action={
+            <div className="flex flex-col items-center gap-1.5">
+              {!role &&
+                name &&
+                ROLES.map((r) => (
+                  <Link key={r} to={entityHref(r, name)} className="text-xs text-series-1 hover:underline">
+                    {name} as {r}
+                  </Link>
+                ))}
+              <Link to="/studios" className="mt-1 text-xs text-ink-muted hover:text-ink-secondary">
+                Back to studios
+              </Link>
+            </div>
+          }
+        />
       </Card>
     );
   }
