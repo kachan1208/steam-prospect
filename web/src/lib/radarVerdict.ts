@@ -83,14 +83,46 @@
  *                     SAT_FLOOD_YOY, and entrant_room hits 100 at the catalog norm
  *                     ENTRANT_RATIO_CATALOG_NORM. Either signal alone can sink a score.
  *
- * So the ring rules and the number now read the SAME axes against the SAME bars — the
- * ring says which side of a bar a niche falls on, the score says by how much and blends
- * in the money. After the rebuild the same 219 niches read enter 67.6 > hold 50.2 >
- * crowded 39.1 > declining 19.5. The ring rules themselves are unchanged: they encode
- * distinct failure MODES (crowded and declining are different problems, not different
- * amounts of one problem) and a scalar cannot express that. Changing any threshold here
- * therefore moves the score too — keep them in lockstep with build_marts.py's OPP_*
- * constants (etl/tests/test_opportunity_ordering.py asserts the equivalence both ways).
+ * So the DEMAND and CONCENTRATION axes now read the same bars on both sides — the ring
+ * says which side of a bar a niche falls on, the score says by how much and blends in the
+ * money. After the rebuild the same 219 niches read enter 67.6 > hold 50.2 > crowded 39.1
+ * > declining 19.5. The ring rules themselves are unchanged: they encode distinct failure
+ * MODES (crowded and declining are different problems, not different amounts of one
+ * problem) and a scalar cannot express that. Changing DEMAND_ENTER_PCT / DEMAND_DECLINE_PCT
+ * / WC_WINNER_TAKE_MOST therefore moves the score too — keep them in lockstep with
+ * build_marts.py's OPP_* constants (etl/tests/test_opportunity_ordering.py asserts that
+ * equivalence both ways).
+ *
+ * ...EXCEPT ON SUPPLY, WHERE THEY ASK DIFFERENT QUESTIONS ON PURPOSE (2026-09-01). "Two
+ * views of one model" was over-claimed, and the /docs copy inherited the over-claim as a
+ * flat "the board and the score can't disagree". They can, and they do — measured on the
+ * 222-niche default Radar cut (tag / 24m / min50):
+ *   - This file's ring reads supply ABSOLUTELY and binary: `saturation_yoy > SAT_FLOOD_YOY`
+ *     (line ~464). It is the +15%/yr line RadarBoard.tsx literally draws across the plate
+ *     as the quadrant divider, so the ring and the picture cannot disagree.
+ *   - mart_niche.sql's supply_brake reads supply RELATIVELY and continuously: flood_room
+ *     subtracts annualised DEMAND growth from annualised SUPPLY growth, then takes
+ *     supply_room = LEAST(flood_room, entrant_room) and brakes by
+ *     0.35 + 0.65*supply_room/100 — so entrant_ratio, which never moves a ring, can
+ *     nonetheless halve a printed score.
+ *   MEASURED DISAGREEMENT: 59 of 211 comparable niches (28.0%) contradict on supply.
+ *   9/222 ring "supply flooding — vetoes enter" with NO brake applied at all; 43/222 ring
+ *   "pipeline calm" while the score brakes below x0.80, and 15 of those are driven purely
+ *   by entrant_ratio. Sharpest case: Metroidvania rings "demand in structural growth,
+ *   supply not flooding" and the same dossier prints opp v2 30.1 — cut from an unbraked
+ *   56.0 by exactly the entrant_ratio the panel calls context.
+ *   PROOF THE DEMAND TERM IS THE WHOLE DIFFERENCE: among the 33 niches with
+ *   |demand_trend_24m_pct| < 5% the two reads agree 33/33 (100%); among the 59 that
+ *   disagree, median |demand_trend_24m_pct| = 30.9%.
+ * BOTH ARE RIGHT FOR THEIR JOB, and swapping either was measured and rejected. Absolute is
+ * right for the ring: a new entrant ships into the WHOLE pipeline, not into the pipeline
+ * net of demand, and the board's own Y axis is absolute (making the ring relative moves
+ * 28/222 rings and promotes 7 winner-take-most niches to "Enter now"). Relative is right
+ * for the score: it is what stops "everyone left, so it looks uncrowded" from scoring well
+ * — the exact Naval/Transportation failure v2 was built to kill (making the score absolute
+ * changes 149/222 printed scores and reintroduces it). What is NOT allowed is a third
+ * reading drifting in silently, which is why etl/tests/test_opportunity_ordering.py now
+ * pins the relative form as an identity instead of only pinning the two constants equal.
  *
  * DEGRADATION (any field may be null/undefined/NaN — treated identically as "unknown"):
  *   - demand_emerging unknown/absent (older mart) -> the emerging ring is unreachable;
@@ -486,9 +518,18 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
     },
     {
       id: "supply",
-      label: "Supply",
+      // "Release pipeline", not "Supply" (2026-09-01). This row and the opp v2 score printed
+      // beside it answer two different questions about supply, and the bare word "Supply"
+      // implied one answer: readers took the passing row as a promise the score would not
+      // brake. This row is the ABSOLUTE read — how fast the pipeline is growing, the same
+      // +15%/yr line RadarBoard.tsx draws as the quadrant divider. The score's brake is the
+      // RELATIVE read (pipeline growth NET of demand growth) and additionally brakes on
+      // entrant_ratio. They contradict on 59 of 211 comparable niches (28.0%) on the default
+      // cut — deliberately; see the ONE MODEL, TWO VIEWS block. value/pass/decides are
+      // untouched here on purpose: this is a naming fix, and no ring may move.
+      label: "Release pipeline",
       value: sat === null ? "unknown" : `${fmtSigned(sat, 1)} releases YoY`,
-      threshold: `≤ ${fmtSigned(SAT_FLOOD_YOY, 0)} YoY`,
+      threshold: `≤ ${fmtSigned(SAT_FLOOD_YOY, 0)} YoY, absolute — the opp v2 score reads it against demand`,
       pass: sat === null ? null : !flooding,
       note:
         sat === null
@@ -520,12 +561,19 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
       value: er === null ? "unknown" : er.toFixed(2),
       threshold: `≥ ${ENTRANT_RATIO_PAR.toFixed(1)} (catalog norm ~${ENTRANT_RATIO_CATALOG_NORM})`,
       pass: er === null ? null : er >= ENTRANT_RATIO_PAR,
+      // "never moves the ring" is still true and still the point — but it was reading as
+      // "this number changes nothing", which is false about the OTHER number on the same
+      // panel. entrant_ratio feeds mart_niche.sql's entrant_room, and supply_room takes the
+      // WEAKER of flood_room / entrant_room, so this row alone can sink a printed score:
+      // 15 of the 222 niches on the default cut are braked below x0.80 purely by it, with
+      // the ring reading "pipeline calm". Metroidvania is the sharpest — unbraked 56.0,
+      // printed 30.1, and nothing else moved.
       note:
         er === null
           ? "unknown — no read on how recent entrants earn"
           : er >= ENTRANT_RATIO_PAR
             ? "recent entrants earn at or above the niche median"
-            : `recent entrants earn ${Math.round((1 - er) * 100)}% below the niche median — falsification tell, never moves the ring`,
+            : `recent entrants earn ${Math.round((1 - er) * 100)}% below the niche median — falsification tell, never moves the ring, but it does brake the opp v2 score shown alongside`,
       decides: false,
     },
     soloCheck,

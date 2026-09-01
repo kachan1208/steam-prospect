@@ -29,6 +29,21 @@ This file exists so it cannot silently invert again. It pins four things:
   4. NULL-HONESTY      an emerging niche (no comparable demand base) gets NULL momentum and
                        NULL supply_room — never 0 — and is still scored, on the sub-scores
                        it does have, via the renormalising blend.
+  5. THE SUPPLY SPLIT  the ring and the score read SUPPLY as two different questions, on
+                       purpose, and this pins each to its own reading:
+                         flood_room < 50 <=> supply_growth - demand_growth > ln(1.15)
+                         the ring's veto <=> supply_growth > ln(1.15)   (no demand term)
+                       Point 3 only ever asserted the two CONSTANTS are equal
+                       (OPP_FLOOD_YOY == SAT_FLOOD_YOY) — never that the two READINGS
+                       agree, which is how a real 28.0% divergence (59 of 211 comparable
+                       niches on the default cut) went undocumented long enough to be
+                       published on /docs as "the board and the score can't disagree".
+                       The divergence is CORRECT and stays: absolute is right for a ring
+                       (an entrant ships into the whole pipeline) and relative is right for
+                       a score (it is what stops a niche everyone abandoned from reading as
+                       open). Both alternatives were re-measured and rejected — swapping
+                       the ring moves 28/222 rings, swapping the score moves 149/222
+                       scores. What this test forbids is a THIRD reading arriving quietly.
 
 Runs on a synthetic staging layer in an in-memory DuckDB and renders the REAL mart_niche.sql
 through build_marts.render()/build_params(), so it fails on the file that actually ships.
@@ -95,22 +110,42 @@ def clamp01(x: float) -> float:
     return 0.0 if x < 0.0 else (1.0 if x > 1.0 else x)
 
 
+def annualised_growths(trend, sat, emerging) -> tuple[float | None, float | None]:
+    """mart_niche.sql's `rates` CTE: the two growth rates, made commensurable.
+
+    Pulled out of expected_score so check 7 can assert the SUPPLY READING itself rather
+    than re-deriving it inline (which would make the assertion a tautology).
+    """
+    dem_g = None if (trend is None or emerging) else math.log(max(1.0 + trend / 100.0, 0.001)) / 2.0
+    sup_g = None if (sat is None or emerging) else math.log(max(1.0 + sat, 0.001))
+    return dem_g, sup_g
+
+
+def flood_room_of(dem_g, sup_g) -> float | None:
+    """mart_niche.sql's flood_room: supply growth read AGAINST demand growth, one-sided.
+
+    The `or 0.0` mirrors the SQL's defensive COALESCE (never fires in practice — see the
+    SQL comment). Section 2 welds this function to the shipping SQL; section 7 pins what
+    it MEANS. Both are needed: matching the SQL only proves they agree, not that either
+    still implements the intended reading.
+    """
+    if sup_g is None:
+        return None
+    g_flood = math.log(1.0 + bm.OPP_FLOOD_YOY)
+    return 100.0 * (1.0 - clamp01((sup_g - (dem_g or 0.0)) / (2.0 * g_flood)))
+
+
 def expected_score(row: dict) -> tuple[float, dict]:
     trend, sat = row["demand_trend_24m_pct"], row["saturation_yoy"]
     er, wc = row["entrant_ratio"], row["winner_concentration"]
     emerging = bool(row["demand_emerging"])
 
     g_enter = math.log(1.0 + bm.OPP_ENTER_PCT / 100.0) / 2.0
-    g_flood = math.log(1.0 + bm.OPP_FLOOD_YOY)
 
-    dem_g = None if (trend is None or emerging) else math.log(max(1.0 + trend / 100.0, 0.001)) / 2.0
-    sup_g = None if (sat is None or emerging) else math.log(max(1.0 + sat, 0.001))
+    dem_g, sup_g = annualised_growths(trend, sat, emerging)
 
     momentum = None if dem_g is None else 50.0 + 50.0 * math.tanh(dem_g / g_enter)
-    flood_room = (
-        None if sup_g is None
-        else 100.0 * (1.0 - clamp01((sup_g - (dem_g or 0.0)) / (2.0 * g_flood)))
-    )
+    flood_room = flood_room_of(dem_g, sup_g)
     entrant_room = (
         None if (er is None or emerging)
         else 100.0 * clamp01((er - bm.OPP_ENTRANT_FULL) / (bm.OPP_ENTRANT_NORM - bm.OPP_ENTRANT_FULL))
@@ -481,6 +516,102 @@ def main() -> int:
     assert len(tiers) >= 2, f"fixture only exercised solo_tier values {tiers}"
     print(f"[ok] solo_tier partitions solo_viability at {bm.SOLO_TIER_TEAM_MAX}/"
           f"{bm.SOLO_TIER_SOLO_MIN} (values seen: {tiers})")
+
+    # ---- 7. THE TWO SUPPLY READS are different questions — pinned, so a THIRD can't drift in
+    #
+    # Check 3 above asserts OPP_FLOOD_YOY == SAT_FLOOD_YOY and stops there: two equal
+    # CONSTANTS, never two agreeing READINGS. That gap is exactly how the divergence below
+    # sat undocumented long enough to be published as "the board and the score can't
+    # disagree" on /docs (corrected 2026-09-01). Measured on the 222-niche default cut,
+    # 59 of 211 comparable niches (28.0%) contradict on supply — 9 ring "supply flooding"
+    # with no brake at all, 43 ring "pipeline calm" while braked under x0.80.
+    #
+    # THE DIVERGENCE IS DELIBERATE AND STAYS. The ring reads supply ABSOLUTELY because a new
+    # entrant ships into the whole pipeline and because +15%/yr is the line the board draws
+    # on its own axis; the score reads it RELATIVE to demand because that is what stops
+    # "everyone left, so it looks uncrowded" from scoring well (the Naval/Transportation bug
+    # v2 was built to kill). Both were re-measured before this test was written: making the
+    # ring relative moves 28/222 rings, making the score absolute changes 149/222 scores.
+    # So this section does NOT assert the two agree. It asserts each one still IS what it
+    # claims to be, and that the demand term is the entire difference between them.
+    g_flood = math.log(1.0 + bm.OPP_FLOOD_YOY)
+
+    # The fixture rows alone are NOT enough to pin this, and that is not a hypothesis: the
+    # first draft of this section asserted only over them, and a mutation that rescaled
+    # flood_room's denominator (2*ln(1.15) -> ln(1.15), i.e. a third reading that keeps the
+    # demand term but moves the bar to +7.2%/yr) sailed through — the fixture's saturations
+    # (0.00 / +0.067 / +1.00) all miss the shifted band, the nearest by 0.005 in log space.
+    # So the identity is swept on a DESIGNED grid that straddles both bars, and only then
+    # re-checked on the real mart rows. Boundary values are included deliberately: the bars
+    # are `>` on both sides, so saturation exactly 0.15 must read as NOT flooding on both.
+    GRID_SAT = [-0.9, -0.5, -0.2, -0.05, 0.0, 0.05, 0.07, 0.08, 0.10, 0.12, 0.14,
+                0.1499, 0.15, 0.1501, 0.18, 0.25, 0.35, 0.5, 1.0, 3.0]
+    GRID_TREND = [-95.0, -60.0, -30.0, -15.0, -7.0, -2.0, 0.0, 2.0, 7.0, 15.0, 40.0,
+                  80.0, 200.0, 1000.0]
+
+    supply_rows, disagreements = 0, 0
+    probes = [(t, s) for s in GRID_SAT for t in GRID_TREND]
+    probes += [(r["demand_trend_24m_pct"], r["saturation_yoy"]) for r in rows
+               if not r["demand_emerging"]]
+    for trend, sat in probes:
+        dem_g, sup_g = annualised_growths(trend, sat, False)
+        fr = flood_room_of(dem_g, sup_g)
+        if fr is None:
+            continue
+        supply_rows += 1
+        sat = float(sat)
+        key = f"sat={sat:+.4f}/trend={trend}"
+
+        # (a) THE SCORE'S READ IS RELATIVE. flood_room crosses 50 exactly when supply growth
+        #     exceeds DEMAND growth by ln(1 + OPP_FLOOD_YOY) — not before, not after.
+        relative = (sup_g - (dem_g or 0.0)) > g_flood
+        assert (fr < 50.0) == relative, (
+            f"{key}: flood_room {fr:.4f} vs 50 disagrees with the relative test "
+            f"(supply_growth {sup_g:.6f} - demand_growth {(dem_g or 0.0):.6f} = "
+            f"{sup_g - (dem_g or 0.0):.6f} vs ln(1+{bm.OPP_FLOOD_YOY}) = {g_flood:.6f}). "
+            f"flood_room has drifted off the relative reading it is documented as."
+        )
+
+        # (b) THE RING'S READ IS ABSOLUTE, on the same constant: radarVerdict.ts tests
+        #     saturation_yoy > SAT_FLOOD_YOY with no demand term anywhere in it.
+        absolute = sat > SAT_FLOOD_YOY
+        assert absolute == (sup_g > g_flood), (
+            f"{key}: the ring's absolute read (saturation_yoy {sat} vs "
+            f"{SAT_FLOOD_YOY}) no longer matches supply_growth {sup_g:.6f} vs "
+            f"{g_flood:.6f} — the two constants have drifted apart as READINGS"
+        )
+
+        # (c) THE DEMAND TERM IS THE ONLY DIFFERENCE. Neutralise it and the score's read
+        #     collapses onto the ring's, exactly. This is the claim the /docs copy now
+        #     makes in prose ("the ring asks how fast the pipeline is growing, the score
+        #     asks whether it is outgrowing demand"), asserted rather than asserted-in-a-
+        #     comment. It also catches a rescaled denominator, which (a) only catches when
+        #     a row happens to land in the shifted band.
+        assert (flood_room_of(0.0, sup_g) < 50.0) == absolute, (
+            f"{key}: with demand growth zeroed the score's supply read still differs "
+            f"from the ring's (saturation_yoy {sat}) — the two now differ by something "
+            f"OTHER than the demand term. That is a third reading, not the documented two."
+        )
+
+        if absolute != relative:
+            disagreements += 1
+
+    # ANTI-VACUITY. Without a probe where the two reads actually part company, everything
+    # above would still pass with the demand term deleted outright — the failure mode this
+    # project keeps getting bitten by. The grid guarantees such probes (e.g. sat +0.05 with
+    # trend -60%: the ring says calm, supply is outgrowing demand by a mile); the fixture
+    # supplies them too, via the "declining" profile (sat +6.7%/yr against demand -50%/24m).
+    assert supply_rows >= len(GRID_SAT) * len(GRID_TREND), (
+        f"only {supply_rows} probes carried a supply reading; the grid alone should give "
+        f"{len(GRID_SAT) * len(GRID_TREND)}"
+    )
+    assert disagreements > 0, (
+        "no probe reads differently on the absolute (ring) and relative (score) supply "
+        "tests, so this section would pass with the demand term removed entirely"
+    )
+    print(f"[ok] supply reads pinned as TWO deliberate questions: flood_room is relative, "
+          f"the ring is absolute, demand is the only difference "
+          f"({disagreements}/{supply_rows} probes disagree — by design)")
 
     print("\nALL CHECKS PASSED")
     return 0

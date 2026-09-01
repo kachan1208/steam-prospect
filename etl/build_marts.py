@@ -252,10 +252,16 @@ GATE_ENTRANT_FULL = 0.5          # entrant_ratio <= 0.5 -> full entrant severity
 #   every cut by construction, which is stronger comparability than percentiles give.
 # --------------------------------------------------------------------------------------
 # Bars shared with web/src/lib/radarVerdict.ts — the score's sub-score anchors ARE the
-# Radar's ring thresholds, which is what makes the ring and the number one model.
+# Radar's ring thresholds, which is what makes the ring and the number agree about
+# DIRECTION. Not about supply: the constants match, the READINGS do not. OPP_FLOOD_YOY is
+# applied to supply growth NET of demand growth here and to raw saturation_yoy in the ring,
+# so the two contradict on 28.0% of the default cut on purpose (mart_niche.sql, "TWO VIEWS,
+# BUT NOT ON SUPPLY"). Equal constants were the only thing ever asserted, which is how that
+# went unnoticed; test_opportunity_ordering.py now pins the reading itself.
 OPP_ENTER_PCT = 40.0             # == DEMAND_ENTER_PCT: +40%/24m demand growth -> momentum 88.1
-OPP_FLOOD_YOY = 0.15             # == SAT_FLOOD_YOY: supply outgrowing demand by +15%/yr
-                                 # -> flood_room 50
+OPP_FLOOD_YOY = 0.15             # == SAT_FLOOD_YOY as a NUMBER, but read differently: the ring
+                                 # tests saturation_yoy against it directly; flood_room hits 50
+                                 # when supply outgrows DEMAND by this much
 OPP_WINNER_TAKE_MOST = 0.85      # == WC_WINNER_TAKE_MOST -> revenue_spread 50
 OPP_ENTRANT_NORM = 1.08          # == ENTRANT_RATIO_CATALOG_NORM -> entrant_room 100 (capped)
 OPP_ENTRANT_FULL = 0.5           # entrant_ratio <= 0.5 -> entrant_room 0 (same bar the

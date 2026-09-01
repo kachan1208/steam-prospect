@@ -91,8 +91,10 @@
 --      culprit (its median was 1.000 — near-inert). The base `opportunity` was.
 --
 -- THE MODEL NOW. Four inspectable 0..100 sub-scores, blended, then braked by supply
--- pressure. Every anchor below IS a threshold web/src/lib/radarVerdict.ts rings on, which
--- is precisely what makes the number and the ring two views of one model:
+-- pressure. The DEMAND and CONCENTRATION anchors below ARE thresholds
+-- web/src/lib/radarVerdict.ts rings on, which is what makes the number and the ring agree
+-- about direction. The SUPPLY brake is deliberately NOT the ring's supply read — see
+-- "TWO VIEWS, BUT NOT ON SUPPLY" below before assuming they must match:
 --
 --   momentum        demand FLOW, the headline term. 50 + 50*tanh(g / g_enter) where
 --                   g = ln(1 + demand_trend_24m_pct/100)/2 is the niche's annualised
@@ -144,6 +146,31 @@
 -- scored the demand half. flood_room is ONE-SIDED (capped at 100 once demand outpaces
 -- supply) on purpose: a collapsing pipeline is at best "calm", never a bonus — rewarding it
 -- is exactly the Naval/Transportation failure mode that motivated v2 in the first place.
+--
+-- TWO VIEWS, BUT NOT ON SUPPLY (2026-09-01). The header above says "one model", and the
+-- /docs page turned that into "the board and the score can't disagree". On supply that was
+-- false, and measurably so. This mart reads supply RELATIVELY (flood_room: annualised supply
+-- growth MINUS annualised demand growth, then LEAST()-ed with entrant_room). The Radar ring
+-- reads it ABSOLUTELY and binary — saturation_yoy > SAT_FLOOD_YOY, full stop — because that
+-- is the +15%/yr line the board literally draws across the plate as its quadrant divider.
+-- MEASURED on the 222-niche default cut (tag / 24m / min50): 59 of 211 comparable niches
+-- (28.0%) contradict on supply. 9 ring "supply flooding — vetoes enter" while supply_brake
+-- is 1.0 (no brake at all); 43 ring "pipeline calm" while the brake sits under 0.80, and 15
+-- of those are driven purely by entrant_room, which by construction never moves a ring.
+-- Metroidvania is the sharpest: rings "supply not flooding", prints opportunity_v2 30.1
+-- against an unbraked 56.0.
+-- THE DEMAND TERM IS THE ENTIRE DIFFERENCE — not a hypothesis: among the 33 niches with
+-- |demand_trend_24m_pct| < 5% the two reads agree 33/33 (100%), and among the 59 that
+-- disagree the median |demand_trend_24m_pct| is 30.9%.
+-- KEEP IT THAT WAY. Both alternatives were measured and rejected. Making the ring relative
+-- moves 28/222 rings and promotes 7 winner-take-most niches to "Enter now". Making this
+-- brake absolute changes 149/222 published scores and hands a top score back to every niche
+-- everyone is LEAVING — the exact bug v2 exists to prevent. What must NOT happen is a silent
+-- drift into a THIRD reading, so etl/tests/test_opportunity_ordering.py now pins the relative
+-- form as an identity (flood_room < 50 <=> supply_growth - demand_growth > ln(1 +
+-- OPP_FLOOD_YOY)) instead of only asserting OPP_FLOOD_YOY == SAT_FLOOD_YOY — asserting the
+-- two CONSTANTS match while never asserting the two READINGS agree is precisely what let
+-- this divergence sit undocumented.
 --
 -- NULL-HONESTY. A missing input does not vote and is never read as 0: the blend divides by
 -- the weights of the sub-scores that exist. market_pull and quality_gap are percentiles and
