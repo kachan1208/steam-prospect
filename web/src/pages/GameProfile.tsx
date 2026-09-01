@@ -732,7 +732,7 @@ export default function GameProfile() {
               subtitle={
                 teardownQ.data
                   ? teardownQ.data.eligible_reviews
-                    ? `${fmtInt(teardownQ.data.n_reviews_sampled)} sampled English reviews · text sentiment (VADER) around each aspect`
+                    ? `${fmtInt(teardownQ.data.n_reviews_sampled)} sampled English reviews · text sentiment around each aspect, from a model trained on game reviews`
                     : "Not enough sampled English reviews for aspect mining on this title"
                   : undefined
               }

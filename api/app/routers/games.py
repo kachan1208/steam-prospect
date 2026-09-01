@@ -583,7 +583,9 @@ def game_teardown(appid: int) -> GameTeardown:
             COALESCE(gb.genre, ab.genre) AS baseline_genre,
             COALESCE(gb.n_games, ab.n_games) AS n_games_in_baseline,
             a.pos_share - COALESCE(gb.pos_share, ab.pos_share) AS delta_vs_genre,
-            -- Aspect TEXT sentiment (VADER) + its own genre-baseline differential.
+            -- Aspect TEXT sentiment + its own genre-baseline differential. text_pos_share is
+            -- the CLASSIFIER's praise/complaint split (VADER is only the model-absent fallback);
+            -- mean_compound is still the raw VADER compound, kept for comparison.
             a.n_text_pos, a.n_text_neg, a.n_text_neutral, a.text_pos_share, a.mean_compound,
             COALESCE(gb.text_pos_share, ab.text_pos_share) AS genre_text_pos_share,
             a.text_pos_share - COALESCE(gb.text_pos_share, ab.text_pos_share) AS text_delta_vs_genre
@@ -622,12 +624,21 @@ def game_teardown(appid: int) -> GameTeardown:
     caveats = [
         "Review aspects are mined from a SAMPLE of English-language reviews (the `reviews` table is a "
         "per-game sample, recency-biased for older/popular titles) — not the game's full review history.",
-        "Per-aspect sentiment is scored from the review TEXT around each aspect keyword with a lexicon "
-        "method (VADER), not the reviewer's overall thumbs-up/down. It's deliberately lightweight and so "
-        "is coarse: English-only, sarcasm-blind, and domain-blind — everyday-English valence means terms "
-        "like \"hard\", \"brutal\" or \"insane\" often read as negative even where players mean them as "
-        "praise (Difficulty especially). Read it as a directional signal, not a verdict; the overall-vote "
-        "split is shown alongside for comparison.",
+        # The praise/complaint split comes from the distilled classifier's sentiment head, NOT
+        # VADER — see build_marts.compute_aspect_sentiment, where text_sentiment is
+        # COALESCE(clf_sentiment, <VADER band>) and the VADER arm is only the model-absent
+        # fallback (a missing model is fatal by default, so it does not run in production).
+        # This string described the REPLACED lexicon method, including the exact "hard/brutal"
+        # failure the model was trained to fix; keep it in step with the note rendered in
+        # web/src/components/charts/AspectDivergingBars.tsx.
+        "Per-aspect sentiment is scored from the review TEXT around each aspect keyword — not the "
+        "reviewer's overall thumbs-up/down — by a classifier trained on hand-labelled game-review "
+        "fragments, so it reads gaming usage in context: \"cheap deaths\" is a Difficulty complaint, "
+        "\"cheap at 5 bucks\" is praise for Price. On a blind sample it agreed with a human read 81.7% "
+        "of the time, against 65.8% for the lexicon method (VADER) it replaced. Still directional, not a "
+        "verdict: English-only, and it leans slightly toward reading a borderline passage as negative. "
+        "Mentions it can't place are dropped, neutral ones are excluded from the split and reported "
+        "separately, and the overall-vote split is shown alongside for comparison.",
         "Press coverage is fuzzy-matched (article_game_mentions, confidence-filtered) and skews recent "
         "(~365-day scrape backfill) and English-outlet; Steam News (dev-authored posts) is excluded — "
         "this is journalist coverage only.",

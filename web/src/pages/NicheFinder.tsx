@@ -648,8 +648,15 @@ export default function NicheFinder() {
         <h1 className="text-ink-primary" style={{ fontSize: 25 }}>
           Niche Finder
         </h1>
+        {/* NOT "growth-gated" — there is no gate in the current model. opportunity_v2 is a
+            weighted blend of four sub-scores times a supply brake (etl/marts/mart_niche.sql,
+            `scored_v2`). decline_gate still exists as a column, but it stopped multiplying the
+            score and is now a falsification tell only, so describing the ranking as gated
+            promised a safety net the score does not apply. */}
         <span className="text-[13px] text-ink-secondary">
-          {total > 0 ? `${total.toLocaleString()} niches · ranked by growth-gated opportunity` : "ranked by growth-gated opportunity"}
+          {total > 0
+            ? `${total.toLocaleString()} niches · ranked by opportunity — momentum, market pull, revenue spread and quality gap, braked by supply`
+            : "ranked by opportunity — momentum, market pull, revenue spread and quality gap, braked by supply"}
         </span>
         <a
           href={csvUrl}

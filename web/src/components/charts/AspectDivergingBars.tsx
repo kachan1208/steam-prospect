@@ -38,11 +38,15 @@ function standoutAspects(aspects: ReviewAspect[]): Set<string> {
 }
 
 /**
- * Praise-vs-complaint per aspect — the Game Teardown centerpiece. The headline bar is now
- * TEXT sentiment: for every mention we score the VADER compound of the review text AROUND the
- * aspect keyword (see mart_game_teardown.sql / build_marts.compute_aspect_sentiment), so it
- * reflects what reviewers actually SAY about the aspect — not their overall thumbs-up/down,
- * which is what the old (and still-shown-for-comparison) vote split conflated. Each row: a
+ * Praise-vs-complaint per aspect — the Game Teardown centerpiece. The headline bar is TEXT
+ * sentiment: for every mention we classify the review text AROUND the aspect keyword with the
+ * distilled aspect/sentiment model's sentiment head (see etl/aspect_classifier.py and
+ * build_marts.compute_aspect_sentiment, where text_sentiment is COALESCE(clf_sentiment, <VADER
+ * band>) — VADER is now only the fallback for a build with no model, which is fatal by default
+ * and so does not happen in production). It reflects what reviewers actually SAY about the
+ * aspect — not their overall thumbs-up/down, which is what the old (and still-shown-for-
+ * comparison) vote split conflated. Unlike the lexicon it replaced, it reads gaming usage in
+ * context, which is why the copy below can claim "cheap deaths" vs "cheap price". Each row: a
  * 100%-stacked bar (positive accent-300 / negative paper 50% — mono steel, per the design
  * handoff's "never red/green" rule for aspect sentiment; see lib/palette.ts) split by
  * text_pos_share, plus a genre-baseline reference tick, so a bar
