@@ -19,6 +19,7 @@ import { Badge } from "../components/ui/Badge";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Loading } from "../components/ui/Loading";
 import { SocialLinks } from "../components/ui/SocialLinks";
+import { TableScroll } from "../components/ui/TableScroll";
 import { Meter, BulletMeter } from "../components/ui/Meter";
 import { ViewToggle } from "../components/ui/ViewToggle";
 import { trackEvent } from "../lib/analytics";
@@ -1166,7 +1167,7 @@ export default function GameProfile() {
             />
           )}
           {comparablesQ.data && comparablesQ.data.items.length > 0 && (
-            <div className="overflow-x-auto border border-chartborder">
+            <TableScroll className="border border-chartborder">
               <table className="w-full min-w-[640px] text-xs">
                       <thead>
                         <tr className="border-b border-chartborder text-left text-ink-muted">
@@ -1221,7 +1222,7 @@ export default function GameProfile() {
                         ))}
                       </tbody>
                     </table>
-                  </div>
+                  </TableScroll>
                 )}
               </BlueprintPanel>
 

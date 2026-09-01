@@ -4,6 +4,7 @@ import { useQueries } from "@tanstack/react-query";
 
 import { EmptyState } from "../components/ui/EmptyState";
 import { Loading } from "../components/ui/Loading";
+import { TableScroll } from "../components/ui/TableScroll";
 import { gameProfileQueryOptions, nicheDetailQueryOptions, useHealth, type Dimension, type GameProfile, type NicheDetail, type NicheRow } from "../lib/api";
 import { monthName } from "../lib/format";
 import {
@@ -232,7 +233,7 @@ export default function Watchlist() {
 
       <div className="blueprint">
         <i className="bp-corner" />
-        <div className="overflow-x-auto">
+        <TableScroll>
           <div style={{ minWidth: TABLE_MIN_WIDTH }}>
             <div
               role="row"
@@ -251,7 +252,7 @@ export default function Watchlist() {
               <Row key={entry.id} entry={entry} value={currentValue(entry)} to={entryPath(entry)} />
             ))}
           </div>
-        </div>
+        </TableScroll>
       </div>
     </div>
   );

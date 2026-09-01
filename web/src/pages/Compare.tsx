@@ -6,6 +6,7 @@ import clsx from "clsx";
 import { CompareTrendsChart, compareSeriesColor } from "../components/charts/CompareTrendsChart";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Loading } from "../components/ui/Loading";
+import { TableScroll } from "../components/ui/TableScroll";
 import { gameProfileQueryOptions, type GameProfile } from "../lib/api";
 import { COMPARE_CAP, removeFromCompare, useCompareList } from "../lib/compareList";
 import { estimatedUnits } from "../lib/estimates";
@@ -275,7 +276,7 @@ export default function Compare() {
           <Panel>
             {anyLoading && <Loading label="Loading games…" className="p-6 text-sm" />}
             {!anyLoading && (
-              <div className="overflow-x-auto">
+              <TableScroll>
                 {/* `relative` matters: the sr-only "(best in this row)" spans are absolutely
                     positioned, and without a positioned ancestor INSIDE this scroll container
                     they resolve against the .blueprint panel — landing past the page edge and
@@ -437,7 +438,7 @@ export default function Compare() {
                     })}
                   </div>
                 </div>
-              </div>
+              </TableScroll>
             )}
           </Panel>
         </>

@@ -6,6 +6,7 @@ import { Badge } from "../components/ui/Badge";
 import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Loading } from "../components/ui/Loading";
+import { TableScroll } from "../components/ui/TableScroll";
 import { ApiError, useEntitySearch, type EntityRole, type EntitySearchRow } from "../lib/api";
 import { fmtInt, fmtPct, fmtUsd } from "../lib/format";
 import { genreTintStyle, heatDomain, heatStyle } from "../lib/heat";
@@ -123,7 +124,7 @@ export default function Studios() {
           </div>
         )}
         {data && data.items.length > 0 && (
-          <div className="overflow-x-auto">
+          <TableScroll>
             <table className="w-full min-w-[860px] border-collapse text-sm">
               <thead>
                 <tr className="border-b border-chartborder text-left text-xs text-ink-muted">
@@ -213,7 +214,7 @@ export default function Studios() {
                 ))}
               </tbody>
             </table>
-          </div>
+          </TableScroll>
         )}
         {data && (
           <div className="border-t border-chartborder px-3 py-2 text-xs text-ink-muted">

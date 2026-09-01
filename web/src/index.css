@@ -303,14 +303,45 @@ h1, h2, h3, h4, h5, h6 {
  * instrument, and macOS overlay scrollbars stay invisible until touched — which made a
  * clipped list read as "the list ends at #22" (the A1 silent cap). Keep its scrollbar
  * permanently visible; the markup pairs this with a bottom fade. */
-.rail-scroll::-webkit-scrollbar {
+/* …and the same silent cap on the INLINE axis, for every wide table/grid in the app
+ * (.table-scroll, applied through components/ui/TableScroll.tsx — one rule, not a patch
+ * per page). Measured on production 2026-09-01: /studios @390 hid 799px of a 1139px row
+ * (70% — Years, Active, Total est. revenue, P90, Hit rate, Top genres all off-screen),
+ * /niches @390 hid 520px of 860 (60%), /games/:id comparables @390 hid 346px of 640, and
+ * /studios still hid 197px at 1024. Nothing hinted the columns existed.
+ *
+ * The fade is a MASK rather than the rail's overlay gradient because these scrollers sit
+ * on three different planes (card --surface-1, .blueprint panel, page) and a mask needs no
+ * colour to match. TableScroll only sets data-hidden when content is really clipped, so a
+ * table that fits — every one of them at 1440 — is left exactly as it was. */
+.rail-scroll::-webkit-scrollbar,
+.table-scroll::-webkit-scrollbar {
   width: 6px;
+  height: 6px;
 }
-.rail-scroll::-webkit-scrollbar-thumb {
+.rail-scroll::-webkit-scrollbar-thumb,
+.table-scroll::-webkit-scrollbar-thumb {
   background: var(--baseline);
 }
-.rail-scroll::-webkit-scrollbar-track {
+.rail-scroll::-webkit-scrollbar-track,
+.table-scroll::-webkit-scrollbar-track {
   background: transparent;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+.table-scroll[data-hidden="right"] {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+}
+.table-scroll[data-hidden="left"] {
+  -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 40px), transparent);
+  mask-image: linear-gradient(to left, #000 calc(100% - 40px), transparent);
+}
+.table-scroll[data-hidden="both"] {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent);
 }
 
 /* Consistent keyboard focus ring across interactive elements. */

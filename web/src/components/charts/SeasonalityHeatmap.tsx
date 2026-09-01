@@ -4,6 +4,7 @@ import type { SeasonalityCell } from "../../lib/api";
 import { fmtCompact, fmtUsd, monthName, weekdayName } from "../../lib/format";
 import { sequentialColorAt, sequentialScale } from "../../lib/palette";
 import { useTheme } from "../../lib/theme";
+import { TableScroll } from "../ui/TableScroll";
 
 type Measure = "median_rev" | "n_releases";
 
@@ -72,7 +73,7 @@ export function SeasonalityHeatmap({ cells }: { cells: SeasonalityCell[] }) {
           )}
         </div>
       </div>
-      <div className="overflow-x-auto">
+      <TableScroll>
         <div className="inline-grid grid-cols-[40px_repeat(7,minmax(34px,1fr))] gap-[2px]" style={{ minWidth: 380 }}>
           <div />
           {weekdays.map((w) => (
@@ -111,7 +112,7 @@ export function SeasonalityHeatmap({ cells }: { cells: SeasonalityCell[] }) {
             </Fragment>
           ))}
         </div>
-      </div>
+      </TableScroll>
       <div className="mt-3 flex items-center gap-2 text-[10px] text-ink-muted">
         <span>Low</span>
         <span className="h-2 max-w-[160px] flex-1 rounded-full" style={{ background: legendGradient }} />

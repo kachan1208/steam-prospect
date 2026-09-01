@@ -97,8 +97,14 @@ function NotableRow({ item }: { item: PressNotableArticle }) {
       : undefined;
 
   return (
-    <div className="flex items-start gap-3 border-b border-chartborder/60 py-2.5 first:pt-0 last:border-0 last:pb-0">
-      <div className="flex w-32 shrink-0 flex-col items-start gap-1">
+    /* Two columns from sm up; STACKED below it (A11, measured 2026-09-01). The fixed
+       w-32 outlet column plus gap-3 costs 140px of a 318px card at 390px, which left the
+       headline 146px — and the headline is the only thing telling these rows apart, so the
+       list read "How to get gold i… / How to get Lead i… / How to get salt in…". Most of
+       that 128px was wasted anyway: the outlet pill is a short name. Stacked, the outlet
+       and date share one meta line and the headline gets the full 318px. */
+    <div className="flex flex-col gap-1 border-b border-chartborder/60 py-2.5 first:pt-0 last:border-0 last:pb-0 sm:flex-row sm:items-start sm:gap-3">
+      <div className="flex shrink-0 flex-row items-center gap-2 sm:w-32 sm:flex-col sm:items-start sm:gap-1">
         <span
           className="max-w-full truncate rounded-full border border-chartborder bg-page px-2 py-0.5 text-[10px] font-semibold text-ink-secondary"
           title={outlet}
@@ -107,7 +113,7 @@ function NotableRow({ item }: { item: PressNotableArticle }) {
         </span>
         <span className="tabular pl-0.5 text-[10px] text-ink-muted">{dateOnly(item.published_at)}</span>
       </div>
-      <div className="min-w-0 flex-1 pt-0.5">
+      <div className="min-w-0 flex-1 sm:pt-0.5">
         <ArticleTitle item={item} />
         <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-ink-muted">
           {!authorIsOutlet && item.author && <span>{item.author}</span>}
@@ -157,7 +163,16 @@ export function NotableCoverageCard({ press }: { press: GamePress }) {
           <span
             // Square corners — blueprint grammar has radius 0 on tags/chips (the 2px dot
             // inside stays a circle; dots aren't chips).
-            className="inline-flex shrink-0 items-center gap-1.5 border border-chartborder bg-page px-2.5 py-1 text-[11px]"
+            //
+            // WRAPS, and must not be shrink-0 (A3, 2026-09-01). Card's header already drops
+            // this chip to its own line at phone widths, but the chip is 372px wide once the
+            // detail carries its base ("Mostly positive · 77% positive of 43 rated · 33
+            // neutral excluded") and the line is only 318px at 390 — as shrink-0 it simply
+            // ran off the end, giving /games/1962700 the app's only body-level horizontal
+            // scroll (scrollWidth 417 vs clientWidth 390) and clipping its own text
+            // mid-word ("exclud…"). The disclosure is the point of that wording, so wrap it
+            // rather than shorten it: label on one line, base on the next.
+            className="inline-flex max-w-full flex-wrap items-center gap-x-1.5 gap-y-0.5 border border-chartborder bg-page px-2.5 py-1 text-[11px]"
             title={`${fmtInt(press.n_pos_articles)} positive · ${fmtInt(press.n_neg_articles)} negative${
               press.n_neutral_articles ? ` · ${fmtInt(press.n_neutral_articles)} neutral (excluded from the share)` : ""
             } of ${fmtInt(press.n_scored_articles)} scored — VADER on headlines/summaries`}

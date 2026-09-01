@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { render, within } from "@testing-library/react";
 
-import { pressToneSummary } from "./NotableCoverageCard";
-import type { GamePress } from "../lib/api";
+import { NotableCoverageCard, pressToneSummary } from "./NotableCoverageCard";
+import type { GamePress, PressNotableArticle } from "../lib/api";
 
 /**
  * A percentage and the base printed next to it must be able to produce each other.
@@ -58,5 +59,54 @@ describe("pressToneSummary", () => {
   it("still refuses to invent a lean when nothing was scored or nothing took a side", () => {
     expect(pressToneSummary(press({ n_scored_articles: 0 }))).toBeNull();
     expect(pressToneSummary(press({ press_pos_share: null }))?.detail).toBe("101 scored, no clear lean");
+  });
+});
+
+function article(overrides: Partial<PressNotableArticle> = {}): PressNotableArticle {
+  return {
+    source: "pcgamer",
+    title: "How to get gold in Subnautica 2",
+    author: "Sean Martin",
+    published_at: "2026-05-14 09:00:00",
+    match_confidence: 0.9,
+    is_earliest: false,
+    url: "https://example.test/a",
+    sentiment_compound: 0.4,
+    sentiment: "positive",
+    ...overrides,
+  };
+}
+
+/**
+ * Two phone-width layout failures measured on production 2026-09-01, on /games/1962700 at
+ * 390px. jsdom has no layout engine, so what is asserted here is the STRUCTURE that
+ * produces the measured result — the pixels themselves were verified with Playwright:
+ * body scrollWidth 417 -> 390, and the press headline box 146px -> 286px.
+ */
+describe("NotableCoverageCard at phone widths", () => {
+  it("lets the tone chip give way instead of running off the page (A3)", () => {
+    const { container } = render(<NotableCoverageCard press={press({ notable: [article()] })} />);
+    const chip = within(container).getByText("Mostly positive").parentElement!;
+    // 372px of chip on a 318px line: as `shrink-0` it overflowed the viewport by 27px and
+    // clipped its own last word ("exclud…"), giving the route the app's only body-level
+    // horizontal scroll. It has to be able to shrink AND to wrap internally.
+    expect(chip.className).not.toMatch(/\bshrink-0\b/);
+    expect(chip.className).toMatch(/\bflex-wrap\b/);
+    expect(chip.className).toMatch(/\bmax-w-full\b/);
+    // …and the disclosure that wrapping exists to preserve is still whole.
+    expect(chip.textContent).toContain("83% positive of 70 rated · 31 neutral excluded");
+  });
+
+  it("gives the headline the full row below sm instead of a 146px sliver (A11)", () => {
+    const { container } = render(<NotableCoverageCard press={press({ notable: [article()] })} />);
+    const headline = within(container).getByText("How to get gold in Subnautica 2", { selector: "span" });
+    const row = headline.closest("div.flex-1")!.parentElement!;
+    // The outlet column's fixed width is what cost the headline 140px of a 318px card, so
+    // it must be breakpoint-scoped: stacked below sm, two columns from sm up.
+    expect(row.className).toMatch(/\bflex-col\b/);
+    expect(row.className).toMatch(/\bsm:flex-row\b/);
+    const meta = row.firstElementChild as HTMLElement;
+    expect(meta.className).toMatch(/\bsm:w-32\b/);
+    expect(meta.className).not.toMatch(/(^|\s)w-32(\s|$)/);
   });
 });

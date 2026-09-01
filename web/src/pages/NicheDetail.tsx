@@ -17,6 +17,7 @@ import { KpiCell } from "../components/ui/KpiCell";
 import { Loading } from "../components/ui/Loading";
 import { BulletMeter } from "../components/ui/Meter";
 import { StatTile } from "../components/ui/StatTile";
+import { TableScroll } from "../components/ui/TableScroll";
 import { ViewToggle } from "../components/ui/ViewToggle";
 import { trackEvent } from "../lib/analytics";
 import { nicheWatchlistId, toggleNicheWatchlist, useWatchlist, WATCHLIST_CAP } from "../lib/watchlist";
@@ -921,7 +922,7 @@ export default function NicheDetail() {
             ) : (
               // Six fixed columns don't reflow at phone widths — scroll horizontally instead
               // of squeezing them (same convention as the Games & distribution tab's table).
-              <div className="overflow-x-auto">
+              <TableScroll>
                 <div className="min-w-[640px]">
                   <div className="grid grid-cols-[60px_2fr_1fr_1fr_1fr_1fr] items-center gap-3.5 border-t border-ink-primary/20 px-5 py-2.5">
                     <span />
@@ -964,7 +965,7 @@ export default function NicheDetail() {
                     );
                   })}
                 </div>
-              </div>
+              </TableScroll>
             )}
           </div>
 
@@ -1309,7 +1310,7 @@ export default function NicheDetail() {
                   title="What players praise & complain about"
                   subtitle="Review aspects pooled across the niche (vote-weighted). A complaint the whole niche shares is a quality-gap opening; a praise pillar is the bar to clear."
                 >
-                  <div className="overflow-x-auto rounded-card border border-chartborder">
+                  <TableScroll className="rounded-card border border-chartborder">
                     <table className="w-full min-w-[560px] text-xs">
                       <thead>
                         <tr className="border-b border-chartborder text-left text-ink-muted">
@@ -1347,7 +1348,7 @@ export default function NicheDetail() {
                         ))}
                       </tbody>
                     </table>
-                  </div>
+                  </TableScroll>
                 </Card>
               )}
 
@@ -1358,7 +1359,7 @@ export default function NicheDetail() {
                 >
                   <NichePressChart points={detail.press.timeline} />
                   {detail.press.top_outlets.length > 0 && (
-                    <div className="mt-3 overflow-x-auto rounded-card border border-chartborder">
+                    <TableScroll className="mt-3 rounded-card border border-chartborder">
                       <table className="w-full min-w-[420px] text-xs">
                         <thead>
                           <tr className="border-b border-chartborder text-left text-ink-muted">
@@ -1377,7 +1378,7 @@ export default function NicheDetail() {
                           ))}
                         </tbody>
                       </table>
-                    </div>
+                    </TableScroll>
                   )}
                   <p className="mt-2 text-[11px] italic text-ink-muted">
                     Fuzzy-matched with a confidence floor; an article covering two of the niche's games counts once per
@@ -1504,7 +1505,7 @@ export default function NicheDetail() {
                   }
                 />
                 {detail.representative_games.length > 0 && (
-                  <div className="mt-3 overflow-x-auto rounded-card border border-chartborder">
+                  <TableScroll className="mt-3 rounded-card border border-chartborder">
                     <table className="w-full min-w-[640px] text-xs">
                       <thead>
                         <tr className="border-b border-chartborder text-left text-ink-muted">
@@ -1547,7 +1548,7 @@ export default function NicheDetail() {
                         ))}
                       </tbody>
                     </table>
-                  </div>
+                  </TableScroll>
                 )}
               </>
             )}
@@ -1576,9 +1577,9 @@ export default function NicheDetail() {
 
             {!gamesUnavailable && gamesQ.data && gamesQ.data.items.length > 0 && (
               <>
-                <div
+                <TableScroll
                   className={clsx(
-                    "overflow-x-auto rounded-card border border-chartborder",
+                    "rounded-card border border-chartborder",
                     gamesQ.isFetching && "opacity-90 transition-opacity",
                   )}
                 >
@@ -1671,7 +1672,7 @@ export default function NicheDetail() {
                       ))}
                     </tbody>
                   </table>
-                </div>
+                </TableScroll>
                 <div className="mt-2 flex items-center justify-between text-xs text-ink-muted">
                   <span>
                     {rangeStart.toLocaleString()}–{rangeEnd.toLocaleString()} of{" "}

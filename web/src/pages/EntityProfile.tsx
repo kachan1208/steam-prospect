@@ -7,6 +7,7 @@ import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Loading } from "../components/ui/Loading";
 import { StatTile } from "../components/ui/StatTile";
+import { TableScroll } from "../components/ui/TableScroll";
 import {
   ApiError,
   useEntityProfile,
@@ -271,7 +272,7 @@ export default function EntityProfile() {
       </Card>
 
       <Card title="Portfolio" subtitle="Every catalog release credited to this entity, latest first">
-        <div className="overflow-x-auto rounded-card border border-chartborder">
+        <TableScroll className="rounded-card border border-chartborder">
           <table className="w-full min-w-[640px] text-xs">
             <thead>
               <tr className="border-b border-chartborder text-left text-ink-muted">
@@ -328,7 +329,7 @@ export default function EntityProfile() {
               ))}
             </tbody>
           </table>
-        </div>
+        </TableScroll>
       </Card>
     </div>
   );
