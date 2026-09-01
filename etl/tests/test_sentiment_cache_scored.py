@@ -132,6 +132,86 @@ def test_config_change_still_forces_full_rescan():
         con.close()
 
 
+def test_version_bump_changes_the_config_hash():
+    """SENTIMENT_CACHE_VERSION is the ONLY escape hatch for a defect a config-value hash cannot
+    see — a scoring bug, a vaderSentiment upgrade, or (2026-09-01, the reason this test exists)
+    a cache file with a hole punched in it by an OOM-killed build. All of those leave every
+    hashed knob byte-identical, so the bump has to be what moves the hash. Pin it directly: if
+    `version=` ever falls out of _sentiment_config_hash's payload, the escape hatch silently
+    stops working and the next operator who bumps the constant gets a no-op instead of a
+    rescore."""
+    before = bm._sentiment_config_hash()
+    original = bm.SENTIMENT_CACHE_VERSION
+    try:
+        bm.SENTIMENT_CACHE_VERSION = original + 1
+        after = bm._sentiment_config_hash()
+    finally:
+        bm.SENTIMENT_CACHE_VERSION = original
+    assert after != before, (
+        "SENTIMENT_CACHE_VERSION must be part of _sentiment_config_hash — a bump that does not "
+        "move the hash cannot force a rescore"
+    )
+    assert bm._sentiment_config_hash() == before, "restoring the version restores the hash"
+
+
+def test_version_bump_forces_the_wipe_and_refill():
+    """End-to-end consequence of the hash change above, through the real cache path: bumping the
+    version must make _refresh_sentiment_cache WIPE (aspect_mention + press_article +
+    scored_review) and make the next run re-scan the entire pool, not just the delta.
+
+    This is the mechanism the 1 -> 2 repair rides on. The hole it repairs is invisible to the
+    cache itself (a partially-scored review is indistinguishable from a review that mentions
+    nothing else), so the version bump is the whole of the fix — if this path no-ops, the repair
+    silently does not happen and nobody finds out until the next diff against the raw regex."""
+    bm.TEARDOWN_MIN_REVIEWS = 1
+    original = bm.SENTIMENT_CACHE_VERSION
+    with tempfile.TemporaryDirectory() as td:
+        data_dir = Path(td)
+
+        con = _fresh_con()
+        _capture_new_reviews(bm.compute_aspect_sentiment, con, data_dir)
+        con.close()
+
+        # Steady state first: without a bump, the second run scans nothing. Establishing this
+        # here is what makes the third run's number mean "the bump did it".
+        con = _fresh_con()
+        assert _capture_new_reviews(bm.compute_aspect_sentiment, con, data_dir) == 0
+        con.close()
+
+        cache = duckdb.connect(str(data_dir / bm.SENTIMENT_CACHE_DB_NAME))
+        mentions_before = cache.execute("SELECT count(*) FROM aspect_mention").fetchone()[0]
+        cache.close()
+        assert mentions_before > 0, "fixture must actually populate the cache"
+
+        try:
+            bm.SENTIMENT_CACHE_VERSION = original + 1
+            bumped_hash = bm._sentiment_config_hash()
+            con = _fresh_con()
+            n = _capture_new_reviews(bm.compute_aspect_sentiment, con, data_dir)
+            con.close()
+        finally:
+            bm.SENTIMENT_CACHE_VERSION = original
+
+        assert n == len(MENTIONING) + len(SILENT), (
+            f"a version bump must rescan the whole pool, rescanned {n}"
+        )
+        cache = duckdb.connect(str(data_dir / bm.SENTIMENT_CACHE_DB_NAME))
+        mentions_after, scored_after = cache.execute(
+            "SELECT (SELECT count(*) FROM aspect_mention), (SELECT count(*) FROM scored_review)"
+        ).fetchone()
+        stored = cache.execute("SELECT value FROM meta WHERE key = 'config_hash'").fetchone()[0]
+        cache.close()
+        # Refilled, not merely emptied — and refilled to exactly what it held before, since the
+        # scoring config is otherwise unchanged (the bump is a rescore, not a behaviour change).
+        assert mentions_after == mentions_before, (
+            f"wipe+refill must reproduce the cache, {mentions_before} -> {mentions_after}"
+        )
+        assert scored_after == len(MENTIONING) + len(SILENT)
+        # And the cache is re-keyed to the BUMPED config, so the run after it is a plain hit
+        # rather than a second rescore.
+        assert stored == bumped_hash, "the wipe must store the bumped config hash"
+
+
 def test_crash_recovery_rescans_without_duplicates():
     """A review whose mentions landed but whose scored_review record did not (crash between the
     two) must be re-scanned — and the re-insert must not double its rows."""
