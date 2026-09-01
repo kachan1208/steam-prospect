@@ -319,3 +319,42 @@ describe("NicheCombined page", () => {
     expect(screen.getByText("Check again")).toBeTruthy();
   });
 });
+
+/**
+ * The combination's game table is the /niches/:dimension/:key Games & distribution table by
+ * another name — same API row shape (NicheGameRow), same two estimators, and it shipped the
+ * same impossible row: `owners_est` (mart_game.owners_mid, SteamSpy buckets) printed beside
+ * `est_revenue` (est_rev_reviews = reviews x 30 x price) and a price column, so revenue over
+ * copies disagreed with the price two cells left.
+ *
+ * The fixture is the live Souls-like row that made the bug easiest to see —
+ * GET /api/niches/tag/Souls-like/games?win=24m&min_reviews=50 (2026-09-01): Path of Exile 2,
+ * $202,068,121.50 against 35,000,000 owners = $5.77 a copy under a $29.99 price. Derived
+ * units are 202,068,121.50 / 29.99 = 6,737,850.
+ */
+describe("NicheCombined — the game table's copies come from the revenue's own estimator", () => {
+  const POE2 = {
+    appid: 2694490,
+    name: "Path of Exile 2",
+    release_year: 2024,
+    price_initial: 29.99,
+    total_reviews: 224595,
+    owners_est: 35000000,
+    est_revenue: 202068121.5,
+  };
+
+  it("prints est. revenue ÷ price, never the SteamSpy owners figure", async () => {
+    stubFetch(() => jsonResponse(combinedBody({ items: [POE2] })));
+    renderPage(TWO);
+
+    const link = await screen.findByRole("link", { name: "Path of Exile 2" });
+    const cells = Array.from((link.closest("tr") as HTMLTableRowElement).querySelectorAll("td")).map(
+      (td) => td.textContent?.trim() ?? "",
+    );
+    // 202,068,121.50 / 29.99 = 6,737,850 -> "6.7M"; the owners figure was "35.0M".
+    expect(cells).toContain("6.7M");
+    expect(cells).not.toContain("35.0M");
+    expect(screen.queryByText("Owners (est.)")).toBeNull();
+    expect(screen.getByText("Est. units")).toBeTruthy();
+  });
+});

@@ -630,3 +630,192 @@ describe("NicheDetail — the overview Top games panel is the SELECTED CUT's top
     expect(screen.queryByText("32.1K")).toBeNull();
   });
 });
+
+/**
+ * The Games & distribution table has to multiply out ACROSS a row.
+ *
+ * It used to print three numbers side by side that came from two different estimators: the
+ * price and the revenue are the reviews-based (Boxleiter) pair — mart_game.est_rev_reviews =
+ * total_reviews x 30 x price_initial — while the copy count was mart_game.owners_mid, the
+ * owners-based SteamSpy bucket midpoint the API serves as `owners_est`. Dividing the two
+ * columns the layout invites you to divide gave a price per copy that the price column in the
+ * same row contradicts.
+ *
+ * Measured on the live API, GET /api/niches/tag/Souls-like/games?win=24m&min_reviews=50
+ * &sort=revenue&order=desc (2026-09-01) — the fixture below is that response, verbatim:
+ *
+ *   game                     est_revenue      price   owners_est    est_revenue/owners_est
+ *   Clair Obscur            $414,290,625.30   49.99    3,500,000    $118.37   (2.37x price)
+ *   Hollow Knight: Silksong $251,133,970.20   19.99   10,948,102    $ 22.94   (1.15x price)
+ *   ELDEN RING NIGHTREIGN   $227,657,471.40   39.99    3,500,000    $ 65.04   (1.63x price)
+ *   Path of Exile 2         $202,068,121.50   29.99   35,000,000    $  5.77   (0.19x price)
+ *   Stellar Blade           $167,906,610.90   59.99    2,439,131    $ 68.84   (1.15x price)
+ *
+ * Cross-surface, the same mismatch was visible without any arithmetic at all: /compare prints
+ * Silksong "Est. units 12.6M" (251,133,970.2 / 19.99) where this table printed "10.9M".
+ *
+ * These tests assert the DISPLAYED strings, not the helper — lib/estimates.test.ts already
+ * covers the helper, and the bug was never in the maths, it was in which column got rendered.
+ */
+describe("NicheDetail — the games table multiplies out across the row", () => {
+  // GET /api/niches/tag/Souls-like/games?win=24m&min_reviews=50&sort=revenue&order=desc, verbatim.
+  const GAMES = {
+    total: 223,
+    limit: 25,
+    offset: 0,
+    items: [
+      {
+        appid: 1903340,
+        name: "Clair Obscur: Expedition 33",
+        release_year: 2025,
+        price_initial: 49.99,
+        est_revenue: 414290625.3,
+        total_reviews: 276249,
+        owners_est: 3500000.0,
+      },
+      {
+        appid: 1030300,
+        name: "Hollow Knight: Silksong",
+        release_year: 2025,
+        price_initial: 19.99,
+        est_revenue: 251133970.2,
+        total_reviews: 418766,
+        owners_est: 10948101.889666468,
+      },
+      {
+        appid: 2694490,
+        name: "Path of Exile 2",
+        release_year: 2024,
+        price_initial: 29.99,
+        est_revenue: 202068121.5,
+        total_reviews: 224595,
+        owners_est: 35000000.0,
+      },
+    ],
+  };
+
+  const DETAIL = {
+    dimension: "tag",
+    key: "Souls-like",
+    tier: "micro",
+    variants: [
+      {
+        dimension: "tag",
+        key: "Souls-like",
+        window: "24m",
+        min_reviews: 50,
+        n_games: 223,
+        median_rev: 100_000,
+        p90_rev: 5_000_000,
+        median_price: 14.99,
+        opportunity_v2: 77.25,
+        saturation_yoy: 0.0176,
+        n_recent_year: 346,
+        n_prior_year: 340,
+      },
+    ],
+    saturation_trend: [],
+    revenue_histogram: [],
+    representative_games: [],
+    players: null,
+    themes: [],
+    press: null,
+    hit_rates: { hit_rate_200k: null, hit_rate_500k: null, median_rev: null, n_games: null, winner_concentration: null },
+  };
+
+  function renderGamesTab() {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    return render(
+      <QueryClientProvider client={client}>
+        <ThemeProvider>
+          <MemoryRouter initialEntries={["/niches/tag/Souls-like?tab=games&win=24m&min_reviews=50"]}>
+            <Routes>
+              <Route path={NICHE_ROUTE_PATH} element={<NicheDetail />} />
+            </Routes>
+          </MemoryRouter>
+        </ThemeProvider>
+      </QueryClientProvider>,
+    );
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        const body = url.includes("/games")
+          ? GAMES
+          : url.includes("/niches/tag/")
+            ? DETAIL
+            : url.includes("/market/benchmarks")
+              ? { cited: { pct_new_releases_over_100k: 0.085, revenue_benchmark_marks: [], dev_tiers: [] } }
+              : {};
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  /** The rendered cells of the row whose first cell links to /games/{appid}. */
+  async function rowCells(appid: number): Promise<string[]> {
+    const link = await screen.findByRole("link", { name: new RegExp(GAMES.items.find((g) => g.appid === appid)!.name) });
+    const row = link.closest("tr");
+    expect(row).toBeTruthy();
+    return Array.from((row as HTMLTableRowElement).querySelectorAll("td")).map((td) => td.textContent?.trim() ?? "");
+  }
+
+  it("prints copies from the SAME estimator as the revenue in that row, not SteamSpy owners", async () => {
+    renderGamesTab();
+    // 414,290,625.30 / 49.99 = 8,287,470 copies -> "8.3M". The owners-based figure for this row
+    // is 3,500,000 -> "3.5M", which is what the table used to print beside a $49.99 price.
+    const clair = await rowCells(1903340);
+    expect(clair).toContain("8.3M");
+    expect(clair).not.toContain("3.5M");
+
+    // The worst offender: 202,068,121.50 / 29.99 = 6,737,850 -> "6.7M", against the 35,000,000
+    // owners ("35.0M") that made this row read $5.77 a copy at a $29.99 price.
+    const poe2 = await rowCells(2694490);
+    expect(poe2).toContain("6.7M");
+    expect(poe2).not.toContain("35.0M");
+  });
+
+  it("agrees with /compare on the same game — Silksong is 12.6M units on both", async () => {
+    renderGamesTab();
+    // 251,133,970.20 / 19.99 = 12,562,980 -> "12.6M", exactly what Compare.tsx's Est. units row
+    // prints from the same helper. The old column printed the owners figure, "10.9M".
+    const silksong = await rowCells(1030300);
+    expect(silksong).toContain("12.6M");
+    expect(silksong).not.toContain("10.9M");
+  });
+
+  it("names the column for what it now is, and disowns the owners method in the header", async () => {
+    renderGamesTab();
+    const header = await screen.findByText("Est. units");
+    expect(screen.queryByText("Owners (est.)")).toBeNull();
+    // The header says which estimator the number came from and where the other one lives.
+    expect(header.getAttribute("title")).toMatch(/est\. revenue ÷ launch price/i);
+    expect(header.getAttribute("title")).toMatch(/different method/i);
+  });
+
+  it("holds price × units === the revenue printed in the same row, for every row", async () => {
+    renderGamesTab();
+    await screen.findByText("Est. units");
+    for (const g of GAMES.items) {
+      const cells = await rowCells(g.appid);
+      // Cells: name, year, price, reviews, units, revenue. Parse the two the reader divides.
+      const price = Number(cells[2].replace(/[$,]/g, ""));
+      const units = Number(cells[4].replace("M", "")) * 1_000_000;
+      expect(price).toBeCloseTo(g.price_initial, 2);
+      // fmtCompact rounds to one decimal at M scale, so the reader's own division has to land
+      // within that rounding — 0.05M of slack, not an arbitrary tolerance.
+      expect(units * price).toBeGreaterThan(g.est_revenue - 0.05e6 * price);
+      expect(units * price).toBeLessThan(g.est_revenue + 0.05e6 * price);
+      // And the old pairing must fail that same check, which is the whole point.
+      expect(Math.abs(g.owners_est * price - g.est_revenue)).toBeGreaterThan(0.05e6 * price);
+    }
+  });
+});

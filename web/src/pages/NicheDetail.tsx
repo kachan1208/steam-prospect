@@ -19,6 +19,7 @@ import { BulletMeter } from "../components/ui/Meter";
 import { StatTile } from "../components/ui/StatTile";
 import { ViewToggle } from "../components/ui/ViewToggle";
 import { trackEvent } from "../lib/analytics";
+import { estimatedUnits } from "../lib/estimates";
 import { nicheWatchlistId, toggleNicheWatchlist, useWatchlist, WATCHLIST_CAP } from "../lib/watchlist";
 import {
   ApiError,
@@ -1316,7 +1317,7 @@ export default function NicheDetail() {
 
               <Card
                 title="Revenue spread and entry economics"
-                subtitle="Estimated lifetime GROSS per game (reviews × a genre-fitted owners-per-review ratio × launch price) — not net of Steam's cut, refunds or discounts."
+                subtitle="Estimated lifetime GROSS per game (reviews × 30 owners-per-review × launch price — one flat ratio, not fitted per genre) — not net of Steam's cut, refunds or discounts."
               >
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                   <StatTile
@@ -1633,7 +1634,16 @@ export default function NicheDetail() {
                           <th className="px-2 py-1.5 font-medium">Game</th>
                           <th className="px-2 py-1.5 font-medium">Year</th>
                           <th className="px-2 py-1.5 font-medium">Price</th>
-                          <th className="px-2 py-1.5 font-medium">Owners</th>
+                          {/* The degraded fallback shipped the SAME mixed-estimator row as the
+                              live table above — owners_mid beside est_rev_reviews — so it gets
+                              the same fix. A reader who lands here during a mart rebuild has to
+                              get the same arithmetic, not a second answer. */}
+                          <th
+                            className="px-2 py-1.5 font-medium"
+                            title="Est. revenue ÷ launch price — the same reviews-based (Boxleiter) estimator as the revenue column, so the row multiplies out."
+                          >
+                            Est. units
+                          </th>
                           <th className="px-2 py-1.5 font-medium">Reviews</th>
                           <th className="px-2 py-1.5 font-medium">Positive</th>
                           <th className="px-2 py-1.5 font-medium">Est. revenue</th>
@@ -1658,7 +1668,9 @@ export default function NicheDetail() {
                             </td>
                             <td className="tabular px-2 py-1.5">{g.release_year ?? "—"}</td>
                             <td className="tabular px-2 py-1.5">{fmtPrice(g.price_initial)}</td>
-                            <td className="tabular px-2 py-1.5">{fmtCompact(g.owners_mid)}</td>
+                            <td className="tabular px-2 py-1.5">
+                              {fmtCompact(estimatedUnits(g.est_rev_reviews, g.price_initial, g.total_reviews))}
+                            </td>
                             <td className="tabular px-2 py-1.5">{fmtInt(g.total_reviews)}</td>
                             <td className="tabular px-2 py-1.5">{fmtPct(g.positive_ratio)}</td>
                             <td className="tabular px-2 py-1.5">
@@ -1742,10 +1754,32 @@ export default function NicheDetail() {
                             onSort={onGameSort}
                           />
                         </th>
-                        {/* Owners isn't in the API's sort whitelist — an inert header rather
-                            than a control that 422s. */}
-                        <th className="px-2 py-1.5 font-medium" title="Estimated copies owned (SteamSpy band midpoint)">
-                          Owners (est.)
+                        {/* Units, NOT SteamSpy owners. This row prints a price, a copy count and
+                            a revenue side by side, so the copy count has to be the one that
+                            closes the arithmetic a reader does ACROSS the row. It used to be
+                            mart_game.owners_mid (owners-based) beside est_rev_reviews
+                            (reviews-based) — two different estimators in one row, so revenue ÷
+                            copies contradicted the price two cells to the left. Live API,
+                            tag/Souls-like win=24m min_reviews=50 sorted by revenue desc
+                            (2026-09-01): Path of Exile 2 read $202,068,121 over 35.0M owners =
+                            $5.77 a copy against a $29.99 price; Clair Obscur $414,290,625 over
+                            3.5M = $118.37 against $49.99; Silksong showed 10.9M owners here while
+                            /compare printed "Est. units 12.6M" for that same game.
+                            Same helper and same reasoning as /compare and the game profile's
+                            Estimates panel — lib/estimates.ts explains why the reviews-based
+                            estimator is the one that stays. The owners-based figure is not
+                            reprinted here: the profile can afford to carry it on a sub-line
+                            labelled "different method", a 25-row table has no such slot and a
+                            header read once cannot un-teach a division the cells invite 25 times.
+                            Still absent from the API's sort whitelist, so still an inert header
+                            rather than a control that 422s — and nothing is lost by that: at a
+                            fixed price units is strictly increasing in est_revenue, so the
+                            "Est. revenue" control already orders this column. */}
+                        <th
+                          className="px-2 py-1.5 font-medium"
+                          title="Estimated copies sold on the SAME reviews-based (Boxleiter) estimator as Est. revenue — est. revenue ÷ launch price, exactly. The owners-based SteamSpy estimate is a different method; it's on each game's profile, labelled as such."
+                        >
+                          Est. units
                         </th>
                         <th className="px-2 py-1.5">
                           <GameSortLabel
@@ -1779,7 +1813,9 @@ export default function NicheDetail() {
                           <td className="tabular px-2 py-1.5">{g.release_year ?? "—"}</td>
                           <td className="tabular px-2 py-1.5">{fmtPrice(g.price_initial)}</td>
                           <td className="tabular px-2 py-1.5">{fmtInt(g.total_reviews)}</td>
-                          <td className="tabular px-2 py-1.5">{fmtCompact(g.owners_est)}</td>
+                          <td className="tabular px-2 py-1.5">
+                            {fmtCompact(estimatedUnits(g.est_revenue, g.price_initial, g.total_reviews))}
+                          </td>
                           <td className="tabular px-2 py-1.5">
                             <span
                               className="rounded px-1.5 py-0.5"

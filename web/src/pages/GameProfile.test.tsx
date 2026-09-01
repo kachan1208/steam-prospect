@@ -254,3 +254,36 @@ describe("GameProfile — press tone percentage and its base agree", () => {
     expect(await screen.findByText(/31 neutral excluded/)).toBeTruthy();
   });
 });
+
+/**
+ * The Estimates footnote describes an estimator that is NOT the one running.
+ *
+ * It read "Gross revenue = reviews x owners-per-review (genre-fitted) x launch price". The
+ * multiplier is a flat 30 for every game in the catalog: mart_game.est_rev_reviews is
+ * total_reviews x 30 x price_initial (etl/build_marts.py), and the low/high are the same
+ * product at the 20 and 55 ends of /api/market/benchmarks' cited band. Verified on the live
+ * payload above: 559,257 x 30 x $14.99 = $251,497,872.9, which IS est_rev_reviews to the cent.
+ *
+ * Genre-fitted multipliers do exist — /api/market/benchmarks' boxleiter_by_genre carries an
+ * Action median of 106.99 and a slope of 26.14, and /api/estimate uses them — but neither
+ * number reaches this panel. Nothing displayed here is wrong; only the sentence describing it
+ * was, and the sentence is what gets fixed. Switching the estimator would move est_rev_reviews
+ * under /compare, comparables, mart_niche.median_rev and mart_market at the same time.
+ */
+describe("GameProfile — the Estimates footnote describes the estimator that actually ran", () => {
+  it("states the flat 30 rather than claiming a genre fit that is not applied", async () => {
+    renderProfile();
+    const note = await screen.findByText(/Gross revenue = reviews/);
+    expect(note.textContent).toContain("reviews × 30 owners-per-review × launch price");
+    expect(note.textContent).toMatch(/not fitted per genre/);
+    // The exact false claim, in the wording it shipped in.
+    expect(note.textContent).not.toMatch(/owners-per-review \(genre-fitted\)/);
+  });
+
+  it("keeps the revenue arithmetic untouched while the copy changes", async () => {
+    renderProfile();
+    // Same figures as before the copy fix: 559,257 x 30 x $14.99, and its 20/55 band ends.
+    expect(await screen.findByText("$251.5M")).toBeTruthy();
+    expect(await screen.findByText(/\$167\.7M – \$461\.1M/)).toBeTruthy();
+  });
+});

@@ -352,7 +352,7 @@ export default function NicheFinder() {
       columnHelper.accessor((row) => row.p90_rev ?? null, {
         id: "p90_rev",
         header: () => (
-          <SortLabel label="P90 rev" help="What the niche's successful titles earn: the 90th percentile of estimated lifetime revenue across its scored games (1 in 10 does better). Each game's estimate = review count × an owners-per-review ratio (~20–55, genre-fitted) × launch price — gross, lifetime, not reported sales. Median (the typical outcome) is in the deep dive." col="p90_rev" active={sort === "p90_rev"} order={order} onSort={toggleSort} />
+          <SortLabel label="P90 rev" help="What the niche's successful titles earn: the 90th percentile of estimated lifetime revenue across its scored games (1 in 10 does better). Each game's estimate = review count × 30 owners-per-review × launch price — one flat ratio (the mid of the cited 20–55 band), not fitted per genre; gross, lifetime, not reported sales. Median (the typical outcome) is in the deep dive." col="p90_rev" active={sort === "p90_rev"} order={order} onSort={toggleSort} />
         ),
         cell: (info) => {
           const v = info.getValue();
