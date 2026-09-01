@@ -89,7 +89,12 @@ export interface OwnersPerReview {
 export interface DrilldownProfile {
   price_initial: number | null;
   total_reviews: number | null;
-  owners_mid: number | null;
+  /** The units figure the page's Estimates panel prints — the reviews-based (Boxleiter) count,
+   * NOT the owners-based `owners_mid`. The owners curve below is cumulative reviews x
+   * owners-per-review, so only the reviews-based headline is the number it actually walks
+   * toward; captioning it with owners_mid pointed the reader at a different estimator
+   * (Hollow Knight: a curve ending near 16.8M captioned "trends toward the 7.5M headline"). */
+  units_headline: number | null;
   live_players: number | null;
 }
 
@@ -278,12 +283,12 @@ function ReviewsDrilldown({
 function OwnersDrilldown({
   points,
   ownersPerReview,
-  ownersMid,
+  unitsHeadline,
   thin,
 }: {
   points: GameTrendPoint[];
   ownersPerReview: OwnersPerReview | null;
-  ownersMid: number | null;
+  unitsHeadline: number | null;
   thin: boolean;
 }) {
   if (ownersPerReview == null) {
@@ -311,7 +316,7 @@ function OwnersDrilldown({
       />
       <p className="text-[11px] italic text-ink-muted">
         Estimate, not a measured count: cumulative reviews × {ratioNote}. Built on the full-history review growth
-        curve above, so it trends toward the {fmtCompact(ownersMid)} headline estimate.
+        curve above, so it trends toward the {fmtCompact(unitsHeadline)} headline estimate.
         <ThinDataNote thin={thin} />
       </p>
     </div>
@@ -644,7 +649,7 @@ export function GameMetricDrilldown({
         <OwnersDrilldown
           points={points}
           ownersPerReview={ownersPerReview}
-          ownersMid={profile.owners_mid}
+          unitsHeadline={profile.units_headline}
           thin={thin}
         />
       );

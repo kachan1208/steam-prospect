@@ -8,6 +8,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { Loading } from "../components/ui/Loading";
 import { gameProfileQueryOptions, type GameProfile } from "../lib/api";
 import { COMPARE_CAP, removeFromCompare, useCompareList } from "../lib/compareList";
+import { estimatedUnits } from "../lib/estimates";
 import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtRevenue } from "../lib/format";
 import { genreTintStyle } from "../lib/heat";
 import { usePageTitle } from "../lib/usePageTitle";
@@ -78,7 +79,17 @@ const STAT_ROWS: StatRowDef[] = [
     fmt: (p) => fmtRevenue(p.est_rev_reviews, p.price_initial === 0),
     best: (p) => (p.price_initial === 0 ? null : p.est_rev_reviews),
   },
-  { key: "units", label: "Est. units", fmt: (p) => fmtCompact(p.owners_mid), best: (p) => p.owners_mid },
+  // Units come from the SAME reviews-based estimator as the revenue row above (lib/estimates.ts),
+  // never from the owners-based owners_mid. Pairing the two estimators in one column pair is what
+  // let this grid show a game with MORE units AND LESS revenue at a HIGHER price — Silksong vs
+  // Hollow Knight — a comparison no reader can act on. Now units × price === the revenue printed
+  // one row up, for every paid title in the grid.
+  {
+    key: "units",
+    label: "Est. units",
+    fmt: (p) => fmtCompact(estimatedUnits(p.est_rev_reviews, p.price_initial, p.total_reviews)),
+    best: (p) => estimatedUnits(p.est_rev_reviews, p.price_initial, p.total_reviews),
+  },
   { key: "rating", label: "Rating", fmt: (p) => fmtPct(p.positive_ratio), best: (p) => p.positive_ratio },
   {
     key: "live_players",

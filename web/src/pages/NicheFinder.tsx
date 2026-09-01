@@ -26,6 +26,7 @@ import { usePageTitle } from "../lib/usePageTitle";
 // 2026-08-29): a static import of a page module drags that page — and NicheDetail, and
 // vendor-recharts with it — into this route's chunk, defeating the code splitting.
 import {
+  DEFAULT_NICHE_CUT,
   formatNicheRef,
   nicheCombinedPath,
   parseNicheSelection,
@@ -208,8 +209,9 @@ export default function NicheFinder() {
   const [dimension, setDimension] = useState<Dimension>("tag");
   // 24m is the market a new entrant actually faces — the all-time cut is context, not an
   // entry decision, so it is NOT the default (same default as the MCP tool).
-  const [windowParam, setWindowParam] = useState<Window>("24m");
-  const [minReviews, setMinReviews] = useState(50); // mart materializes exactly 0 (no floor), 50 & 100
+  const [windowParam, setWindowParam] = useState<Window>(DEFAULT_NICHE_CUT.win);
+  // mart materializes exactly 0 (no floor), 50 & 100
+  const [minReviews, setMinReviews] = useState(DEFAULT_NICHE_CUT.min_reviews);
   const [tiers, setTiers] = useState<NicheTier[]>(DEFAULT_TIERS);
   const [q, setQ] = useState("");
   const debouncedQ = useDebounced(q, 300);
