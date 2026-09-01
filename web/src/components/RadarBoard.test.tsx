@@ -11,6 +11,7 @@ import {
   xToPx,
   yToPx,
   type RadarBoardBlip,
+  type RadarRegion,
 } from "./RadarBoard";
 import {
   SOLO_FRIENDLY_MIN,
@@ -93,9 +94,11 @@ const REFERENCE: RadarVerdictInput = {
   solo_viability: 0.995,
 };
 
-/** Selection is controlled by the page — the harness stands in for it. `pool` defaults
- * to the plotted blips (the common case in these tests); the search suite passes a
- * strictly larger pool to pin the beyond-plot behavior. */
+/** Selection AND the click-to-zoom region are controlled by the page (the zoom joined
+ * the controlled set on 2026-09-01, when /radar started carrying it in ?zoom=) — the
+ * harness stands in for the page for both. `pool` defaults to the plotted blips (the
+ * common case in these tests); the search suite passes a strictly larger pool to pin
+ * the beyond-plot behavior. */
 function Harness({
   blips,
   soloOnly,
@@ -108,6 +111,7 @@ function Harness({
   plotCap?: number;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [zoom, setZoom] = useState<RadarRegion | null>(null);
   return (
     <MemoryRouter>
       <RadarBoard
@@ -117,6 +121,8 @@ function Harness({
         soloOnly={soloOnly}
         selectedId={selectedId}
         onSelect={setSelectedId}
+        zoom={zoom}
+        onZoom={setZoom}
       />
     </MemoryRouter>
   );

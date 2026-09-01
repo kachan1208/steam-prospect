@@ -124,8 +124,14 @@ import { nicheDetailPath } from "../lib/nichePath";
  * hover is disabled (moot in a single-region view; dot hover/tooltip stays), the rail
  * carries a clear-filter CHIP with the honest member count, search composes WITH the
  * filter (scope = the region's members), and verdict-group counts recompute from the
- * filtered rows. Three exits, all page-local: the chip's ✕, Esc (after more local Esc
- * consumers — search text, the <lg drawer), and clicking the plate's background.
+ * filtered rows. Three exits: the chip's ✕, Esc (after more local Esc consumers —
+ * search text, the <lg drawer), and clicking the plate's background.
+ *
+ * The zoom is CONTROLLED by the page (`zoom` / `onZoom`), exactly like `selectedId` /
+ * `onSelect`, because /radar keeps it in the URL — see Radar.tsx. It used to be local
+ * useState, which made it the one radar control you couldn't share: the chip read
+ * "FLAT/SHRINKING · OPEN 32 niches ✕" and the header "— ZOOMED", while the address bar
+ * still said /radar and a reload dropped you back to the full board.
  *
  * PLATE SIZING (2026-08-28, "radar is too small" + "not all pages have same size"):
  * see the geometry section — the plate is rectangular and responsive (viewBox rebuilt
@@ -225,6 +231,16 @@ export type RadarRegion =
   | "shrinking-open"
   | "shrinking-flooding"
   | "strip";
+
+/** The region ids as VALUES — the page parses ?zoom= against this list, so a URL can
+ * never name a region the board doesn't have, and the two can't drift apart. */
+export const RADAR_REGIONS: readonly RadarRegion[] = [
+  "growing-open",
+  "growing-flooding",
+  "shrinking-open",
+  "shrinking-flooding",
+  "strip",
+] as const;
 
 /** CLICK-TO-ZOOM DOMAINS (2026-08-28 directive: "when you click on a radar one of the
  * sides - it zooms in to this side and filters niches on the right side"). Clicking a
@@ -963,6 +979,8 @@ export function RadarBoard({
   soloOnly,
   selectedId,
   onSelect,
+  zoom,
+  onZoom,
 }: {
   /** What the plate plots: the active class's Top-N by opportunity (the page slices). */
   blips: RadarBoardBlip[];
@@ -978,16 +996,20 @@ export function RadarBoard({
    * page (which also switches the class picker when a search hit is cross-class). */
   selectedId: string | null;
   onSelect: (id: string | null) => void;
+  /** Controlled click-to-zoom — the region whose domain the plate is zoomed to and whose
+   * members the rail is filtered to, or null for the full board. Owned by the page so it
+   * can ride the URL (?zoom=), like the class picker / solo lens / Top-N / selection. */
+  zoom: RadarRegion | null;
+  onZoom: (region: RadarRegion | null) => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
   // The hovered REGION (quadrant or strip) — set/cleared ONLY by the five hit rects'
   // enter/leave, so a mousemove inside a region costs nothing. Hover-only, never sticky.
   const [hoverRegion, setHoverRegion] = useState<RadarRegion | null>(null);
-  // CLICK-TO-ZOOM state (page-local, never routed): the region whose domain the plate
-  // is zoomed to and whose members the rail is filtered to. Entered by clicking a
-  // region's empty area; exited by Esc, the rail chip's ✕, or a background click.
-  const [zoom, setZoom] = useState<RadarRegion | null>(null);
+  // Entered by clicking a region's empty area; exited by Esc, the rail chip's ✕, or a
+  // background click. All three go through onZoom(null), so the URL always agrees.
+  const setZoom = onZoom;
   // TOOLTIP POSITION LIVES IN A REF, NOT IN STATE (2026-08-28 perf fix). Every dot has an
   // onMouseMove, and setState-per-pointer-pixel re-rendered this whole ~1900-line board
   // (all dots, the plate decor, the rail list) on every mouse move across a dot. Only
@@ -1071,7 +1093,7 @@ export function RadarBoard({
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [zoom, selectedId, isDesktop]);
+  }, [zoom, selectedId, isDesktop, setZoom]);
 
   const byRing = useMemo(() => {
     const m = new Map<RadarRing, RailBlip[]>(RING_ORDER.map((r) => [r, []]));

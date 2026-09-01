@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQueries } from "@tanstack/react-query";
 import clsx from "clsx";
 
@@ -116,10 +117,37 @@ function RecommendationCard({ overview }: { overview: TimingOverview }) {
   );
 }
 
+/**
+ * BOTH GENRE SELECTS RIDE THE URL (?genre= for the timing sections, ?price_genre= for
+ * the price distribution). They were useState, so the reproduction was: set the first to
+ * Strategy — the page correctly refetches (GET /api/seasonality?genre=Strategy) — then
+ * reload, and both snap back to __all__ with no trace in the address bar. /niches/:dim/:key
+ * promises on screen that its filter lives in the URL; "here are the Strategy launch
+ * windows" has to be a link you can send, not a click sequence you have to describe.
+ *
+ * Same contract as /games and /radar: DEFAULT (__all__) IS OMITTED so a pristine /timing
+ * stays a clean URL, an unknown genre reads as __all__ rather than throwing (the API
+ * would 404 it anyway, and TimingStatus already renders that honestly), and the selects
+ * PUSH — each is a deliberate "show me this genre" step the back button should walk,
+ * exactly like /games' genre <select>.
+ */
 export default function LaunchTiming() {
   usePageTitle("Launch timing");
   const genres = useGenres();
-  const [timingGenre, setTimingGenre] = useState("__all__");
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const setGenreParam = useCallback(
+    (key: string, value: string) => {
+      const next = new URLSearchParams(searchParams);
+      if (value === "__all__") next.delete(key);
+      else next.set(key, value);
+      setSearchParams(next);
+    },
+    [searchParams, setSearchParams],
+  );
+
+  const timingGenre = searchParams.get("genre") || "__all__";
+  const setTimingGenre = useCallback((g: string) => setGenreParam("genre", g), [setGenreParam]);
   const { data: overview, isLoading: timingLoading, error: timingError } = useTimingOverview(timingGenre);
   const { data: seasonality, isLoading: seasonLoading } = useSeasonality(timingGenre);
 
@@ -128,7 +156,8 @@ export default function LaunchTiming() {
     queries: curveGenres.map((g) => launchCurveQueryOptions(g)),
   });
 
-  const [priceGenre, setPriceGenre] = useState("__all__");
+  const priceGenre = searchParams.get("price_genre") || "__all__";
+  const setPriceGenre = useCallback((g: string) => setGenreParam("price_genre", g), [setGenreParam]);
   const { data: priceDist, isLoading: priceLoading } = useMarketDistribution("price", priceGenre, "all");
 
   function toggleGenre(g: string) {
