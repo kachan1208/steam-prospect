@@ -935,11 +935,18 @@ export default function Docs() {
               <span className="text-ink-primary">estimated owners × launch price</span> = gross lifetime box revenue
               (not net-of-Steam's-cut, not first-year-only). Owners come from the{" "}
               <span className="text-ink-primary">Boxleiter method</span>: reviews are a small, roughly-consistent
-              fraction of owners, so owners ≈ reviews × a multiplier of about{" "}
-              <span className="text-ink-primary">20–55</span>, fitted per genre (mid ≈ 30) and clamped to that band.
+              fraction of owners, so owners ≈ reviews × a multiplier in the{" "}
+              <span className="text-ink-primary">20–55</span> band. The two paths pick that multiplier differently, and
+              the page you're on decides which you're reading. Every catalog figure — the game profile, /compare, the
+              niche tables, median and P90 revenue — uses the <span className="text-ink-primary">flat mid of 30</span>{" "}
+              (est_rev_reviews = reviews × 30 × launch price, with 20 and 55 giving the low and high of the range).
+              It is deliberately NOT genre-fitted: one multiplier keeps every one of those surfaces agreeing with the
+              others. estimate_revenue, below, is the exception that does fit per genre.
             </p>
             <p>
-              In estimate_revenue, the reviews path gives owners = reviews × (20 / genre-mid / 55) for low/mid/high; net =
+              In estimate_revenue, the reviews path gives owners = reviews × (20 / genre-mid / 55) for low/mid/high —
+              the one place a genre-fitted slope (clamped to 20–55) replaces the flat 30, so its mid can differ from
+              the catalog figure for the same game; net =
               gross × ~70% (after Steam's ~30% cut). The wishlist path is rougher: owners = wishlists × ~8–12%
               first-week conversion × 5 (first-week → first-year).
             </p>
@@ -1008,7 +1015,7 @@ export default function Docs() {
               ],
               [
                 "Why do Prospect's numbers differ from other tools?",
-                "Different tools use different owner multipliers and review sources. Prospect fits its Boxleiter multiplier per genre and prefers Steam's ground-truth review counts where available — estimate_revenue returns the exact inputs it used alongside every estimate.",
+                "Different tools use different owner multipliers and review sources. Prospect's catalog figures use a flat Boxleiter mid of 30 owners per review so every surface agrees with the others; estimate_revenue fits the multiplier per genre instead, and returns the exact inputs it used alongside every estimate. Prospect also prefers Steam's ground-truth review counts where available.",
               ],
               [
                 "Can I export data?",

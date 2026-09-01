@@ -18,6 +18,7 @@ import {
   type NicheDetail,
   type Window,
 } from "../lib/api";
+import { estimatedUnits } from "../lib/estimates";
 import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
 // The §4b KPI-cell primitive (condensed numeral, 1px-gap blueprint grid) is shared with the
 // deep-dive page — from components/ui, so neither page has to import the other.
@@ -562,8 +563,18 @@ export default function NicheCombined() {
                       <th className="px-4 py-2.5 font-semibold">Year</th>
                       <th className="px-4 py-2.5 font-semibold">Price</th>
                       <th className="px-4 py-2.5 font-semibold">Reviews</th>
-                      <th className="px-4 py-2.5 font-semibold">Owners (est.)</th>
-                      <th className="px-4 py-2.5 font-semibold" title="Estimated lifetime gross: reviews × a genre-fitted owners-per-review ratio × launch price">
+                      {/* Same row, same fix as the niche page's Games & distribution table:
+                          this served the API's `owners_est` (mart_game.owners_mid, SteamSpy)
+                          next to `est_revenue` (est_rev_reviews, Boxleiter) — two estimators
+                          in one row, so revenue ÷ copies fought the price column. Derived from
+                          the revenue actually printed, via the one helper (lib/estimates.ts). */}
+                      <th
+                        className="px-4 py-2.5 font-semibold"
+                        title="Estimated copies sold on the same reviews-based (Boxleiter) estimator as Est. revenue — est. revenue ÷ launch price, exactly."
+                      >
+                        Est. units
+                      </th>
+                      <th className="px-4 py-2.5 font-semibold" title="Estimated lifetime gross: reviews × 30 owners-per-review × launch price">
                         Est. revenue
                       </th>
                     </tr>
@@ -579,7 +590,9 @@ export default function NicheCombined() {
                         <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">{g.release_year ?? "—"}</td>
                         <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">{fmtPrice(g.price_initial)}</td>
                         <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">{fmtCompact(g.total_reviews)}</td>
-                        <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">{fmtCompact(g.owners_est)}</td>
+                        <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">
+                          {fmtCompact(estimatedUnits(g.est_revenue, g.price_initial, g.total_reviews))}
+                        </td>
                         <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">
                           {fmtRevenue(g.est_revenue, g.price_initial === 0)}
                         </td>

@@ -803,7 +803,18 @@ export default function GameProfile() {
             <div className="flex flex-col gap-2.5">
               <EstimateRow
                 label="Gross revenue"
-                help="Estimated lifetime GROSS revenue: reviews × an owners-per-review ratio (~20-55, genre-fitted) × launch price. An estimate with real error bars. Not net of Steam's cut, refunds or discounts."
+                // The ratio is a FLAT 30 here, not genre-fitted, and the copy has to say the
+                // arithmetic it actually does: mart_game's est_rev_reviews is
+                // total_reviews × 30 × price_initial (etl/build_marts.py:1331) and the low/high
+                // are the same reviews × price at the 20 and 55 ends of the cited band
+                // (/api/market/benchmarks cited.boxleiter_owners_per_review {20, 30, 55}).
+                // Checked on the live API: Hollow Knight 559,257 × 30 × $14.99 = $251,497,872.9,
+                // exactly est_rev_reviews. Genre-fitted multipliers DO exist in the mart
+                // (benchmarks.boxleiter_by_genre — Action slope 26.1, median 107.0) and the MCP
+                // /api/estimate path uses them, but nothing on this panel does. Fix the words,
+                // never the estimator: est_rev_reviews is the spine of /compare, comparables,
+                // mart_niche.median_rev and mart_market.
+                help="Estimated lifetime GROSS revenue: reviews × 30 owners-per-review × launch price. 30 is the Boxleiter MID applied flat to every game, not fitted per genre; the low–high range swaps in the 20 and 55 ends of the same cited band. An estimate with real error bars. Not net of Steam's cut, refunds or discounts."
                 value={fmtRevenue(estRevenue, profile.price_initial === 0)}
                 sub={
                   profile.price_initial === 0
@@ -882,7 +893,8 @@ export default function GameProfile() {
               />
             </div>
             <div className="mt-1 border-t border-chartborder pt-2.5 text-[11px] text-ink-muted">
-              Gross revenue = reviews × owners-per-review (genre-fitted) × launch price, lifetime — and Units sold is
+              Gross revenue = reviews × 30 owners-per-review × launch price, lifetime — one flat catalog-wide ratio
+              (the Boxleiter mid), not fitted per genre; the low–high range swaps in 20 and 55. Units sold is
               that same estimate before the price multiply, so gross revenue ÷ launch price = units exactly. The
               owners-based (SteamSpy bucket) figure noted beside it is a separate method, not the partner of this
               revenue. Reviews are a point-in-time read from the catalog, not verified sales data.
