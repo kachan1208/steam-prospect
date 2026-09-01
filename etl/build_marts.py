@@ -649,20 +649,47 @@ SENTIMENT_SCORE_BATCH = 20000    # rows pulled+scored+inserted per streamed batc
 SENTIMENT_CACHE_DB_NAME = "sentiment_cache.duckdb"  # lives in --data-dir, deliberately NOT named
                                                      # prospect_*.duckdb — main()'s retention logic
                                                      # prunes old dated marts; this file must survive.
-SENTIMENT_CACHE_VERSION = 1  # bump to force a full rescore even when none of the hashed config
-                              # HELD AT 1 DELIBERATELY (2026-09-01). A project-review pass set
-                              # this to 2 to repair the 0.62% of mentions frozen by the OOM-killed
-                              # builds — a real, well-measured gap. But bumping it here schedules a
-                              # 21.7M-row rescore as an invisible side effect of a 37-file commit,
-                              # on the night after this pipeline produced its FIRST clean nightly in
-                              # three days. af1ba5b exists specifically to avoid that wipe. Do the
-                              # rescore as its own change, on a night someone is watching.
-                              # knobs below changed (e.g. a vaderSentiment version bump, or a fix to
-                              # the scoring code itself that a config-value hash can't see).
-                              # 1 -> 2 (2026-09-01): the one-time repair of the frozen 0.62%
-                              # mention hole documented in _build_aspect_keyword_votes' KNOWN GAP
-                              # paragraph — the first full build after this bump wipes and
-                              # refills the cache.
+SENTIMENT_CACHE_VERSION = 2  # bump to force a full rescore even when none of the hashed config
+                              # knobs below changed (e.g. a vaderSentiment version bump, or a fix
+                              # to the scoring code itself that a config-value hash can't see).
+                              #
+                              # 1 -> 2 (2026-09-01): THE ONE-TIME REPAIR of the frozen mention
+                              # hole measured on 2026-08-31 and documented in full in
+                              # _build_aspect_keyword_votes' KNOWN GAP paragraph — 1,962 of
+                              # 314,626 raw mentions (0.62%; 118 of 9,404 cells, touching 73 of
+                              # 600 games) missing from the cache, every one of them in the last
+                              # two arms of _aspect_window_sql's UNION ALL, left behind by an
+                              # OOM-killed scoring stream and frozen in by the 2026-08-22
+                              # scored_review seed migration. The gap is not reachable from the
+                              # cache alone, so one full rescore is the only repair there is.
+                              #
+                              # THE HOLD IS BEING LIFTED DELIBERATELY, and this commit is the
+                              # whole of it. This constant was previously set to 2 inside a
+                              # 37-file commit and put back to 1 — not because the repair was
+                              # wrong (the measurement above is solid) but because a 21.7M-row
+                              # rescore must never fire as an invisible side effect of an
+                              # unrelated change, least of all on the night after this pipeline
+                              # produced its first clean nightly in three days. af1ba5b exists
+                              # for exactly that reason. The condition that hold asked for is now
+                              # met: this is a single-purpose change, and the rescore is
+                              # SCHEDULED for the 21:00 UTC nightly_refresh of 2026-09-01 with
+                              # someone watching. Note the schedule detail that decides WHICH run
+                              # pays for it (deploy/crontab.txt): 21:00 nightly_refresh is the
+                              # only FULL build; the 13:30 light_build runs --light, which does
+                              # not score at all and will NOT perform the rescore.
+                              #
+                              # WHAT THAT BUILD DOES: _refresh_sentiment_cache sees a changed
+                              # _sentiment_config_hash and DELETEs all three cache tables, then
+                              # compute_aspect_sentiment re-scores the whole eligible pool from
+                              # src.reviews. Live sizes measured on the droplet 2026-09-01, so
+                              # the next reader does not have to re-derive the blast radius:
+                              #     sentiment_cache.duckdb      0.46 GB on disk
+                              #     cache.aspect_mention     21,684,113 rows
+                              #     cache.scored_review      24,458,199 rows
+                              #     cache.press_article         205,508 rows
+                              # All three are discarded and rebuilt. press_article rides along
+                              # because it is keyed by the same single config hash; at 205K rows
+                              # it is rounding error next to the reviews.
 
 # Domain-tuned VADER lexicon overrides (2026-07). Stock VADER is a general-English lexicon: it has
 # no notion that "horror"/"brutal"/"insane"/"sick" are GENRE or INTENSITY descriptors in game
@@ -2249,18 +2276,39 @@ def _build_aspect_keyword_votes(con: duckdb.DuckDBPyConnection, mention_table: s
     The gap is not reachable from the cache alone (an incomplete arm set is indistinguishable
     from a review that genuinely mentions nothing else without re-reading the text), so the only
     repair is one full rescore: bump SENTIMENT_CACHE_VERSION, which makes
-    _refresh_sentiment_cache wipe and refill. Note this change makes that rescore ~half the
-    memory it used to be — the wipe path's full-pool _sent_new is now the only text in the
-    build, where before it sat next to staging's identical 8.45GB stg_review_text.
+    _refresh_sentiment_cache wipe and refill.
     Until it is done, the same rows are already missing from the TEXT-sentiment columns and the
-    drill-down excerpts, which have read this cache since 2026-07; this change makes the
-    vote-split bars agree with them rather than introducing a new discrepancy.
+    drill-down excerpts, which have read this cache since 2026-07; the keyword-vote change makes
+    the vote-split bars agree with them rather than introducing a new discrepancy.
 
-    REPAIR STATUS (2026-09-01, review follow-up): the bump was APPLIED — SENTIMENT_CACHE_VERSION
-    moved 1 -> 2, so the FIRST FULL build after that change wipes and refills the cache, closing
-    the frozen hole (a --light build does not score and therefore does not perform the rescore;
-    it is the next full build that does). Everything above remains the historical record of how
-    the hole was created, found and measured.
+    REPAIR STATUS (2026-09-01): the bump IS APPLIED — SENTIMENT_CACHE_VERSION is 2, changed by
+    this commit and by nothing else in it, which is the whole reason the repair was deferred out
+    of the earlier 37-file change (see the constant's own comment for that history). The FIRST
+    FULL build after this lands wipes all three cache tables and refills them, closing the frozen
+    hole; it is scheduled for the 21:00 UTC nightly_refresh of 2026-09-01 with an operator
+    watching. A --light build never scores, so the 13:30 light_build cannot and will not do it.
+    Live blast radius, measured on the droplet 2026-09-01: cache file 0.46 GB, aspect_mention
+    21,684,113 rows, scored_review 24,458,199 rows, press_article 205,508 rows — all discarded
+    and recomputed. Everything above remains the historical record of how the hole was created,
+    found and measured; do not delete it just because the repair has shipped.
+
+    WHY THIS RESCORE IS CHEAPER THAN THE ONES THAT DIED (re-verified against the current code,
+    2026-09-01, because it is what makes running it survivable): a wipe puts the WHOLE eligible
+    pool through _sent_new, the delta text table in compute_aspect_sentiment's cached branch.
+    That table used to be the SECOND corpus-wide copy of review text alive at that moment — the
+    first being staging's stg_review_text, 24.8M rows / 8.45GB, held as a TEMP table from
+    create_staging until mart_game_teardown.sql dropped it. It is gone: create_staging now builds
+    the text-free stg_review_key (same population, 282MB), _sent_new reads its text straight from
+    src.reviews by key, and mart_game_aspect_reviews.sql's _aspectrev_base lost its own 8.45GB
+    text column the same day (2026-08-31), re-reading text for the ranking survivors only. Grep
+    confirms it: every remaining mention of stg_review_text in this repo is a comment about its
+    removal. So the rescore's peak text is one full-pool copy instead of two concurrent ones.
+    HONEST CAVEAT, not covered by that halving: _sent_windows (the 10-arm window table built from
+    _sent_new) is delta-sized in steady state but full-corpus-sized on a wipe, and it is live
+    alongside _sent_new for the whole scoring pass. It is a regular table, so it lands in the
+    build's own .duckdb file on disk rather than the memory budget, and its rows are ~520-char
+    slices rather than whole reviews — but it is real, it is why the wipe path is the one case
+    this function still calls a "full-copy case", and it is the thing to watch tonight.
 
     `n_buckets` > 1 splits the scan on hash(recommendationid) — used for the 21.7M-row cache,
     where a single hash join against the 24.4M-row pool would not fit the box's memory budget.
