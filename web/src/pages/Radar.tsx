@@ -2,7 +2,7 @@ import { useCallback, useMemo } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import clsx from "clsx";
 
-import { RadarBoard, type RadarBoardBlip, type RadarSector } from "../components/RadarBoard";
+import { RadarBoard, RADAR_REGIONS, type RadarBoardBlip, type RadarRegion, type RadarSector } from "../components/RadarBoard";
 import { Loading } from "../components/ui/Loading";
 import { useNiches, type NicheRow } from "../lib/api";
 import { SOLO_FRIENDLY_MIN, radarVerdictTrace } from "../lib/radarVerdict";
@@ -158,6 +158,8 @@ function RadarBoardSection({
   onTopN,
   selectedId,
   onSelect,
+  zoom,
+  onZoom,
 }: {
   blips: RadarBoardBlip[];
   pool: RadarBoardBlip[];
@@ -174,6 +176,8 @@ function RadarBoardSection({
   onTopN: (v: number) => void;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
+  zoom: RadarRegion | null;
+  onZoom: (v: RadarRegion | null) => void;
 }) {
   return (
     <section className="blueprint relative border-ink-primary/25 px-6 py-5 lg:px-[30px] lg:py-[24px]">
@@ -220,6 +224,8 @@ function RadarBoardSection({
           soloOnly={soloOnly}
           selectedId={selectedId}
           onSelect={onSelect}
+          zoom={zoom}
+          onZoom={onZoom}
         />
       )}
 
@@ -283,13 +289,14 @@ export default function Radar() {
   // client-side display slices (see POPULATION_LIMIT), so only the solo toggle changes
   // what is fetched.
   //
-  // ALL FOUR RIDE THE URL (2026-08-28) — the flagship page was the only surface whose
-  // view couldn't be linked or bookmarked, while six others already use useSearchParams.
-  // "Look at Roguelike Deckbuilder on the themes board" is now a URL you can send. Same
-  // contract as NicheDetail/NicheFinder: DEFAULTS ARE OMITTED (a pristine /radar stays a
-  // clean URL — only a non-default reading writes a param), unknown/garbage values fall
-  // back to the default rather than throwing, and writes `replace` so flipping chips
-  // doesn't bury the previous page under a dozen history entries.
+  // ALL FIVE RIDE THE URL (class/solo/top/niche 2026-08-28; the quadrant ZOOM joined
+  // them 2026-09-01) — the flagship page was the only surface whose view couldn't be
+  // linked or bookmarked, while six others already use useSearchParams. "Look at
+  // Roguelike Deckbuilder on the themes board" is now a URL you can send. Same contract
+  // as NicheDetail/NicheFinder: DEFAULTS ARE OMITTED (a pristine /radar stays a clean
+  // URL — only a non-default reading writes a param), unknown/garbage values fall back
+  // to the default rather than throwing, and writes `replace` so flipping chips doesn't
+  // bury the previous page under a dozen history entries.
   const [searchParams, setSearchParams] = useSearchParams();
 
   const rawClass = searchParams.get("class");
@@ -298,8 +305,14 @@ export default function Radar() {
   const rawTop = Number(searchParams.get("top"));
   const topN = TOP_N_OPTIONS.some((o) => o.v === rawTop) ? rawTop : 80;
   const selectedId = searchParams.get("niche");
+  // The click-to-zoom region. It was RadarBoard-local useState until 2026-09-01, which
+  // made it the one radar control you couldn't share: clicking a quadrant filtered the
+  // rail to "FLAT/SHRINKING · OPEN 32 niches ✕" and titled the plate "— ZOOMED" while
+  // the address bar still read /radar, so a reload silently threw the zoom away.
+  const rawZoom = searchParams.get("zoom");
+  const zoom: RadarRegion | null = RADAR_REGIONS.includes(rawZoom as RadarRegion) ? (rawZoom as RadarRegion) : null;
 
-  /** One writer for all four params: null/default clears the key, anything else sets it. */
+  /** One writer for all five params: null/default clears the key, anything else sets it. */
   const setParams = useCallback(
     (updates: Record<string, string | number | null>) => {
       const next = new URLSearchParams(searchParams);
@@ -315,6 +328,7 @@ export default function Radar() {
   const setBoardClass = useCallback((v: RadarSector) => setParams({ class: v === "micro" ? null : v }), [setParams]);
   const setSoloOnly = useCallback((v: boolean) => setParams({ solo: v ? null : "off" }), [setParams]);
   const setTopN = useCallback((v: number) => setParams({ top: v === 80 ? null : v }), [setParams]);
+  const setZoom = useCallback((v: RadarRegion | null) => setParams({ zoom: v }), [setParams]);
 
   // The board population: the two cuts that make up the three sectors. Each query asks
   // for the endpoint's max rows by opportunity_v2 — the full population the rail search
@@ -448,6 +462,8 @@ export default function Radar() {
         onTopN={setTopN}
         selectedId={selectedId}
         onSelect={handleSelect}
+        zoom={zoom}
+        onZoom={setZoom}
       />
     </div>
   );
