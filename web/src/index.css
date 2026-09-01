@@ -185,7 +185,15 @@
   --status-serious: #ec835a;
   --status-critical: #d03b3b;
   /* dark theme: the mark hues already pass as text on the dark surfaces */
-  --status-good-text: #0ca30c;
+  /* dark theme: --status-serious (#ec835a) does pass as text on the dark surfaces (5.04:1
+     on surface-1), but --status-good (#0ca30c) does NOT — 3.96:1 for the /datalog SUCCESS
+     badge on #213141, measured 2026-09-01, against a 4.5 requirement at 11px/600. This
+     block used to alias BOTH mark hues verbatim on the claim that they "already pass"; the
+     green never did. That asymmetry showed the worst: the FAILED badge beside it was legible
+     and the SUCCESS badge — the state ~every row is in — was not. Lightened along the same
+     hue instead of aliased, mirroring what the :root block does in the other direction:
+     #3fbf3f reads 5.46:1 on surface-1, 4.85:1 on surface-2 and 5.84:1 on the page plane. */
+  --status-good-text: #3fbf3f;
   --status-serious-text: #ec835a;
 
   --diverging-neutral: #383835;

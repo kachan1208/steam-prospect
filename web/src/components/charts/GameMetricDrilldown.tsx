@@ -15,6 +15,7 @@ import {
 } from "recharts";
 
 import {
+  errorMessage,
   gamePlayersQueryOptions,
   gameTrendsQueryOptions,
   type GamePlayersMonthlyPoint,
@@ -24,6 +25,7 @@ import {
 } from "../../lib/api";
 import { fmtAxisCompact, fmtAxisUsd, fmtCompact, fmtInt, fmtPrice, fmtUsd } from "../../lib/format";
 import { channelColor, CSS_VAR } from "../../lib/palette";
+import { RetryButton } from "../ui/ErrorState";
 import { BulletMeter } from "../ui/Meter";
 import { TooltipPanel } from "./TooltipPanel";
 
@@ -622,9 +624,11 @@ export function GameMetricDrilldown({
     return <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading trend data…</div>;
   }
   if (trendsQuery.isError) {
+    // Was `error.message` — the raw exception, i.e. a bare "Failed to fetch" on a blip.
     return (
-      <div className="flex h-24 items-center justify-center text-center text-xs text-verdict-serious">
-        {trendsQuery.error instanceof Error ? trendsQuery.error.message : "Failed to load trend data."}
+      <div className="flex h-24 flex-col items-center justify-center gap-2 text-center text-xs text-verdict-serious">
+        <span>Couldn&apos;t load trend data. {errorMessage(trendsQuery.error)}</span>
+        <RetryButton onClick={() => void trendsQuery.refetch()} />
       </div>
     );
   }

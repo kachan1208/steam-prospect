@@ -1,8 +1,9 @@
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
-import { useGameTrendsWithComps, type GameTrendPoint } from "../../lib/api";
+import { errorMessage, useGameTrendsWithComps, type GameTrendPoint } from "../../lib/api";
 import { axisScale, fmtCompact } from "../../lib/format";
 import { compareSeries, type CompareSeriesShape, type CompareSeriesStyle } from "../../lib/palette";
+import { RetryButton } from "../ui/ErrorState";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 
 /**
@@ -133,9 +134,12 @@ export function CompareTrendsChart({
     return <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading trends…</div>;
   }
   if (trendsQ.isError || !trendsQ.data) {
+    // `error.message` here is the raw exception: with the API unreachable this read
+    // "Failed to load trends: Failed to fetch" (measured on production 2026-09-01).
     return (
-      <div className="flex h-24 items-center justify-center text-xs text-verdict-serious">
-        Failed to load trends{trendsQ.error instanceof Error ? `: ${trendsQ.error.message}` : "."}
+      <div className="flex h-24 flex-col items-center justify-center gap-2 text-center text-xs text-verdict-serious">
+        <span>Couldn&apos;t load trends. {errorMessage(trendsQ.error)}</span>
+        <RetryButton onClick={() => void trendsQ.refetch()} />
       </div>
     );
   }

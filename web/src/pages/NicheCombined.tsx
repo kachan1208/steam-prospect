@@ -5,6 +5,7 @@ import clsx from "clsx";
 
 import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { Loading } from "../components/ui/Loading";
 import { TableScroll } from "../components/ui/TableScroll";
 import { trackEvent } from "../lib/analytics";
@@ -444,12 +445,15 @@ export default function NicheCombined() {
         </Card>
       )}
 
+      {/* Was `error.message` in raw — "Failed to combine these niches: Failed to fetch"
+          with the API unreachable (measured on production 2026-09-01), and no retry. */}
       {enough && !degraded && !cutUnavailable && combinedQ.isError && (
         <Card>
-          <div className="py-8 text-center text-sm text-status-serious">
-            Failed to combine these niches
-            {combinedQ.error instanceof Error ? `: ${combinedQ.error.message}` : "."}
-          </div>
+          <ErrorState
+            title="Couldn't combine these niches"
+            error={combinedQ.error}
+            onRetry={() => void combinedQ.refetch()}
+          />
         </Card>
       )}
 
@@ -682,7 +686,11 @@ function PerNicheFunnel({
           combined === 0 ? "border-chartborder bg-surface2" : "border-brand bg-brand-tint",
         )}
       >
-        <div className="text-xs font-medium text-ink-muted">
+        {/* ink-secondary, not ink-muted: the tile's bg-brand-tint lifts the backdrop to
+            #36485b, where 55% paper reads 3.78:1 at 12px — under AA's 4.5. Same failure the
+            /studios inactive tab had, from the same token on a lighter-than-usual panel.
+            Measured 2026-09-01; ink-secondary reads 4.86:1 here. */}
+        <div className="text-xs font-medium text-ink-secondary">
           {mode === "intersect" ? "In all of them" : "In any of them"}
         </div>
         <div
@@ -694,7 +702,7 @@ function PerNicheFunnel({
           {combined === null ? "not computed yet" : `${fmtInt(combined)} games`}
         </div>
         {combined != null && combined > 0 && smallest != null && smallest > 0 && mode === "intersect" && (
-          <div className="mt-0.5 text-[11px] text-ink-muted">{fmtPct(combined / smallest, 1)} of the smallest</div>
+          <div className="mt-0.5 text-[11px] text-ink-secondary">{fmtPct(combined / smallest, 1)} of the smallest</div>
         )}
       </div>
     </div>

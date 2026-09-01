@@ -5,6 +5,7 @@ import clsx from "clsx";
 import { Badge } from "../components/ui/Badge";
 import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { Loading } from "../components/ui/Loading";
 import { TableScroll } from "../components/ui/TableScroll";
 import { ApiError, useEntitySearch, type EntityRole, type EntitySearchRow } from "../lib/api";
@@ -100,7 +101,7 @@ export default function Studios() {
   const setRole = (next: EntityRole) => patchParams({ role: next === "publisher" ? null : next });
 
   const browsing = debouncedQ.trim().length === 0;
-  const { data, isLoading, isFetching, isError, error } = useEntitySearch(
+  const { data, isLoading, isFetching, isError, error, refetch } = useEntitySearch(
     debouncedQ,
     role,
     browsing ? BROWSE_MIN_GAMES : 1,
@@ -130,9 +131,14 @@ export default function Studios() {
                 key={r.id}
                 type="button"
                 onClick={() => setRole(r.id)}
+                // The INACTIVE tab is a live control, not decoration, so it owes AA like any
+                // other label. text-ink-muted on the bg-surface2 pill measured 4.41:1
+                // (#989fa6 on #2a3948, 12px/500, 2026-09-01) — under 4.5. ink-secondary
+                // reads 5.77:1 there and the selected state still separates on its own
+                // surface fill + shadow, which is what carries the selection anyway.
                 className={clsx(
                   "rounded-md px-2.5 py-1 text-xs font-medium transition-all",
-                  role === r.id ? "bg-surface text-ink-primary shadow-xs" : "text-ink-muted hover:text-ink-secondary",
+                  role === r.id ? "bg-surface text-ink-primary shadow-xs" : "text-ink-secondary hover:text-ink-primary",
                 )}
               >
                 {r.label}
@@ -162,10 +168,10 @@ export default function Studios() {
             }
           />
         )}
+        {/* Was `error.message` in raw — "Failed to load studios: Failed to fetch" with the
+            API unreachable (measured on production 2026-09-01), and no retry. */}
         {isError && !is503 && (
-          <div className="p-6 text-sm text-verdict-serious">
-            Failed to load studios{error instanceof Error ? `: ${error.message}` : "."}
-          </div>
+          <ErrorState title="Couldn't load studios" error={error} onRetry={() => void refetch()} className="p-6" />
         )}
         {data && data.items.length === 0 && (
           <div className="p-6 text-sm text-ink-muted">

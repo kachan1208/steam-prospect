@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { Card } from "../components/ui/Card";
+import { ErrorState } from "../components/ui/ErrorState";
 import { Loading } from "../components/ui/Loading";
 import { request } from "../lib/api";
 import { usePageTitle } from "../lib/usePageTitle";
@@ -81,7 +82,7 @@ function DeltaSummary({ deltas }: { deltas?: Counts }) {
 
 export default function DataLog() {
   usePageTitle("Data log");
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["refresh-history"],
     queryFn: ({ signal }) => request<{ runs: Run[] }>("/refresh/history", { signal }),
   });
@@ -102,7 +103,11 @@ export default function DataLog() {
           <Loading className="text-sm" />
         </Card>
       ) : isError ? (
-        <Card className="py-10 text-center text-sm text-verdict-serious">Couldn’t load the refresh log.</Card>
+        // This page never leaked a raw exception, but it was still a dead end: no retry on
+        // any of the seven routes checked 2026-09-01.
+        <Card className="py-4">
+          <ErrorState title="Couldn’t load the refresh log" error={error} onRetry={() => void refetch()} />
+        </Card>
       ) : runs.length === 0 ? (
         <Card className="flex flex-col items-center gap-2 py-12 text-center">
           <p className="text-sm font-medium text-ink-primary">No refreshes recorded yet</p>

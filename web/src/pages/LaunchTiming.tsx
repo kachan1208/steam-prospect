@@ -9,9 +9,11 @@ import { SeasonalityHeatmap } from "../components/charts/SeasonalityHeatmap";
 import { TimingBars } from "../components/charts/TimingBars";
 import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState, RetryButton } from "../components/ui/ErrorState";
 import { Loading } from "../components/ui/Loading";
 import {
   ApiError,
+  errorMessage,
   launchCurveQueryOptions,
   useGenres,
   useMarketDistribution,
@@ -26,7 +28,7 @@ import { usePageTitle } from "../lib/usePageTitle";
 const DEFAULT_CURVE_GENRES = ["__all__", "Indie", "Action", "Adventure", "Casual", "Simulation", "Strategy", "RPG"];
 
 /** Shared loading / refreshing / no-data handling for the timing sections. */
-function TimingStatus({ isLoading, error }: { isLoading: boolean; error: unknown }) {
+function TimingStatus({ isLoading, error, onRetry }: { isLoading: boolean; error: unknown; onRetry: () => void }) {
   if (isLoading) return <Loading className="h-40 text-xs" />;
   if (error instanceof ApiError && error.status === 503) {
     return (
@@ -44,7 +46,11 @@ function TimingStatus({ isLoading, error }: { isLoading: boolean; error: unknown
       />
     );
   }
-  if (error) return <EmptyState title="Couldn't load timing data" description={String(error)} />;
+  // `description={String(error)}` printed "TypeError: Failed to fetch" on four cards of
+  // this page at once (measured on production 2026-09-01) — a stack-trace noun shown to a
+  // designer looking for a launch month. ErrorState says what happened and offers the
+  // retry that the whole page previously lacked.
+  if (error) return <ErrorState title="Couldn't load timing data" error={error} onRetry={onRetry} />;
   return null;
 }
 
@@ -149,8 +155,24 @@ export default function LaunchTiming() {
 
   const timingGenre = searchParams.get("genre") || "__all__";
   const setTimingGenre = useCallback((g: string) => setGenreParam("genre", g), [setGenreParam]);
-  const { data: overview, isLoading: timingLoading, error: timingError } = useTimingOverview(timingGenre);
-  const { data: seasonality, isLoading: seasonLoading } = useSeasonality(timingGenre);
+  const {
+    data: overview,
+    isLoading: timingLoading,
+    error: timingError,
+    refetch: refetchTiming,
+  } = useTimingOverview(timingGenre);
+  // Seasonality, the launch curves and the price histogram are read for their ERRORS too,
+  // not just their data. Rendering only `isLoading` and `data` meant a failed fetch left an
+  // empty framed box with no message at all — measured on production 2026-09-01, three of
+  // this page's seven cards (Release day × month, Launch shape by genre, Price distribution)
+  // sat blank while the other four shouted a TypeError. A silent empty chart is the worse
+  // failure: it reads as "no data for this genre", which is a claim about the catalog.
+  const {
+    data: seasonality,
+    isLoading: seasonLoading,
+    error: seasonError,
+    refetch: refetchSeasonality,
+  } = useSeasonality(timingGenre);
 
   const [curveGenres, setCurveGenres] = useState<string[]>(DEFAULT_CURVE_GENRES);
   const curveResults = useQueries({
@@ -159,13 +181,24 @@ export default function LaunchTiming() {
 
   const priceGenre = searchParams.get("price_genre") || "__all__";
   const setPriceGenre = useCallback((g: string) => setGenreParam("price_genre", g), [setGenreParam]);
-  const { data: priceDist, isLoading: priceLoading } = useMarketDistribution("price", priceGenre, "all");
+  const {
+    data: priceDist,
+    isLoading: priceLoading,
+    error: priceError,
+    refetch: refetchPrice,
+  } = useMarketDistribution("price", priceGenre, "all");
 
   function toggleGenre(g: string) {
     setCurveGenres((prev) => (prev.includes(g) ? prev.filter((x) => x !== g) : [...prev, g]));
   }
 
-  const timingStatus = <TimingStatus isLoading={timingLoading && !overview} error={overview ? null : timingError} />;
+  const timingStatus = (
+    <TimingStatus
+      isLoading={timingLoading && !overview}
+      error={overview ? null : timingError}
+      onRetry={() => void refetchTiming()}
+    />
+  );
   const genreLabel = timingGenre === "__all__" ? "All genres" : timingGenre;
   const bestMonths = new Set(overview?.window_recommendation?.best_months ?? []);
   const decaySummary = overview?.decay_summary;
@@ -261,6 +294,13 @@ export default function LaunchTiming() {
         {seasonLoading && !seasonality && (
           <Loading className="h-40 text-xs" />
         )}
+        {!seasonality && !seasonLoading && seasonError && (
+          <ErrorState
+            title="Couldn't load release-date data"
+            error={seasonError}
+            onRetry={() => void refetchSeasonality()}
+          />
+        )}
         {seasonality &&
           (seasonality.month_weekday.length > 0 ? (
             <>
@@ -350,6 +390,12 @@ export default function LaunchTiming() {
                 {result?.isLoading && (
                   <Loading className="h-32 text-xs" />
                 )}
+                {result?.error && !result.data && (
+                  <div className="flex h-32 flex-col items-center justify-center gap-2 text-center">
+                    <span className="text-[11px] text-verdict-serious">{errorMessage(result.error)}</span>
+                    <RetryButton onClick={() => void result.refetch()} />
+                  </div>
+                )}
                 {result?.data && <LaunchShapeBars points={result.data.points} height={140} />}
               </div>
             );
@@ -363,6 +409,13 @@ export default function LaunchTiming() {
         action={<GenreSelect genres={genres} value={priceGenre} onChange={setPriceGenre} />}
       >
         {priceLoading && !priceDist && <Loading className="h-40 text-xs" />}
+        {!priceDist && !priceLoading && priceError && (
+          <ErrorState
+            title="Couldn't load the price distribution"
+            error={priceError}
+            onRetry={() => void refetchPrice()}
+          />
+        )}
         {priceDist && (
           <>
             <Histogram

@@ -17,6 +17,7 @@ import { GameTrendsChart } from "../components/charts/GameTrendsChart";
 import { NotableCoverageCard } from "../components/NotableCoverageCard";
 import { Badge } from "../components/ui/Badge";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { Loading } from "../components/ui/Loading";
 import { SocialLinks } from "../components/ui/SocialLinks";
 import { TableScroll } from "../components/ui/TableScroll";
@@ -25,6 +26,7 @@ import { ViewToggle } from "../components/ui/ViewToggle";
 import { trackEvent } from "../lib/analytics";
 import { gameWatchlistId, toggleGameWatchlist, useWatchlist, WATCHLIST_CAP } from "../lib/watchlist";
 import {
+  isNotFound,
   notFoundReason,
   useGameChannelMix,
   useGameComparables,
@@ -529,9 +531,18 @@ export default function GameProfile() {
   }
 
   if (!validAppid) {
+    // Every sibling dead end offers a way out — /games/999999999 and /games/-5 both print
+    // "Back to search", /entity/<bogus> "Back to games", /niches/tag/<bogus> "Back to the
+    // Niche Finder". This branch was the one that stranded the reader (measured on
+    // production 2026-09-01: /games/notanumber rendered one sentence and no links).
     return (
       <BlueprintPanel>
-        <div className="py-8 text-center text-sm text-verdict-serious">Invalid game ID in the URL.</div>
+        <div className="flex flex-col items-center gap-2 py-8 text-center text-sm">
+          <span className="text-verdict-serious">Invalid game ID in the URL.</span>
+          <Link to="/games" className="text-brand hover:underline">
+            Back to search
+          </Link>
+        </div>
       </BlueprintPanel>
     );
   }
@@ -541,10 +552,36 @@ export default function GameProfile() {
   }
 
   if (profileQ.isError || !profile) {
+    // "Not found" is claimed ONLY on a 404 — the API actually looked and said no. With the
+    // API unreachable this branch used to render "Game not found: Failed to fetch"
+    // (measured on production 2026-09-01), telling the reader their game had been deleted
+    // when in fact nothing had been asked. Anything that is not a 404 is a failure to
+    // answer, so it gets neutral copy plus a retry.
+    const missing = isNotFound(profileQ.error);
     // The API's own 404 detail already reads "game not found: 999999999" — appending it raw
     // rendered "Game not found: game not found: 999999999". notFoundReason() keeps just the
-    // appid (or the real message for a non-404 failure); same helper NicheDetail uses.
+    // appid; same helper NicheDetail uses.
     const reason = notFoundReason(profileQ.error);
+    const backToSearch = (
+      <Link
+        to="/games"
+        className="border border-borderstrong px-3 py-1.5 text-xs font-medium text-ink-primary transition-colors hover:bg-ink-primary/[0.08]"
+      >
+        Back to search
+      </Link>
+    );
+    if (!missing) {
+      return (
+        <BlueprintPanel>
+          <ErrorState
+            title="Couldn't load this game"
+            error={profileQ.error}
+            onRetry={() => void profileQ.refetch()}
+            action={backToSearch}
+          />
+        </BlueprintPanel>
+      );
+    }
     return (
       <BlueprintPanel>
         <div className="flex flex-col items-center gap-2 py-8 text-center text-sm">
