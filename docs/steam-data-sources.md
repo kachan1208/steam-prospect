@@ -78,10 +78,13 @@ only. Cheap to store weekly; complements steamcharts for the head of the catalog
 
 ## Suggested order of attack
 
-1. **Followers poller** (smallest, starts the clock on a time series we can't backfill):
-   coming-soon cohort + releases <90d old, nightly, into `game_followers(appid, captured_at,
-   member_count)`. ~15K games ≈ one rate-limited hour.
-2. **GetItems price snapshot**: daily sweep, `price_snapshots(appid, date, final_cents,
-   discount_pct)` — unlocks sale markers on charts and price-history features.
+1. ~~**Followers poller**~~ — **SHIPPED.** `deploy/collectors/followers_bulk.py:130` polls
+   `memberslistxml` exactly as proposed here.
+2. ~~**GetItems price snapshot**~~ — **SHIPPED.** `deploy/collectors/catalog_prices.py:72`
+   calls `IStoreBrowseService/GetItems`. It also went one better than this doc suggested:
+   diffing `price_change_number` against yesterday's dump gives price-change detection
+   without the PICS daemon in item 4.
 3. **GetItems as enrich fast-path**: replace/augment per-game appdetails in the nightly.
-4. **PICS build watcher**: the daemon; biggest engineering lift, best event quality.
+   Still unbuilt — this is where the remaining value is.
+4. **PICS build watcher**: the daemon; biggest engineering lift, best event quality. Still
+   unbuilt, and item 2's `price_change_number` diff removed much of its original motivation.
