@@ -43,6 +43,24 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # min(true_total, 20k) for every 50+-review game. 13h timeout ends before the 21:00 nightly;
 # takes the refresh lock so it cannot overlap a still-running one. Self-draining: exits in
 # seconds once coverage is full (which is why the box is often idle inside this window).
+#
+# THIS STEP OOM-KILLED TWICE (08-30 rc=137 after 1687s, 09-01 rc=137 after 1945s; 08-31 was a
+# lock skip, not a success) AND THE CAUSE IS FIXED IN THE SCRAPER, NOT HERE. Recorded in this
+# file because steam-scraper has no version control, so this is the only versioned home for it.
+#
+# The kernel's kill line said anon-rss 1,527,188kB after 1,720 of 5,596 games / 374,278 reviews
+# — ~0.85MB per game, RISING with the run, i.e. memory scaled with games PROCESSED rather than
+# with concurrency. That is a retention bug, not a working set: every bulk fetch built
+#     futures = {executor.submit(fetch, appid): appid for appid in appids}
+# submitting the whole queue at once, so the dict held a strong reference to every Future for
+# the entire run. A completed Future keeps its _result, so review payloads already written to
+# SQLite could never be collected. Fixed 2026-09-01 by releasing each Future as it lands
+# (`futures.pop(future)`) at all 12 sites in scraper.py plus one in news_scraper.py. Measured
+# on a 400x512KB reproduction: +207MB retained before, +0MB after.
+#
+# --limit stays 15000 deliberately: a smaller limit was drafted as a mitigation BEFORE the
+# cause was found, and shipping it now would cap coverage permanently for no reason. The 1500M
+# cgroup cap remains the safety net, and alert_check reports a recurrence.
 0 6 * * * /root/prospect/deploy/cron-wrap.sh review_keeper bash -c 'cd /root/steam-scraper && timeout 46800 systemd-run --scope --quiet -p MemoryMax=1500M -p MemorySwapMax=0 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 20000 --min-reviews 1 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0' >> /root/deepen_backfill.log 2>&1
 
 # ── 06:15 UTC — daytime socials keeper. OWN lock, deliberately: it must run ALONGSIDE the
