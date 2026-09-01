@@ -39,6 +39,8 @@ import {
 } from "../lib/api";
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
+import { estimatedUnits } from "../lib/estimates";
+import { DEFAULT_NICHE_CUT, findNicheVariant } from "../lib/nicheSelection";
 import { fmtAxisCompact, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName } from "../lib/format";
 import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { markerMonths } from "../lib/notable";
@@ -447,6 +449,12 @@ export default function GameProfile() {
   const niche0Q = useNicheDetail("tag", nicheTag0);
   const niche1Q = useNicheDetail("tag", nicheTag1);
   const niche2Q = useNicheDetail("tag", nicheTag2);
+  // Right endpoint, WRONG CUT was the old bug: `find(v => v.window === "24m")` matches the first
+  // 24m row the mart emits, which is the >=0-reviews cut — a different population than the niche
+  // page this row LINKS TO, the Niche Finder and the Radar, all of which default to 24m/>=50.
+  // Souls-like read 57.7 here against 77.3 there; Metroidvania read 58.7 here against 30.1 there.
+  // Match DEFAULT_NICHE_CUT exactly; when the mart never built that cut for a niche, fall back
+  // but SAY SO on the row rather than pass a different population off as the default.
   const inNiches = [
     { tag: nicheTag0, q: niche0Q },
     { tag: nicheTag1, q: niche1Q },
@@ -454,8 +462,15 @@ export default function GameProfile() {
   ]
     .filter((e): e is { tag: string; q: typeof niche0Q } => e.tag !== null)
     .map((e) => {
-      const variant = e.q.data?.variants.find((v) => v.window === "24m") ?? e.q.data?.variants[0];
-      return { tag: e.tag, opp: variant?.opportunity_v2 ?? null };
+      const variants = e.q.data?.variants;
+      const exact = findNicheVariant(variants, DEFAULT_NICHE_CUT);
+      const variant = exact ?? variants?.[0];
+      return {
+        tag: e.tag,
+        opp: variant?.opportunity_v2 ?? null,
+        // null on the default cut (nothing to disclose); the actual cut otherwise.
+        offCut: exact || !variant ? null : `${variant.window === "24m" ? "24m" : "all-time"} · ≥${variant.min_reviews}`,
+      };
     })
     .filter((e) => e.opp !== null);
 
@@ -468,6 +483,26 @@ export default function GameProfile() {
     const p = profile.price_initial;
     return { low: r * bx.min * p, mid: profile.est_rev_reviews ?? r * bx.mid * p, high: r * bx.max * p };
   }, [profile, benchmarksQ.data]);
+
+  // The revenue figure actually PRINTED in the Estimates panel, and the unit count that goes
+  // with it. Both are the reviews-based (Boxleiter) estimator, so revenue ÷ list price === units
+  // exactly — see lib/estimates.ts for why that estimator and not the owners one. Before this,
+  // the panel printed reviews-based revenue against the owners-based `owners_mid`: Hollow Knight
+  // showed $251.5M over 7.5M units at a $14.99 price, $33.53 a copy, against a footnote that
+  // spells out the division. owners_mid is still shown, one line down, named as the other method.
+  const estRevenue = revenueRange ? revenueRange.mid : profile?.est_rev_reviews ?? null;
+  const estUnits = useMemo(
+    () =>
+      estimatedUnits(
+        estRevenue,
+        profile?.price_initial,
+        profile?.total_reviews,
+        // Only the cited benchmark ratio — never the owners-derived fallback below, which would
+        // put the owners estimator back into the pair through the free-to-play branch.
+        benchmarksQ.data?.cited.boxleiter_owners_per_review.mid ?? null,
+      ),
+    [estRevenue, profile?.price_initial, profile?.total_reviews, benchmarksQ.data],
+  );
 
   // Owners-per-review ratio for the Owners/Revenue drilldowns — same source + fallback the
   // Owners/Revenue rows themselves imply: the cited Boxleiter mid when benchmarks are
@@ -769,7 +804,7 @@ export default function GameProfile() {
               <EstimateRow
                 label="Gross revenue"
                 help="Estimated lifetime GROSS revenue: reviews × an owners-per-review ratio (~20-55, genre-fitted) × launch price. An estimate with real error bars. Not net of Steam's cut, refunds or discounts."
-                value={fmtRevenue(revenueRange ? revenueRange.mid : profile.est_rev_reviews, profile.price_initial === 0)}
+                value={fmtRevenue(estRevenue, profile.price_initial === 0)}
                 sub={
                   profile.price_initial === 0
                     ? "Free-to-play — no box revenue at $0 price"
@@ -782,8 +817,18 @@ export default function GameProfile() {
               />
               <EstimateRow
                 label="Units sold"
-                help="Estimated copies owned (SteamSpy midpoint, review-modeled for coarse buckets). Owned ≠ played ≠ paid full price."
-                value={fmtCompact(profile.owners_mid)}
+                help="Estimated copies sold on the SAME reviews-based (Boxleiter) estimator as Gross revenue above — reviews × owners-per-review — so gross revenue ÷ launch price lands exactly here. The owners-based (SteamSpy bucket) estimate is a different method and is shown separately below the figure. Owned ≠ played ≠ paid full price."
+                value={fmtCompact(estUnits)}
+                sub={
+                  <>
+                    {profile.price_initial != null && profile.price_initial > 0 && estRevenue != null
+                      ? `${fmtUsd(estRevenue)} ÷ ${fmtPrice(profile.price_initial)} launch price`
+                      : "reviews × owners-per-review — no box revenue to divide at $0"}
+                    {profile.owners_mid != null && (
+                      <> · owners-based estimate: {fmtCompact(profile.owners_mid)} (different method)</>
+                    )}
+                  </>
+                }
                 onClick={() => toggleMetric("owners")}
                 active={selectedMetric === "owners"}
               />
@@ -837,28 +882,42 @@ export default function GameProfile() {
               />
             </div>
             <div className="mt-1 border-t border-chartborder pt-2.5 text-[11px] text-ink-muted">
-              Gross revenue = reviews × owners-per-review (genre-fitted) × launch price, lifetime. Units and reviews are
-              point-in-time reads from the catalog, not verified sales data.
+              Gross revenue = reviews × owners-per-review (genre-fitted) × launch price, lifetime — and Units sold is
+              that same estimate before the price multiply, so gross revenue ÷ launch price = units exactly. The
+              owners-based (SteamSpy bucket) figure noted beside it is a separate method, not the partner of this
+              revenue. Reviews are a point-in-time read from the catalog, not verified sales data.
             </div>
           </BlueprintFrame>
 
           {inNiches.length > 0 && (
             <BlueprintPanel title="In niches">
               <div className="flex flex-col gap-2.5 text-[13px]">
-                {inNiches.map(({ tag, opp }) => (
-                  <div key={tag} className="flex items-baseline gap-2">
-                    <Link
-                      to={`/niches/tag/${encodeURIComponent(tag)}`}
-                      className="min-w-0 truncate text-ink-primary hover:text-brand hover:underline"
-                    >
-                      {tag}
-                    </Link>
-                    <span className={clsx("ml-auto shrink-0 tabular", (opp as number) >= 70 ? "text-brand" : "text-ink-secondary")}>
-                      opp {(opp as number).toFixed(1)}
-                    </span>
+                {inNiches.map(({ tag, opp, offCut }) => (
+                  <div key={tag} className="flex flex-col">
+                    <div className="flex items-baseline gap-2">
+                      <Link
+                        to={`/niches/tag/${encodeURIComponent(tag)}`}
+                        className="min-w-0 truncate text-ink-primary hover:text-brand hover:underline"
+                      >
+                        {tag}
+                      </Link>
+                      <span className={clsx("ml-auto shrink-0 tabular", (opp as number) >= 70 ? "text-brand" : "text-ink-secondary")}>
+                        opp {(opp as number).toFixed(1)}
+                      </span>
+                    </div>
+                    {offCut && (
+                      <span className="text-[10px] text-ink-muted">
+                        {offCut} reviews — the ≥50 default cut isn't built for this niche
+                      </span>
+                    )}
                   </div>
                 ))}
               </div>
+              {/* The scores above are the app-default cut, so clicking through to the niche page
+                  (which opens on the same cut) shows the SAME number, not a second opinion. */}
+              <p className="mt-3 border-t border-chartborder pt-2 text-[10px] text-ink-muted">
+                Opportunity v2 on the default cut: last 24 months, ≥50 reviews.
+              </p>
             </BlueprintPanel>
           )}
         </div>
@@ -887,7 +946,10 @@ export default function GameProfile() {
             profile={{
               price_initial: profile.price_initial,
               total_reviews: profile.total_reviews,
-              owners_mid: profile.owners_mid,
+              // The HEADLINE units the Estimates panel prints, not owners_mid: the owners curve
+              // is cumulative reviews × owners-per-review, and its caption claims it "trends
+              // toward the headline estimate" — true only if the headline is the same estimator.
+              units_headline: estUnits,
               live_players: profile.live_players,
             }}
             ownersPerReview={ownersPerReview}
@@ -1194,9 +1256,15 @@ export default function GameProfile() {
                     const mc = p.mean_compound;
                     return (
                       <div className="mb-4">
-                        <div className="mb-1 flex items-center justify-between text-xs">
+                        <div className="mb-1 flex items-center justify-between gap-2 text-xs">
                           <span className="text-ink-muted">Coverage tone (headlines &amp; summaries)</span>
-                          <span className="tabular text-ink-secondary">{fmtPct(p.press_pos_share, 0)} positive</span>
+                          {/* The share is positive / (positive + negative) — the base printed
+                              beside it has to be that same base, not n_scored_articles, or the
+                              division a reader does on the line below fails (Hollow Knight:
+                              58/12/31, so 83% is 58/70 and NOT 58/101). */}
+                          <span className="tabular shrink-0 text-ink-secondary">
+                            {fmtPct(p.press_pos_share, 0)} positive of {fmtInt(p.n_pos_articles + p.n_neg_articles)} rated
+                          </span>
                         </div>
                         <div
                           className="relative h-3 bg-page"
@@ -1213,7 +1281,9 @@ export default function GameProfile() {
                         </div>
                         <div className="mt-1 text-[11px] text-ink-muted">
                           {fmtInt(p.n_pos_articles)} positive · {fmtInt(p.n_neg_articles)} negative
-                          {p.n_neutral_articles > 0 && <> · {fmtInt(p.n_neutral_articles)} neutral</>}
+                          {p.n_neutral_articles > 0 && (
+                            <> · {fmtInt(p.n_neutral_articles)} neutral (excluded from the share)</>
+                          )}
                           {typeof mc === "number" && (
                             <>
                               {" · "}mean <span className="tabular">{mc >= 0 ? "+" : ""}{mc.toFixed(2)}</span>

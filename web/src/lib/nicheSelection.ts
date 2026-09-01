@@ -69,6 +69,37 @@ export interface NicheCut {
   min_reviews: number;
 }
 
+/**
+ * THE cut every niche surface lands on with no URL/user override: last 24 months, >=50 reviews.
+ * NicheFinder's initial state, NicheDetail's URL fallback and the Radar all resolve here, so an
+ * opportunity score quoted anywhere in the app means the same population by default.
+ *
+ * It lives in one place because it did NOT used to: GameProfile's "In niches" sidebar picked
+ * `variants.find(v => v.window === "24m")`, which lands on the FIRST 24m row the mart emits —
+ * the >=0-reviews cut — and so quoted a score for a different population than the page it links
+ * to. Souls-like read 57.7 in the sidebar against 77.3 on its own page, the Niche Finder and the
+ * Radar; Metroidvania erred the other way, 58.7 against 30.1. Match on BOTH axes, never on
+ * window alone, and never on index 0.
+ */
+export const DEFAULT_NICHE_CUT: NicheCut = { win: "24m", min_reviews: 50 };
+
+/** Minimal shape of a mart niche row for cut-matching — structural so this leaf module keeps
+ * its type-only dependency on lib/api (NicheRow satisfies it). */
+export interface NicheVariantLike {
+  window: string;
+  min_reviews: number;
+}
+
+/** The variant for an exact (window x review-floor) cut, or undefined when the mart never
+ * materialized that combination. Deliberately EXACT: a near-miss is a different population, and
+ * silently substituting one is the bug this replaces. */
+export function findNicheVariant<T extends NicheVariantLike>(
+  variants: readonly T[] | undefined,
+  cut: NicheCut = DEFAULT_NICHE_CUT,
+): T | undefined {
+  return variants?.find((v) => v.window === cut.win && v.min_reviews === cut.min_reviews);
+}
+
 /** /niches/combined?niches=tag:Roguelike&niches=tag:Deckbuilding&mode=intersect — the
  * link the finder's "Analyse combined" button navigates to. */
 export function nicheCombinedPath(selection: NicheSelection[], mode: NicheCombineMode, cut?: NicheCut): string {
