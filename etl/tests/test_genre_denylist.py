@@ -45,6 +45,14 @@ MIXED_A = 5200   # Early Access + Free To Play + Action  -> primary must be 'Act
 MIXED_B = 5201   # Early Access + Indie                  -> primary must be 'Indie'
 MIXED_C = 5202   # Early Access + Indie + Action         -> primary must be 'Action'
 
+# Whitespace / case variants (2026-09-01). The denylist used an exact NOT IN, so
+# 'Early Access ' and 'early access' slipped past it and republished the niche the list
+# exists to suppress. The TAG side shipped the same bug for real: 'Dystopian ' and
+# 'Parody ' rendered as twins of their trimmed selves, with opposite Radar verdicts.
+VARIANT_APPIDS = [5300, 5301, 5302, 5303, 5304, 5305]
+VARIANT_LABELS = ["Early Access ", " Early Access", "early access",
+                  "EARLY ACCESS", "Free to play ", " Free To Play"]
+
 
 def build_genre_rows() -> list[tuple[int, str]]:
     rows: list[tuple[int, str]] = []
@@ -60,6 +68,10 @@ def build_genre_rows() -> list[tuple[int, str]]:
             rows.append((appid, "Free to Play"))   # 40 games (case-variant spelling)
     for appid in EA_ONLY_APPIDS:
         rows.append((appid, "Early Access"))
+    # One variant spelling each, plus a real genre so the game itself must survive.
+    for appid, label in zip(VARIANT_APPIDS, VARIANT_LABELS):
+        rows.append((appid, label))
+        rows.append((appid, "Indie"))
     rows += [
         (MIXED_A, "Early Access"), (MIXED_A, "Free To Play"), (MIXED_A, "Action"),
         (MIXED_B, "Early Access"), (MIXED_B, "Indie"),
@@ -147,8 +159,8 @@ def main() -> int:
 
     # ---- 1. stg_genre_membership carries no denylisted label (case-insensitive) -------
     leaked = con.execute(
-        "SELECT DISTINCT genre FROM stg_genre_membership WHERE lower(genre) IN "
-        "(SELECT lower(genre) FROM denylist_genre) ORDER BY 1"
+        "SELECT DISTINCT genre FROM stg_genre_membership WHERE lower(trim(genre)) IN "
+        "(SELECT lower(trim(genre)) FROM denylist_genre) ORDER BY 1"
     ).fetchall()
     assert not leaked, f"denylisted label(s) leaked into stg_genre_membership: {leaked}"
     kept = {r[0] for r in con.execute("SELECT DISTINCT genre FROM stg_genre_membership").fetchall()}
