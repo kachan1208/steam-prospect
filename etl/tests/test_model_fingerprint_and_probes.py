@@ -89,7 +89,13 @@ def test_config_hash_folds_in_the_model_and_is_stable():
 # 1b. The one-time re-key: switching fingerprints must not cost a 16M-row rescore
 # ------------------------------------------------------------------------------------
 def _cache_con(config_hash: str | None) -> duckdb.DuckDBPyConnection:
-    """An attached-shaped sentiment cache with one row in each table, so a wipe is visible."""
+    """An attached-shaped sentiment cache with one row in each table, so a wipe is visible.
+
+    MIRRORS _attach_sentiment_cache's schema by hand (these tests drive _refresh_sentiment_cache
+    against an in-memory `cache` SCHEMA rather than a real attached FILE, so they cannot just
+    call it). A table added there and not here fails these tests with a Catalog Error the moment
+    the wipe touches it — which is the intended signal, not a nuisance: the wipe must clear every
+    table whose contents are keyed to the scoring config."""
     con = duckdb.connect(":memory:")
     con.execute("CREATE SCHEMA cache")
     con.execute("CREATE TABLE cache.aspect_mention(recommendationid VARCHAR, aspect VARCHAR, "
@@ -100,15 +106,22 @@ def _cache_con(config_hash: str | None) -> duckdb.DuckDBPyConnection:
     con.execute("CREATE TABLE cache.scored_review(recommendationid VARCHAR)")
     con.execute("INSERT INTO cache.scored_review VALUES ('r1')")
     con.execute("CREATE TABLE cache.meta(key VARCHAR, value VARCHAR)")
+    con.execute("CREATE TABLE cache.rescore_status("
+                "updated_at TIMESTAMP, reviews_in_pool BIGINT, reviews_scored BIGINT, "
+                "mention_rows BIGINT, buckets_total INTEGER, buckets_done INTEGER, "
+                "stopped_early VARCHAR, slowest_bucket_seconds DOUBLE)")
+    con.execute("INSERT INTO cache.rescore_status VALUES (NULL, 1, 1, 1, 1, 1, NULL, 1.0)")
     if config_hash is not None:
         con.execute("INSERT INTO cache.meta VALUES ('config_hash', ?)", [config_hash])
     return con
 
 
-def _cache_rows(con) -> tuple[int, int, int]:
+def _cache_rows(con) -> tuple[int, int, int, int]:
+    # rescore_status is included because a wipe that leaves it behind reports a fresh,
+    # 0%-scored cache as a completed rescore.
     return tuple(
         con.execute(f"SELECT COUNT(*) FROM cache.{t}").fetchone()[0]
-        for t in ("aspect_mention", "press_article", "scored_review")
+        for t in ("aspect_mention", "press_article", "scored_review", "rescore_status")
     )
 
 
@@ -131,7 +144,7 @@ def test_the_fingerprint_switch_re_keys_the_cache_instead_of_wiping_it():
     con = _cache_con(legacy)
     try:
         assert bm._refresh_sentiment_cache(con) is False, "a re-key is not an invalidation"
-        assert _cache_rows(con) == (1, 1, 1), "the cache must survive the fingerprint switch"
+        assert _cache_rows(con) == (1, 1, 1, 1), "the cache must survive the fingerprint switch"
         stored = con.execute("SELECT value FROM cache.meta WHERE key='config_hash'").fetchone()[0]
         assert stored == bm._sentiment_config_hash(), "...re-keyed to the content hash"
         # Idempotent: the second run is a plain hit, not another migration.
@@ -145,7 +158,7 @@ def test_a_real_config_change_still_wipes(monkeypatch):
     con = _cache_con("some-hash-from-a-different-lexicon")
     try:
         assert bm._refresh_sentiment_cache(con) is True
-        assert _cache_rows(con) == (0, 0, 0)
+        assert _cache_rows(con) == (0, 0, 0, 0)
     finally:
         con.close()
 
@@ -158,7 +171,7 @@ def test_a_changed_model_still_wipes_even_under_the_legacy_key(tmp_path, monkeyp
     con = _cache_con(other_legacy)
     try:
         assert bm._refresh_sentiment_cache(con) is True
-        assert _cache_rows(con) == (0, 0, 0)
+        assert _cache_rows(con) == (0, 0, 0, 0)
     finally:
         con.close()
 
