@@ -2081,6 +2081,15 @@ def _attach_sentiment_cache(con: duckdb.DuckDBPyConnection, data_dir: Path) -> P
     con.execute(
         "CREATE TABLE IF NOT EXISTS cache.press_article(article_id BIGINT, compound DOUBLE)"
     )
+    # Did scored_review EXIST before this attach? The seed below turns on the answer, and
+    # "the table is empty" is not the same question: a legacy cache file has no such table at
+    # all, whereas a run that died mid-scoring leaves the table present and empty next to a
+    # part-filled aspect_mention. Asked before the CREATE, because after it the two states are
+    # indistinguishable.
+    had_scored_review = con.execute(
+        "SELECT count(*) FROM duckdb_tables() "
+        "WHERE database_name = 'cache' AND table_name = 'scored_review'"
+    ).fetchone()[0] > 0
     # Which reviews have been SCANNED — regardless of whether the scan produced any mention rows.
     # This table exists because aspect_mention cannot answer that question: a review whose text
     # matches no aspect keyword produces zero rows there, so "not in aspect_mention" conflates
@@ -2091,11 +2100,23 @@ def _attach_sentiment_cache(con: duckdb.DuckDBPyConnection, data_dir: Path) -> P
     # burning ~20 minutes of the 2-core box EVERY night on regex over text that can never match.
     con.execute("CREATE TABLE IF NOT EXISTS cache.scored_review(recommendationid VARCHAR)")
     con.execute("CREATE TABLE IF NOT EXISTS cache.meta(key VARCHAR, value VARCHAR)")
-    # Migration seed, first run only: reviews with mention rows are proof of a past scan, so count
-    # them scanned instead of re-scanning ~1.8M of them. Guarded on scored_review being empty, so
-    # it runs once; after a config-change wipe both tables are empty and the seed is a no-op.
-    # The ~10M zero-mention reviews have no trace anywhere and get their one final rescan.
-    if con.execute("SELECT count(*) FROM cache.scored_review").fetchone()[0] == 0:
+    # Migration seed, ONE-TIME: reviews with mention rows in a pre-2026-08-22 cache file are
+    # proof of a past scan, so count them scanned instead of re-scanning ~1.8M of them. The
+    # ~10M zero-mention reviews have no trace anywhere and get their one final rescan.
+    #
+    # GUARDED ON THE TABLE'S ABSENCE, NOT ON ITS EMPTINESS (2026-09-02). The old guard was
+    # `scored_review is empty`, which is also true of the wreckage a run that died mid-scoring
+    # leaves behind: aspect_mention part-filled, scored_review empty. The seed then did exactly
+    # what scored_review exists to prevent — declare "has rows in aspect_mention" to mean
+    # "fully scanned" — and the reviews whose arms the crash split mid-stream were frozen with
+    # a PREFIX of their arms, invisibly and permanently. That is not a hypothetical: it is the
+    # 2026-08-22 seed re-run over an OOM-killed build's leftovers, and it is where the 0.62%
+    # hole documented in _build_aspect_keyword_votes came from. It also silently defeated the
+    # DELETE-and-rescan recovery in compute_aspect_sentiment, which is the ONLY repair path
+    # that block has. A file that has the table has been through this code before, so the
+    # migration is done; anything empty in it after that is a crash to be redone, not history
+    # to be preserved.
+    if not had_scored_review:
         con.execute(
             "INSERT INTO cache.scored_review "
             "SELECT DISTINCT recommendationid FROM cache.aspect_mention "
@@ -2303,12 +2324,19 @@ def _build_aspect_keyword_votes(con: duckdb.DuckDBPyConnection, mention_table: s
     text column the same day (2026-08-31), re-reading text for the ranking survivors only. Grep
     confirms it: every remaining mention of stg_review_text in this repo is a comment about its
     removal. So the rescore's peak text is one full-pool copy instead of two concurrent ones.
-    HONEST CAVEAT, not covered by that halving: _sent_windows (the 10-arm window table built from
-    _sent_new) is delta-sized in steady state but full-corpus-sized on a wipe, and it is live
-    alongside _sent_new for the whole scoring pass. It is a regular table, so it lands in the
-    build's own .duckdb file on disk rather than the memory budget, and its rows are ~520-char
-    slices rather than whole reviews — but it is real, it is why the wipe path is the one case
-    this function still calls a "full-copy case", and it is the thing to watch tonight.
+    HONEST CAVEAT, not covered by that halving — AND IT IS WHAT KILLED THE 09-01 RUN. _sent_new
+    was one TEMP table holding the whole delta, i.e. the whole pool on a wipe, and _sent_windows
+    (the 10-arm window explosion built from it) was live alongside it for the entire scoring
+    pass. TEMP tables are stored in DuckDB's temp directory and count against
+    max_temp_directory_size, so that copy WAS the spill budget, and the 2026-09-01 nightly died
+    on it: "failed to offload data block of size 256.0 KiB (14.9 GiB/15.0 GiB used)", 13,473s in,
+    with the cache wiped and unrefilled. FIXED 2026-09-02: compute_aspect_sentiment scores in
+    hash(recommendationid) buckets (PROSPECT_SENTIMENT_BUCKETS, default 8, the same knob this
+    function takes), materialising one bucket of text and one bucket of windows at a time, so
+    neither is ever more than 1/N of the pool. The wipe path is no longer a full-copy case; what
+    remains is N streams of src.reviews instead of one. Left on the record because the reasoning
+    above — that the halving alone made the rescore survivable — was wrong, and the next person
+    sizing this phase should see why.
 
     `n_buckets` > 1 splits the scan on hash(recommendationid) — used for the 21.7M-row cache,
     where a single hash join against the 24.4M-row pool would not fit the box's memory budget.
@@ -2523,65 +2551,151 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             n_new_reviews = con.execute("SELECT COUNT(*) FROM _sent_new_ids").fetchone()[0]
             con.execute("DROP VIEW IF EXISTS _sent_new")
             con.execute("DROP TABLE IF EXISTS _sent_new")
-            # THE ONLY REVIEW TEXT THIS BUILD MATERIALISES. Scope is the nightly delta and
-            # nothing else: pool reviews with no cache.scored_review record, i.e. reviews
-            # nobody has ever run the aspect regexes over. In steady state that is ~1-2M
-            # reviews / a few hundred MB against a 24.8M-row / 8.45GB corpus; on a config-wipe
-            # rescore it is the whole pool for the duration of the sentiment phase — the one
-            # remaining full-copy case, accepted because wipes are rare and deliberate.
+            con.execute("DROP TABLE IF EXISTS _sent_windows")
+
+            # SCORED IN HASH BUCKETS (2026-09-02), not in one pass. Everything from here to the
+            # scored_review INSERT runs once per bucket of hash(recommendationid) % _n_buckets,
+            # so the two delta-proportional materialisations — the delta's review TEXT and the
+            # 10-arm window explosion built from it — are never larger than 1/_n_buckets of the
+            # pool at any instant.
             #
-            # Text is read straight from src.reviews (sqlite) rather than from a staging copy:
-            # there is no corpus-wide text table any more, and streaming the source once to
-            # pick out the delta's rows never materialises the rows it discards. A TABLE, not a
-            # VIEW, so the 10-arm window scan below reads it without re-running that scan per
-            # arm (a view here cost a 9.7h phase and a 22.7GiB spill in 2026-08).
-            con.execute(
-                """
-                CREATE TEMP TABLE _sent_new AS
-                SELECT n.appid, n.recommendationid, r.review_text
-                FROM _sent_new_ids n
-                JOIN src.reviews r ON r.recommendationid = n.recommendationid
-                """
-            )
+            # WHY. The 2026-09-01 nightly, the first full build after SENTIMENT_CACHE_VERSION
+            # went 1 -> 2 and wiped the cache, died in this block after 13,473s with
+            #     OutOfMemoryException: failed to offload data block of size 256.0 KiB
+            #     (14.9 GiB/15.0 GiB used)   [the 'max_temp_directory_size' cap set in main()]
+            # and left the cache WIPED BUT NOT REFILLED (aspect_mention/scored_review/
+            # press_article all 0), which makes every subsequent build attempt the identical
+            # full-corpus rescore and hit the identical wall. A wipe empties scored_review, so
+            # the anti-join above returns the WHOLE 24.4M-review pool and this "delta" is the
+            # entire corpus. In steady state it is ~1-2M reviews and none of this is expensive;
+            # a wipe is rare, which is exactly why the bucketing the rest of this function grew
+            # in 2026-08 never reached the code below.
+            #
+            # WHAT ACTUALLY EATS THE 15GiB (measured on duckdb 1.5.4, not assumed — the naive
+            # reading blames _sent_windows and would have fixed nothing):
+            #   * TEMP tables are stored in DuckDB's temp directory and DO count against
+            #     max_temp_directory_size. A `CREATE TEMP TABLE ... AS` of ~700MB of
+            #     incompressible text under a 400MB cap fails with this error verbatim.
+            #   * A REGULAR table costs ZERO temp — the same CTAS into a regular table spends
+            #     0 bytes there, because its rows go into the database file.
+            # _sent_new is TEMP and, on a wipe, is the whole corpus: it, plus the 24.4M-row
+            # build side of the join that fills it, is the spill budget. _sent_windows is
+            # REGULAR (it must be — see below), so its cost lands on the .building file's
+            # DISK instead: the other budget, the one whose exhaustion killed the 2026-08-30
+            # run ("20.6 GiB/20.6 GiB used", i.e. every free byte on the volume). Bucketing
+            # divides BOTH by _n_buckets, which is why the loop wraps both statements and not
+            # just the window build.
+            #
+            # NOT FIXED BY RAISING THE CAP. max_temp_directory_size is deliberately below free
+            # disk so a runaway query fails on its own budget instead of taking the filesystem,
+            # the scraper's SQLite and the serving mart down with it. It did its job here.
+            #
+            # Same env knob and same default as the read-back's bucketing further down, and
+            # deliberately so: both loops exist to keep exactly one full-corpus-sized
+            # materialisation off the box at a time, on the same box, in the same phase — an
+            # operator who has to turn one down always wants the other to move with it.
+            _n_buckets = max(1, int(os.environ.get("PROSPECT_SENTIMENT_BUCKETS", "8")))
+            # Which buckets have work, from one lean pass over the ids (no text). This is not
+            # an optimisation for the wipe — there every bucket is full — it is what keeps the
+            # ORDINARY night honest: each bucket's text query streams the whole sqlite reviews
+            # table past a hash join, so an unguarded loop would run _n_buckets full scans of
+            # 24.8M rows on a night with nothing (or three things) to score.
+            _todo = sorted(int(b) for (b,) in con.execute(
+                f"SELECT DISTINCT hash(recommendationid) % {_n_buckets} FROM _sent_new_ids"
+            ).fetchall())
+
             # Idempotent rescan: if a previous run died between inserting a review's mention rows
             # and recording it in scored_review, that review is selected again here — clear its
             # partial rows first so the re-insert can't double-count it. (The pre-scored_review
             # code had the mirror-image failure: such a review was skipped forever with a partial
             # subset, quietly violating the completeness invariant above.)
+            # ONCE, over the whole delta, BEFORE the first bucket inserts anything — never per
+            # bucket. Run inside the loop it would delete the rows earlier buckets had just
+            # written, because a review's ids are the delta's ids no matter which bucket it
+            # falls in.
             con.execute(
                 "DELETE FROM cache.aspect_mention WHERE recommendationid IN "
                 "(SELECT recommendationid FROM _sent_new_ids)"
             )
 
-            # The expensive regex now runs ONLY over the delta (_sent_new), not the full pool.
-            # REGULAR (not TEMP) so the independent read cursor in _stream_vader_scores can see
-            # it; dropped after scoring so it never ships in the versioned .duckdb.
-            con.execute("DROP TABLE IF EXISTS _sent_windows")
-            con.execute(f"CREATE TABLE _sent_windows AS {_aspect_window_sql('_sent_new')}")
-
             clf = _get_classifier()
-            if clf is not None:
-                n_new_mentions = _stream_vader_and_classify(
-                    con,
-                    "SELECT recommendationid, aspect, window_text FROM _sent_windows",
-                    "INSERT INTO cache.aspect_mention VALUES (?, ?, ?, ?, ?, ?)",
-                    clf,
+            n_new_mentions = 0
+            for _b in _todo:
+                # THE ONLY REVIEW TEXT THIS BUILD MATERIALISES. Scope is one bucket of the
+                # delta: pool reviews with no cache.scored_review record — reviews nobody has
+                # ever run the aspect regexes over — narrowed to this bucket. In steady state
+                # the whole delta is ~1-2M reviews / a few hundred MB against a 24.8M-row /
+                # 8.45GB corpus; on a config-wipe rescore the delta is the whole pool, and
+                # this bucket predicate is the only thing standing between that and the spill
+                # budget.
+                #
+                # Text is read straight from src.reviews (sqlite) rather than from a staging
+                # copy: there is no corpus-wide text table any more, and streaming the source
+                # to pick out the bucket's rows never materialises the rows it discards. The
+                # cost of bucketing is one such stream per bucket instead of one in total —
+                # paid deliberately, because the alternative (one full-pool copy, sliced
+                # afterwards) is the 8.45GB TEMP table that just killed the build.
+                #
+                # A TABLE, not a VIEW, so the 10-arm window scan below reads it without
+                # re-running the join per arm (a view here cost a 9.7h phase and a 22.7GiB
+                # spill in 2026-08).
+                bucket = (f"WHERE hash(n.recommendationid) % {_n_buckets} = {_b}"
+                          if _n_buckets > 1 else "")
+                con.execute(
+                    f"""
+                    CREATE TEMP TABLE _sent_new AS
+                    SELECT n.appid, n.recommendationid, r.review_text
+                    FROM _sent_new_ids n
+                    JOIN src.reviews r ON r.recommendationid = n.recommendationid
+                    {bucket}
+                    """
                 )
-            else:
-                n_new_mentions = _stream_vader_scores(
-                    con,
-                    "SELECT recommendationid, aspect, window_text FROM _sent_windows",
-                    "INSERT INTO cache.aspect_mention (recommendationid, aspect, compound) VALUES (?, ?, ?)",
-                )
-            con.execute("DROP TABLE IF EXISTS _sent_windows")
-            # Record the scan LAST, after every mention row for these reviews is in — the order is
-            # what makes the completeness invariant crash-safe (a death anywhere above leaves the
+                # The expensive regex runs ONLY over this bucket of the delta, never the full
+                # pool. REGULAR (not TEMP) so the INDEPENDENT read cursor in
+                # _stream_vader_scores / _stream_vader_and_classify can see it — that is a
+                # correctness requirement, not a preference, and bucketing must not quietly
+                # turn it into a TEMP table to save spill. Dropped at the end of every
+                # iteration so only one bucket's windows exist at a time and none of it ever
+                # ships in the versioned .duckdb.
+                con.execute(f"CREATE TABLE _sent_windows AS {_aspect_window_sql('_sent_new')}")
+                if clf is not None:
+                    n_new_mentions += _stream_vader_and_classify(
+                        con,
+                        "SELECT recommendationid, aspect, window_text FROM _sent_windows",
+                        "INSERT INTO cache.aspect_mention VALUES (?, ?, ?, ?, ?, ?)",
+                        clf,
+                    )
+                else:
+                    n_new_mentions += _stream_vader_scores(
+                        con,
+                        "SELECT recommendationid, aspect, window_text FROM _sent_windows",
+                        "INSERT INTO cache.aspect_mention (recommendationid, aspect, compound) VALUES (?, ?, ?)",
+                    )
+                con.execute("DROP TABLE IF EXISTS _sent_windows")
+                con.execute("DROP TABLE IF EXISTS _sent_new")
+
+            # Record the scan LAST, after EVERY bucket's mention rows are in — the order is what
+            # makes the completeness invariant crash-safe (a death anywhere above leaves the
             # review out of scored_review, and the next run redoes it via the DELETE + rescan).
             # Reads the lean ids table for the same reason the DELETE does.
+            #
+            # OUTSIDE THE LOOP, AND THAT IS THE POINT. Writing scored_review per bucket would
+            # be a smaller transaction and a tempting "checkpoint", and it would re-create
+            # EXACTLY the defect this rescore exists to repair: a crash in bucket 5 would
+            # leave buckets 0-4's reviews recorded as scanned. Those reviews are fully scored
+            # — the split is by review, not by aspect — so nothing is lost THIS time; but the
+            # per-bucket write only stays safe as long as the bucket boundary and the
+            # completeness boundary coincide, and they do not have to. Any future change that
+            # splits a review's own arms across iterations (bucketing by aspect, by window, by
+            # batch) would then mark a review scanned with a PREFIX of its arms present, which
+            # is bit-for-bit the 0.62% hole this code found in the live cache on 2026-08-31
+            # (1,962 of 314,626 mentions missing, every one of them in the last two arms of the
+            # UNION, every affected review a clean prefix) and which is invisible from the
+            # cache alone. One write, after the last bucket, keeps "in scored_review" meaning
+            # "fully represented in aspect_mention" no matter how the loop above is sliced.
             con.execute(
                 "INSERT INTO cache.scored_review SELECT recommendationid FROM _sent_new_ids"
             )
-            con.execute("DROP TABLE IF EXISTS _sent_new")
             con.execute("DROP TABLE IF EXISTS _sent_new_ids")
 
             # Full in-scope set, read back from the cache (untouched old rows + just-inserted new
@@ -2601,7 +2715,11 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             # grouping key — every row of a given (appid, recommendationid, aspect) group lands in
             # the same bucket, so no group is ever split and each bucket's aggregate is final.
             # Peak memory is one bucket's worth; the cost is N scans of the cache instead of one.
-            _n_buckets = max(1, int(os.environ.get("PROSPECT_SENTIMENT_BUCKETS", "8")))
+            #
+            # _n_buckets is the one set above, for the scoring loop — same knob, same value, on
+            # purpose (see there). Read back, do not re-read the env: the two loops must agree
+            # or an operator turning the knob down would fix one phase and leave the other at
+            # its old width.
             con.execute(
                 """
                 CREATE TEMP TABLE stg_aspect_mention_sentiment(
@@ -2688,7 +2806,11 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             # _build_aspect_keyword_votes for why these counts equal the 10-arm regex scan
             # mart_game_teardown.sql used to run over all 24.8M reviews.
             _build_aspect_keyword_votes(con, "cache.aspect_mention", _n_buckets)
+            # The bucket figure is in the line on purpose: on a wipe night this phase is the one
+            # an operator is watching, and "0 of 8 buckets" vs "8 of 8" is the difference
+            # between a no-op and a full rescore.
             print(f"[etl] aspect sentiment cache: {n_new_reviews:,} new review(s) scored "
+                  f"in {len(_todo)}/{_n_buckets} hash bucket(s) "
                   f"({n_new_mentions:,} new mention rows); {n_scored:,} mention rows in scope total")
         finally:
             _detach_sentiment_cache(con)
