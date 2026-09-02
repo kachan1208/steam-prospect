@@ -50,7 +50,20 @@ if [ -f "$HOLD_FILE" ] && [ -z "$(find "$HOLD_FILE" -mmin +$(( HOLD_HOURS * 60 )
     exit 0
 fi
 
-pgrep -f "[b]uild_marts" >/dev/null && exit 0
+# Skip if a mart build is already running — but a `--rescore-only` run is NOT a mart build.
+# It writes only the sentiment cache, never a mart and never the swap, and it holds the cache
+# for ~3s per ~16-minute bucket (measured; see _attach_sentiment_cache's lock notes). Treating
+# it as a competing build froze the published mart for the whole multi-day rescore, which is
+# precisely what --rescore-only exists to avoid: on 2026-09-02 the 13:30 light build logged
+# `finished rc=0 after 0s` while a rescore ran, because this line matched it.
+#
+# `grep -v` over `pgrep -af`, not a second pgrep pattern: the check must be "is any build_marts
+# running that is NOT a rescore", and a bare pattern cannot express the negative. The `-n` test
+# keeps an empty pgrep (no builds at all) from reading as a match.
+_builds="$(pgrep -af "[b]uild_marts" || true)"
+if [ -n "$_builds" ] && printf '%s' "$_builds" | grep -qv -- "--rescore-only"; then
+    exit 0
+fi
 
 # Stale-scratch sweep. The old bare
 #     rm -rf /root/prospect/data/*.duckdb.building*
