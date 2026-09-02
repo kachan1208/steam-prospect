@@ -3679,16 +3679,65 @@ SCRATCH_ACTIVE_SECONDS = 3600   # anything written more recently than this may b
                                 # scratch file (every mart file DROPs before it CREATEs).
 _SCRATCH_RE = re.compile(r"^prospect_(.+?)\.duckdb\.building(\.wal|\.tmp)?$")
 
+# --rescore-only gets its OWN scratch name, outside the prospect_<version>.duckdb.building
+# family entirely (2026-09-02). It publishes nothing — it writes the staging it needs to find
+# the unscored delta, scores buckets into the sentiment cache, and exits — so naming its
+# working file after a mart it will never write was a collision waiting to happen:
+#
+#   * the nightly derives prospect_<YYYYMMDD>.duckdb.building from the SAME UTC date, so a
+#     multi-day rescore and a nightly that starts under it open the IDENTICAL file (plus the
+#     GB-scale .building.tmp/ spill beside it), and prospect-refresh.sh has no guard that
+#     would stop the nightly from trying;
+#   * deploy/light-build-cron.sh sweeps `prospect_*.duckdb.building*` by age, and
+#     prospect-refresh.sh's post-success cleanup does it with no age test at all — both would
+#     happily delete a live rescore's spill;
+#   * the only way to keep those apart used to be a build hold, which freezes ALL published
+#     data for the length of the rescore — precisely what --rescore-only exists to avoid.
+#
+# The name is deliberately NOT `prospect_*`: it cannot match those shell globs, and it cannot
+# match main()'s `prospect_*.duckdb` retention glob either, so no --keep value can ever see it
+# as a dated mart. Nothing in it is durable (progress lives in the sentiment cache), so it is
+# safe to reuse, recreate or delete between runs.
+#
+# LIFECYCLE — it must survive a multi-DAY rescore and still never linger forever:
+#   * a clean or crashed exit removes it in main()'s finally, like any other scratch;
+#   * a SIGKILL leaves it behind, so it is swept HERE instead, by every build_marts run
+#     (nightly + light build = at least twice a day) under the same age rules as the versioned
+#     scratch. Age is measured with _scratch_age_seconds, which looks one level INTO the spill
+#     dir — a scoring rescore writes there continuously and to the scratch file once a bucket
+#     (~16 min), so a live rescore is never mistaken for a dead one;
+#   * a rescore that resumes reuses the file if it is there, and DuckDB's own file lock is then
+#     what stops a SECOND rescore from starting on top of the first (see main()).
+RESCORE_SCRATCH_DB_NAME = "rescore_scratch.duckdb"
+# The pseudo-version this scratch is grouped under, so _sweep_stale_scratch's existing
+# own-version/other-version rules apply to it unchanged. Never a real mart version (those are
+# YYYYMMDD), which is what keeps "a rescore is running" and "a mart build is running" separate.
+RESCORE_SCRATCH_VERSION = "rescore"
+
 
 def _scratch_paths(data_dir: Path) -> dict[str, list[Path]]:
-    """Every build-scratch path in data_dir, grouped by the mart version it belongs to.
-    Never matches prospect_*.duckdb, current.duckdb or the sentiment cache."""
+    """Every build-scratch path in data_dir, grouped by the mart version it belongs to
+    (--rescore-only's scratch groups under RESCORE_SCRATCH_VERSION). Never matches
+    prospect_*.duckdb, current.duckdb or the sentiment cache."""
     groups: dict[str, list[Path]] = {}
     for p in sorted(data_dir.glob("prospect_*.duckdb.building*")):
         m = _SCRATCH_RE.match(p.name)
         if m:
             groups.setdefault(m.group(1), []).append(p)
+    # The rescore scratch, its .wal and its .tmp/ spill dir — one glob, since the name is a
+    # fixed prefix rather than a version pattern.
+    rescore = sorted(data_dir.glob(f"{RESCORE_SCRATCH_DB_NAME}*"))
+    if rescore:
+        groups[RESCORE_SCRATCH_VERSION] = rescore
     return groups
+
+
+def _scratch_label(version: str) -> str:
+    """How a version's scratch is named on disk — for log lines, which must print the glob the
+    reader would actually type."""
+    if version == RESCORE_SCRATCH_VERSION:
+        return f"{RESCORE_SCRATCH_DB_NAME}*"
+    return f"prospect_{version}.duckdb.building*"
 
 
 def _scratch_age_seconds(paths: list[Path]) -> float:
@@ -3711,12 +3760,17 @@ def _scratch_age_seconds(paths: list[Path]) -> float:
 def _remove_scratch(paths: list[Path], keep_artifact: bool = False) -> None:
     """Delete the given scratch paths. `keep_artifact` spares the finished `.building` file
     and its `.wal` — a validation failure keeps the artifact so it can be inspected or
-    landed without a 3-6 hour rebuild — but still removes the `.building.tmp/` spill dir,
-    which is up to 18GB nobody can do anything with."""
+    landed without a 3-6 hour rebuild — but still removes the `.tmp/` spill dir, which is up
+    to 18GB nobody can do anything with.
+
+    The spill test is the `.tmp` SUFFIX, not `.building.tmp`: DuckDB names the spill after
+    whatever database file it was given, so the rescore scratch's is rescore_scratch.duckdb.tmp
+    and the narrower test silently left every byte of it on the disk (it is a directory, so the
+    `is_file()` arm below skipped it too — a leak with no error and no log line)."""
     import shutil
 
     for p in sorted(paths):
-        is_spill = p.name.endswith(".building.tmp")
+        is_spill = p.name.endswith(".tmp")
         if keep_artifact and not is_spill:
             print(f"[etl] kept scratch {p.name} (validation failed — see the remedy above)")
             continue
@@ -3736,16 +3790,22 @@ def _sweep_stale_scratch(data_dir: Path, version: str) -> None:
     version) plus any OTHER version's scratch that is provably dead, and leaves everything
     else strictly alone. A version whose scratch was touched within SCRATCH_ACTIVE_SECONDS
     is treated as a build in flight and skipped loudly — if it really is running, DuckDB's
-    own file lock stops us from opening it a moment later, which is the correct outcome."""
+    own file lock stops us from opening it a moment later, which is the correct outcome.
+
+    `version` is RESCORE_SCRATCH_VERSION for a --rescore-only run, so the rescore scratch is
+    "own" to a rescore (reclaimed once provably dead) and "another version's" to a mart build
+    (spared for SCRATCH_STALE_HOURS) — which is what lets a multi-day rescore and the nightly
+    share the data dir. It is also why every build_marts run is what stops a SIGKILLed
+    rescore's scratch from living on the disk forever: nothing else sweeps that name."""
     for v, paths in sorted(_scratch_paths(data_dir).items()):
         age = _scratch_age_seconds(paths)
         if age < SCRATCH_ACTIVE_SECONDS:
-            print(f"[etl] NOT sweeping prospect_{v}.duckdb.building* — written "
+            print(f"[etl] NOT sweeping {_scratch_label(v)} — written "
                   f"{age / 60:.0f} min ago, a build may still be using it "
                   f"(remove it by hand if you know it is dead)")
             continue
         if v != version and age < SCRATCH_STALE_HOURS * 3600:
-            print(f"[etl] NOT sweeping prospect_{v}.duckdb.building* — another version's "
+            print(f"[etl] NOT sweeping {_scratch_label(v)} — another version's "
                   f"scratch, only {age / 3600:.1f}h old (stale threshold "
                   f"{SCRATCH_STALE_HOURS:.0f}h)")
             continue
@@ -3757,6 +3817,20 @@ def _sweep_own_scratch(data_dir: Path, version: str, keep_artifact: bool = False
     ours to clean up. On success only the `.wal`/`.tmp` leftovers still exist — the
     `.building` file has already been os.replace()d into place."""
     _remove_scratch(_scratch_paths(data_dir).get(version, []), keep_artifact=keep_artifact)
+
+
+def _refuse_publishing_rescore_scratch(building: Path) -> None:
+    """The rescore scratch holds staging and NOT ONE mart row, so landing it as a mart would
+    publish an empty catalog over a working one. --rescore-only returns from main() long
+    before the validation gate, the os.replace or the symlink swap, so reaching any of them
+    with this file means that early return was removed or bypassed — fail loudly instead of
+    letting the next refactor discover the difference in production."""
+    if building.name == RESCORE_SCRATCH_DB_NAME:
+        raise RuntimeError(
+            f"refusing to publish {building.name}: it is the --rescore-only scratch "
+            "(staging only, no marts) and must never be validated, landed as a versioned "
+            "mart or swapped into current.duckdb"
+        )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -3910,20 +3984,48 @@ def main() -> int:
     # scratch (the file, its .wal, an up-to-18GB .tmp spill dir) — swept here before the
     # build (scoped: this version plus provably-dead leftovers, never a live build's spill)
     # and again in the try/finally below, so a failed run cleans up after itself.
-    _sweep_stale_scratch(data_dir, mart_version)
-    building = data_dir / f"prospect_{mart_version}.duckdb.building"
+    #
+    # --rescore-only builds into RESCORE_SCRATCH_DB_NAME instead, under its own pseudo-version.
+    # It writes no mart, so naming its scratch after the date's mart made a multi-day rescore
+    # and the nightly fight over one filename (and one spill dir) with nothing but a build hold
+    # — i.e. a total publishing freeze — to keep them apart. See RESCORE_SCRATCH_DB_NAME.
+    scratch_version = RESCORE_SCRATCH_VERSION if args.rescore_only else mart_version
+    _sweep_stale_scratch(data_dir, scratch_version)
+    building = (data_dir / RESCORE_SCRATCH_DB_NAME if args.rescore_only
+                else data_dir / f"prospect_{mart_version}.duckdb.building")
 
     params = build_params()
     print(f"[etl] source     : {source_db}")
-    print(f"[etl] output     : {versioned}")
+    if args.rescore_only:
+        # Deliberately NOT the versioned mart path: this mode never writes one, and printing
+        # one would put a filename in the log that nothing on disk will ever match.
+        print(f"[etl] output     : none — --rescore-only (scratch: {building})")
+    else:
+        print(f"[etl] output     : {versioned}")
     t0 = time.perf_counter()
 
     # Set only when the BUILD SUCCEEDED and the validation gate refused the swap: the
     # finished artifact is then kept on disk (see the remedy printed below). Every other
     # exit — success, crash, source error — cleans its scratch up as before.
     validation_failed = False
+    # Resuming is the NORMAL case for a multi-night rescore, so the scratch it opens is often
+    # the one a SIGKILL left behind minutes ago — the sweep above spares those on purpose (it
+    # cannot tell a killed run's file from a running one's). Reusing it is safe and REQUIRES NO
+    # CLEANUP: nothing in this file is durable (progress lives in the sentiment cache, staging
+    # is rebuilt from src every run), and every working table the scoring path creates is either
+    # TEMP or DROP-IF-EXISTS'd immediately before it is created — keep it that way, because a
+    # plain CREATE TABLE added there would turn every resume into "Table with name X already
+    # exists". test_a_killed_rescore_resumes_on_the_same_scratch pins exactly that.
+    #
+    # Not deleting the file first is also deliberate: DuckDB's file lock refusing this connect
+    # is the ONLY thing that keeps a second rescore off a live one's scratch, and unlinking the
+    # name would hand both processes their own inode and let them both run.
+    reused_scratch = args.rescore_only and building.exists()
     try:
       con = duckdb.connect(str(building))
+      if reused_scratch:
+          print(f"[etl] reusing the scratch {building.name} left by a previous run "
+                "(nothing in it is durable — see the rescore-scratch notes)")
       try:
         # On memory-constrained hosts (e.g. a small Droplet) cap DuckDB's memory so it spills
         # to its on-disk temp dir instead of being OOM-killed. Env-driven; unset = default.
@@ -4075,6 +4177,9 @@ def main() -> int:
       finally:
         con.close()
 
+      # Nothing below this line may run against the rescore scratch — see the helper.
+      _refuse_publishing_rescore_scratch(building)
+
       # Pre-swap validation gate: compare the finished build against the currently
       # published mart and refuse to swap when data went missing (see validate_mart).
       if args.skip_validation:
@@ -4121,8 +4226,9 @@ def main() -> int:
       print(f"\n[etl] swapped {current} -> {versioned.name}")
 
       # Retention: keep the newest N versioned files (default 2 = current + one rollback;
-      # disk is the droplet's scarcest resource). Never matches the sentiment cache or
-      # .building scratch — the glob is exact-suffix.
+      # disk is the droplet's scarcest resource). Never matches the sentiment cache, the
+      # .building scratch or the rescore scratch — the glob is exact-suffix AND
+      # prospect_-prefixed, which is exactly why RESCORE_SCRATCH_DB_NAME is neither.
       versions = sorted(data_dir.glob("prospect_*.duckdb"), key=lambda p: p.name, reverse=True)
       for old in versions[args.keep:]:
           old.unlink()
@@ -4134,7 +4240,12 @@ def main() -> int:
         # .building file itself was just os.replace()d into place. The ONE exception is a
         # validation failure, where the build finished and only the gate objected: the
         # artifact is worth 3-6 hours and is kept (its spill dir is not).
-        _sweep_own_scratch(data_dir, mart_version, keep_artifact=validation_failed)
+        #
+        # For --rescore-only this is what keeps the data dir clean between nights: the scratch
+        # is disposable (progress is in the sentiment cache), so every exit that runs a finally
+        # removes it. Only a SIGKILL can leave it behind, and the next run's _sweep_stale_scratch
+        # collects it.
+        _sweep_own_scratch(data_dir, scratch_version, keep_artifact=validation_failed)
 
     print(f"[etl] done in {time.perf_counter() - t0:.1f}s  (version {mart_version})")
     return 0
