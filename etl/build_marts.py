@@ -669,6 +669,15 @@ SENTIMENT_SCORE_BATCH = 20000    # rows pulled+scored+inserted per streamed batc
 # 52h of scoring), where N=1000 would be 13.9h (+27%).
 RESCORE_BUCKET_REVIEWS = 125_000
 
+# How long a process will WAIT for another one to release the sentiment cache file before giving
+# up (see _attach_sentiment_cache for the measured lock semantics). 30 minutes is sized from the
+# longest legitimate hold either side takes: the light build's press pass, 205,526 articles at
+# 208/s = 987s, plus room for the corpus to grow. Long enough that a rescore and a light build
+# always hand off cleanly; short enough that a genuinely wedged process fails a nightly loudly
+# instead of hanging it until the 6h timeout.
+SENTIMENT_CACHE_LOCK_WAIT_SECONDS = 1800
+SENTIMENT_CACHE_LOCK_POLL_SECONDS = 2.0
+
 # Incremental sentiment cache (2026-07): compute_aspect_sentiment/compute_press_sentiment used to
 # re-run VADER over the ENTIRE ~1.7M-mention / ~204K-article corpus on EVERY ETL run, even though
 # reviews/articles are immutable — a scored (recommendationid, aspect) mention or article_id's
@@ -2147,14 +2156,53 @@ def _sentiment_config_hash(model_fingerprint: str | None = None) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _attach_sentiment_cache(con: duckdb.DuckDBPyConnection, data_dir: Path) -> Path:
+def _attach_sentiment_cache(con: duckdb.DuckDBPyConnection, data_dir: Path,
+                            wait_seconds: float | None = None) -> Path:
     """ATTACH the persistent, cross-run sentiment cache read-write as `cache`, creating its file
     and/or tables on first use. Caller MUST _detach_sentiment_cache() when done — both compute_*
     functions do this in a try/finally, since DuckDB holds a write lock on an attached file for as
     long as it stays attached, and a second ATTACH of the same path (e.g. the next compute_*
-    call, or a re-run in the same process) would otherwise fail."""
+    call, or a re-run in the same process) would otherwise fail.
+
+    WAITS FOR ANOTHER PROCESS instead of dying on it (2026-09-02). The lock is per FILE and
+    cross-process, and it is exclusive in both directions — measured, not read off the docs:
+    while one process holds the cache read-write, a second process's ATTACH fails immediately
+    with
+
+        IOException: Could not set lock on file "...sentiment_cache.duckdb": Conflicting lock
+
+    and so does a READ_ONLY attach, so there is no read-only escape hatch. That exact error
+    killed the 2026-08-31 light build. It matters far more now: a detached ~52h rescore and the
+    13:30 light build have to share this file for days. Both sides poll instead of failing, and
+    because the release is instant (a waiter re-acquires within one poll of the holder's DETACH)
+    a bounded wait is all the coordination either side needs — no lock files, no ordering
+    protocol, nothing to leave stale if a process is killed.
+
+    The wait is BOUNDED and loud: a genuinely stuck holder must still fail the build rather than
+    hang a nightly forever."""
     cache_path = Path(data_dir) / SENTIMENT_CACHE_DB_NAME
-    con.execute(f"ATTACH '{cache_path}' AS cache")
+    if wait_seconds is None:
+        wait_seconds = SENTIMENT_CACHE_LOCK_WAIT_SECONDS
+    _deadline = time.monotonic() + max(0.0, wait_seconds)
+    _waited_from = None
+    while True:
+        try:
+            con.execute(f"ATTACH '{cache_path}' AS cache")
+            break
+        except duckdb.IOException as e:
+            # Only the cross-process file lock is retryable. Anything else (a corrupt file, a
+            # missing directory, the in-PROCESS "Unique file handle conflict" that means this
+            # code attached twice without detaching) is a bug or an outage and must surface now.
+            if "Conflicting lock" not in str(e) or time.monotonic() >= _deadline:
+                raise
+            if _waited_from is None:
+                _waited_from = time.monotonic()
+                print(f"[etl] sentiment cache is locked by another process — waiting up to "
+                      f"{wait_seconds:,.0f}s for it (this is the rescore/light-build handoff)")
+            time.sleep(SENTIMENT_CACHE_LOCK_POLL_SECONDS)
+    if _waited_from is not None:
+        print(f"[etl] sentiment cache acquired after waiting "
+              f"{time.monotonic() - _waited_from:,.1f}s")
     con.execute(
         "CREATE TABLE IF NOT EXISTS cache.aspect_mention("
         "recommendationid VARCHAR, aspect VARCHAR, compound DOUBLE, "
@@ -2484,7 +2532,8 @@ def _build_aspect_keyword_votes(con: duckdb.DuckDBPyConnection, mention_table: s
     con.execute("DROP TABLE IF EXISTS _kw_votes_part")
 
 
-def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> int:
+def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
+                             scoring_only: bool = False) -> int:
     """Precompute per-(appid, aspect) VADER text sentiment for the Game Teardown (see the
     ASPECT_LEXICON block above for the what/why). Runs BEFORE the mart SQL loop so
     mart_game_teardown.sql / mart_game_aspect_reviews.sql can read the results:
@@ -2511,7 +2560,22 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
 
     Scoring streams through _stream_vader_scores (a per-mention window table built in SQL, read
     via an independent cursor in bounded batches) — peak memory is one batch, never the whole
-    ~1.7M-row corpus (matters on the 2GB Droplet)."""
+    ~1.7M-row corpus (matters on the 2GB Droplet).
+
+    scoring_only=True (the --rescore-only mode) stops after the scoring loop: it refills the
+    cache and writes the progress row, but skips the read-back and the keyword votes, which
+    exist only to feed the marts this mode does not build. It returns the number of REVIEWS
+    recorded this run rather than the in-scope mention count, since there is no in-scope set.
+
+    THE CACHE IS NOT HELD WHILE SCORING (2026-09-02). The lock on sentiment_cache.duckdb is
+    exclusive and cross-process, so anything this function holds it through, it denies to every
+    other process (see _attach_sentiment_cache). A ~52h detached rescore holding it for the
+    duration would block every light build for two and a half days, which is the whole reason
+    --rescore-only would otherwise be pointless. So the cache is attached in three SHORT phases
+    — plan, commit-each-bucket, finish — and the expensive part (the 10-arm window regex and the
+    VADER+classifier stream, ~16 min per bucket) runs with it DETACHED, writing into a local
+    staging table. Measured hold to commit one 125k-review bucket into a production-sized cache:
+    ~0.8s on a dev laptop, ~3s scaled to the droplet, i.e. a duty cycle around 0.3%."""
     # Idempotent per connection: the nightly calls this once per process, but tests (and any
     # future re-entry) may not, and CREATE TEMP TABLE has no IF NOT EXISTS to fall back on.
     con.execute("DROP TABLE IF EXISTS stg_aspect_mention_sentiment")
@@ -2621,6 +2685,9 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
         con.execute("DROP TABLE IF EXISTS _sent_raw")
         con.execute("DROP TABLE IF EXISTS _sent_windows")
     else:
+        # PHASE 1 of three, and the cache is attached for ONLY these few seconds: work out what
+        # this run has to score. See the docstring — the lock is exclusive and cross-process, so
+        # every second spent holding it is a second denied to the light build sharing the box.
         _attach_sentiment_cache(con, data_dir)
         try:
             if _refresh_sentiment_cache(con):
@@ -2759,110 +2826,153 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
                 "SELECT COALESCE(MAX(slowest_bucket_seconds), 0.0) FROM cache.rescore_status"
             ).fetchone()[0] or 0.0
 
-            clf = _get_classifier()
-            n_new_mentions = 0
-            n_done = 0
-            _stopped_early = None
             # Baseline for "how many reviews did THIS run actually record", which a deadline
             # stop makes different from the size of the delta.
             _scored_before = con.execute("SELECT COUNT(*) FROM cache.scored_review").fetchone()[0]
-            for _b in _todo:
-                if _deadline is not None and time.monotonic() + _bucket_cost >= _deadline:
-                    _stopped_early = (
-                        f"sentiment deadline reached "
-                        f"({time.monotonic() - _PROC_T0:,.0f}s into the build; "
-                        f"~{_bucket_cost:,.0f}s needed for the next bucket)"
-                    )
-                    break
-                _t_bucket = time.monotonic()
-                # ONE predicate, used verbatim by the DELETE, the text build and the
-                # scored_review INSERT below. See the block comment above: the three agreeing
-                # is the whole invariant, so they share the string rather than each spelling
-                # it out.
-                _sent_pred = f"hash(recommendationid) % {_score_buckets} = {_b}"
-                _bucket_ids = f"SELECT recommendationid FROM _sent_new_ids WHERE {_sent_pred}"
-                # THE ONLY REVIEW TEXT THIS BUILD MATERIALISES. Scope is one bucket of the
-                # delta: pool reviews with no cache.scored_review record — reviews nobody has
-                # ever run the aspect regexes over — narrowed to this bucket. In steady state
-                # the whole delta is ~1-2M reviews / a few hundred MB against a 24.8M-row /
-                # 8.45GB corpus; on a config-wipe rescore the delta is the whole pool, and
-                # this bucket predicate is the only thing standing between that and the spill
-                # budget.
-                #
-                # Text is read straight from src.reviews (sqlite) rather than from a staging
-                # copy: there is no corpus-wide text table any more, and streaming the source
-                # to pick out the bucket's rows never materialises the rows it discards. The
-                # cost of bucketing is one such stream per bucket instead of one in total —
-                # paid deliberately, because the alternative (one full-pool copy, sliced
-                # afterwards) is the 8.45GB TEMP table that just killed the build.
-                #
-                # A TABLE, not a VIEW, so the 10-arm window scan below reads it without
-                # re-running the join per arm (a view here cost a 9.7h phase and a 22.7GiB
-                # spill in 2026-08).
-                #
-                # Idempotent rescan, scoped to THIS bucket: if a previous run died after
-                # inserting some of these reviews' mention rows but before recording them,
-                # they are selected again here — clear their rows first so the re-insert
-                # cannot double-count. Scoped, not delta-wide, so it can never touch a bucket
-                # this run has already finished or will never reach.
+        finally:
+            # END OF PHASE 1. Everything below — the regex, the window explosion, the
+            # VADER+classifier stream, i.e. all of the time — runs with the cache DETACHED and
+            # therefore available to any other process on the box.
+            _detach_sentiment_cache(con)
+
+        # ---- SCORING. The cache is DETACHED for all of it except each bucket's own commit. --
+        clf = _get_classifier()
+        n_new_mentions = 0
+        n_done = 0
+        _stopped_early = None
+        for _b in _todo:
+            if _deadline is not None and time.monotonic() + _bucket_cost >= _deadline:
+                _stopped_early = (
+                    f"sentiment deadline reached "
+                    f"({time.monotonic() - _PROC_T0:,.0f}s into the build; "
+                    f"~{_bucket_cost:,.0f}s needed for the next bucket)"
+                )
+                break
+            _t_bucket = time.monotonic()
+            # ONE predicate, used verbatim by the DELETE, the text build and the
+            # scored_review INSERT below. See the block comment above: the three agreeing
+            # is the whole invariant, so they share the string rather than each spelling
+            # it out.
+            _sent_pred = f"hash(recommendationid) % {_score_buckets} = {_b}"
+            _bucket_ids = f"SELECT recommendationid FROM _sent_new_ids WHERE {_sent_pred}"
+            # THE ONLY REVIEW TEXT THIS BUILD MATERIALISES. Scope is one bucket of the
+            # delta: pool reviews with no cache.scored_review record — reviews nobody has
+            # ever run the aspect regexes over — narrowed to this bucket. In steady state
+            # the whole delta is ~1-2M reviews / a few hundred MB against a 24.8M-row /
+            # 8.45GB corpus; on a config-wipe rescore the delta is the whole pool, and
+            # this bucket predicate is the only thing standing between that and the spill
+            # budget.
+            #
+            # Text is read straight from src.reviews (sqlite) rather than from a staging
+            # copy: there is no corpus-wide text table any more, and streaming the source
+            # to pick out the bucket's rows never materialises the rows it discards. The
+            # cost of bucketing is one such stream per bucket instead of one in total —
+            # paid deliberately, because the alternative (one full-pool copy, sliced
+            # afterwards) is the 8.45GB TEMP table that just killed the build.
+            #
+            # A TABLE, not a VIEW, so the 10-arm window scan below reads it without
+            # re-running the join per arm (a view here cost a 9.7h phase and a 22.7GiB
+            # spill in 2026-08).
+            #
+            # The bucket filter is applied inside the subquery rather than as an aliased
+            # WHERE on the join, so the predicate text is the SAME _sent_pred the DELETE
+            # above and the INSERT below use. It also shrinks the join's build side to the
+            # bucket instead of hashing the whole delta once per bucket.
+            con.execute(
+                f"""
+                CREATE TEMP TABLE _sent_new AS
+                SELECT n.appid, n.recommendationid, r.review_text
+                FROM (SELECT appid, recommendationid FROM _sent_new_ids
+                      WHERE {_sent_pred}) n
+                JOIN src.reviews r ON r.recommendationid = n.recommendationid
+                """
+            )
+            # The expensive regex runs ONLY over this bucket of the delta, never the full
+            # pool. REGULAR (not TEMP) so the INDEPENDENT read cursor in
+            # _stream_vader_scores / _stream_vader_and_classify can see it — that is a
+            # correctness requirement, not a preference, and bucketing must not quietly
+            # turn it into a TEMP table to save spill. Dropped at the end of every
+            # iteration so only one bucket's windows exist at a time and none of it ever
+            # ships in the versioned .duckdb.
+            con.execute(f"CREATE TABLE _sent_windows AS {_aspect_window_sql('_sent_new')}")
+            # Scored into a LOCAL table, not straight into cache.aspect_mention. This is the
+            # single change that makes a multi-day rescore coexist with the nightly light
+            # build: the stream below is ~16 minutes per bucket, and it used to run with the
+            # cache attached, i.e. with every other process on the box locked out of it for
+            # the whole rescore. Nothing about the scoring needs the cache — only the commit
+            # does — so the expensive part now runs detached and the hold drops to ~3s.
+            con.execute("DROP TABLE IF EXISTS _bucket_mentions")
+            con.execute(
+                "CREATE TEMP TABLE _bucket_mentions("
+                "recommendationid VARCHAR, aspect VARCHAR, compound DOUBLE, "
+                "clf_aspect VARCHAR, clf_sentiment VARCHAR, clf_margin DOUBLE)"
+            )
+            if clf is not None:
+                n_bucket_mentions = _stream_vader_and_classify(
+                    con,
+                    "SELECT recommendationid, aspect, window_text FROM _sent_windows",
+                    "INSERT INTO _bucket_mentions VALUES (?, ?, ?, ?, ?, ?)",
+                    clf,
+                )
+            else:
+                n_bucket_mentions = _stream_vader_scores(
+                    con,
+                    "SELECT recommendationid, aspect, window_text FROM _sent_windows",
+                    "INSERT INTO _bucket_mentions (recommendationid, aspect, compound) VALUES (?, ?, ?)",
+                )
+            n_new_mentions += n_bucket_mentions
+            con.execute("DROP TABLE IF EXISTS _sent_windows")
+            con.execute("DROP TABLE IF EXISTS _sent_new")
+
+            # PHASE 2, once per bucket: COMMIT THE BUCKET. The cache is attached for exactly
+            # these three statements — measured at ~0.8s for a 125k-review bucket against a
+            # production-sized cache on a laptop, ~3s scaled to the droplet — and released
+            # again before the next bucket's 16 minutes of scoring. If a light build holds
+            # the cache right now, _attach_sentiment_cache waits for it rather than dying
+            # (the 2026-08-31 failure mode).
+            #
+            # ORDER IS THE INVARIANT, and all three use the SAME _sent_pred over the SAME
+            # table:
+            #   DELETE  — idempotent rescan: a previous run that died after writing some of
+            #             these reviews' rows but before recording them leaves those rows
+            #             behind, and they must go before the re-insert or the bucket
+            #             double-counts. Scoped to this bucket, so it can never touch one
+            #             this run has already finished or will never reach.
+            #   INSERT mentions — every row for exactly these ids.
+            #   INSERT ids      — LAST, and only now. From this statement onward "in
+            #             scored_review" means "fully represented in aspect_mention" for
+            #             them, and the next run's anti-join skips them forever. Interrupt
+            #             anything above and the bucket simply never happened.
+            # That identity — not the fact that buckets happen to split on review
+            # boundaries — is what makes the completeness invariant hold, and it keeps
+            # holding if this loop is ever sliced some other way.
+            _attach_sentiment_cache(con, data_dir)
+            try:
                 con.execute(
                     f"DELETE FROM cache.aspect_mention WHERE recommendationid IN ({_bucket_ids})"
                 )
-                # The bucket filter is applied inside the subquery rather than as an aliased
-                # WHERE on the join, so the predicate text is the SAME _sent_pred the DELETE
-                # above and the INSERT below use. It also shrinks the join's build side to the
-                # bucket instead of hashing the whole delta once per bucket.
                 con.execute(
-                    f"""
-                    CREATE TEMP TABLE _sent_new AS
-                    SELECT n.appid, n.recommendationid, r.review_text
-                    FROM (SELECT appid, recommendationid FROM _sent_new_ids
-                          WHERE {_sent_pred}) n
-                    JOIN src.reviews r ON r.recommendationid = n.recommendationid
-                    """
+                    "INSERT INTO cache.aspect_mention "
+                    "SELECT recommendationid, aspect, compound, clf_aspect, clf_sentiment, "
+                    "clf_margin FROM _bucket_mentions"
                 )
-                # The expensive regex runs ONLY over this bucket of the delta, never the full
-                # pool. REGULAR (not TEMP) so the INDEPENDENT read cursor in
-                # _stream_vader_scores / _stream_vader_and_classify can see it — that is a
-                # correctness requirement, not a preference, and bucketing must not quietly
-                # turn it into a TEMP table to save spill. Dropped at the end of every
-                # iteration so only one bucket's windows exist at a time and none of it ever
-                # ships in the versioned .duckdb.
-                con.execute(f"CREATE TABLE _sent_windows AS {_aspect_window_sql('_sent_new')}")
-                if clf is not None:
-                    n_new_mentions += _stream_vader_and_classify(
-                        con,
-                        "SELECT recommendationid, aspect, window_text FROM _sent_windows",
-                        "INSERT INTO cache.aspect_mention VALUES (?, ?, ?, ?, ?, ?)",
-                        clf,
-                    )
-                else:
-                    n_new_mentions += _stream_vader_scores(
-                        con,
-                        "SELECT recommendationid, aspect, window_text FROM _sent_windows",
-                        "INSERT INTO cache.aspect_mention (recommendationid, aspect, compound) VALUES (?, ?, ?)",
-                    )
-                con.execute("DROP TABLE IF EXISTS _sent_windows")
-                con.execute("DROP TABLE IF EXISTS _sent_new")
-
-                # RECORD THE BUCKET — LAST, and only now. Every mention row for exactly these
-                # ids is committed above, so from this statement onward "in scored_review"
-                # means "fully represented in aspect_mention" for them, and the next run's
-                # anti-join will skip them forever. Interrupt anything above this line and the
-                # bucket simply never happened: its ids stay in the delta and the DELETE at the
-                # top of the next attempt clears whatever partial rows it left.
-                #
-                # _bucket_ids is the SAME predicate over the SAME table the DELETE and the text
-                # build used. That identity — not the fact that buckets happen to split on
-                # review boundaries — is what makes the completeness invariant hold, and it
-                # keeps holding if this loop is ever sliced some other way.
                 con.execute(f"INSERT INTO cache.scored_review {_bucket_ids}")
-                _elapsed = time.monotonic() - _t_bucket
-                _bucket_cost = max(_bucket_cost, _elapsed)
-                n_done += 1
+            finally:
+                _detach_sentiment_cache(con)
+            con.execute("DROP TABLE IF EXISTS _bucket_mentions")
+            _elapsed = time.monotonic() - _t_bucket
+            _bucket_cost = max(_bucket_cost, _elapsed)
+            n_done += 1
 
-            con.execute("DROP TABLE IF EXISTS _sent_new_ids")
+        con.execute("DROP TABLE IF EXISTS _sent_new_ids")
 
+        # PHASE 3, the last attach: record progress, and (unless this is --rescore-only) read
+        # the in-scope set back out for the marts. The read-back is the one genuinely long hold
+        # left in this function — it materialises the whole 21.7M-row cache — which is exactly
+        # why --rescore-only skips it: a mode whose job is to run for days beside a nightly must
+        # not take the lock for minutes at a time.
+        _attach_sentiment_cache(con, data_dir)
+        try:
             # DURABLE PROGRESS. Written here, while the cache is still attached, so a
             # multi-night rescore can be followed from the cache file alone:
             #     duckdb data/sentiment_cache.duckdb -c 'SELECT * FROM rescore_status'
@@ -2891,6 +3001,14 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
                 print(f"[etl] aspect sentiment: STOPPED EARLY between buckets — {_stopped_early}. "
                       f"{len(_todo) - n_done} bucket(s) deferred to the next run; progress is "
                       f"recorded in the cache (rescore_status).")
+
+            if scoring_only:
+                # --rescore-only stops here. Everything below builds staging tables that exist
+                # solely to feed marts this mode does not build, and the read-back in particular
+                # is the long cache hold this mode is designed to avoid.
+                print(f"[etl] rescore-only: {_scored_reviews - _scored_before:,} review(s) "
+                      f"recorded this run; {_pool_reviews - _scored_reviews:,} still unscored")
+                return _scored_reviews - _scored_before
 
             # Full in-scope set, read back from the cache (untouched old rows + just-inserted new
             # ones alike). Same shape/columns as the uncached branch above.
@@ -3668,6 +3786,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="Escape hatch: skip the pre-swap row-count validation gate and swap "
                          "unconditionally (e.g. after a deliberate mart removal or an expected "
                          "large shrink).")
+    ap.add_argument("--rescore-only", action="store_true",
+                    help="Refill the sentiment cache and NOTHING else: staging, then the "
+                         "resumable bucket scoring loop, then exit. No marts, no press "
+                         "sentiment, no validation, no swap — current.duckdb is never touched. "
+                         "For running a multi-day full rescore beside the nightly: the cache "
+                         "lock is only held for each bucket's ~3s commit, so --light builds "
+                         "keep publishing fresh prices/players meanwhile. Resumable — rerun it "
+                         "and it picks up where it stopped (progress: SELECT * FROM "
+                         "rescore_status in the cache file).")
     return ap
 
 
@@ -3747,6 +3874,23 @@ def main() -> int:
     mart_version = date.today().strftime("%Y%m%d")
     versioned = data_dir / f"prospect_{mart_version}.duckdb"
     current = data_dir / "current.duckdb"
+
+    # --rescore-only builds no mart at all, so it has nothing to say about --light's copies or
+    # the validation gate's swap. Refusing the combinations up front beats discovering an hour
+    # in that the flags disagreed about what this run was for.
+    if args.rescore_only:
+        bad = [f for f, on in (("--light", args.light),
+                               ("--skip-validation", args.skip_validation)) if on]
+        if bad:
+            print(f"ERROR: --rescore-only cannot be combined with {', '.join(bad)} — it builds "
+                  "no marts and never swaps, so there is nothing for those flags to affect.",
+                  file=sys.stderr)
+            return 2
+        if not _sentiment_cache_enabled():
+            print("ERROR: --rescore-only needs the sentiment cache, but "
+                  "PROSPECT_SENTIMENT_CACHE is off — there would be nothing to refill.",
+                  file=sys.stderr)
+            return 2
 
     # A --light build must never replace a same-day FULL build (its teardown/aspect tables
     # are stale copies) — checked up front so the mistake costs seconds, not the 30min build.
@@ -3842,6 +3986,23 @@ def main() -> int:
         else:
             print("[etl] sentiment cache  : DISABLED (PROSPECT_SENTIMENT_CACHE=off) "
                   "-- full rescore every run, cache file untouched")
+
+        # --rescore-only stops HERE, right after staging: score the delta into the sentiment
+        # cache and return, without building a single mart. Staging is required and not
+        # optional — the eligible pool comes from stg_review_key, so there is nothing to score
+        # without it — but everything after this point exists to produce an artifact this mode
+        # deliberately does not produce. Nothing is swapped, nothing is validated,
+        # current.duckdb is not touched, and the .building scratch is swept by the finally
+        # below exactly as it is for a failed build.
+        if args.rescore_only:
+            print("[etl] RESCORE-ONLY: refilling the sentiment cache; no marts, no swap")
+            t_sent = time.perf_counter()
+            n_sent = compute_aspect_sentiment(con, data_dir, scoring_only=True)
+            print(f"[etl] rescore-only done: {n_sent:,} review(s) scored "
+                  f"({time.perf_counter() - t_sent:.1f}s). Rerun to continue; check progress "
+                  f"with: duckdb {data_dir / SENTIMENT_CACHE_DB_NAME} "
+                  f"-c 'SELECT * FROM rescore_status'")
+            return 0
 
         # --light: the two full-text monsters (teardown family + aspect excerpts) are ~80% of
         # a full build; instead of running them, copy their OUTPUT TABLES verbatim from the

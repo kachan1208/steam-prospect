@@ -35,8 +35,10 @@ Every test runs the REAL compute_aspect_sentiment against a real on-disk cache f
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -325,10 +327,16 @@ def test_legacy_cache_without_scored_review_is_still_seeded():
 # ------------------------------------------------------------------------------------------
 
 def _crash_after(k_buckets: int, partial_rows: int = 3):
-    """A scorer that completes `k_buckets` buckets, then writes a PARTIAL set of mention rows
-    for the next one and dies inside it. The partial write matters: without it the test would
-    only prove that a bucket which wrote nothing records nothing, which is trivially true and
-    says nothing about the invariant."""
+    """A scorer that completes `k_buckets` buckets, then scores a PARTIAL set of windows for the
+    next one and dies inside it. The partial write matters: without it the test would only prove
+    that a bucket which did nothing records nothing, which is trivially true.
+
+    Since 2026-09-02 those partial rows land in the LOCAL staging table, not in the cache — the
+    scoring pass runs with the cache detached so a multi-day rescore does not lock out the light
+    build. The crash window that could leave rows in the CACHE without their ids therefore
+    shrank to the three-statement commit; that path is covered by
+    test_sentiment_cache_scored.py::test_crash_recovery_rescans_without_duplicates, which
+    reproduces it directly by deleting a scored_review row."""
     real = bm._stream_vader_and_classify
     state = {"calls": 0}
 
@@ -374,13 +382,19 @@ def test_interrupted_bucket_is_not_recorded():
         mentions, scored = _cache(data_dir)
 
     assert state["calls"] == k + 1, "the fixture must actually reach the interrupted bucket"
-    # The interrupted bucket DID write rows — so this is not a vacuous "nothing happened" case.
-    partial = {row[0] for row in mentions} & interrupted_ids
-    assert partial, "the interrupted bucket must have committed some mention rows"
-    # ...and not one of its ids is claimed as scanned.
+    # Not a vacuous "nothing happened at all" run: the buckets before it really did commit.
+    mention_ids = {row[0] for row in mentions}
+    assert mention_ids & done_ids, "the completed buckets must have committed mention rows"
+    # Not one id of the interrupted bucket is claimed as scanned...
     assert not (scored & interrupted_ids), (
         f"{len(scored & interrupted_ids)} id(s) from the interrupted bucket were recorded in "
         "scored_review; a bucket must be recorded only after all of its rows are committed"
+    )
+    # ...and since scoring now runs with the cache detached, it left no rows there either, so
+    # there is nothing for the next run to clean up. Strictly stronger than "ids absent".
+    assert not (mention_ids & interrupted_ids), (
+        f"{len(mention_ids & interrupted_ids)} id(s) of the interrupted bucket wrote mention "
+        "rows; scoring must stage locally and commit only in the bucket's own attach window"
     )
     # ...while the buckets that completed before it are durably done.
     assert scored == done_ids, (
@@ -557,3 +571,166 @@ def test_rescore_status_reports_progress_from_the_cache_alone():
             finally:
                 con.close()
         assert _status(data_dir) == {}, "a config wipe must clear the progress report"
+
+
+# ------------------------------------------------------------------------------------------
+# Coexistence — a multi-day rescore must not lock the light build out of the cache.
+#
+# MEASURED FACTS this rests on (duckdb 1.5.4, two real OS processes, not the docs):
+#   * the cache lock is per FILE, cross-process, and exclusive in BOTH directions: while one
+#     process holds it read-write, a second process's ATTACH fails at once with
+#     `IOException: Could not set lock on file ...: Conflicting lock`, and a READ_ONLY attach
+#     fails identically — there is no read-only escape hatch;
+#   * release is instant: a poller re-acquires within one poll interval of the holder's DETACH;
+#   * committing one 125k-review bucket into a production-sized cache holds it ~0.8s on a
+#     laptop, ~3s scaled to the droplet — against ~16 min of scoring per bucket, a duty cycle
+#     near 0.3%.
+# Those two together are what make coexistence real rather than nominal, and they are only
+# true because the scoring pass runs with the cache DETACHED. Both directions are pinned here.
+# ------------------------------------------------------------------------------------------
+
+# A real light-build press pass, in its own process, against the same cache file. Not a bare
+# ATTACH: the thing that has to work is compute_press_sentiment, which attaches read-write,
+# writes cache.press_article and detaches — the exact call that died on 2026-08-31.
+_PRESS_PASS = r'''
+import sys, json
+sys.path.insert(0, {etl!r})
+import duckdb, build_marts as bm
+bm.SENTIMENT_CACHE_LOCK_WAIT_SECONDS = {wait}
+bm.SENTIMENT_CACHE_LOCK_POLL_SECONDS = 0.05
+con = duckdb.connect(":memory:")
+con.execute("SET threads=3"); con.execute("SET memory_limit='1GB'")
+con.execute("CREATE SCHEMA src")
+con.execute("CREATE TABLE src.articles(id BIGINT, title VARCHAR, summary VARCHAR, source VARCHAR)")
+con.execute("CREATE TABLE src.article_game_mentions(article_id BIGINT, appid INTEGER)")
+con.executemany("INSERT INTO src.articles VALUES (?,?,?,?)",
+                [(i, f"Review {{i}}", "The combat is excellent and the price is fair.", "press")
+                 for i in range({n_articles})])
+con.executemany("INSERT INTO src.article_game_mentions VALUES (?,?)",
+                [(i, 7) for i in range({n_articles})])
+n = bm.compute_press_sentiment(con, {data_dir!r})
+print(json.dumps({{"scored": n}}))
+'''
+
+# Holds the cache read-write for a fixed time, like a light build's press pass in progress.
+_HOLDER = r'''
+import sys, time
+sys.path.insert(0, {etl!r})
+import duckdb
+con = duckdb.connect(":memory:")
+con.execute("SET threads=3"); con.execute("SET memory_limit='1GB'")
+con.execute("ATTACH '{cache}' AS cache")
+open({marker!r}, "w").write("held")
+time.sleep({hold})
+con.execute("DETACH cache")
+'''
+
+
+def _run_press_pass(data_dir: Path, wait: float = 5.0, n_articles: int = 150):
+    return subprocess.run(
+        [sys.executable, "-c", _PRESS_PASS.format(
+            etl=str(ETL), wait=wait, data_dir=str(data_dir), n_articles=n_articles)],
+        capture_output=True, text=True, timeout=180,
+    )
+
+
+def test_light_build_press_pass_runs_while_a_rescore_is_scoring():
+    """THE COEXISTENCE REQUIREMENT. While the rescore is inside a scoring pass, a separate
+    process must be able to run a full press pass — attach read-write, write, detach — and
+    finish. The rescore then carries on and completes normally.
+
+    Deterministic, not a race: the rescore's scorer is hooked to launch the press process and
+    BLOCK until it exits, so the overlap is guaranteed rather than hoped for. The press process
+    is given a short lock wait, so if the rescore were holding the cache (as it did before the
+    scoring pass was moved outside the attach window) it fails in seconds instead of hanging."""
+    real = bm._stream_vader_and_classify
+    result = {}
+
+    def scorer_with_concurrent_press(con, select_sql, insert_sql, clf):
+        n = real(con, select_sql, insert_sql, clf)
+        if "proc" not in result:                       # once, during the first bucket
+            result["proc"] = _run_press_pass(result["data_dir"])
+        return n
+
+    with tempfile.TemporaryDirectory() as td:
+        data_dir = Path(td)
+        result["data_dir"] = data_dir
+        bm._stream_vader_and_classify = scorer_with_concurrent_press
+        try:
+            n_scored = _score(data_dir)
+        finally:
+            bm._stream_vader_and_classify = real
+
+        proc = result["proc"]
+        assert proc.returncode == 0, (
+            "a light build's press pass could not run while the rescore was scoring:\n"
+            f"{proc.stderr[-1500:]}"
+        )
+        assert json.loads(proc.stdout.strip().splitlines()[-1])["scored"] == 150
+
+        # The rescore was not damaged by the handoff: it finished every bucket, and the press
+        # rows the other process wrote are still there.
+        assert n_scored == N_REVIEWS
+        mentions, scored = _cache(data_dir)
+        assert scored == POOL_IDS and len(mentions) > 0
+        c = duckdb.connect(str(data_dir / bm.SENTIMENT_CACHE_DB_NAME))
+        try:
+            assert c.execute("SELECT count(*) FROM press_article").fetchone()[0] == 150
+        finally:
+            c.close()
+
+
+def test_rescore_waits_for_a_light_build_instead_of_dying_on_the_lock():
+    """The other direction. When the light build holds the cache, the rescore's per-bucket
+    commit must WAIT for it — the 2026-08-31 failure was exactly this attach dying on
+    `Conflicting lock` instead of retrying. Bounded, so a genuinely wedged holder still fails
+    the build rather than hanging a nightly forever."""
+    real = bm._stream_vader_and_classify
+    state = {}
+    HOLD = 3.0
+
+    def scorer_then_take_the_lock(con, select_sql, insert_sql, clf):
+        n = real(con, select_sql, insert_sql, clf)
+        if "proc" not in state:
+            # Hand the cache to another process right before this bucket's commit, and do not
+            # return until it actually holds it — otherwise the rescore might commit first and
+            # the test would prove nothing.
+            marker = state["data_dir"] / "held.marker"
+            state["proc"] = subprocess.Popen(
+                [sys.executable, "-c", _HOLDER.format(
+                    etl=str(ETL), cache=str(state["data_dir"] / bm.SENTIMENT_CACHE_DB_NAME),
+                    marker=str(marker), hold=HOLD)])
+            t0 = time.monotonic()
+            while not marker.exists() and time.monotonic() - t0 < 30:
+                time.sleep(0.02)
+            assert marker.exists(), "the holder process never acquired the cache"
+            state["handed_off_at"] = time.monotonic()
+        return n
+
+    prev_wait = bm.SENTIMENT_CACHE_LOCK_WAIT_SECONDS
+    prev_poll = bm.SENTIMENT_CACHE_LOCK_POLL_SECONDS
+    bm.SENTIMENT_CACHE_LOCK_WAIT_SECONDS = 60.0
+    bm.SENTIMENT_CACHE_LOCK_POLL_SECONDS = 0.05
+    with tempfile.TemporaryDirectory() as td:
+        data_dir = Path(td)
+        state["data_dir"] = data_dir
+        # The cache file has to exist before the holder can attach it, so seed it with a run.
+        _score(data_dir, bucket_reviews=10_000)
+        c = duckdb.connect(str(data_dir / bm.SENTIMENT_CACHE_DB_NAME))
+        c.execute("DELETE FROM scored_review")   # make everything unscored again
+        c.execute("DELETE FROM aspect_mention")
+        c.close()
+
+        bm._stream_vader_and_classify = scorer_then_take_the_lock
+        try:
+            n_scored = _score(data_dir)          # must SUCCEED, having waited
+        finally:
+            bm._stream_vader_and_classify = real
+            bm.SENTIMENT_CACHE_LOCK_WAIT_SECONDS = prev_wait
+            bm.SENTIMENT_CACHE_LOCK_POLL_SECONDS = prev_poll
+            state["proc"].wait(timeout=60)
+
+        assert "handed_off_at" in state, "the fixture never handed the lock over"
+        assert n_scored == N_REVIEWS, f"the rescore lost work to the handoff: {n_scored}"
+        _, scored = _cache(data_dir)
+        assert scored == POOL_IDS
