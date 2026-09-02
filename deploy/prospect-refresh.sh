@@ -412,55 +412,101 @@ run_step "genre_sync" 600 "python3 -m steam_scraper.scraper --db steam_games.db 
 # app restart + prune. On failure/timeout: keep the previous mart so the app never serves a partial.
 STEP="etl"; ETL_T0=$(date -u +%s)
 echo "[etl] start $(date -u)"
-# Stray-job sweep (2026-08-19): the ETL peaks past 2GB and shares a 3.9GB box — any scraper
-# job still running here (an overrunning daytime keeper, a manually chained catch-up run)
-# starves it into an OOM kill (rc=137, exactly what happened on 2026-08-18: an overnight
-# socials+demos chain ate the headroom). Every scraper job is resumable by design (staleness
-# markers + daily crons re-select where they left off), so killing strays is always safe;
-# losing tonight's mart is not. The refresh's OWN scraper steps are long done by this point.
-pkill -f 'steam_scraper.scraper' 2>/dev/null && echo "[etl] swept stray scraper jobs" || true
-sleep 5
-# Stale-scratch sweep (2026-08-19). build_marts spills to <version>.duckdb.building.tmp/ and on
-# this corpus that reached 18GB. A run that dies (last night's OOM) leaves the whole spill behind
-# forever: the success-path cleanup below never matched it — its glob is *.duckdb.tmp, while the
-# real names end in .duckdb.building.tmp — and the failure path cleaned nothing at all. One dead
-# run had the disk at 90% (8GB free) while the next run was still spilling into it. Sweep BEFORE
-# starting, and only artifacts not belonging to today's build, so headroom is guaranteed no matter
-# how the previous attempt ended.
-find /root/prospect/data -maxdepth 1 -name 'prospect_*.duckdb.building*' \
-     ! -name "prospect_$(date -u +%Y%m%d).duckdb.building*" -exec rm -rf {} + 2>/dev/null || true
-df -h /root/prospect/data | tail -1 | awk '{print "[etl] disk before build: " $4 " free (" $5 " used)"}'
-cd /root/prospect/etl || exit 1
 ETL_RC=0
-# The ETL is the one step that does NOT go through run_step (it has a bespoke success path below:
-# restart, prune, metrics). It still needs the same logging contract, so it gets one by hand.
+ETL_SKIPPED=0
+# Concurrent-build guard (2026-09-02) — the same test light-build-cron.sh grew, for the same
+# reason. Until now NOTHING here asked whether another build_marts was already running:
+# cron-wrap's flock serialises the CRON jobs only, so a build started OUTSIDE the lock (a manual
+# full build in an interactive shell) had this step open the same prospect_<version>.duckdb
+# .building file and the same GB-scale spill dir, on a 2-core/3.9GB box that cannot feed two
+# DuckDB builds at once.
 #
-# `python -u`: build_marts prints `[etl] ran <mart>.sql (Ns)` for every mart as it goes. On
-# 2026-08-21 it was killed at the 4h timeout and not one of those lines survived the buffer,
-# leaving a four-hour failure with nothing to diagnose. Unbuffered, a timeout now leaves behind
-# the exact mart it died in.
+# A `--rescore-only` run is NOT such a build and must NOT stop the nightly. It writes only the
+# sentiment cache, never a mart and never the swap; its scratch has its own name that shares
+# nothing with a mart build's (RESCORE_SCRATCH_DB_NAME in etl/build_marts.py); and it is
+# designed to run for DAYS beside this job. Treating it as a competing build is exactly how a
+# rescore ends up needing a build hold, which freezes every published mart for the rescore's
+# whole length — the thing --rescore-only exists to avoid.
 #
-# Timeout raised 4h -> 6h, because 4h was never above the distribution it was meant to bound.
-# Historical ETL durations from this log (`grep '^\[etl\] \(OK\|FAILED\)'`):
+# `grep -v` over `pgrep -af`, not a second pgrep pattern: the question is "is any build_marts
+# running that is NOT a rescore", and a bare pattern cannot express the negative. The `-n` test
+# keeps an empty pgrep (no builds at all) from reading as a match, and the bracket in
+# "[b]uild_marts" keeps pgrep from matching its own cmdline — which is also why this check has
+# to live in a script file and never in an inline cron command.
 #
-#   2225 2402 2361 2413 ... 11245 12128 12469 12477 12652 12729 13267 13350 15151 16467 17403
-#
-# Three successful runs took 15151s, 16467s and 17403s — every one of them longer than the 14400s
-# ceiling. They only survived because the timeout was added after they ran. So the 2026-08-21
-# rc=124 was not a new regression; it was a mine laid earlier, and the marts added that day cost
-# ~49s in total (mart_niche 35.3s + mart_game_event 9.7s + mart_niche_game 4.2s, measured).
-#
-# 6h sits 24% above the observed 17403s maximum, which leaves room for a corpus that keeps
-# growing. It also still fits the schedule: the ETL starts ~23:08, so 6h ends ~05:08, before the
-# 06:00 review keeper that shares this flock. The failure mode of a ceiling set too low is losing
-# the ENTIRE night's mart, which is far worse than a run that goes long.
-ETL_LOG="$STEP_LOG_DIR/etl.${RUN_TS}.log"
-echo "[etl] log: $ETL_LOG"
-timeout 21600 /root/prospect/etl/.venv/bin/python -u build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data > "$ETL_LOG" 2>&1 || ETL_RC=$?
-[ "$ETL_RC" -ne 0 ] && explain_failure "etl" "$ETL_RC" "$ETL_LOG"
-# Per-mart timings, slowest first — the run's own profile, kept even on success so a slow build is
-# visible BEFORE it becomes a failed one.
-grep -E '^\[etl\] ran ' "$ETL_LOG" 2>/dev/null | sort -t'(' -k2 -rn | head -8 | sed 's/^/[etl] slowest: /'
+# A skip is LOUD, deliberately. It logs the offending cmdline here and leaves ETL_RC non-zero,
+# so the existing push below reports prospect_pipeline_step_success{step="etl"} 0 and
+# alert_check.py's "any step failed in 24h" check fires. A night that builds no mart must never
+# be indistinguishable from a night that built one — that is how 22 of 26 nightlies failed
+# silently.
+_builds=$(pgrep -af "[b]uild_marts" || true)
+if [ -n "$_builds" ] && printf '%s' "$_builds" | grep -qv -- "--rescore-only"; then
+    ETL_SKIPPED=1
+    ETL_RC=125          # not 124 (that is `timeout`'s) and not any build_marts exit code:
+                        # "did not run", so the log never reads as a build that failed.
+    echo "[etl] SKIPPED — another mart build is already running (not a --rescore-only run):"
+    printf '%s\n' "$_builds" | sed 's/^/       /'
+    echo "       No mart is built tonight; that build owns the swap. Previous mart kept, app"
+    echo "       not restarted. Scraping above still ran, so tomorrow's build has the data."
+    push "prospect_etl_skipped_concurrent_build 1"
+else
+    push "prospect_etl_skipped_concurrent_build 0"
+    # Stray-job sweep (2026-08-19): the ETL peaks past 2GB and shares a 3.9GB box — any scraper
+    # job still running here (an overrunning daytime keeper, a manually chained catch-up run)
+    # starves it into an OOM kill (rc=137, exactly what happened on 2026-08-18: an overnight
+    # socials+demos chain ate the headroom). Every scraper job is resumable by design (staleness
+    # markers + daily crons re-select where they left off), so killing strays is always safe;
+    # losing tonight's mart is not. The refresh's OWN scraper steps are long done by this point.
+    pkill -f 'steam_scraper.scraper' 2>/dev/null && echo "[etl] swept stray scraper jobs" || true
+    sleep 5
+    # Stale-scratch sweep (2026-08-19). build_marts spills to <version>.duckdb.building.tmp/ and
+    # on this corpus that reached 18GB. A run that dies (last night's OOM) leaves the whole spill
+    # behind forever: the success-path cleanup below never matched it — its glob is *.duckdb.tmp,
+    # while the real names end in .duckdb.building.tmp — and the failure path cleaned nothing at
+    # all. One dead run had the disk at 90% (8GB free) while the next run was still spilling into
+    # it. Sweep BEFORE starting, and only artifacts not belonging to today's build, so headroom is
+    # guaranteed no matter how the previous attempt ended.
+    #
+    # Still `prospect_*` only, deliberately: a --rescore-only run's scratch is NOT in this family
+    # (rescore_scratch.duckdb*), so this sweep cannot reach a multi-day rescore's file or its
+    # spill. build_marts' own age-scoped sweep owns that name — including collecting it when a
+    # SIGKILLed rescore leaves it behind.
+    find /root/prospect/data -maxdepth 1 -name 'prospect_*.duckdb.building*' \
+         ! -name "prospect_$(date -u +%Y%m%d).duckdb.building*" -exec rm -rf {} + 2>/dev/null || true
+    df -h /root/prospect/data | tail -1 | awk '{print "[etl] disk before build: " $4 " free (" $5 " used)"}'
+    cd /root/prospect/etl || exit 1
+    # The ETL is the one step that does NOT go through run_step (it has a bespoke success path
+    # below: restart, prune, metrics). It still needs the same logging contract, so it gets one
+    # by hand.
+    #
+    # `python -u`: build_marts prints `[etl] ran <mart>.sql (Ns)` for every mart as it goes. On
+    # 2026-08-21 it was killed at the 4h timeout and not one of those lines survived the buffer,
+    # leaving a four-hour failure with nothing to diagnose. Unbuffered, a timeout now leaves behind
+    # the exact mart it died in.
+    #
+    # Timeout raised 4h -> 6h, because 4h was never above the distribution it was meant to bound.
+    # Historical ETL durations from this log (`grep '^\[etl\] \(OK\|FAILED\)'`):
+    #
+    #   2225 2402 2361 2413 ... 11245 12128 12469 12477 12652 12729 13267 13350 15151 16467 17403
+    #
+    # Three successful runs took 15151s, 16467s and 17403s — every one of them longer than the
+    # 14400s ceiling. They only survived because the timeout was added after they ran. So the
+    # 2026-08-21 rc=124 was not a new regression; it was a mine laid earlier, and the marts added
+    # that day cost ~49s in total (mart_niche 35.3s + mart_game_event 9.7s + mart_niche_game 4.2s,
+    # measured).
+    #
+    # 6h sits 24% above the observed 17403s maximum, which leaves room for a corpus that keeps
+    # growing. It also still fits the schedule: the ETL starts ~23:08, so 6h ends ~05:08, before
+    # the 06:00 review keeper that shares this flock. The failure mode of a ceiling set too low is
+    # losing the ENTIRE night's mart, which is far worse than a run that goes long.
+    ETL_LOG="$STEP_LOG_DIR/etl.${RUN_TS}.log"
+    echo "[etl] log: $ETL_LOG"
+    timeout 21600 /root/prospect/etl/.venv/bin/python -u build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data > "$ETL_LOG" 2>&1 || ETL_RC=$?
+    [ "$ETL_RC" -ne 0 ] && explain_failure "etl" "$ETL_RC" "$ETL_LOG"
+    # Per-mart timings, slowest first — the run's own profile, kept even on success so a slow build
+    # is visible BEFORE it becomes a failed one.
+    grep -E '^\[etl\] ran ' "$ETL_LOG" 2>/dev/null | sort -t'(' -k2 -rn | head -8 | sed 's/^/[etl] slowest: /'
+fi
 ETL_DUR=$(( $(date -u +%s) - ETL_T0 ))
 if [ "$ETL_RC" -eq 0 ]; then
     # Restart is now VERIFIED (2026-08-28). The old code ran `docker restart prospect` bare
@@ -509,6 +555,12 @@ prospect_pipeline_step_last_run_timestamp{step=\"restart\"} $(date -u +%s)"
         echo "[etl] built OK in ${ETL_DUR}s but the RESTART FAILED verification — mart is" \
              "swapped, app is NOT confirmed healthy; check 'docker logs prospect'"
     fi
+elif [ "$ETL_SKIPPED" -eq 1 ]; then
+    # Skipped, not failed: nothing ran, so there is no ETL log to explain and no scratch of ours
+    # to reclaim — and the spill that DOES exist belongs to the build we stepped aside for, which
+    # is precisely what must not be touched. RESULT stays FAILED (the night published no mart),
+    # which is what makes the skip visible in refresh_history.json and prospect_pipeline_run_ok.
+    echo "[etl] not run — see the SKIPPED note above; previous mart kept, app not restarted"
 else
     echo "[etl] FAILED rc=$ETL_RC after ${ETL_DUR}s — kept previous mart, app not restarted"
     # Reclaim the spill. A dead build leaves its DuckDB scratch directory behind, and on this
