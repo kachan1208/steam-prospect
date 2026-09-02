@@ -61,7 +61,23 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # --limit stays 15000 deliberately: a smaller limit was drafted as a mitigation BEFORE the
 # cause was found, and shipping it now would cap coverage permanently for no reason. The 1500M
 # cgroup cap remains the safety net, and alert_check reports a recurrence.
-0 6 * * * /root/prospect/deploy/cron-wrap.sh review_keeper bash -c 'cd /root/steam-scraper && timeout 46800 systemd-run --scope --quiet -p MemoryMax=1500M -p MemorySwapMax=0 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 20000 --min-reviews 1 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0' >> /root/deepen_backfill.log 2>&1
+#
+# timeout 46800 -> 25200 (13h -> 7h), 2026-09-02. FIXING THE OOM IS WHAT CREATED THIS BUG.
+# cron-wrap takes /root/.prospect-refresh.lock, which light_build (13:30) needs too. While this
+# step OOM-died at ~30min (1687s, 1945s) it released the lock long before 13:30 and nobody
+# noticed the overlap. Now that it survives — 2026-09-01 ran 10618s and 2026-09-02 ran 9169s,
+# both still going when killed, both oom_kill 0 — a 13h window runs 06:00->19:00 and SKIPS the
+# light build every single day. Confirmed: 09-01 13:30 logged "SKIPPED: lock is held".
+#
+# 06:00 + 7h = 13:00, clearing 13:30 with 30 minutes of margin. Safe to truncate because this
+# is an INCREMENTAL backfill: --refresh-days 7 / --target 20000 means a shorter slice deepens
+# fewer games tonight and the rest are picked up tomorrow. Nothing is lost, and a daily mart
+# refresh is worth more than a few hundred extra games per night.
+#
+# NOTE this step has never once ended on its own — every run on record is rc=137 (OOM) or
+# rc=143 (operator SIGTERM) — so its natural runtime is UNKNOWN and cannot be scheduled around.
+# The bound is the point: it must yield the lock at a predictable time, whatever it has done.
+0 6 * * * /root/prospect/deploy/cron-wrap.sh review_keeper bash -c 'cd /root/steam-scraper && timeout 25200 systemd-run --scope --quiet -p MemoryMax=1500M -p MemorySwapMax=0 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 20000 --min-reviews 1 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0' >> /root/deepen_backfill.log 2>&1
 
 # ── 06:15 UTC — daytime socials keeper. OWN lock, deliberately: it must run ALONGSIDE the
 # review keeper (different endpoints — store pages vs appreviews), so it must not contend for
