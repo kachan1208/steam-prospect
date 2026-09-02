@@ -605,3 +605,104 @@ def test_light_build_refuses_to_replace_the_full_build(published):
     assert sorted(p.name for p in data.iterdir()) == before, (
         "the light guard must refuse before touching the data dir"
     )
+
+
+# ------------------------------------------------------------------------------------------
+# --rescore-only: refill the sentiment cache and NOTHING else.
+#
+# The mode exists so a multi-day full rescore can run beside the nightly instead of instead of
+# it. A full build with a partly-refilled cache would rebuild mart_game_aspect_reviews off it,
+# drop >VALIDATE_MAX_DROP_PCT, fail the gate and swap nothing — freezing prices, players and
+# new releases for the whole rescore while paging every night. This mode decouples the two:
+# --light keeps publishing fresh data, --rescore-only chips away at the cache.
+# ------------------------------------------------------------------------------------------
+
+def test_rescore_only_fills_the_cache_and_publishes_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("PROSPECT_SENTIMENT_CACHE", "on")
+    monkeypatch.setenv("PROSPECT_RESCORE_BUCKET_REVIEWS", "200")   # 1200 reviews -> 6 buckets
+    monkeypatch.delenv("PROSPECT_SENTIMENT_DEADLINE_SECONDS", raising=False)
+    src = tmp_path / "steam_games.db"
+    data = tmp_path / "data"
+    data.mkdir()
+    build_source(src)
+
+    assert _run(["--source", str(src), "--data-dir", str(data), "--rescore-only"]) == 0
+    out = capsys.readouterr().out
+    # It must STOP after scoring. The read-back materialises the whole in-scope cache and is
+    # the one long cache hold left in compute_aspect_sentiment — taking it here would lock the
+    # light build out for minutes at a time, which is the entire thing this mode avoids. Its
+    # summary line is the observable proof it did not run.
+    assert "rescore-only" in out
+    assert "mention rows in scope total" not in out, (
+        "--rescore-only ran the read-back; it must stop after the scoring loop"
+    )
+
+    # The cache was filled...
+    cache = data / bm.SENTIMENT_CACHE_DB_NAME
+    assert cache.exists()
+    c = duckdb.connect(str(cache), read_only=True)
+    try:
+        scored, mentions = c.execute(
+            "SELECT (SELECT count(*) FROM scored_review), (SELECT count(*) FROM aspect_mention)"
+        ).fetchone()
+        status = c.execute("SELECT reviews_in_pool, reviews_scored, buckets_total, buckets_done "
+                           "FROM rescore_status").fetchall()
+    finally:
+        c.close()
+    assert scored == 40 * 30, f"every eligible review must be scanned, {scored} were"
+    assert mentions > 0
+    assert status == [(1200, 1200, 6, 6)], status
+
+    # ...and NOTHING was published: no mart, no symlink, no leftover scratch.
+    left = sorted(p.name for p in data.iterdir())
+    assert left == [bm.SENTIMENT_CACHE_DB_NAME], (
+        f"--rescore-only must leave only the cache behind, found {left}"
+    )
+
+
+def test_rescore_only_resumes_and_is_a_no_op_once_complete(tmp_path, monkeypatch):
+    """Rerunning it is how a multi-day rescore makes progress, so the second run must score the
+    remainder and a third must score nothing at all."""
+    monkeypatch.setenv("PROSPECT_SENTIMENT_CACHE", "on")
+    monkeypatch.setenv("PROSPECT_RESCORE_BUCKET_REVIEWS", "200")
+    src = tmp_path / "steam_games.db"
+    data = tmp_path / "data"
+    data.mkdir()
+    build_source(src)
+    argv = ["--source", str(src), "--data-dir", str(data), "--rescore-only"]
+
+    assert _run(argv) == 0
+    c = duckdb.connect(str(data / bm.SENTIMENT_CACHE_DB_NAME), read_only=True)
+    first = c.execute("SELECT count(*) FROM aspect_mention").fetchone()[0]
+    c.close()
+
+    assert _run(argv) == 0
+    c = duckdb.connect(str(data / bm.SENTIMENT_CACHE_DB_NAME), read_only=True)
+    try:
+        again, done = c.execute(
+            "SELECT (SELECT count(*) FROM aspect_mention), "
+            "       (SELECT buckets_done FROM rescore_status)").fetchone()
+    finally:
+        c.close()
+    assert again == first, "a completed rescore must not rescore anything"
+    assert done == 0, f"the second run had nothing to do, but did {done} bucket(s)"
+
+
+def test_rescore_only_refuses_flags_it_cannot_honour(tmp_path, monkeypatch):
+    """It builds no mart and never swaps, so --light and --skip-validation have nothing to act
+    on, and with the cache off there is nothing to refill. All three must fail in seconds
+    rather than an hour into staging."""
+    src = tmp_path / "steam_games.db"
+    data = tmp_path / "data"
+    data.mkdir()
+    build_source(src)
+    base = ["--source", str(src), "--data-dir", str(data), "--rescore-only"]
+
+    monkeypatch.setenv("PROSPECT_SENTIMENT_CACHE", "on")
+    assert _run(base + ["--light"]) == 2
+    assert _run(base + ["--skip-validation"]) == 2
+    monkeypatch.setenv("PROSPECT_SENTIMENT_CACHE", "off")
+    assert _run(base) == 2
+    assert sorted(p.name for p in data.iterdir()) == [], (
+        "a refused --rescore-only must not touch the data dir"
+    )
