@@ -24,6 +24,17 @@ export PROSPECT_DUCKDB_MEMORY_LIMIT=2500MB   # cap DuckDB on the 4GB box
 # and the next build's scratch, so a runaway query now fails on its own budget instead of
 # taking the filesystem down with it. Raise only alongside `df -h /`.
 export PROSPECT_DUCKDB_TEMP_MAX=15GiB
+# Stop the sentiment phase from running into the `timeout 21600` below (2026-09-02). A full
+# rescore (a SENTIMENT_CACHE_VERSION bump wipes the cache, so the "delta" becomes all 24.4M
+# reviews) is ~52h of scoring at the droplet's measured ~116 mention-rows/s — it CANNOT finish
+# in one night, and that is fine: build_marts scores in resumable hash buckets and records each
+# completed bucket in the cache, so the work accumulates across nights. What is NOT fine is
+# being SIGKILLed by `timeout` mid-bucket: that throws the in-flight bucket away AND takes the
+# whole build (marts, validation, swap, even the log buffer) with it. This budget makes the ETL
+# stop starting new buckets 3h in, leaving 3h for staging's tail, the mart loop, validation and
+# the swap — comfortably above the 17403s worst observed FULL run. Keep it well under 21600 and
+# move the two together.
+export PROSPECT_SENTIMENT_DEADLINE_SECONDS=10800
 # Droplet-local secrets (STEAM_API_KEY, ...) — file lives only on the box, chmod 600,
 # never in git. Steps that can use a key pick it up from the environment; every keyless
 # path keeps working if the file is absent.

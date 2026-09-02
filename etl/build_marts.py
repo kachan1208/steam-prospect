@@ -637,6 +637,38 @@ SENTIMENT_POS_THRESHOLD = 0.05
 SENTIMENT_NEG_THRESHOLD = -0.05
 SENTIMENT_SCORE_BATCH = 20000    # rows pulled+scored+inserted per streamed batch (bounded memory)
 
+# THE UNIT OF WORK for compute_aspect_sentiment's scoring loop: how many REVIEWS one hash bucket
+# should hold. The bucket count is derived from this and the size of the delta
+# (_rescore_bucket_count), rather than being a fixed number, because the two regimes it has to
+# serve differ by four orders of magnitude and want opposite things:
+#
+#   ordinary night   ~1.1M new reviews  ->   9 buckets   (bucketing is nearly free, and each
+#                                                         bucket re-streams src.reviews, so a
+#                                                         big fixed count would be pure cost)
+#   config wipe      24.4M reviews      -> 196 buckets   (the delta is the whole corpus and the
+#                                                         run CANNOT finish it in one night)
+#
+# SIZED FROM MEASURED THROUGHPUT, against the nightly's spare time budget:
+#   * scoring rate on the droplet ~= 116 mention-rows/s. (Measured: this codebase's
+#     _stream_vader_and_classify does 405 rows/s on 206-char aspect windows on a dev laptop;
+#     the droplet runs the SAME code over press articles at 205,526/987s = 208/s where the
+#     laptop does 733/s, i.e. 3.5x slower, so 405/3.5 ~= 116.)
+#   * this corpus has 21,684,113 mention rows over 24,458,199 scanned reviews = 0.887
+#     mentions per review, so 116 mention-rows/s ~= 131 reviews/s.
+#   * 125,000 reviews therefore ~= 110,900 mention rows ~= 956s ~= 16 minutes per bucket.
+#
+# 16 minutes is the number that matters. The ETL runs under `timeout 21600` (6h, see
+# deploy/prospect-refresh.sh) and staging + the mart loop + validation + the swap need most of
+# it, so the sentiment phase's realistic slack is ~2h. A bucket must finish COMFORTABLY inside
+# that: 16 min is 13% of a 2h slack, ~7 buckets complete per night, and the most a run can
+# overshoot its deadline (it only stops BETWEEN buckets) is one bucket. Contrast the old fixed
+# 8: on a wipe that is 6.5h PER BUCKET, larger than the entire nightly budget, so not one
+# bucket would ever complete and a resumable rescore would never advance a single step.
+# Bigger is not free either — every bucket re-streams the 24.8M-row sqlite reviews table
+# (~50s on the droplet), so the overhead is N x 50s: 2.7h across a 196-bucket rescore (+5% on
+# 52h of scoring), where N=1000 would be 13.9h (+27%).
+RESCORE_BUCKET_REVIEWS = 125_000
+
 # Incremental sentiment cache (2026-07): compute_aspect_sentiment/compute_press_sentiment used to
 # re-run VADER over the ENTIRE ~1.7M-mention / ~204K-article corpus on EVERY ETL run, even though
 # reviews/articles are immutable — a scored (recommendationid, aspect) mention or article_id's
@@ -1982,6 +2014,59 @@ def _aspect_excerpt_arms_sql() -> str:
     return "\n\n    UNION ALL\n".join(arms)
 
 
+def _rescore_bucket_count(n_new_reviews: int) -> int:
+    """How many hash buckets to slice this run's delta into — derived from the delta's SIZE, not
+    fixed. See RESCORE_BUCKET_REVIEWS for the sizing arithmetic and why a fixed count cannot
+    serve both an ordinary night and a config-wipe rescore.
+
+    PROSPECT_RESCORE_BUCKET_REVIEWS overrides the target; a wrong value is refused up front by
+    _env_config_errors rather than hours in. Always >= 1, so an empty delta still type-checks
+    into the loop (which then has nothing to iterate)."""
+    target = RESCORE_BUCKET_REVIEWS
+    raw = os.environ.get("PROSPECT_RESCORE_BUCKET_REVIEWS", "").strip()
+    if raw:
+        try:
+            target = max(1, int(raw))
+        except ValueError:
+            pass  # refused by _env_config_errors(); fall back rather than crash mid-build
+    return max(1, -(-max(0, n_new_reviews) // target))  # ceil division, no math import
+
+
+# Stamped at IMPORT, which for the nightly is within a second of the `timeout 21600` clock
+# starting. The deadline below is expressed against it so the budget an operator sets is
+# "seconds of wall clock from the moment the ETL started", the same thing `timeout` measures —
+# not "seconds from whenever staging happened to finish", which varies by an hour.
+_PROC_T0 = time.monotonic()
+
+
+def _sentiment_deadline() -> float | None:
+    """The monotonic instant after which compute_aspect_sentiment starts NO NEW BUCKET, or None
+    for no deadline (unset = the default, so a manual/detached rescore runs until it is done).
+
+    WHY THIS EXISTS. The nightly runs the ETL under `timeout 21600`
+    (deploy/prospect-refresh.sh). A rescore that is still scoring when that fires is SIGKILLed
+    at an arbitrary instant — mid-bucket, mid-batch — and everything that bucket had done is
+    rolled back by the next run's DELETE. Worse, the kill takes the whole build with it: no
+    marts, no swap, and (2026-08-21) not even a log line, because a killed process never
+    flushes. Stopping BETWEEN buckets instead costs at most the buckets we chose not to start,
+    keeps every completed bucket permanently recorded, and lets the rest of the build finish
+    normally and say what it did.
+
+    The budget is deliberately NOT derived from `timeout` inside Python: build_marts has no way
+    to know it is running under one, and guessing would be worse than being told. The deploy
+    script sets it next to the timeout it is paired with, so the two move together."""
+    raw = os.environ.get("PROSPECT_SENTIMENT_DEADLINE_SECONDS", "").strip()
+    if not raw:
+        return None
+    try:
+        budget = float(raw)
+    except ValueError:
+        return None  # refused by _env_config_errors(); never crash the build over a knob
+    if budget <= 0:
+        return None
+    return _PROC_T0 + budget
+
+
 def _sentiment_cache_enabled() -> bool:
     """Kill-switch: PROSPECT_SENTIMENT_CACHE=off (or =0) disables the cache entirely — no ATTACH,
     no cache reads/writes, every run does a full rescore exactly as it did before this feature
@@ -2100,6 +2185,27 @@ def _attach_sentiment_cache(con: duckdb.DuckDBPyConnection, data_dir: Path) -> P
     # burning ~20 minutes of the 2-core box EVERY night on regex over text that can never match.
     con.execute("CREATE TABLE IF NOT EXISTS cache.scored_review(recommendationid VARCHAR)")
     con.execute("CREATE TABLE IF NOT EXISTS cache.meta(key VARCHAR, value VARCHAR)")
+    # HOW FAR ALONG IS THE RESCORE — answerable from the cache file alone, with no build
+    # running and no log to grep:
+    #
+    #   duckdb data/sentiment_cache.duckdb -c 'SELECT * FROM rescore_status'
+    #
+    # One row, rewritten at the end of every scoring run. It is a REPORT, never a source of
+    # truth: what is and is not scored is decided by scored_review and nothing else, so a
+    # corrupt or absent row here can never cause a review to be skipped. reviews_in_pool is
+    # recorded because the cache cannot otherwise know the denominator (the eligible pool is
+    # rebuilt by staging every run and does not live in this file).
+    #
+    # buckets_* describe ONE RUN's slicing, not global progress. The bucket count is derived
+    # from the size of the remaining delta, so it shrinks as the rescore advances and
+    # "7 of 196" followed by "7 of 189" is correct, not a bug. reviews_scored/reviews_in_pool
+    # is the progress number that means the same thing every night.
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS cache.rescore_status("
+        "updated_at TIMESTAMP, reviews_in_pool BIGINT, reviews_scored BIGINT, "
+        "mention_rows BIGINT, buckets_total INTEGER, buckets_done INTEGER, "
+        "stopped_early VARCHAR, slowest_bucket_seconds DOUBLE)"
+    )
     # Migration seed, ONE-TIME: reviews with mention rows in a pre-2026-08-22 cache file are
     # proof of a past scan, so count them scanned instead of re-scanning ~1.8M of them. The
     # ~10M zero-mention reviews have no trace anywhere and get their one final rescan.
@@ -2171,6 +2277,9 @@ def _refresh_sentiment_cache(con: duckdb.DuckDBPyConnection) -> bool:
     # and keeping it across a config change would silently skip the full rescore this wipe exists
     # to force.
     con.execute("DELETE FROM cache.scored_review")
+    # ...and so must the progress report, for the same reason: it describes how far a rescore
+    # under the OLD config got, and leaving it would show a fresh wipe as 100% complete.
+    con.execute("DELETE FROM cache.rescore_status")
     con.execute("DELETE FROM cache.meta WHERE key = 'config_hash'")
     con.execute("INSERT INTO cache.meta VALUES ('config_hash', ?)", [current])
     return True
@@ -2590,37 +2699,88 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             # disk so a runaway query fails on its own budget instead of taking the filesystem,
             # the scraper's SQLite and the serving mart down with it. It did its job here.
             #
-            # Same env knob and same default as the read-back's bucketing further down, and
-            # deliberately so: both loops exist to keep exactly one full-corpus-sized
-            # materialisation off the box at a time, on the same box, in the same phase — an
-            # operator who has to turn one down always wants the other to move with it.
-            _n_buckets = max(1, int(os.environ.get("PROSPECT_SENTIMENT_BUCKETS", "8")))
+            # THE BUCKET IS THE UNIT OF WORK (2026-09-02), and that is what makes a rescore
+            # RESUMABLE ACROSS RUNS. Each iteration below does three things to ONE bucket, all
+            # three selected by the IDENTICAL predicate over the IDENTICAL table (_sent_pred,
+            # applied to _sent_new_ids):
+            #
+            #     DELETE that bucket's stale mention rows
+            #  -> SCORE that bucket, streaming into cache.aspect_mention
+            #  -> RECORD that bucket's ids in cache.scored_review
+            #
+            # so "the id-set written to scored_review is exactly the id-set whose mention rows
+            # were just fully committed" is true BY CONSTRUCTION, at any slicing granularity.
+            # That is stronger than the previous shape (one write of the whole delta at the
+            # end), which was safe only because the bucket boundary happened to coincide with
+            # the review boundary — an accident that would silently stop holding the moment
+            # anything sliced a review's own keyword arms across iterations, re-creating the
+            # 0.62% prefix hole this rescore exists to repair. Here the invariant does not
+            # depend on how the loop is sliced, only on the three predicates being the same
+            # one; keep them literally the same string.
+            #
+            # WHAT THIS BUYS: a run that stops for ANY reason — deadline, OOM, SIGKILL, a
+            # crash three buckets in — leaves every COMPLETED bucket permanently done. The
+            # next run's anti-join (above) does not see those reviews, so it slices only what
+            # remains and carries on. A 52-hour full rescore does not fit the nightly's
+            # `timeout 21600`, and with an end-of-delta write it never could: every night
+            # would redo the same first hours and throw them away. With this, ~7 buckets a
+            # night stick, and the cache refills over ~4 weeks of nightlies (or in one
+            # detached weekend run, which is the same code path with no deadline set).
+            #
+            # DIFFERENT BUCKET COUNT FROM THE READ-BACK BELOW, deliberately — they are bounding
+            # different things. The read-back's PROSPECT_SENTIMENT_BUCKETS (default 8) bounds
+            # MEMORY over a fixed 21.7M-row input that every run processes in full, so a fixed
+            # count is right. This loop bounds TIME over an input that is 1.1M reviews on an
+            # ordinary night and 24.4M on a wipe, so its count is derived from the delta's size
+            # (see RESCORE_BUCKET_REVIEWS): ~9 buckets nightly, ~196 on a wipe. Pinning both to
+            # one knob would either give the wipe 6.5-hour buckets that can never complete, or
+            # give the ordinary night ~200 pointless re-streams of src.reviews.
+            _score_buckets = _rescore_bucket_count(n_new_reviews)
             # Which buckets have work, from one lean pass over the ids (no text). This is not
             # an optimisation for the wipe — there every bucket is full — it is what keeps the
             # ORDINARY night honest: each bucket's text query streams the whole sqlite reviews
-            # table past a hash join, so an unguarded loop would run _n_buckets full scans of
-            # 24.8M rows on a night with nothing (or three things) to score.
+            # table past a hash join, so an unguarded loop would run _score_buckets full scans
+            # of 24.8M rows on a night with nothing (or three things) to score.
             _todo = sorted(int(b) for (b,) in con.execute(
-                f"SELECT DISTINCT hash(recommendationid) % {_n_buckets} FROM _sent_new_ids"
+                f"SELECT DISTINCT hash(recommendationid) % {_score_buckets} FROM _sent_new_ids"
             ).fetchall())
 
-            # Idempotent rescan: if a previous run died between inserting a review's mention rows
-            # and recording it in scored_review, that review is selected again here — clear its
-            # partial rows first so the re-insert can't double-count it. (The pre-scored_review
-            # code had the mirror-image failure: such a review was skipped forever with a partial
-            # subset, quietly violating the completeness invariant above.)
-            # ONCE, over the whole delta, BEFORE the first bucket inserts anything — never per
-            # bucket. Run inside the loop it would delete the rows earlier buckets had just
-            # written, because a review's ids are the delta's ids no matter which bucket it
-            # falls in.
-            con.execute(
-                "DELETE FROM cache.aspect_mention WHERE recommendationid IN "
-                "(SELECT recommendationid FROM _sent_new_ids)"
-            )
+            # Stop starting new buckets once the budget is gone. Checked BETWEEN buckets only:
+            # the whole design rests on a bucket being atomic, so interrupting one mid-scoring
+            # would just throw that bucket's work away on the next run's DELETE.
+            _deadline = _sentiment_deadline()
+            # What one bucket costs, for deciding whether the next one fits. Seeded from the
+            # slowest bucket the PREVIOUS run recorded, because run one of a multi-night
+            # rescore would otherwise have no estimate at all for its first bucket and could
+            # start a 16-minute unit with two minutes left. Slowest, not average: the cost of
+            # over-estimating is one idle bucket slot, the cost of under-estimating is the
+            # SIGKILL this exists to avoid.
+            _bucket_cost = con.execute(
+                "SELECT COALESCE(MAX(slowest_bucket_seconds), 0.0) FROM cache.rescore_status"
+            ).fetchone()[0] or 0.0
 
             clf = _get_classifier()
             n_new_mentions = 0
+            n_done = 0
+            _stopped_early = None
+            # Baseline for "how many reviews did THIS run actually record", which a deadline
+            # stop makes different from the size of the delta.
+            _scored_before = con.execute("SELECT COUNT(*) FROM cache.scored_review").fetchone()[0]
             for _b in _todo:
+                if _deadline is not None and time.monotonic() + _bucket_cost >= _deadline:
+                    _stopped_early = (
+                        f"sentiment deadline reached "
+                        f"({time.monotonic() - _PROC_T0:,.0f}s into the build; "
+                        f"~{_bucket_cost:,.0f}s needed for the next bucket)"
+                    )
+                    break
+                _t_bucket = time.monotonic()
+                # ONE predicate, used verbatim by the DELETE, the text build and the
+                # scored_review INSERT below. See the block comment above: the three agreeing
+                # is the whole invariant, so they share the string rather than each spelling
+                # it out.
+                _sent_pred = f"hash(recommendationid) % {_score_buckets} = {_b}"
+                _bucket_ids = f"SELECT recommendationid FROM _sent_new_ids WHERE {_sent_pred}"
                 # THE ONLY REVIEW TEXT THIS BUILD MATERIALISES. Scope is one bucket of the
                 # delta: pool reviews with no cache.scored_review record — reviews nobody has
                 # ever run the aspect regexes over — narrowed to this bucket. In steady state
@@ -2639,15 +2799,26 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
                 # A TABLE, not a VIEW, so the 10-arm window scan below reads it without
                 # re-running the join per arm (a view here cost a 9.7h phase and a 22.7GiB
                 # spill in 2026-08).
-                bucket = (f"WHERE hash(n.recommendationid) % {_n_buckets} = {_b}"
-                          if _n_buckets > 1 else "")
+                #
+                # Idempotent rescan, scoped to THIS bucket: if a previous run died after
+                # inserting some of these reviews' mention rows but before recording them,
+                # they are selected again here — clear their rows first so the re-insert
+                # cannot double-count. Scoped, not delta-wide, so it can never touch a bucket
+                # this run has already finished or will never reach.
+                con.execute(
+                    f"DELETE FROM cache.aspect_mention WHERE recommendationid IN ({_bucket_ids})"
+                )
+                # The bucket filter is applied inside the subquery rather than as an aliased
+                # WHERE on the join, so the predicate text is the SAME _sent_pred the DELETE
+                # above and the INSERT below use. It also shrinks the join's build side to the
+                # bucket instead of hashing the whole delta once per bucket.
                 con.execute(
                     f"""
                     CREATE TEMP TABLE _sent_new AS
                     SELECT n.appid, n.recommendationid, r.review_text
-                    FROM _sent_new_ids n
+                    FROM (SELECT appid, recommendationid FROM _sent_new_ids
+                          WHERE {_sent_pred}) n
                     JOIN src.reviews r ON r.recommendationid = n.recommendationid
-                    {bucket}
                     """
                 )
                 # The expensive regex runs ONLY over this bucket of the delta, never the full
@@ -2674,29 +2845,52 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
                 con.execute("DROP TABLE IF EXISTS _sent_windows")
                 con.execute("DROP TABLE IF EXISTS _sent_new")
 
-            # Record the scan LAST, after EVERY bucket's mention rows are in — the order is what
-            # makes the completeness invariant crash-safe (a death anywhere above leaves the
-            # review out of scored_review, and the next run redoes it via the DELETE + rescan).
-            # Reads the lean ids table for the same reason the DELETE does.
-            #
-            # OUTSIDE THE LOOP, AND THAT IS THE POINT. Writing scored_review per bucket would
-            # be a smaller transaction and a tempting "checkpoint", and it would re-create
-            # EXACTLY the defect this rescore exists to repair: a crash in bucket 5 would
-            # leave buckets 0-4's reviews recorded as scanned. Those reviews are fully scored
-            # — the split is by review, not by aspect — so nothing is lost THIS time; but the
-            # per-bucket write only stays safe as long as the bucket boundary and the
-            # completeness boundary coincide, and they do not have to. Any future change that
-            # splits a review's own arms across iterations (bucketing by aspect, by window, by
-            # batch) would then mark a review scanned with a PREFIX of its arms present, which
-            # is bit-for-bit the 0.62% hole this code found in the live cache on 2026-08-31
-            # (1,962 of 314,626 mentions missing, every one of them in the last two arms of the
-            # UNION, every affected review a clean prefix) and which is invisible from the
-            # cache alone. One write, after the last bucket, keeps "in scored_review" meaning
-            # "fully represented in aspect_mention" no matter how the loop above is sliced.
-            con.execute(
-                "INSERT INTO cache.scored_review SELECT recommendationid FROM _sent_new_ids"
-            )
+                # RECORD THE BUCKET — LAST, and only now. Every mention row for exactly these
+                # ids is committed above, so from this statement onward "in scored_review"
+                # means "fully represented in aspect_mention" for them, and the next run's
+                # anti-join will skip them forever. Interrupt anything above this line and the
+                # bucket simply never happened: its ids stay in the delta and the DELETE at the
+                # top of the next attempt clears whatever partial rows it left.
+                #
+                # _bucket_ids is the SAME predicate over the SAME table the DELETE and the text
+                # build used. That identity — not the fact that buckets happen to split on
+                # review boundaries — is what makes the completeness invariant hold, and it
+                # keeps holding if this loop is ever sliced some other way.
+                con.execute(f"INSERT INTO cache.scored_review {_bucket_ids}")
+                _elapsed = time.monotonic() - _t_bucket
+                _bucket_cost = max(_bucket_cost, _elapsed)
+                n_done += 1
+
             con.execute("DROP TABLE IF EXISTS _sent_new_ids")
+
+            # DURABLE PROGRESS. Written here, while the cache is still attached, so a
+            # multi-night rescore can be followed from the cache file alone:
+            #     duckdb data/sentiment_cache.duckdb -c 'SELECT * FROM rescore_status'
+            # One row, replaced each run. See _attach_sentiment_cache for why this is a report
+            # and never a source of truth.
+            _pool_reviews = con.execute("SELECT COUNT(*) FROM _sent_pool_meta").fetchone()[0]
+            _scored_reviews, _mention_rows = con.execute(
+                "SELECT (SELECT COUNT(*) FROM cache.scored_review), "
+                "       (SELECT COUNT(*) FROM cache.aspect_mention)"
+            ).fetchone()
+            con.execute("DELETE FROM cache.rescore_status")
+            con.execute(
+                "INSERT INTO cache.rescore_status VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [datetime.now(timezone.utc), _pool_reviews, _scored_reviews, _mention_rows,
+                 len(_todo), n_done, _stopped_early, _bucket_cost],
+            )
+            _pct = (100.0 * _scored_reviews / _pool_reviews) if _pool_reviews else 100.0
+            print(f"[etl] aspect sentiment: {n_done}/{len(_todo)} bucket(s) scored this run "
+                  f"({_score_buckets} bucket(s) planned over {n_new_reviews:,} unscored review(s)); "
+                  f"pool {_scored_reviews:,}/{_pool_reviews:,} reviews scored ({_pct:.1f}%)")
+            if _stopped_early is not None:
+                # A CLEAN stop, not a failure: the build carries on and publishes, every bucket
+                # this run finished is permanently recorded, and the next run resumes from the
+                # anti-join. The alternative is `timeout` SIGKILLing the process mid-bucket,
+                # which loses that bucket AND the whole build.
+                print(f"[etl] aspect sentiment: STOPPED EARLY between buckets — {_stopped_early}. "
+                      f"{len(_todo) - n_done} bucket(s) deferred to the next run; progress is "
+                      f"recorded in the cache (rescore_status).")
 
             # Full in-scope set, read back from the cache (untouched old rows + just-inserted new
             # ones alike). Same shape/columns as the uncached branch above.
@@ -2716,10 +2910,12 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             # the same bucket, so no group is ever split and each bucket's aggregate is final.
             # Peak memory is one bucket's worth; the cost is N scans of the cache instead of one.
             #
-            # _n_buckets is the one set above, for the scoring loop — same knob, same value, on
-            # purpose (see there). Read back, do not re-read the env: the two loops must agree
-            # or an operator turning the knob down would fix one phase and leave the other at
-            # its old width.
+            # A MEMORY bound over a fixed, always-full-corpus input, which is why this one is a
+            # flat count and the scoring loop's is derived from the delta (see the long note at
+            # _score_buckets). Every run materialises the whole in-scope cache here — 21.7M rows
+            # today — no matter how much of it was scored tonight, so there is no "size of the
+            # work" to scale to and PROSPECT_SENTIMENT_BUCKETS=8 is simply what fits 2500MB.
+            _n_buckets = max(1, int(os.environ.get("PROSPECT_SENTIMENT_BUCKETS", "8")))
             con.execute(
                 """
                 CREATE TEMP TABLE stg_aspect_mention_sentiment(
@@ -2806,11 +3002,13 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> 
             # _build_aspect_keyword_votes for why these counts equal the 10-arm regex scan
             # mart_game_teardown.sql used to run over all 24.8M reviews.
             _build_aspect_keyword_votes(con, "cache.aspect_mention", _n_buckets)
-            # The bucket figure is in the line on purpose: on a wipe night this phase is the one
-            # an operator is watching, and "0 of 8 buckets" vs "8 of 8" is the difference
-            # between a no-op and a full rescore.
-            print(f"[etl] aspect sentiment cache: {n_new_reviews:,} new review(s) scored "
-                  f"in {len(_todo)}/{_n_buckets} hash bucket(s) "
+            # REVIEWS ACTUALLY SCORED THIS RUN, not the size of the delta it set out to score —
+            # a deadline stop makes those two different, and this line is what an operator
+            # reads to decide whether the night did anything. Derived from scored_review's own
+            # growth, so it cannot drift from what was really recorded.
+            n_reviews_scored = _scored_reviews - _scored_before
+            print(f"[etl] aspect sentiment cache: {n_reviews_scored:,} new review(s) scored "
+                  f"of {n_new_reviews:,} unscored "
                   f"({n_new_mentions:,} new mention rows); {n_scored:,} mention rows in scope total")
         finally:
             _detach_sentiment_cache(con)
@@ -3489,6 +3687,26 @@ def _env_config_errors() -> list[str]:
         if buckets < 1:
             errors.append(f"PROSPECT_SENTIMENT_BUCKETS={raw!r} is not a positive integer "
                           "(hash-bucket count for the sentiment materialisation; unset = 8)")
+    raw = os.environ.get("PROSPECT_RESCORE_BUCKET_REVIEWS", "").strip()
+    if raw:
+        try:
+            per_bucket = int(raw)
+        except ValueError:
+            per_bucket = 0
+        if per_bucket < 1:
+            errors.append(f"PROSPECT_RESCORE_BUCKET_REVIEWS={raw!r} is not a positive integer "
+                          "(target reviews per scoring bucket; unset = "
+                          f"{RESCORE_BUCKET_REVIEWS:,})")
+    raw = os.environ.get("PROSPECT_SENTIMENT_DEADLINE_SECONDS", "").strip()
+    if raw:
+        try:
+            budget = float(raw)
+        except ValueError:
+            budget = -1.0
+        if budget <= 0:
+            errors.append(f"PROSPECT_SENTIMENT_DEADLINE_SECONDS={raw!r} is not a positive number "
+                          "(wall-clock seconds from process start after which no NEW sentiment "
+                          "bucket is started; unset = no deadline)")
     raw = os.environ.get("PROSPECT_DUCKDB_MEMORY_LIMIT", "").strip()
     # Deploy sets e.g. 2500MB (deploy/prospect-refresh.sh), so the contract is DuckDB's own
     # memory-limit grammar — a bare integer or an integer + size unit — not a bare int alone.
