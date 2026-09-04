@@ -98,6 +98,10 @@ VM_IMPORT="http://localhost:8428/api/v1/import/prometheus"
 START=$(date -u +%s)
 RESULT="FAILED"   # flipped to OK only after a clean ETL
 STEP="starting"
+# One-line reason for a FAILED night, for the ledger's `error` field. Set by the failures that
+# leave nothing in the ETL log (restart verification, an ETL skip, a preflight); left empty
+# for a real ETL failure, where record_run scans the ETL log for the reason instead.
+RUN_ERROR=""
 
 # Best-effort push of Prometheus-format metric lines to VictoriaMetrics (never fails the run).
 push() { curl -s -m 8 -X POST "$VM_IMPORT" --data-binary "$1" >/dev/null 2>&1 || true; }
@@ -228,10 +232,15 @@ wait_bg() {
 
 record_run() {
     local dur=$(( $(date -u +%s) - START ))
-    /root/steam-scraper/.venv/bin/python - "$RESULT" "$dur" "$STEP" <<'PY'
-import json, sqlite3, os, sys, glob, datetime, urllib.request
+    # ETL_RC/ETL_DUR/ETL_LOG are unset when the run dies before the ETL starts — passed as ""
+    # and recorded as null, which is the honest answer ("the ETL never ran").
+    /root/steam-scraper/.venv/bin/python - "$RESULT" "$dur" "$STEP" "${ETL_RC:-}" "${ETL_DUR:-}" \
+        "${ETL_LOG:-}" "$RUN_ERROR" "$HISTORY" <<'PY'
+import json, re, sqlite3, os, sys, glob, datetime, urllib.request
 result, duration, step = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-hist = "/root/prospect/data/refresh_history.json"
+etl_rc = int(sys.argv[4]) if sys.argv[4] else None
+etl_duration = int(sys.argv[5]) if sys.argv[5] else None
+etl_log, run_error, hist = sys.argv[6], sys.argv[7], sys.argv[8]
 con = sqlite3.connect("/root/steam-scraper/steam_games.db")
 def n(t):
     try: return con.execute("SELECT count(*) FROM " + t).fetchone()[0]
@@ -255,8 +264,27 @@ freshness = {
     "players":  fresh_hours("SELECT max(captured_at) FROM player_counts"),
     "games":    fresh_hours("SELECT max(updated_at) FROM games"),
 }
+# mart_version = the newest mart ON DISK; serving_version = what current.duckdb points at. They
+# differ after a rollback.sh (the newest file is the one rolled AWAY from), so serving_version
+# is the authoritative "what did the app serve when this row was written".
 marts = sorted(glob.glob("/root/prospect/data/prospect_*.duckdb"))
 mart_version = marts[-1].split("prospect_")[-1].replace(".duckdb", "") if marts else None
+try:
+    m = re.search(r"prospect_(\d{8})\.duckdb", os.readlink("/root/prospect/data/current.duckdb"))
+    serving_version = m.group(1) if m else None
+except OSError:
+    serving_version = None
+def etl_error(path):
+    """The ETL log's last non-blank line naming a failure, else its last non-blank line."""
+    try:
+        lines = [l.rstrip() for l in open(path, encoding="utf-8", errors="replace") if l.strip()]
+    except OSError:
+        return None
+    hits = [l for l in lines if re.search(r"Error|Traceback|FAILED|OutOfMemory|MemoryError|No space|Killed", l)]
+    return (hits[-1] if hits else lines[-1]) if lines else None
+error = None
+if result != "OK":
+    error = (run_error or (etl_error(etl_log) if etl_log else None) or f"failed at step {step}")[:300]
 prev = {}
 if os.path.exists(hist):
     # Baseline = the newest row that COUNTED something. HELD/SKIPPED rows (nights that never
@@ -269,7 +297,8 @@ deltas = {k: counts[k] - prev[k] for k in counts if isinstance(counts[k], int) a
 now = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
 rec = {"finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
        "result": result, "duration_s": duration, "step": step, "mart_version": mart_version,
-       "counts": counts, "deltas": deltas, "freshness_hours": freshness}
+       "serving_version": serving_version, "etl_rc": etl_rc, "etl_duration_s": etl_duration,
+       "error": error, "counts": counts, "deltas": deltas, "freshness_hours": freshness}
 with open(hist, "a") as f:
     f.write(json.dumps(rec) + "\n")
 # Push run-level + data metrics to VictoriaMetrics for the Data Pipeline dashboard.
@@ -288,7 +317,7 @@ try:
         "http://localhost:8428/api/v1/import/prometheus", data="\n".join(m).encode()), timeout=8)
 except Exception:
     pass
-print("recorded:", rec["finished_at"], result, "deltas", deltas, "freshness", freshness)
+print("recorded:", rec["finished_at"], result, "error", error, "deltas", deltas, "freshness", freshness)
 PY
 }
 trap record_run EXIT
@@ -473,6 +502,7 @@ if [ -n "$_builds" ] && printf '%s' "$_builds" | grep -qv -- "--rescore-only"; t
                         # "did not run", so the log never reads as a build that failed.
     echo "[etl] SKIPPED — another mart build is already running (not a --rescore-only run):"
     printf '%s\n' "$_builds" | sed 's/^/       /'
+    RUN_ERROR="etl: skipped — another mart build was already running"
     echo "       No mart is built tonight; that build owns the swap. Previous mart kept, app"
     echo "       not restarted. Scraping above still ran, so tomorrow's build has the data."
     push "prospect_etl_skipped_concurrent_build 1"
@@ -545,6 +575,7 @@ if [ "$ETL_RC" -eq 0 ]; then
     RESTART_OK=1
     if ! prospect_restart_verify 120; then
         RESTART_OK=0
+        RUN_ERROR="restart: app did not answer /api/health within 120s of docker restart"
         echo "WARN: [restart] app did not answer /api/health within 120s of docker restart"
     fi
     RESTART_DUR=$(( $(date -u +%s) - RESTART_T0 ))
