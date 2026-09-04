@@ -60,6 +60,7 @@ fi
 export PYTHONUNBUFFERED=1
 
 LOG=/var/log/prospect-refresh.log
+HISTORY=/root/prospect/data/refresh_history.json   # the run ledger (JSONL) the Data log page reads
 # One log file per step. The main log is a timeline (start/done/rc); the detail lives here.
 # Two reasons this is not just tidiness:
 #  - The parallel lane (news/twitch/ccu/tags_refresh/dev_socials) writes concurrently, so on a
@@ -105,7 +106,7 @@ push() { curl -s -m 8 -X POST "$VM_IMPORT" --data-binary "$1" >/dev/null 2>&1 ||
 # deploy/rollback.sh only repoints data/current.duckdb; the next build writes a fresh mart and
 # repoints it back, silently undoing the rollback — usually before anyone looks. rollback.sh
 # therefore leaves a hold file and every build checks it here, FIRST: before the EXIT trap is
-# installed and before any work, so a held night records nothing rather than a bogus FAILED.
+# installed and before any work, so a held night records a HELD row rather than a bogus FAILED.
 #
 # The hold AUTO-EXPIRES (default 48h). A hold that could freeze the pipeline indefinitely
 # would just be a new way to lose a week of data quietly — the failure mode this whole branch
@@ -113,6 +114,29 @@ push() { curl -s -m 8 -X POST "$VM_IMPORT" --data-binary "$1" >/dev/null 2>&1 ||
 # a hold that is still on and page about it.
 HOLD_FILE=${PROSPECT_BUILD_HOLD:-/root/.prospect-build-hold}
 HOLD_HOURS=${PROSPECT_BUILD_HOLD_HOURS:-48}
+# record_held — a HELD row in the run ledger. A held night used to leave NO row (this exits
+# before the EXIT trap), but "no row" is also what a dead box leaves, and two of the last 13
+# nights were found only by their absence. Same shape as cron-wrap.sh's SKIPPED row: result ∈
+# {OK, FAILED, HELD, SKIPPED}, no counts/deltas/freshness (nothing ran to count), reason = the
+# hold file's first non-empty line. python3 does the JSON escaping, the shell does the append.
+record_held() {
+    python3 - "$HOLD_FILE" <<'PY' >> "$HISTORY" || echo "WARN: could not append a HELD row to $HISTORY" >> "$LOG"
+import datetime, json, os, re, sys
+try:
+    reason = next((l.strip() for l in open(sys.argv[1], encoding="utf-8", errors="replace") if l.strip()), "")
+except OSError:
+    reason = ""
+try:  # current.duckdb -> prospect_YYYYMMDD.duckdb (a relative link); the token is the version
+    m = re.search(r"prospect_(\d{8})\.duckdb", os.readlink("/root/prospect/data/current.duckdb"))
+    ver = m.group(1) if m else None
+except OSError:
+    ver = None
+now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+print(json.dumps({"finished_at": now, "result": "HELD", "step": "hold",
+                  "reason": reason[:200] or "build hold active", "duration_s": 0,
+                  "mart_version": ver, "serving_version": ver}))
+PY
+}
 if [ -f "$HOLD_FILE" ] && [ -z "$(find "$HOLD_FILE" -mmin +$(( HOLD_HOURS * 60 )) 2>/dev/null)" ]; then
     {
         echo "=================== refresh HELD: $(date -u) ==================="
@@ -121,6 +145,7 @@ if [ -f "$HOLD_FILE" ] && [ -z "$(find "$HOLD_FILE" -mmin +$(( HOLD_HOURS * 60 )
         echo "release it with: rm -f $HOLD_FILE   (it expires on its own after ${HOLD_HOURS}h)"
     } >> "$LOG"
     push "prospect_build_hold_active 1"
+    record_held
     exit 0
 fi
 if [ -f "$HOLD_FILE" ]; then
@@ -234,10 +259,12 @@ marts = sorted(glob.glob("/root/prospect/data/prospect_*.duckdb"))
 mart_version = marts[-1].split("prospect_")[-1].replace(".duckdb", "") if marts else None
 prev = {}
 if os.path.exists(hist):
-    lines = [l for l in open(hist).read().splitlines() if l.strip()]
-    if lines:
-        try: prev = json.loads(lines[-1]).get("counts") or {}
+    # Baseline = the newest row that COUNTED something. HELD/SKIPPED rows (nights that never
+    # ran) carry no counts, and using one as the baseline would blank every delta.
+    for line in reversed([l for l in open(hist).read().splitlines() if l.strip()]):
+        try: prev = json.loads(line).get("counts") or {}
         except Exception: prev = {}
+        if prev: break
 deltas = {k: counts[k] - prev[k] for k in counts if isinstance(counts[k], int) and isinstance(prev.get(k), int)}
 now = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
 rec = {"finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),

@@ -83,10 +83,36 @@ push() {
     return 0
 }
 
+# record_skipped — append a SKIPPED row to the nightly's run ledger (data/refresh_history.json,
+# JSONL). Nightly only: a held lock there is a night with no mart, and until 2026-09-04 it left
+# NO row at all — two such nights in the last 13 were found only by their absence. The row
+# shape is a contract with the web "Data log" page: result ∈ {OK, FAILED, HELD, SKIPPED}, plus
+# optional reason/etl_rc/etl_duration_s/error/serving_version; a SKIPPED row carries no
+# counts/deltas/freshness because nothing ran to count. python3 does the JSON escaping, the
+# shell does the append; a failure here only logs (still no lib.sh dependency, see above).
+HISTORY=${PROSPECT_REFRESH_HISTORY:-/root/prospect/data/refresh_history.json}
+MART_LINK=${PROSPECT_CURRENT_MART:-/root/prospect/data/current.duckdb}
+record_skipped() {
+    python3 - "$LOCK" "$MART_LINK" <<'PY' >> "$HISTORY" || log "WARN: could not append a SKIPPED row to $HISTORY"
+import datetime, json, os, re, sys
+lock, link = sys.argv[1], sys.argv[2]
+try:  # current.duckdb -> prospect_YYYYMMDD.duckdb (a relative link); the token is the version
+    m = re.search(r"prospect_(\d{8})\.duckdb", os.readlink(link))
+    ver = m.group(1) if m else None
+except OSError:
+    ver = None
+now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+print(json.dumps({"finished_at": now, "result": "SKIPPED", "step": "lock",
+                  "reason": f"lock held: {lock}", "duration_s": 0,
+                  "mart_version": ver, "serving_version": ver}))
+PY
+}
+
 exec 9>"$LOCK" || { log "ERROR: cannot open lock file $LOCK"; exit 1; }
 if ! flock -n 9; then
     log "SKIPPED: $LOCK is held — did not run: $*"
     push "prospect_cron_skipped{job=\"$JOB\"} 1"
+    [ "$JOB" = "nightly_refresh" ] && record_skipped
     exit 0
 fi
 push "prospect_cron_skipped{job=\"$JOB\"} 0"
