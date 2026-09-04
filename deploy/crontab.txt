@@ -74,10 +74,17 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # fewer games tonight and the rest are picked up tomorrow. Nothing is lost, and a daily mart
 # refresh is worth more than a few hundred extra games per night.
 #
-# NOTE this step has never once ended on its own — every run on record is rc=137 (OOM) or
-# rc=143 (operator SIGTERM) — so its natural runtime is UNKNOWN and cannot be scheduled around.
-# The bound is the point: it must yield the lock at a predictable time, whatever it has done.
-0 6 * * * /root/prospect/deploy/cron-wrap.sh review_keeper bash -c 'cd /root/steam-scraper && timeout 25200 systemd-run --scope --quiet -p MemoryMax=1500M -p MemorySwapMax=0 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 20000 --min-reviews 1 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0' >> /root/deepen_backfill.log 2>&1
+# NOTE this step has never once ended on its own — every run on record is rc=137 (OOM),
+# rc=143 (operator SIGTERM) or, since the 7h bound, rc=124 (its own timeout) — so its natural
+# runtime is UNKNOWN and cannot be scheduled around. The bound is the point: it must yield the
+# lock at a predictable time, whatever it has done.
+#
+# `-x` (2026-09-04): because the bound IS the schedule, ending at rc=124 is the designed
+# outcome — yet cron-wrap counted it as a failure, pushed step_success{step="review_keeper"} 0
+# every morning, and alert_check's check (a) breached every single day (the two real OOMs above
+# were indistinguishable from that noise). With -x, rc 124/143 push success and start the job's
+# success clock for check (d); rc 137 (cgroup OOM) still counts as the failure it is.
+0 6 * * * /root/prospect/deploy/cron-wrap.sh -x review_keeper bash -c 'cd /root/steam-scraper && timeout 25200 systemd-run --scope --quiet -p MemoryMax=1500M -p MemorySwapMax=0 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 20000 --min-reviews 1 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0' >> /root/deepen_backfill.log 2>&1
 
 # ── 06:15 UTC — daytime socials keeper. OWN lock, deliberately: it must run ALONGSIDE the
 # review keeper (different endpoints — store pages vs appreviews), so it must not contend for

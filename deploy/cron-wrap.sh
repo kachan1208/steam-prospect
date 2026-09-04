@@ -8,8 +8,15 @@
 # and NOTHING recorded that anywhere — no log line, no metric. A nightly that silently
 # skipped looks identical to one that was never scheduled.
 #
-# Usage: cron-wrap.sh [-l LOCKFILE] JOB_NAME COMMAND [ARG...]
+# Usage: cron-wrap.sh [-l LOCKFILE] [-x] JOB_NAME COMMAND [ARG...]
 #   -l LOCKFILE   lock to take nonblocking (default /root/.prospect-refresh.lock)
+#   -x            "expected deadline" job: rc 124 (GNU timeout expired) and rc 143 (SIGTERM)
+#                 count as SUCCESS for the outcome push, and the log line says so. For a job
+#                 whose own `timeout` IS its schedule: the 06:00 review keeper is a bounded
+#                 slice of an open-ended backlog and has ended EVERY run at rc=124 since its
+#                 7h bound landed (2026-09-02), so without this the wrapper pushed
+#                 step_success=0 each morning and alert_check's check (a) breached daily.
+#                 rc 137 stays a failure — that is the cgroup OOM kill, a real signal.
 #
 # On lock held:    logs the skip to /var/log/prospect-cron-wrap.log, pushes
 #                  prospect_cron_skipped{job="JOB_NAME"} 1 to the droplet-local
@@ -49,10 +56,12 @@ STEP_LOG_DIR=${PROSPECT_STEP_LOG_DIR:-/var/log/prospect-steps}
 # entries in deploy/crontab.txt carry their own `mkdir -p … &&` prefix.
 mkdir -p "$STEP_LOG_DIR" 2>/dev/null || true
 
-usage() { echo "usage: $0 [-l LOCKFILE] JOB_NAME COMMAND [ARG...]" >&2; exit 2; }
-while getopts "l:" opt; do
+EXPECT_DEADLINE=0
+usage() { echo "usage: $0 [-l LOCKFILE] [-x] JOB_NAME COMMAND [ARG...]" >&2; exit 2; }
+while getopts "l:x" opt; do
     case "$opt" in
         l) LOCK="$OPTARG" ;;
+        x) EXPECT_DEADLINE=1 ;;
         *) usage ;;
     esac
 done
@@ -97,8 +106,17 @@ trap - TERM INT HUP
 
 DUR=$(( $(date -u +%s) - T0 ))
 NOW=$(date -u +%s)
-OK=1; [ "$RC" -ne 0 ] && OK=0
-log "finished rc=$RC after ${DUR}s"
+OK=1; NOTE=""
+if [ "$RC" -ne 0 ]; then
+    # -x: 124 is timeout's "deadline reached"; 143 is SIGTERM (an operator kill, or a timeout
+    # landing on the `bash -c` around the job). Never 137 — the cgroup OOM kill is a failure.
+    if [ "$EXPECT_DEADLINE" -eq 1 ] && { [ "$RC" -eq 124 ] || [ "$RC" -eq 143 ]; }; then
+        NOTE=" (expected deadline)"
+    else
+        OK=0
+    fi
+fi
+log "finished rc=$RC$NOTE after ${DUR}s"
 push "prospect_pipeline_step_success{step=\"$JOB\"} $OK
 prospect_pipeline_step_duration_seconds{step=\"$JOB\"} $DUR
 prospect_pipeline_step_last_run_timestamp{step=\"$JOB\"} $NOW"

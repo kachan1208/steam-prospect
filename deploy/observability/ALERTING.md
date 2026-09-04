@@ -28,7 +28,10 @@ collector, the 19:15 quiet-window steps (which also push per-step metrics of the
 the keepers and the backup are all evaluated. That is the point: before this, the four
 steps most prone to the "database is locked" failure — the very incident that motivated
 this script — pushed nothing at all, so a repeat would have been just as silent. **Putting
-a new job behind `cron-wrap.sh` is what puts it under alerting.**
+a new job behind `cron-wrap.sh` is what puts it under alerting.** A job whose own `timeout`
+is its schedule (the 06:00 review keeper, a bounded slice of an open-ended backlog) is
+wrapped with `cron-wrap.sh -x`: rc 124/143 then push success instead of breaching (a) every
+day; rc 137 (cgroup OOM kill) still fails.
 
 **(d) deliberately does not page on skips.** Skips are a designed outcome — the midday
 light build is *supposed* to skip while the review keeper holds the refresh lock — and
