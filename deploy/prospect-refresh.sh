@@ -17,7 +17,14 @@
 # retired — `git pull` in /root/prospect is the whole deploy for shell changes).
 set -uo pipefail
 export PATH=/root/steam-scraper/.venv/bin:/root/.local/bin:$PATH
-export PROSPECT_DUCKDB_MEMORY_LIMIT=2500MB   # cap DuckDB on the 4GB box
+# DuckDB's own cap, sized to FIT the ETL's cgroup (2026-09-04; was 2500MB with no cgroup at
+# all). The ETL runs under `systemd-run --scope -p MemoryMax=3000M` (see the invocation): on
+# the 3.9 GB box that is 3000M for the ETL and ~900M for the two uvicorn workers plus the OS,
+# and the keepers never overlap the ETL by schedule (06:00/06:15 vs 21:00-05:08). Inside the
+# 3000M, DuckDB gets 2200MB; the rest is the Python classifier heap + its multiprocessing
+# children, and DuckDB treats its limit as a target it can overshoot briefly, so the gap is
+# not slack. Move the two numbers together.
+export PROSPECT_DUCKDB_MEMORY_LIMIT=2200MB
 # Cap the SPILL too (2026-08-31). max_temp_directory_size defaults to all free disk, so the
 # 08-30 nightly spilled 20.6GB until the volume was full, then died after 5.35h with nothing
 # built. 15GB leaves room for the two retained marts (~2.3GB each), the scraper's SQLite + WAL
@@ -598,7 +605,13 @@ else
     if [ "$ETL_SKIPPED" -eq 0 ]; then
         ETL_LOG="$STEP_LOG_DIR/etl.${RUN_TS}.log"
         echo "[etl] log: $ETL_LOG"
-        timeout 21600 /root/prospect/etl/.venv/bin/python -u build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data > "$ETL_LOG" 2>&1 || ETL_RC=$?
+        # The systemd-run scope is the same cgroup cap the keepers run under (deploy/crontab.txt).
+        # Without it the ETL was the one unbounded process on the box, and an overshoot became a
+        # kernel OOM kill of whatever the kernel picked. Now a breach is rc=137 of the ETL alone:
+        # previous mart kept, app untouched. See PROSPECT_DUCKDB_MEMORY_LIMIT for the arithmetic.
+        # `timeout` stays outermost, as in the keeper lines, so its deadline and rc are unchanged.
+        timeout 21600 systemd-run --scope --quiet -p MemoryMax=3000M -p MemorySwapMax=0 \
+            /root/prospect/etl/.venv/bin/python -u build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data > "$ETL_LOG" 2>&1 || ETL_RC=$?
         [ "$ETL_RC" -ne 0 ] && explain_failure "etl" "$ETL_RC" "$ETL_LOG"
         # Per-mart timings, slowest first — the run's own profile, kept even on success so a slow
         # build is visible BEFORE it becomes a failed one.
