@@ -671,6 +671,20 @@ SENTIMENT_SCORE_BATCH = 20000    # rows pulled+scored+inserted per streamed batc
 # 52h of scoring), where N=1000 would be 13.9h (+27%).
 RESCORE_BUCKET_REVIEWS = 125_000
 
+# THE UNIT OF WORK for repair_sentiment_arms (--repair-arms), in reviews per hash bucket.
+# Deliberately 8x the scoring loop's RESCORE_BUCKET_REVIEWS, because the two bound different
+# things. That one bounds TIME: ~16 minutes of VADER + classifier per bucket, sized so the
+# nightly can stop between buckets. A repair bucket does no such pass — it streams the
+# bucket's text out of src.reviews (~50s on the droplet), runs the ten keyword regexes over
+# it and scores only the ~1% of reviews found mismatched — so slicing a 24.4M-review pool
+# into 196 buckets would spend 2.7h re-streaming sqlite to bound a phase that has nothing to
+# bound. What a repair bucket must bound is MEMORY: its text is one TEMP table (charged to
+# max_temp_directory_size, see the scoring loop's notes), and 1M reviews is ~340MB of it
+# (8.45GB / 24.8M rows) — comfortably inside the nightly's 2200MB DuckDB budget with the
+# ten-arm scan running over it, and ~25 buckets for the whole pool.
+# PROSPECT_REPAIR_BUCKET_REVIEWS overrides it (validated in _env_config_errors).
+REPAIR_BUCKET_REVIEWS = 1_000_000
+
 # How long a process will WAIT for another one to release the sentiment cache file before giving
 # up (see _attach_sentiment_cache for the measured lock semantics). 30 minutes is sized from the
 # longest legitimate hold either side takes: the light build's press pass, 205,526 articles at
@@ -2081,6 +2095,21 @@ def _rescore_bucket_count(n_new_reviews: int) -> int:
     return max(1, -(-max(0, n_new_reviews) // target))  # ceil division, no math import
 
 
+def _repair_bucket_count(n_reviews: int) -> int:
+    """How many hash buckets repair_sentiment_arms slices its candidate set into — the same
+    ceil arithmetic as _rescore_bucket_count over REPAIR_BUCKET_REVIEWS (see it for why the
+    two targets differ by 8x). PROSPECT_REPAIR_BUCKET_REVIEWS overrides the target; a wrong
+    value is refused up front by _env_config_errors."""
+    target = REPAIR_BUCKET_REVIEWS
+    raw = os.environ.get("PROSPECT_REPAIR_BUCKET_REVIEWS", "").strip()
+    if raw:
+        try:
+            target = max(1, int(raw))
+        except ValueError:
+            pass  # refused by _env_config_errors(); fall back rather than crash mid-run
+    return max(1, -(-max(0, n_reviews) // target))
+
+
 # Stamped at IMPORT, which for the nightly is within a second of the `timeout 21600` clock
 # starting. The deadline below is expressed against it so the budget an operator sets is
 # "seconds of wall clock from the moment the ETL started", the same thing `timeout` measures —
@@ -3271,6 +3300,394 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
     return n_scored
 
 
+def repair_sentiment_arms(con: duckdb.DuckDBPyConnection, data_dir: Path) -> dict | None:
+    """--repair-arms: find the reviews whose cached keyword-arm set is a strict SUBSET of the
+    arms their text matches, and rescore exactly those — nothing else in the cache is touched.
+
+    THE DEFECT IT REPAIRS is the one measured on 2026-08-31 and written up in
+    _build_aspect_keyword_votes' KNOWN GAP paragraph: 1,962 of 314,626 raw mentions (0.62%)
+    missing from cache.aspect_mention, every one in the last two arms of _aspect_window_sql's
+    UNION ALL (1,902 Price & Value, 60 Content & Length), on reviews whose scoring stream an
+    OOM-killed build cut mid-corpus and whose partial arm set the 2026-08-22 scored_review
+    seed then froze in as "scanned" — every affected review's cached arms are a clean PREFIX
+    of its raw arms. The repair chosen then was a SENTIMENT_CACHE_VERSION bump: a wipe and a
+    57-hour rescore of 24.4M reviews that held three nightlies. The same hole is reachable
+    for a fraction of that: one regex pass to find the mismatched reviews, and a rescore of
+    only those.
+
+    WHY THE SUBSET TEST IS SOUND. Every cached arm row was produced by the same per-arm
+    `WHERE regexp_matches(review_text, rx, 'i')` filter, from the same ASPECT_LEXICON entry,
+    that _aspect_window_sql evaluates here. The lexicon is part of _sentiment_config_hash, so
+    while the stored hash equals the current one the regex cannot have changed under the
+    cache, and a review's cached arm set is always a subset of its raw one; the only way the
+    two can differ is rows that were never written, which is exactly the hole. Hence:
+      * cached == raw           the ~99% case: intact, left alone;
+      * cached STRICT SUBSET    the hole: DELETE the review's rows and rescore it in the same
+                                bucket through the same scorer the nightly uses;
+      * cached has an arm raw lacks (superset or mixed): the regex DID move under the cache,
+                                which is the config hash's job, not this mode's — counted,
+                                reported, left alone.
+    An incomplete arm set is indistinguishable from a review that mentions nothing else
+    WITHOUT re-reading the text — the reason the cache alone could never find the hole, and
+    the reason this pass reads the text of every scored in-scope review exactly once. "In
+    scope" is the nightly's own pool — the TEARDOWN_MIN_REVIEWS floor and the newest
+    SENTIMENT_POOL_CAP_PER_GAME reviews per game — so a capped-out review's rows, which the
+    nightly ignores, are never re-read or rewritten here either.
+
+    COST, and why this is a pass and not a rescore. The raw arm set comes from
+    _aspect_window_sql itself (one source of truth for what an arm matches), selecting only
+    (recommendationid, aspect) out of it: DuckDB prunes the unreferenced window_text and
+    kw_pos projections (verified with EXPLAIN on 1.5.4 — the plan holds the ten
+    regexp_matches filters and nothing else), so the pass costs the ten keyword regexes over
+    the text — the scan mart_game_teardown.sql ran nightly until 2026-08-31, ~20 min for
+    ~11M reviews on the droplet — plus one src.reviews stream per bucket. VADER and the
+    classifier run only over the mismatched reviews' windows: ~1% of the pool if the
+    2026-08-31 measurement holds, i.e. tens of minutes rather than 52 hours.
+
+    SAME DISCIPLINE AS THE SCORING LOOP, because it has the same neighbours:
+      * BUCKETED on hash(recommendationid), so review text is never more than one bucket's
+        worth at a time (REPAIR_BUCKET_REVIEWS — see it for why a repair bucket is 8x a
+        scoring bucket);
+      * the cache is attached for SHORT windows only — the plan, one read of each bucket's
+        cached arms, one commit per bucket — and detached for the text stream, the regexes
+        and the scoring, so a light build's press pass can take it meanwhile;
+      * each commit is ORDERED so that a death anywhere inside it leaves the review unscanned
+        rather than holed: its scored_review rows go first (from then on the nightly's
+        anti-join would rescan it), its mention rows are replaced, and scored_review is
+        re-inserted LAST — the same "an id is recorded only after all of its rows" invariant
+        compute_aspect_sentiment's loop rests on;
+      * the stored config hash is re-read at every commit and the run aborts if it moved: a
+        concurrent wipe must never be handed rows scored under the previous config.
+
+    RESUMABLE per bucket, from the cache file alone. cache.repair_arms_status holds one row
+    per completed bucket of the current PASS (keyed by config hash and bucket count, so the
+    partition is pinned for the pass even if the pool grows between runs); a rerun skips
+    those buckets; once every bucket has a row the pass is complete and the next run reports
+    its totals, clears them and starts a fresh pass — which is what makes the mode
+    idempotent: a second pass over a repaired cache finds zero mismatches.
+        duckdb data/sentiment_cache.duckdb -c 'SELECT * FROM repair_arms_status'
+    A row is written only after its bucket's commit, so unlike rescore_status it is never
+    stale. Honours PROSPECT_SENTIMENT_DEADLINE_SECONDS between buckets like the scoring loop.
+
+    Returns the pass totals (checked, mismatched, rescored, raw_mentions, missing_mentions,
+    superset, mixed, buckets, done) — main() prints them as the summary an operator compares
+    against the 2026-08-31 measurement — or None when the cache is not keyed to the current
+    scoring config (nothing in it is repairable; a full build or --rescore-only wipes it)."""
+    for t in ("_repair_pool_meta", "_repair_ids", "_repair_text", "_repair_raw",
+              "_repair_cached", "_repair_diff", "_repair_mismatch", "_repair_fix_text",
+              "_repair_windows", "_repair_mentions"):
+        con.execute(f"DROP TABLE IF EXISTS {t}")
+    # The in-scope pool: the SAME population compute_aspect_sentiment scores — stg_review_key
+    # under the per-game TEARDOWN_MIN_REVIEWS floor, then capped to the newest
+    # SENTIMENT_POOL_CAP_PER_GAME reviews per game (2026-09-05; _sentiment_pool_cap reads the
+    # PROSPECT_SENTIMENT_POOL_CAP override, 0 = uncapped). Spelled out rather than shared
+    # because that function builds its copy inline as part of its own staging; the floor, the
+    # cap and the QUALIFY ordering (numeric id, then the raw key — see the note at its
+    # _sent_pool_meta CTAS) are kept identical to that CTAS on purpose, so this mode checks
+    # exactly the reviews the nightly scores and never re-reads a capped-out review's text:
+    # its cache rows are out of scope, ignored by the nightly and left alone here.
+    _cap = _sentiment_pool_cap()
+    _newest = (
+        "QUALIFY row_number() OVER (PARTITION BY t.appid "
+        "ORDER BY TRY_CAST(t.recommendationid AS BIGINT) DESC NULLS LAST, "
+        f"t.recommendationid DESC) <= {_cap}"
+    ) if _cap > 0 else ""
+    con.execute(
+        f"""
+        CREATE TEMP TABLE _repair_pool_meta AS
+        WITH elig AS (
+            SELECT appid FROM stg_review_key
+            GROUP BY appid HAVING COUNT(*) >= {TEARDOWN_MIN_REVIEWS}
+        )
+        SELECT t.appid, t.recommendationid
+        FROM stg_review_key t
+        JOIN elig e ON e.appid = t.appid
+        {_newest}
+        """
+    )
+    current_hash = _sentiment_config_hash()
+
+    def _stored_hash() -> str | None:
+        row = con.execute("SELECT value FROM cache.meta WHERE key = 'config_hash'").fetchone()
+        return None if row is None else row[0]
+
+    # PHASE 1: the plan, cache attached for seconds.
+    _attach_sentiment_cache(con, data_dir)
+    try:
+        stored = _stored_hash()
+        if stored != current_hash:
+            print("ERROR: --repair-arms: the sentiment cache is not keyed to the current scoring "
+                  f"config (stored {stored!r}, current {current_hash[:12]}...) — nothing in it "
+                  "is repairable. The next full build or --rescore-only run wipes and refills it.",
+                  file=sys.stderr)
+            return None
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS cache.repair_arms_status("
+            "config_hash VARCHAR, n_buckets INTEGER, bucket INTEGER, checked BIGINT, "
+            "raw_mentions BIGINT, mismatched BIGINT, missing_mentions BIGINT, rescored BIGINT, "
+            "superset BIGINT, mixed BIGINT, seconds DOUBLE, completed_at TIMESTAMP)"
+        )
+        # CANDIDATES: pool reviews the cache claims to have scanned. Reviews it has NOT are the
+        # nightly's delta and stay its business; reviews outside the per-game cap are not in
+        # the pool at all, so their rows are neither checked nor touched. Lean (ids only), the
+        # size of _sent_new_ids on a wipe.
+        con.execute(
+            """
+            CREATE TEMP TABLE _repair_ids AS
+            SELECT p.appid, p.recommendationid
+            FROM _repair_pool_meta p
+            WHERE EXISTS (
+                SELECT 1 FROM cache.scored_review s
+                WHERE s.recommendationid = p.recommendationid
+            )
+            """
+        )
+        n_candidates = con.execute("SELECT COUNT(*) FROM _repair_ids").fetchone()[0]
+        # Rows from a previous config describe a cache that no longer exists.
+        con.execute("DELETE FROM cache.repair_arms_status WHERE config_hash <> ?", [current_hash])
+        prev = con.execute(
+            "SELECT n_buckets, bucket, seconds FROM cache.repair_arms_status "
+            "WHERE config_hash = ? ORDER BY bucket", [current_hash]
+        ).fetchall()
+        done: dict[int, float] = {}
+        n_buckets = _repair_bucket_count(n_candidates)
+        if prev and any(r[0] != prev[0][0] for r in prev):
+            print("[etl] repair-arms: repair_arms_status holds rows from more than one bucket "
+                  "count — discarding them and starting a fresh pass")
+            con.execute("DELETE FROM cache.repair_arms_status WHERE config_hash = ?",
+                        [current_hash])
+        elif prev and len(prev) >= prev[0][0]:
+            t = con.execute(
+                "SELECT SUM(checked), SUM(mismatched), SUM(rescored), MAX(completed_at) "
+                "FROM cache.repair_arms_status WHERE config_hash = ?", [current_hash]
+            ).fetchone()
+            print(f"[etl] repair-arms: the previous pass is complete ({prev[0][0]} bucket(s), "
+                  f"finished {t[3]}): checked {t[0]:,}, mismatched {t[1]:,}, rescored {t[2]:,} "
+                  "— starting a fresh pass")
+            con.execute("DELETE FROM cache.repair_arms_status WHERE config_hash = ?",
+                        [current_hash])
+        elif prev:
+            n_buckets = int(prev[0][0])
+            done = {int(b): float(s or 0.0) for _n, b, s in prev}
+            print(f"[etl] repair-arms: resuming — {len(done)}/{n_buckets} bucket(s) already "
+                  "checked by a previous run")
+    finally:
+        _detach_sentiment_cache(con)
+    con.execute("DROP TABLE IF EXISTS _repair_pool_meta")
+    print(f"[etl] repair-arms: {n_candidates:,} scanned review(s) in scope, "
+          f"{n_buckets} bucket(s), {n_buckets - len(done)} to check")
+
+    clf = _get_classifier()
+    _deadline = _sentiment_deadline()
+    _bucket_cost = max(done.values(), default=0.0)
+    n_done = 0
+    _stopped_early = None
+    for _b in range(n_buckets):
+        if _b in done:
+            continue
+        if _deadline is not None and time.monotonic() + _bucket_cost >= _deadline:
+            _stopped_early = (
+                f"sentiment deadline reached ({time.monotonic() - _PROC_T0:,.0f}s into the run; "
+                f"~{_bucket_cost:,.0f}s needed for the next bucket)"
+            )
+            break
+        _t_bucket = time.monotonic()
+        # ONE predicate for the bucket, used verbatim by every id-keyed step below — the same
+        # rule as the scoring loop, and for the same reason.
+        _pred = f"hash(recommendationid) % {n_buckets} = {_b}"
+        _bucket_ids = f"SELECT recommendationid FROM _repair_ids WHERE {_pred}"
+        checked = con.execute(f"SELECT COUNT(*) FROM _repair_ids WHERE {_pred}").fetchone()[0]
+        raw = mismatched = missing = superset = mixed = 0
+        con.execute("CREATE TEMP TABLE _repair_mismatch(recommendationid VARCHAR)")
+        if checked:
+            # THE ONLY REVIEW TEXT THIS RUN MATERIALISES: one bucket of the candidates, read
+            # straight from src.reviews — the same shape as the scoring loop's _sent_new.
+            con.execute(
+                f"""
+                CREATE TEMP TABLE _repair_text AS
+                SELECT n.appid, n.recommendationid, r.review_text
+                FROM (SELECT appid, recommendationid FROM _repair_ids WHERE {_pred}) n
+                JOIN src.reviews r ON r.recommendationid = n.recommendationid
+                """
+            )
+            # RAW ARMS: the (review, arm) pairs the text matches TODAY, from the one generator
+            # that defines an arm. Only the two key columns are selected, so the window and
+            # position regexes are pruned and this is the ten-filter keyword scan.
+            con.execute(
+                "CREATE TEMP TABLE _repair_raw AS "
+                "SELECT DISTINCT recommendationid, aspect FROM ("
+                f"{_aspect_window_sql('_repair_text')}"
+                ")"
+            )
+            # CACHED ARMS for the same reviews — the one cache read per bucket, held for the
+            # seconds it takes; the hash filter lets DuckDB cut the 21.7M-row table down to
+            # the bucket before the semi-join.
+            _attach_sentiment_cache(con, data_dir)
+            try:
+                con.execute(
+                    f"""
+                    CREATE TEMP TABLE _repair_cached AS
+                    SELECT DISTINCT m.recommendationid, m.aspect
+                    FROM cache.aspect_mention m
+                    WHERE hash(m.recommendationid) % {n_buckets} = {_b}
+                      AND m.recommendationid IN ({_bucket_ids})
+                    """
+                )
+            finally:
+                _detach_sentiment_cache(con)
+            # THE COMPARISON, as sets: per review, arms the text matches that the cache lacks
+            # (`missing`) and arms the cache holds that the text does not match (`extra`).
+            # A review with no rows on either side is intact and never appears here.
+            con.execute(
+                """
+                CREATE TEMP TABLE _repair_diff AS
+                SELECT COALESCE(r.recommendationid, c.recommendationid) AS recommendationid,
+                       COUNT(*) FILTER (WHERE c.aspect IS NULL) AS missing,
+                       COUNT(*) FILTER (WHERE r.aspect IS NULL) AS extra
+                FROM _repair_raw r
+                FULL OUTER JOIN _repair_cached c
+                  ON c.recommendationid = r.recommendationid AND c.aspect = r.aspect
+                GROUP BY 1
+                """
+            )
+            raw = con.execute("SELECT COUNT(*) FROM _repair_raw").fetchone()[0]
+            mismatched, missing, superset, mixed = con.execute(
+                """
+                SELECT COUNT(*) FILTER (WHERE missing > 0 AND extra = 0),
+                       COALESCE(SUM(missing) FILTER (WHERE missing > 0 AND extra = 0), 0),
+                       COUNT(*) FILTER (WHERE missing = 0 AND extra > 0),
+                       COUNT(*) FILTER (WHERE missing > 0 AND extra > 0)
+                FROM _repair_diff
+                """
+            ).fetchone()
+            mismatched, missing, superset, mixed = (int(mismatched), int(missing),
+                                                    int(superset), int(mixed))
+            con.execute(
+                "INSERT INTO _repair_mismatch "
+                "SELECT recommendationid FROM _repair_diff WHERE missing > 0 AND extra = 0"
+            )
+            if mismatched:
+                # RESCORE the mismatched reviews — their text is already in hand — through
+                # the identical window build and scorer the nightly uses, into a LOCAL table
+                # committed below. REGULAR window table: the streaming cursor must see it.
+                con.execute(
+                    """
+                    CREATE TEMP TABLE _repair_fix_text AS
+                    SELECT t.appid, t.recommendationid, t.review_text
+                    FROM _repair_text t
+                    JOIN _repair_mismatch m ON m.recommendationid = t.recommendationid
+                    """
+                )
+                con.execute(
+                    f"CREATE TABLE _repair_windows AS {_aspect_window_sql('_repair_fix_text')}"
+                )
+                con.execute(
+                    "CREATE TEMP TABLE _repair_mentions("
+                    "recommendationid VARCHAR, aspect VARCHAR, compound DOUBLE, "
+                    "clf_aspect VARCHAR, clf_sentiment VARCHAR, clf_margin DOUBLE)"
+                )
+                if clf is not None:
+                    _stream_vader_and_classify(
+                        con,
+                        "SELECT recommendationid, aspect, window_text FROM _repair_windows",
+                        "INSERT INTO _repair_mentions VALUES (?, ?, ?, ?, ?, ?)",
+                        clf,
+                    )
+                else:
+                    _stream_vader_scores(
+                        con,
+                        "SELECT recommendationid, aspect, window_text FROM _repair_windows",
+                        "INSERT INTO _repair_mentions (recommendationid, aspect, compound) "
+                        "VALUES (?, ?, ?)",
+                    )
+                con.execute("DROP TABLE IF EXISTS _repair_windows")
+                con.execute("DROP TABLE IF EXISTS _repair_fix_text")
+            for t in ("_repair_diff", "_repair_cached", "_repair_raw", "_repair_text"):
+                con.execute(f"DROP TABLE IF EXISTS {t}")
+
+        # COMMIT THE BUCKET — the cache attached for these few statements only. See the
+        # docstring for the order: scored_review out FIRST, back in LAST.
+        _attach_sentiment_cache(con, data_dir)
+        try:
+            if _stored_hash() != current_hash:
+                raise RuntimeError(
+                    "--repair-arms: the sentiment cache's config hash changed while the pass "
+                    "was running (a concurrent build wiped or re-keyed it) — aborting before "
+                    "any row scored under the previous config is committed"
+                )
+            if mismatched:
+                con.execute(
+                    "DELETE FROM cache.scored_review WHERE recommendationid IN "
+                    "(SELECT recommendationid FROM _repair_mismatch)"
+                )
+                con.execute(
+                    "DELETE FROM cache.aspect_mention WHERE recommendationid IN "
+                    "(SELECT recommendationid FROM _repair_mismatch)"
+                )
+                con.execute(
+                    "INSERT INTO cache.aspect_mention "
+                    "SELECT recommendationid, aspect, compound, clf_aspect, clf_sentiment, "
+                    "clf_margin FROM _repair_mentions"
+                )
+                con.execute(
+                    "INSERT INTO cache.scored_review SELECT recommendationid FROM _repair_mismatch"
+                )
+            _elapsed = time.monotonic() - _t_bucket
+            con.execute(
+                "INSERT INTO cache.repair_arms_status VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [current_hash, n_buckets, _b, checked, raw, mismatched, missing, mismatched,
+                 superset, mixed, _elapsed, datetime.now(timezone.utc)],
+            )
+        finally:
+            _detach_sentiment_cache(con)
+        con.execute("DROP TABLE IF EXISTS _repair_mentions")
+        con.execute("DROP TABLE IF EXISTS _repair_mismatch")
+        _bucket_cost = max(_bucket_cost, _elapsed)
+        n_done += 1
+        _drift = (f"; {superset + mixed:,} left alone (cached arms the text does not match)"
+                  if superset or mixed else "")
+        print(f"[etl] repair-arms bucket {_b + 1}/{n_buckets}: checked {checked:,}, "
+              f"mismatched {mismatched:,}, rescored {mismatched:,} "
+              f"({missing:,} missing mention row(s) of {raw:,} raw{_drift}; {_elapsed:,.1f}s)")
+    con.execute("DROP TABLE IF EXISTS _repair_ids")
+
+    # THE PASS TOTALS, from the status rows — this run's buckets plus any a previous run of
+    # the same pass completed — so the summary means the same thing however many runs it took.
+    _attach_sentiment_cache(con, data_dir)
+    try:
+        t = con.execute(
+            "SELECT COUNT(*), COALESCE(SUM(checked), 0), COALESCE(SUM(mismatched), 0), "
+            "COALESCE(SUM(rescored), 0), COALESCE(SUM(raw_mentions), 0), "
+            "COALESCE(SUM(missing_mentions), 0), COALESCE(SUM(superset), 0), "
+            "COALESCE(SUM(mixed), 0) "
+            "FROM cache.repair_arms_status WHERE config_hash = ?", [current_hash]
+        ).fetchone()
+    finally:
+        _detach_sentiment_cache(con)
+    totals = {"buckets": n_buckets, "done": int(t[0]), "checked": int(t[1]),
+              "mismatched": int(t[2]), "rescored": int(t[3]), "raw_mentions": int(t[4]),
+              "missing_mentions": int(t[5]), "superset": int(t[6]), "mixed": int(t[7]),
+              "stopped_early": _stopped_early, "buckets_this_run": n_done}
+    _pct_reviews = (100.0 * totals["mismatched"] / totals["checked"]) if totals["checked"] else 0.0
+    _pct_mentions = ((100.0 * totals["missing_mentions"] / totals["raw_mentions"])
+                     if totals["raw_mentions"] else 0.0)
+    # The two fractions an operator compares with the 2026-08-31 measurement (1,962 of
+    # 314,626 raw mentions = 0.62%; 73 of 600 games touched): mismatched reviews over
+    # checked, and missing mention rows over raw.
+    print(f"[etl] repair-arms summary: {totals['done']}/{n_buckets} bucket(s) checked "
+          f"({n_done} this run); checked {totals['checked']:,} review(s), "
+          f"mismatched {totals['mismatched']:,} ({_pct_reviews:.3f}%), "
+          f"rescored {totals['rescored']:,}; {totals['missing_mentions']:,} of "
+          f"{totals['raw_mentions']:,} raw mention row(s) were missing ({_pct_mentions:.2f}%)"
+          + (f"; {totals['superset'] + totals['mixed']:,} review(s) left alone with cached "
+             "arms the text does not match" if totals["superset"] or totals["mixed"] else ""))
+    if _stopped_early is not None:
+        print(f"[etl] repair-arms: STOPPED EARLY between buckets — {_stopped_early}. "
+              f"{n_buckets - totals['done']} bucket(s) deferred; rerun to continue "
+              "(progress is in the cache: SELECT * FROM repair_arms_status)")
+    return totals
+
+
 def compute_press_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> int:
     """Precompute VADER sentiment of each press article's headline+summary, for the Game
     Teardown's press footprint (does a game's journalist coverage skew positive or negative?).
@@ -4151,6 +4568,24 @@ def _refuse_publishing_rescore_scratch(building: Path) -> None:
         )
 
 
+def _live_mart_build_scratch(data_dir: Path) -> str | None:
+    """The scratch label of a MART build (a nightly or a --light run, never the rescore
+    family) written within SCRATCH_ACTIVE_SECONDS — i.e. one that may still be running — or
+    None. --repair-arms refuses to start beside one: it deletes and rewrites cache rows a
+    full build's read-back treats as settled, and a config wipe under it would be fed rows
+    scored under the previous config. The other direction is enforced by the cron guards
+    (deploy/prospect-refresh.sh and deploy/light-build-cron.sh skip themselves while any
+    build_marts that is not a --rescore-only run is alive), and two rescore-family runs are
+    kept apart by DuckDB's file lock on the scratch they share. Same liveness test as
+    _sweep_stale_scratch, so a scratch this refuses is one the sweep would also have spared."""
+    for v, paths in sorted(_scratch_paths(data_dir).items()):
+        if v == RESCORE_SCRATCH_VERSION:
+            continue
+        if _scratch_age_seconds(paths) < SCRATCH_ACTIVE_SECONDS:
+            return _scratch_label(v)
+    return None
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Build Prospect DuckDB marts.")
     # Default source: PROSPECT_SOURCE_DB env first (the droplet's layout differs from the
@@ -4198,6 +4633,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "built, and otherwise copies them verbatim from the published mart "
                          "(~23 minutes and most of the spill saved); build / copy force either "
                          "way. --light always copies and never scores.")
+    ap.add_argument("--repair-arms", action="store_true",
+                    help="Repair the sentiment cache's frozen mention hole and NOTHING else: "
+                         "staging, then one bucketed regex pass over every scored in-scope "
+                         "review comparing the keyword arms its text matches with the arms "
+                         "cached for it, rescoring only the reviews whose cached set is a "
+                         "strict subset (the 2026-08-31 measurement: 0.62%% of mentions, all in "
+                         "the last two arms). No marts, no press sentiment, no validation, no "
+                         "swap; a full 24M-review rescore is never needed for this again. "
+                         "Resumable per bucket (progress: SELECT * FROM repair_arms_status in "
+                         "the cache file); a second run finds zero mismatches. Must not run "
+                         "beside a nightly, a --light build or a --rescore-only run.")
     return ap
 
 
@@ -4227,6 +4673,16 @@ def _env_config_errors() -> list[str]:
             errors.append(f"PROSPECT_RESCORE_BUCKET_REVIEWS={raw!r} is not a positive integer "
                           "(target reviews per scoring bucket; unset = "
                           f"{RESCORE_BUCKET_REVIEWS:,})")
+    raw = os.environ.get("PROSPECT_REPAIR_BUCKET_REVIEWS", "").strip()
+    if raw:
+        try:
+            per_bucket = int(raw)
+        except ValueError:
+            per_bucket = 0
+        if per_bucket < 1:
+            errors.append(f"PROSPECT_REPAIR_BUCKET_REVIEWS={raw!r} is not a positive integer "
+                          "(target reviews per --repair-arms bucket; unset = "
+                          f"{REPAIR_BUCKET_REVIEWS:,})")
     raw = os.environ.get("PROSPECT_SENTIMENT_DEADLINE_SECONDS", "").strip()
     if raw:
         try:
@@ -4330,6 +4786,25 @@ def main() -> int:
                   file=sys.stderr)
             return 2
 
+    # --repair-arms is the same shape from here: staging, cache work, exit — no mart, no swap
+    # — so it takes the same refusals, plus --rescore-only itself: it rewrites rows a rescore
+    # regards as settled, and the two would fight over one scratch file anyway.
+    if args.repair_arms:
+        bad = [f for f, on in (("--light", args.light),
+                               ("--rescore-only", args.rescore_only),
+                               ("--skip-validation", args.skip_validation),
+                               (f"--fulltext {args.fulltext}", args.fulltext != "auto")) if on]
+        if bad:
+            print(f"ERROR: --repair-arms cannot be combined with {', '.join(bad)} — it builds "
+                  "no marts and never swaps, and it must not run inside a rescore.",
+                  file=sys.stderr)
+            return 2
+        if not _sentiment_cache_enabled():
+            print("ERROR: --repair-arms repairs the sentiment cache, but "
+                  "PROSPECT_SENTIMENT_CACHE is off — there is nothing to repair.",
+                  file=sys.stderr)
+            return 2
+
     # A --light build must never replace a same-day FULL build (its teardown/aspect tables
     # are stale copies) — checked up front so the mistake costs seconds, not the 30min build.
     if args.light:
@@ -4367,17 +4842,32 @@ def main() -> int:
     # It writes no mart, so naming its scratch after the date's mart made a multi-day rescore
     # and the nightly fight over one filename (and one spill dir) with nothing but a build hold
     # — i.e. a total publishing freeze — to keep them apart. See RESCORE_SCRATCH_DB_NAME.
-    scratch_version = RESCORE_SCRATCH_VERSION if args.rescore_only else mart_version
+    #
+    # --repair-arms shares that scratch and its pseudo-version: it too writes only the sentiment
+    # cache, may run for hours, and must not be swept by a nightly's stale-scratch sweep. Unlike
+    # a rescore it must never run BESIDE a mart build, which is checked right after the sweep
+    # on the sweep's own liveness test (see _live_mart_build_scratch).
+    cache_only = args.rescore_only or args.repair_arms
+    scratch_version = RESCORE_SCRATCH_VERSION if cache_only else mart_version
     _sweep_stale_scratch(data_dir, scratch_version)
-    building = (data_dir / RESCORE_SCRATCH_DB_NAME if args.rescore_only
+    if args.repair_arms:
+        live = _live_mart_build_scratch(data_dir)
+        if live is not None:
+            print(f"ERROR: --repair-arms must not run beside a mart build, and {live} was written "
+                  f"less than {SCRATCH_ACTIVE_SECONDS / 60:.0f} min ago — a nightly or --light "
+                  "build may be in flight. Wait for it to finish (or remove that scratch by hand "
+                  "if you know it is dead).", file=sys.stderr)
+            return 2
+    building = (data_dir / RESCORE_SCRATCH_DB_NAME if cache_only
                 else data_dir / f"prospect_{mart_version}.duckdb.building")
 
     params = build_params()
     print(f"[etl] source     : {source_db}")
-    if args.rescore_only:
-        # Deliberately NOT the versioned mart path: this mode never writes one, and printing
+    if cache_only:
+        # Deliberately NOT the versioned mart path: these modes never write one, and printing
         # one would put a filename in the log that nothing on disk will ever match.
-        print(f"[etl] output     : none — --rescore-only (scratch: {building})")
+        print(f"[etl] output     : none — "
+              f"{'--rescore-only' if args.rescore_only else '--repair-arms'} (scratch: {building})")
     else:
         print(f"[etl] output     : {versioned}")
     t0 = time.perf_counter()
@@ -4398,7 +4888,7 @@ def main() -> int:
     # Not deleting the file first is also deliberate: DuckDB's file lock refusing this connect
     # is the ONLY thing that keeps a second rescore off a live one's scratch, and unlinking the
     # name would hand both processes their own inode and let them both run.
-    reused_scratch = args.rescore_only and building.exists()
+    reused_scratch = cache_only and building.exists()
     try:
       con = duckdb.connect(str(building))
       if reused_scratch:
@@ -4482,6 +4972,23 @@ def main() -> int:
                   f"({time.perf_counter() - t_sent:.1f}s). Rerun to continue; check progress "
                   f"with: duckdb {data_dir / SENTIMENT_CACHE_DB_NAME} "
                   f"-c 'SELECT * FROM rescore_status'")
+            return 0
+
+        # --repair-arms stops HERE too, and for the same reason: staging's stg_review_key is
+        # what tells it the in-scope pool, and nothing after this point exists for it. See
+        # repair_sentiment_arms for what it does and why it is not a rescore.
+        if args.repair_arms:
+            print("[etl] REPAIR-ARMS: rescoring reviews whose cached arm set is a strict subset "
+                  "of what their text matches; no marts, no swap")
+            t_rep = time.perf_counter()
+            totals = repair_sentiment_arms(con, data_dir)
+            if totals is None:
+                return 2
+            print(f"[etl] repair-arms done: {totals['rescored']:,} review(s) rescored of "
+                  f"{totals['checked']:,} checked ({time.perf_counter() - t_rep:.1f}s). Rerun to "
+                  "continue, or to verify — a complete pass reports mismatched 0; progress: "
+                  f"duckdb {data_dir / SENTIMENT_CACHE_DB_NAME} "
+                  f"-c 'SELECT * FROM repair_arms_status'")
             return 0
 
         # The two full-text monsters (teardown family + aspect excerpts) are ~80% of a full
