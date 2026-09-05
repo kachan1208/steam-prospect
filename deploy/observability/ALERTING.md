@@ -20,7 +20,7 @@ pins it — two more always-on containers is exactly the wrong trade.
 | e | age of `prospect_backup_last_success_timestamp` (pushed by `backup.sh`) | > 50h |
 | f | VictoriaMetrics itself unreachable | immediate |
 | g | `prospect_build_hold_active` (a `rollback.sh` hold nobody released) | latest sample is 1 |
-| h | free disk on the filesystem holding `/root` (pushes `prospect_disk_free_pct`; evaluated even when VM is down) | < `DISK_MIN_FREE_PCT` (default 15%) |
+| h | free disk on the filesystem holding `/root` (pushes `prospect_disk_free_pct`; evaluated even when VM is down) | < `DISK_MIN_FREE_PCT` (default 30%, so it pages before the nightly's own 25 GB gate refuses to build) |
 
 **Every wrapped cron job is covered by (a).** `cron-wrap.sh` pushes
 `prospect_pipeline_step_success{step="<job>"}` for whatever it runs, so the twitch
@@ -28,7 +28,10 @@ collector, the 19:15 quiet-window steps (which also push per-step metrics of the
 the keepers and the backup are all evaluated. That is the point: before this, the four
 steps most prone to the "database is locked" failure — the very incident that motivated
 this script — pushed nothing at all, so a repeat would have been just as silent. **Putting
-a new job behind `cron-wrap.sh` is what puts it under alerting.**
+a new job behind `cron-wrap.sh` is what puts it under alerting.** A job whose own `timeout`
+is its schedule (the 06:00 review keeper, a bounded slice of an open-ended backlog) is
+wrapped with `cron-wrap.sh -x`: rc 124/143 then push success instead of breaching (a) every
+day; rc 137 (cgroup OOM kill) still fails.
 
 **(d) deliberately does not page on skips.** Skips are a designed outcome — the midday
 light build is *supposed* to skip while the review keeper holds the refresh lock — and
@@ -88,9 +91,10 @@ missed run is normal jitter and two in a row is not.
    # multi-day drain is normal for you — otherwise leave it monitored.
    # (ALERT_IGNORE_SKIPPED_JOBS is accepted as an alias for this.)
    #ALERT_IGNORE_JOBS=light_build
-   # Breach when the filesystem holding /root has less than this percent free. 15 = the
-   # headroom backup.sh's weekly copy demands and the ETL's spill ceiling needs.
-   #DISK_MIN_FREE_PCT=15
+   # Breach when the filesystem holding /root has less than this percent free. 30 pages
+   # before the nightly's own disk gate (PROSPECT_DISK_MIN_FREE_GB=25 in prospect-refresh.sh:
+   # an 18 GB spill + a 2.3 GB mart) refuses to build.
+   #DISK_MIN_FREE_PCT=30
    # When the 19:30 backup job is deliberately NOT scheduled, silence its staleness check
    # with this (otherwise remove it — see the history block in deploy/crontab.txt).
    #ALERT_CHECK_BACKUPS=0

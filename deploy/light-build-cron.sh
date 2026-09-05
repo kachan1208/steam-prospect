@@ -29,6 +29,7 @@ else
          "restart and metric pushes disabled" >&2
     prospect_restart_verify() { docker restart prospect && sleep 15; }
     prospect_push_metrics() { :; }
+    NICE=()   # un-niced rather than not at all
 fi
 
 # Every redirect below writes here. cron-wrap.sh also creates it, but this script is run by
@@ -87,8 +88,15 @@ find /root/prospect/data -maxdepth 1 -name 'prospect_*.duckdb.building*' \
      -mmin +120 -exec rm -rf {} + 2>/dev/null || true
 
 cd /root/prospect/etl || exit 1
-if PROSPECT_DUCKDB_MEMORY_LIMIT=1700MB PYTHONUNBUFFERED=1 \
-    timeout 14400 .venv/bin/python -u build_marts.py \
+# Memory (2026-09-04): the same systemd-run cgroup cap the keepers and the nightly ETL run
+# under. 2400M rather than the nightly's 3000M because the 06:15 socials keeper (own lock,
+# capped at 1500M) can still be running at 13:30: 2400M + 1500M + ~900M app/OS is the whole
+# 3.9 GB box only if BOTH peak at once, and then the cgroup kills this opportunistic build
+# instead of letting the box thrash. DuckDB gets 1800MB of the 2400M; the rest is the Python
+# heap. Move the two numbers together.
+if PROSPECT_DUCKDB_MEMORY_LIMIT=1800MB PYTHONUNBUFFERED=1 \
+    timeout 14400 systemd-run --scope --quiet -p MemoryMax=2400M -p MemorySwapMax=0 "${NICE[@]}" \
+      /root/prospect/etl/.venv/bin/python -u build_marts.py \
       --source /root/steam-scraper/steam_games.db \
       --data-dir /root/prospect/data --light \
       >> /var/log/prospect-steps/light-build.cron.log 2>&1; then

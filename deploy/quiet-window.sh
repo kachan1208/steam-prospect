@@ -68,6 +68,7 @@ if [ -f "$(dirname "$0")/lib.sh" ]; then
 else
     echo "WARN: $(dirname "$0")/lib.sh missing — metric push disabled for this run" >&2
     prospect_push_metrics() { :; }
+    NICE=()   # un-niced rather than not at all
 fi
 
 mkdir -p "$LOG_DIR"
@@ -125,7 +126,9 @@ prospect_pipeline_step_last_run_timestamp{step=\"$label\"} $now"
     log "start $label (budget ${budget}s, ${left}s left in window) -> $slog"
     # Backgrounded + `wait` so the traps above can fire while a step is running; bash only
     # runs a trap between commands otherwise, which would be after the whole step.
-    timeout --kill-after="$GRACE" "$budget" "$@" >"$slog" 2>&1 &
+    # "${NICE[@]}" (lib.sh) sits between timeout and the step: nice/ionice exec straight into
+    # the python, so `timeout` is still the group leader the cleanup trap kills by PGID.
+    timeout --kill-after="$GRACE" "$budget" "${NICE[@]}" "$@" >"$slog" 2>&1 &
     STEP_PID=$!
     wait "$STEP_PID"; rc=$?
     # `wait` returns 128+N when a trapped signal interrupted it, with the child still alive.

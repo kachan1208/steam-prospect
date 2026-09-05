@@ -12,6 +12,14 @@
 
 PROSPECT_VM_IMPORT="${PROSPECT_VM_IMPORT:-http://localhost:8428/api/v1/import/prometheus}"
 
+# NICE — scheduling priority for every pipeline step (2026-09-04). Nothing in the pipeline set
+# one, so a 16-worker scrape or a DuckDB build competed with the two uvicorn workers as an
+# equal on 2 vCPUs. An ARRAY so it word-splits safely: `timeout N "${NICE[@]}" cmd …`.
+# ionice -c2 -n7 is a no-op under the mq-deadline/none schedulers (virtio disks) and harmless;
+# nice is what matters on 2 vCPUs.
+# shellcheck disable=SC2034  # used by the scripts that source this file, not in it
+NICE=(nice -n 15 ionice -c2 -n7)
+
 # prospect_push_metrics "<prometheus-format lines>" — push to the droplet-local
 # VictoriaMetrics. Unlike prospect-refresh.sh's own push(), a failure is LOGGED (stderr) —
 # but still never fails the caller: metrics are how problems become visible, so a silently
@@ -23,6 +31,14 @@ prospect_push_metrics() {
         echo "WARN: [lib] metric push to $PROSPECT_VM_IMPORT failed: $out" >&2
     fi
     return 0
+}
+
+# prospect_free_gb [PATH] — whole GiB free on the filesystem holding PATH (default
+# /root/prospect/data), the number `df -h` shows. Prints NOTHING if df cannot measure, so a
+# caller can treat "unmeasurable" as its own case instead of as zero. -P for one-line POSIX
+# output, -k so the arithmetic is the same on every df.
+prospect_free_gb() {
+    df -Pk "${1:-/root/prospect/data}" 2>/dev/null | awk 'NR == 2 { printf "%d\n", $4 / 1048576 }'
 }
 
 # prospect_http_code PATH — echo the HTTP status of PATH ("000" if nothing answered).

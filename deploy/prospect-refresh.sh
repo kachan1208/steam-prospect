@@ -17,7 +17,14 @@
 # retired — `git pull` in /root/prospect is the whole deploy for shell changes).
 set -uo pipefail
 export PATH=/root/steam-scraper/.venv/bin:/root/.local/bin:$PATH
-export PROSPECT_DUCKDB_MEMORY_LIMIT=2500MB   # cap DuckDB on the 4GB box
+# DuckDB's own cap, sized to FIT the ETL's cgroup (2026-09-04; was 2500MB with no cgroup at
+# all). The ETL runs under `systemd-run --scope -p MemoryMax=3000M` (see the invocation): on
+# the 3.9 GB box that is 3000M for the ETL and ~900M for the two uvicorn workers plus the OS,
+# and the keepers never overlap the ETL by schedule (06:00/06:15 vs 21:00-05:08). Inside the
+# 3000M, DuckDB gets 2200MB; the rest is the Python classifier heap + its multiprocessing
+# children, and DuckDB treats its limit as a target it can overshoot briefly, so the gap is
+# not slack. Move the two numbers together.
+export PROSPECT_DUCKDB_MEMORY_LIMIT=2200MB
 # Cap the SPILL too (2026-08-31). max_temp_directory_size defaults to all free disk, so the
 # 08-30 nightly spilled 20.6GB until the volume was full, then died after 5.35h with nothing
 # built. 15GB leaves room for the two retained marts (~2.3GB each), the scraper's SQLite + WAL
@@ -50,16 +57,27 @@ if [ -f "$(dirname "$0")/lib.sh" ]; then
     . "$(dirname "$0")/lib.sh"
 else
     echo "WARN: $(dirname "$0")/lib.sh missing — restart verification DEGRADED to a blind" \
-         "restart; restore the checkout (cd /root/prospect && git pull)"
+         "restart and the disk gate cannot measure; restore the checkout (cd /root/prospect && git pull)"
     prospect_restart_verify() { docker restart prospect && sleep 15; }
+    prospect_free_gb() { :; }   # prints nothing = "unmeasurable", which the gate does not fail on
+    NICE=()                     # un-niced rather than not at all
 fi
 # Unbuffered stdout for EVERY python step. Not cosmetic: a step killed by `timeout` never gets to
 # flush, so a buffered step that dies takes its whole output with it. The 2026-08-21 ETL ran four
 # hours, hit rc=124, and left ZERO lines to diagnose from — it prints per-mart timings the entire
 # way and every one of them died in the buffer.
 export PYTHONUNBUFFERED=1
+# Disk gate (2026-09-04). Free space on this volume IS the ETL's spill ceiling, and the box was
+# found at 22 GB free against a ~25 GB need: the build's spill has reached 18 GB on this corpus
+# (PROSPECT_DUCKDB_TEMP_MAX above bounds only DuckDB's temp dir), plus a ~2.3 GB new mart, plus
+# SQLite WAL growth. Below this floor the nightly refuses to START (preflight, before any scrape)
+# or to BUILD (pre-ETL, after the scratch sweep had its chance) — a recorded FAILED row with the
+# reason, instead of a build that dies hours in on a full disk. Raise/lower with `df -h`; it sits
+# BELOW the /root/.prospect-env sourcing so the box can override it there.
+DISK_MIN_FREE_GB=${PROSPECT_DISK_MIN_FREE_GB:-25}
 
 LOG=/var/log/prospect-refresh.log
+HISTORY=/root/prospect/data/refresh_history.json   # the run ledger (JSONL) the Data log page reads
 # One log file per step. The main log is a timeline (start/done/rc); the detail lives here.
 # Two reasons this is not just tidiness:
 #  - The parallel lane (news/twitch/ccu/tags_refresh/dev_socials) writes concurrently, so on a
@@ -97,6 +115,10 @@ VM_IMPORT="http://localhost:8428/api/v1/import/prometheus"
 START=$(date -u +%s)
 RESULT="FAILED"   # flipped to OK only after a clean ETL
 STEP="starting"
+# One-line reason for a FAILED night, for the ledger's `error` field. Set by the failures that
+# leave nothing in the ETL log (restart verification, an ETL skip, a preflight); left empty
+# for a real ETL failure, where record_run scans the ETL log for the reason instead.
+RUN_ERROR=""
 
 # Best-effort push of Prometheus-format metric lines to VictoriaMetrics (never fails the run).
 push() { curl -s -m 8 -X POST "$VM_IMPORT" --data-binary "$1" >/dev/null 2>&1 || true; }
@@ -105,7 +127,7 @@ push() { curl -s -m 8 -X POST "$VM_IMPORT" --data-binary "$1" >/dev/null 2>&1 ||
 # deploy/rollback.sh only repoints data/current.duckdb; the next build writes a fresh mart and
 # repoints it back, silently undoing the rollback — usually before anyone looks. rollback.sh
 # therefore leaves a hold file and every build checks it here, FIRST: before the EXIT trap is
-# installed and before any work, so a held night records nothing rather than a bogus FAILED.
+# installed and before any work, so a held night records a HELD row rather than a bogus FAILED.
 #
 # The hold AUTO-EXPIRES (default 48h). A hold that could freeze the pipeline indefinitely
 # would just be a new way to lose a week of data quietly — the failure mode this whole branch
@@ -113,6 +135,29 @@ push() { curl -s -m 8 -X POST "$VM_IMPORT" --data-binary "$1" >/dev/null 2>&1 ||
 # a hold that is still on and page about it.
 HOLD_FILE=${PROSPECT_BUILD_HOLD:-/root/.prospect-build-hold}
 HOLD_HOURS=${PROSPECT_BUILD_HOLD_HOURS:-48}
+# record_held — a HELD row in the run ledger. A held night used to leave NO row (this exits
+# before the EXIT trap), but "no row" is also what a dead box leaves, and two of the last 13
+# nights were found only by their absence. Same shape as cron-wrap.sh's SKIPPED row: result ∈
+# {OK, FAILED, HELD, SKIPPED}, no counts/deltas/freshness (nothing ran to count), reason = the
+# hold file's first non-empty line. python3 does the JSON escaping, the shell does the append.
+record_held() {
+    python3 - "$HOLD_FILE" <<'PY' >> "$HISTORY" || echo "WARN: could not append a HELD row to $HISTORY" >> "$LOG"
+import datetime, json, os, re, sys
+try:
+    reason = next((l.strip() for l in open(sys.argv[1], encoding="utf-8", errors="replace") if l.strip()), "")
+except OSError:
+    reason = ""
+try:  # current.duckdb -> prospect_YYYYMMDD.duckdb (a relative link); the token is the version
+    m = re.search(r"prospect_(\d{8})\.duckdb", os.readlink("/root/prospect/data/current.duckdb"))
+    ver = m.group(1) if m else None
+except OSError:
+    ver = None
+now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+print(json.dumps({"finished_at": now, "result": "HELD", "step": "hold",
+                  "reason": reason[:200] or "build hold active", "duration_s": 0,
+                  "mart_version": ver, "serving_version": ver}))
+PY
+}
 if [ -f "$HOLD_FILE" ] && [ -z "$(find "$HOLD_FILE" -mmin +$(( HOLD_HOURS * 60 )) 2>/dev/null)" ]; then
     {
         echo "=================== refresh HELD: $(date -u) ==================="
@@ -121,6 +166,7 @@ if [ -f "$HOLD_FILE" ] && [ -z "$(find "$HOLD_FILE" -mmin +$(( HOLD_HOURS * 60 )
         echo "release it with: rm -f $HOLD_FILE   (it expires on its own after ${HOLD_HOURS}h)"
     } >> "$LOG"
     push "prospect_build_hold_active 1"
+    record_held
     exit 0
 fi
 if [ -f "$HOLD_FILE" ]; then
@@ -150,7 +196,7 @@ run_step() {
     local slog="$STEP_LOG_DIR/${label}.${RUN_TS}.log"
     t0=$(date -u +%s)
     echo "[$label] start $(date -u) -> $slog"
-    timeout "$tmo" bash -c "$cmd" > "$slog" 2>&1 || rc=$?
+    timeout "$tmo" "${NICE[@]}" bash -c "$cmd" > "$slog" 2>&1 || rc=$?
     dur=$(( $(date -u +%s) - t0 ))
     local ok=1
     [ "$rc" -ne 0 ] && { ok=0; echo "WARN: [$label] exited rc=$rc after ${dur}s"; explain_failure "$label" "$rc" "$slog"; }
@@ -168,8 +214,13 @@ prospect_pipeline_step_last_run_timestamp{step=\"$label\"} $(date -u +%s)"
 # built to coexist), so concurrent writers QUEUE instead of erroring. Does NOT touch the
 # global STEP (that tracks the critical Lane-A path for the failure record). PIDs collected
 # in BG_PIDS; wait_bg() is the barrier (called before review_deepen — memory safety, see below).
+# `run_step_bg --tail LABEL …` registers the step in BG_TAIL_PIDS instead: it runs PAST the
+# barrier, and wait_bg_tail (after the restart step) is what the run still ends behind.
 BG_PIDS=()
+BG_TAIL_PIDS=()
 run_step_bg() {
+    local tail=0
+    if [ "$1" = "--tail" ]; then tail=1; shift; fi
     local label="$1" tmo="$2" cmd="$3"
     local slog="$STEP_LOG_DIR/${label}.${RUN_TS}.log"
     (
@@ -178,7 +229,7 @@ run_step_bg() {
         echo "[$label] start $(date -u) (parallel lane) -> $slog"
         # Redirect is what makes the parallel lane legible: five steps sharing one stdout
         # interleave line-by-line, so a traceback arrives shredded among four other steps.
-        timeout "$tmo" bash -c "$cmd" > "$slog" 2>&1 || rc=$?
+        timeout "$tmo" "${NICE[@]}" bash -c "$cmd" > "$slog" 2>&1 || rc=$?
         dur=$(( $(date -u +%s) - t0 ))
         local ok=1
         [ "$rc" -ne 0 ] && { ok=0; echo "WARN: [$label] exited rc=$rc after ${dur}s"; explain_failure "$label" "$rc" "$slog"; }
@@ -189,24 +240,39 @@ run_step_bg() {
 prospect_pipeline_step_success{step=\"$label\"} $ok
 prospect_pipeline_step_last_run_timestamp{step=\"$label\"} $(date -u +%s)"
     ) &
-    BG_PIDS+=("$!")
-    echo "[$label] launched in background (pid $!)"
+    local pid=$! lane="parallel lane"
+    if [ "$tail" -eq 1 ]; then BG_TAIL_PIDS+=("$pid"); lane="tail lane, not on the barrier"; else BG_PIDS+=("$pid"); fi
+    echo "[$label] launched in background (pid $pid, $lane)"
 }
 
-# Barrier: block until every background (Lane B) step has finished. Called before the ETL,
-# which needs a consistent, fully-written DB snapshot.
+# Barrier: block until every background (Lane B) step has finished — the --tail ones excepted.
+# Called before review_deepen/the ETL, which need a quiet, fully-written steam_games.db.
 wait_bg() {
     local pid
     for pid in "${BG_PIDS[@]}"; do wait "$pid"; done
     BG_PIDS=()
 }
 
+# Tail barrier: block until the --tail steps have finished. Called AFTER the restart step and
+# BEFORE step_summary, so the run — its scoreboard, its metrics, and the ledger row the EXIT
+# trap writes — still ends after every step it launched.
+wait_bg_tail() {
+    local pid
+    for pid in "${BG_TAIL_PIDS[@]}"; do wait "$pid"; done
+    BG_TAIL_PIDS=()
+}
+
 record_run() {
     local dur=$(( $(date -u +%s) - START ))
-    /root/steam-scraper/.venv/bin/python - "$RESULT" "$dur" "$STEP" <<'PY'
-import json, sqlite3, os, sys, glob, datetime, urllib.request
+    # ETL_RC/ETL_DUR/ETL_LOG are unset when the run dies before the ETL starts — passed as ""
+    # and recorded as null, which is the honest answer ("the ETL never ran").
+    /root/steam-scraper/.venv/bin/python - "$RESULT" "$dur" "$STEP" "${ETL_RC:-}" "${ETL_DUR:-}" \
+        "${ETL_LOG:-}" "$RUN_ERROR" "$HISTORY" <<'PY'
+import json, re, sqlite3, os, sys, glob, datetime, urllib.request
 result, duration, step = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-hist = "/root/prospect/data/refresh_history.json"
+etl_rc = int(sys.argv[4]) if sys.argv[4] else None
+etl_duration = int(sys.argv[5]) if sys.argv[5] else None
+etl_log, run_error, hist = sys.argv[6], sys.argv[7], sys.argv[8]
 con = sqlite3.connect("/root/steam-scraper/steam_games.db")
 def n(t):
     try: return con.execute("SELECT count(*) FROM " + t).fetchone()[0]
@@ -230,19 +296,41 @@ freshness = {
     "players":  fresh_hours("SELECT max(captured_at) FROM player_counts"),
     "games":    fresh_hours("SELECT max(updated_at) FROM games"),
 }
+# mart_version = the newest mart ON DISK; serving_version = what current.duckdb points at. They
+# differ after a rollback.sh (the newest file is the one rolled AWAY from), so serving_version
+# is the authoritative "what did the app serve when this row was written".
 marts = sorted(glob.glob("/root/prospect/data/prospect_*.duckdb"))
 mart_version = marts[-1].split("prospect_")[-1].replace(".duckdb", "") if marts else None
+try:
+    m = re.search(r"prospect_(\d{8})\.duckdb", os.readlink("/root/prospect/data/current.duckdb"))
+    serving_version = m.group(1) if m else None
+except OSError:
+    serving_version = None
+def etl_error(path):
+    """The ETL log's last non-blank line naming a failure, else its last non-blank line."""
+    try:
+        lines = [l.rstrip() for l in open(path, encoding="utf-8", errors="replace") if l.strip()]
+    except OSError:
+        return None
+    hits = [l for l in lines if re.search(r"Error|Traceback|FAILED|OutOfMemory|MemoryError|No space|Killed", l)]
+    return (hits[-1] if hits else lines[-1]) if lines else None
+error = None
+if result != "OK":
+    error = (run_error or (etl_error(etl_log) if etl_log else None) or f"failed at step {step}")[:300]
 prev = {}
 if os.path.exists(hist):
-    lines = [l for l in open(hist).read().splitlines() if l.strip()]
-    if lines:
-        try: prev = json.loads(lines[-1]).get("counts") or {}
+    # Baseline = the newest row that COUNTED something. HELD/SKIPPED rows (nights that never
+    # ran) carry no counts, and using one as the baseline would blank every delta.
+    for line in reversed([l for l in open(hist).read().splitlines() if l.strip()]):
+        try: prev = json.loads(line).get("counts") or {}
         except Exception: prev = {}
+        if prev: break
 deltas = {k: counts[k] - prev[k] for k in counts if isinstance(counts[k], int) and isinstance(prev.get(k), int)}
 now = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
 rec = {"finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
        "result": result, "duration_s": duration, "step": step, "mart_version": mart_version,
-       "counts": counts, "deltas": deltas, "freshness_hours": freshness}
+       "serving_version": serving_version, "etl_rc": etl_rc, "etl_duration_s": etl_duration,
+       "error": error, "counts": counts, "deltas": deltas, "freshness_hours": freshness}
 with open(hist, "a") as f:
     f.write(json.dumps(rec) + "\n")
 # Push run-level + data metrics to VictoriaMetrics for the Data Pipeline dashboard.
@@ -261,7 +349,7 @@ try:
         "http://localhost:8428/api/v1/import/prometheus", data="\n".join(m).encode()), timeout=8)
 except Exception:
     pass
-print("recorded:", rec["finished_at"], result, "deltas", deltas, "freshness", freshness)
+print("recorded:", rec["finished_at"], result, "error", error, "deltas", deltas, "freshness", freshness)
 PY
 }
 trap record_run EXIT
@@ -270,6 +358,23 @@ exec >>"$LOG" 2>&1
 echo "=================== refresh start: $(date -u) ==================="
 push "prospect_pipeline_running 1
 prospect_pipeline_start_timestamp $START"
+
+# ── Preflight: disk (see DISK_MIN_FREE_GB). Sits AFTER the EXIT trap on purpose: a breach must
+# leave a FAILED row with its reason, and must leave it before any scrape lane has started.
+STEP="preflight"
+FREE_GB=$(prospect_free_gb /root/prospect/data)
+if [ -n "$FREE_GB" ] && [ "$FREE_GB" -lt "$DISK_MIN_FREE_GB" ]; then
+    RUN_ERROR="disk: ${FREE_GB} GB free < ${DISK_MIN_FREE_GB} GB"
+    echo "ERROR: [preflight] $RUN_ERROR — not starting. The ETL would spill into a full disk and" \
+         "die hours in; free space (df -h, stale *.building* scratch, old marts) and re-run."
+    push "prospect_pipeline_step_success{step=\"preflight\"} 0
+prospect_pipeline_step_last_run_timestamp{step=\"preflight\"} $(date -u +%s)"
+    rm -f "$STEP_RESULTS"
+    exit 1
+fi
+echo "[preflight] disk: ${FREE_GB:-?} GB free (floor ${DISK_MIN_FREE_GB} GB)"
+push "prospect_pipeline_step_success{step=\"preflight\"} 1
+prospect_pipeline_step_last_run_timestamp{step=\"preflight\"} $(date -u +%s)"
 
 cd /root/steam-scraper || exit 1
 
@@ -282,8 +387,16 @@ cd /root/steam-scraper || exit 1
 # review_deepen) ensures Lane B finishes before the heavy 16-worker review_deepen starts, so the
 # two big concurrent-worker phases never STACK. On 2026-08-01 the original design (all of Lane B
 # concurrent WITH review_deepen + 2 app workers) peaked past 4GB and swap-thrashed the box into an
-# unreachable state. Lane B (~40min) is hidden under steam_scrape/review_refresh, so the barrier
-# costs ~no wall time; it only caps peak memory.
+# unreachable state. The barrier is meant to cost ~no wall time, Lane B being hidden under
+# steam_scrape — and for every step still on it, it does.
+#
+# EXCEPT followers, a --tail step and NOT on the barrier since 2026-09-04. Measured on the last
+# OK nightly (3h54m in total): Lane A idled at the barrier for 1h43m waiting for it — 3 threads
+# at 0.1 req/s, 391 rows written in 6477s, into its OWN signals.db, never touching the
+# steam_games.db writer slot. It is neither thing the barrier guards against: not a memory load
+# (a few MB, not 16 workers) and not a steam_games.db writer the ETL needs quiet. It gated
+# review_refresh and review_deepen for nothing. It now overlaps them (and the ETL, if it runs
+# its full 7200s) and the run waits for it only at the very end (wait_bg_tail).
 run_step_bg "news"   3000 "./run_news.sh"
 # twitch REMOVED from this lane (2026-08-22). It failed 22 of 26 nightlies here with "database is
 # locked" — not for lack of safeguards (twitch_bulk sets busy_timeout=120000 and commits every 15
@@ -303,7 +416,8 @@ run_step_bg "ccu"    3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=8
 # series (community-group member counts, can never be backfilled); prices = keyed catalog
 # diff (price_change_number) -> batched GetItems snapshots, the raw material for sale
 # markers and price history.
-run_step_bg "followers" 7200 "/root/steam-scraper/.venv/bin/python -u /root/collectors/followers_bulk.py"
+# followers is --tail (off the barrier — see the Lane B note); prices stays on it.
+run_step_bg --tail "followers" 7200 "/root/steam-scraper/.venv/bin/python -u /root/collectors/followers_bulk.py"
 run_step_bg "prices"    5400 "/root/steam-scraper/.venv/bin/python -u /root/collectors/catalog_prices.py"
 # tags_refresh MOVED OUT of this lane (2026-08-24) to the 19:15 quiet-window cron, following
 # the twitch precedent: it lost the SQLite write race two nights running ("database is
@@ -352,8 +466,9 @@ run_step "steam_scrape"     3600 "./run_full.sh"
 # fix for their staleness (the step only ever refreshed a sliver per night mid-contention).
 
 # ── Barrier: Lane B must finish BEFORE review_deepen so the two heavy concurrent-worker phases
-# never overlap (memory safety — see the Lane B note above). Lane B is already done by here.
-echo "[lane-b] waiting for background service steps to finish before review_deepen ..."
+# never overlap (memory safety — see the Lane B note above). Lane B is already done by here;
+# the --tail followers step is not waited for (it is what used to keep Lane A idle here).
+echo "[lane-b] waiting for background service steps (tail lane excepted) before review_refresh/review_deepen ..."
 wait_bg
 echo "[lane-b] background service steps complete."
 
@@ -446,6 +561,7 @@ if [ -n "$_builds" ] && printf '%s' "$_builds" | grep -qv -- "--rescore-only"; t
                         # "did not run", so the log never reads as a build that failed.
     echo "[etl] SKIPPED — another mart build is already running (not a --rescore-only run):"
     printf '%s\n' "$_builds" | sed 's/^/       /'
+    RUN_ERROR="etl: skipped — another mart build was already running"
     echo "       No mart is built tonight; that build owns the swap. Previous mart kept, app"
     echo "       not restarted. Scraping above still ran, so tomorrow's build has the data."
     push "prospect_etl_skipped_concurrent_build 1"
@@ -456,7 +572,9 @@ else
     # starves it into an OOM kill (rc=137, exactly what happened on 2026-08-18: an overnight
     # socials+demos chain ate the headroom). Every scraper job is resumable by design (staleness
     # markers + daily crons re-select where they left off), so killing strays is always safe;
-    # losing tonight's mart is not. The refresh's OWN scraper steps are long done by this point.
+    # losing tonight's mart is not. The refresh's OWN scraper steps are long done by this point
+    # — except the --tail followers collector, which may still be running: its cmdline
+    # (collectors/followers_bulk.py) does not match this pattern, and it must not be swept.
     pkill -f 'steam_scraper.scraper' 2>/dev/null && echo "[etl] swept stray scraper jobs" || true
     sleep 5
     # Stale-scratch sweep (2026-08-19). build_marts spills to <version>.duckdb.building.tmp/ and
@@ -473,7 +591,20 @@ else
     # SIGKILLed rescore leaves it behind.
     find /root/prospect/data -maxdepth 1 -name 'prospect_*.duckdb.building*' \
          ! -name "prospect_$(date -u +%Y%m%d).duckdb.building*" -exec rm -rf {} + 2>/dev/null || true
-    df -h /root/prospect/data | tail -1 | awk '{print "[etl] disk before build: " $4 " free (" $5 " used)"}'
+    # Second disk gate, AFTER the sweep (which may have just freed the headroom): the scrapes
+    # ran and are kept, but a build below the floor is skipped the same way a concurrent build
+    # skips it — previous mart kept, app not restarted, the reason in tonight's ledger row.
+    FREE_GB=$(prospect_free_gb /root/prospect/data)
+    if [ -n "$FREE_GB" ] && [ "$FREE_GB" -lt "$DISK_MIN_FREE_GB" ]; then
+        ETL_SKIPPED=1
+        ETL_RC=125
+        RUN_ERROR="disk: ${FREE_GB} GB free < ${DISK_MIN_FREE_GB} GB"
+        echo "[etl] SKIPPED — $RUN_ERROR even after the scratch sweep: a build would spill into a"
+        echo "       full disk and die hours in. Previous mart kept, app not restarted; tonight's"
+        echo "       scrapes are in steam_games.db for tomorrow's build."
+    else
+        echo "[etl] disk before build: ${FREE_GB:-?} GB free (floor ${DISK_MIN_FREE_GB} GB)"
+    fi
     cd /root/prospect/etl || exit 1
     # The ETL is the one step that does NOT go through run_step (it has a bespoke success path
     # below: restart, prune, metrics). It still needs the same logging contract, so it gets one
@@ -499,13 +630,21 @@ else
     # growing. It also still fits the schedule: the ETL starts ~23:08, so 6h ends ~05:08, before
     # the 06:00 review keeper that shares this flock. The failure mode of a ceiling set too low is
     # losing the ENTIRE night's mart, which is far worse than a run that goes long.
-    ETL_LOG="$STEP_LOG_DIR/etl.${RUN_TS}.log"
-    echo "[etl] log: $ETL_LOG"
-    timeout 21600 /root/prospect/etl/.venv/bin/python -u build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data > "$ETL_LOG" 2>&1 || ETL_RC=$?
-    [ "$ETL_RC" -ne 0 ] && explain_failure "etl" "$ETL_RC" "$ETL_LOG"
-    # Per-mart timings, slowest first — the run's own profile, kept even on success so a slow build
-    # is visible BEFORE it becomes a failed one.
-    grep -E '^\[etl\] ran ' "$ETL_LOG" 2>/dev/null | sort -t'(' -k2 -rn | head -8 | sed 's/^/[etl] slowest: /'
+    if [ "$ETL_SKIPPED" -eq 0 ]; then
+        ETL_LOG="$STEP_LOG_DIR/etl.${RUN_TS}.log"
+        echo "[etl] log: $ETL_LOG"
+        # The systemd-run scope is the same cgroup cap the keepers run under (deploy/crontab.txt).
+        # Without it the ETL was the one unbounded process on the box, and an overshoot became a
+        # kernel OOM kill of whatever the kernel picked. Now a breach is rc=137 of the ETL alone:
+        # previous mart kept, app untouched. See PROSPECT_DUCKDB_MEMORY_LIMIT for the arithmetic.
+        # `timeout` stays outermost, as in the keeper lines, so its deadline and rc are unchanged.
+        timeout 21600 systemd-run --scope --quiet -p MemoryMax=3000M -p MemorySwapMax=0 "${NICE[@]}" \
+            /root/prospect/etl/.venv/bin/python -u build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data > "$ETL_LOG" 2>&1 || ETL_RC=$?
+        [ "$ETL_RC" -ne 0 ] && explain_failure "etl" "$ETL_RC" "$ETL_LOG"
+        # Per-mart timings, slowest first — the run's own profile, kept even on success so a slow
+        # build is visible BEFORE it becomes a failed one.
+        grep -E '^\[etl\] ran ' "$ETL_LOG" 2>/dev/null | sort -t'(' -k2 -rn | head -8 | sed 's/^/[etl] slowest: /'
+    fi
 fi
 ETL_DUR=$(( $(date -u +%s) - ETL_T0 ))
 if [ "$ETL_RC" -eq 0 ]; then
@@ -518,6 +657,7 @@ if [ "$ETL_RC" -eq 0 ]; then
     RESTART_OK=1
     if ! prospect_restart_verify 120; then
         RESTART_OK=0
+        RUN_ERROR="restart: app did not answer /api/health within 120s of docker restart"
         echo "WARN: [restart] app did not answer /api/health within 120s of docker restart"
     fi
     RESTART_DUR=$(( $(date -u +%s) - RESTART_T0 ))
@@ -588,6 +728,9 @@ push "prospect_pipeline_step_duration_seconds{step=\"etl\"} $ETL_DUR
 prospect_pipeline_step_success{step=\"etl\"} $([ "$ETL_RC" -eq 0 ] && echo 1 || echo 0)
 prospect_pipeline_step_last_run_timestamp{step=\"etl\"} $(date -u +%s)"
 echo "etl $ETL_RC $ETL_DUR" >> "$STEP_RESULTS"
+# Tail lane (followers): normally long finished — its 7200s cap runs from 21:00 and the ETL
+# ends past 01:00 — but this is what keeps the scoreboard and the ledger row behind it.
+wait_bg_tail
 step_summary
 rm -f "$STEP_RESULTS"
 echo "=================== refresh done: $(date -u) · $RESULT ==================="

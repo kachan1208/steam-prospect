@@ -8,8 +8,15 @@
 # and NOTHING recorded that anywhere — no log line, no metric. A nightly that silently
 # skipped looks identical to one that was never scheduled.
 #
-# Usage: cron-wrap.sh [-l LOCKFILE] JOB_NAME COMMAND [ARG...]
+# Usage: cron-wrap.sh [-l LOCKFILE] [-x] JOB_NAME COMMAND [ARG...]
 #   -l LOCKFILE   lock to take nonblocking (default /root/.prospect-refresh.lock)
+#   -x            "expected deadline" job: rc 124 (GNU timeout expired) and rc 143 (SIGTERM)
+#                 count as SUCCESS for the outcome push, and the log line says so. For a job
+#                 whose own `timeout` IS its schedule: the 06:00 review keeper is a bounded
+#                 slice of an open-ended backlog and has ended EVERY run at rc=124 since its
+#                 7h bound landed (2026-09-02), so without this the wrapper pushed
+#                 step_success=0 each morning and alert_check's check (a) breached daily.
+#                 rc 137 stays a failure — that is the cgroup OOM kill, a real signal.
 #
 # On lock held:    logs the skip to /var/log/prospect-cron-wrap.log, pushes
 #                  prospect_cron_skipped{job="JOB_NAME"} 1 to the droplet-local
@@ -49,10 +56,12 @@ STEP_LOG_DIR=${PROSPECT_STEP_LOG_DIR:-/var/log/prospect-steps}
 # entries in deploy/crontab.txt carry their own `mkdir -p … &&` prefix.
 mkdir -p "$STEP_LOG_DIR" 2>/dev/null || true
 
-usage() { echo "usage: $0 [-l LOCKFILE] JOB_NAME COMMAND [ARG...]" >&2; exit 2; }
-while getopts "l:" opt; do
+EXPECT_DEADLINE=0
+usage() { echo "usage: $0 [-l LOCKFILE] [-x] JOB_NAME COMMAND [ARG...]" >&2; exit 2; }
+while getopts "l:x" opt; do
     case "$opt" in
         l) LOCK="$OPTARG" ;;
+        x) EXPECT_DEADLINE=1 ;;
         *) usage ;;
     esac
 done
@@ -74,10 +83,36 @@ push() {
     return 0
 }
 
+# record_skipped — append a SKIPPED row to the nightly's run ledger (data/refresh_history.json,
+# JSONL). Nightly only: a held lock there is a night with no mart, and until 2026-09-04 it left
+# NO row at all — two such nights in the last 13 were found only by their absence. The row
+# shape is a contract with the web "Data log" page: result ∈ {OK, FAILED, HELD, SKIPPED}, plus
+# optional reason/etl_rc/etl_duration_s/error/serving_version; a SKIPPED row carries no
+# counts/deltas/freshness because nothing ran to count. python3 does the JSON escaping, the
+# shell does the append; a failure here only logs (still no lib.sh dependency, see above).
+HISTORY=${PROSPECT_REFRESH_HISTORY:-/root/prospect/data/refresh_history.json}
+MART_LINK=${PROSPECT_CURRENT_MART:-/root/prospect/data/current.duckdb}
+record_skipped() {
+    python3 - "$LOCK" "$MART_LINK" <<'PY' >> "$HISTORY" || log "WARN: could not append a SKIPPED row to $HISTORY"
+import datetime, json, os, re, sys
+lock, link = sys.argv[1], sys.argv[2]
+try:  # current.duckdb -> prospect_YYYYMMDD.duckdb (a relative link); the token is the version
+    m = re.search(r"prospect_(\d{8})\.duckdb", os.readlink(link))
+    ver = m.group(1) if m else None
+except OSError:
+    ver = None
+now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+print(json.dumps({"finished_at": now, "result": "SKIPPED", "step": "lock",
+                  "reason": f"lock held: {lock}", "duration_s": 0,
+                  "mart_version": ver, "serving_version": ver}))
+PY
+}
+
 exec 9>"$LOCK" || { log "ERROR: cannot open lock file $LOCK"; exit 1; }
 if ! flock -n 9; then
     log "SKIPPED: $LOCK is held — did not run: $*"
     push "prospect_cron_skipped{job=\"$JOB\"} 1"
+    [ "$JOB" = "nightly_refresh" ] && record_skipped
     exit 0
 fi
 push "prospect_cron_skipped{job=\"$JOB\"} 0"
@@ -97,8 +132,17 @@ trap - TERM INT HUP
 
 DUR=$(( $(date -u +%s) - T0 ))
 NOW=$(date -u +%s)
-OK=1; [ "$RC" -ne 0 ] && OK=0
-log "finished rc=$RC after ${DUR}s"
+OK=1; NOTE=""
+if [ "$RC" -ne 0 ]; then
+    # -x: 124 is timeout's "deadline reached"; 143 is SIGTERM (an operator kill, or a timeout
+    # landing on the `bash -c` around the job). Never 137 — the cgroup OOM kill is a failure.
+    if [ "$EXPECT_DEADLINE" -eq 1 ] && { [ "$RC" -eq 124 ] || [ "$RC" -eq 143 ]; }; then
+        NOTE=" (expected deadline)"
+    else
+        OK=0
+    fi
+fi
+log "finished rc=$RC$NOTE after ${DUR}s"
 push "prospect_pipeline_step_success{step=\"$JOB\"} $OK
 prospect_pipeline_step_duration_seconds{step=\"$JOB\"} $DUR
 prospect_pipeline_step_last_run_timestamp{step=\"$JOB\"} $NOW"
