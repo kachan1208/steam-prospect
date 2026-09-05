@@ -103,7 +103,13 @@ class MarketBenchmarks(BaseModel):
 class RefreshHistory(BaseModel):
     """The Droplet refresh cron's run log. Each run record is free-form by design — the
     cron grows new delta keys without an API deploy — so `runs` stays a list of dicts
-    rather than a frozen row model; the ENVELOPE is what's contractual."""
+    rather than a frozen row model; the ENVELOPE is what's contractual.
+
+    What a record carries today (deploy/prospect-refresh.sh): `result` is one of OK /
+    FAILED / HELD / SKIPPED. OK and FAILED rows have `counts`, `deltas` and
+    `freshness_hours`; HELD and SKIPPED rows (nothing ran) have a `reason` and none of
+    those three. `serving_version`, `error`, `etl_rc` and `etl_duration_s` are optional
+    on all of them and are handed through as written — including nulls."""
 
     runs: list[dict]  # newest first (by finished_at)
     total: int  # runs on disk before `limit` was applied

@@ -1,8 +1,14 @@
 """Data-refresh changelog.
 
-Reads the newline-delimited JSON the Droplet's daily refresh cron appends (one record per run,
-each carrying data deltas vs. the previous run) and serves it for the in-app "Data log" page.
-Public + read-only; returns an empty list when no runs have been recorded yet.
+Reads the newline-delimited JSON the Droplet's nightly refresh appends (one record per run)
+and serves it for the in-app "Data log" page. Public + read-only; returns an empty list when
+no runs have been recorded yet.
+
+A record's `result` is one of OK / FAILED / HELD / SKIPPED. OK and FAILED runs carry the
+data counts, the deltas vs. the previous run and per-source freshness; HELD (a build hold
+was on) and SKIPPED (the refresh lock was already held) never started the pipeline, so they
+carry a `reason` and NO counts/deltas/freshness keys. Records are served as the dicts they
+are on disk — nothing is filled in, coerced or dropped.
 """
 from __future__ import annotations
 
@@ -40,11 +46,18 @@ def refresh_history(
             if not line:
                 continue
             try:
-                runs.append(json.loads(line))
+                rec = json.loads(line)
             except ValueError:
                 # Per-line, like the mcp-log viewer in analytics.py: ONE corrupt line
                 # (a torn append from a crash mid-write) skips itself instead of wiping
                 # the whole history.
                 continue
-    runs.sort(key=lambda r: r.get("finished_at", ""), reverse=True)
+            if not isinstance(rec, dict):
+                # Valid JSON but not a record (a bare scalar or list): the `.get` in the
+                # sort below would raise and take the whole endpoint down with it.
+                continue
+            runs.append(rec)
+    # A record without finished_at (or with it null) sorts oldest instead of crashing the
+    # str-vs-None comparison — a 500 here blanks the page for every run, not just that one.
+    runs.sort(key=lambda r: str(r.get("finished_at") or ""), reverse=True)
     return RefreshHistory(runs=runs[:limit], total=len(runs), limit=limit)
