@@ -7,6 +7,46 @@ committed work — a place where an idea keeps its reasoning until someone picks
 
 ## Cut mart_game_aspect_reviews' 4-hour build step
 
+**STATUS (2026-09-05): the text-last shape below has landed, and the 4 hours are gone — 1,401s of
+a 3,154s ETL on the last successful nightly. What remains is not the sort.** It landed in two
+cuts on top of the lean ranking barrier the file has had since 2026-07-29: #113 (2026-08-30) took
+review_text/steam_url out of the ten excerpt arms and joins the capped text on LAST by
+(appid, recommendationid) — and found that the real 4-hour cost was RE2 unrolling the sentence
+regex, 19× on that expression alone; #119 (2026-08-31) stopped materialising the corpus's text
+at all — survivors' text is re-read from src.reviews by primary key, and `_aspectrev_base` lost
+its 8.45GB column. The guardrail tests named below are all green on that shape.
+
+Profiled statement by statement (2026-09-05) on a 4.37M-review snapshot of the source — 1.66M
+eligible English reviews over 15.9K games, 1,464,649 mentions (the same corpus the mart's
+2026-08-19 note counted), 596K survivors — sqlite-ATTACHed as the nightly attaches it, at the
+droplet's threads=2 / memory_limit=2500MB:
+
+| stage | seconds | share |
+|---|---|---|
+| ten excerpt arms (`_aspectrev_matched`, ~23µs/survivor) | 13.7 | 40% |
+| three full streams of `src.reviews` (elig 6.3, base 5.1, survivors' text 4.4) | 15.8 | 46% |
+| final join + `ORDER BY` on the joined row | 1.1 | 3% |
+| ranking window, meta copy, capped-text side table, everything else | 1.0 | 3% |
+| **total** | **34.2** | |
+
+Peak spill 182MB, all of it the survivors' *uncapped* text in `_aspectrev_surv` (helpful reviews
+average ~1.7KB, five times the corpus mean). Re-run at memory_limit=1000MB so that table no longer
+fits — the production condition, at ~1.8M survivors — the arms go 13.7s → 25.4s and nothing else
+moves: each of the ten arms SEQ_SCANs `_aspectrev_surv`, free from the buffer pool, ten re-reads
+of a spilled table otherwise. A stream of `src.reviews` costs the same whether or not
+review_text is projected (3.4s vs 4.2s): the sqlite scanner pushes projections down but no
+filters, so every row of every language crosses and the row walk is the price; `sqlite_query()`
+would filter inside SQLite but returns every column as VARCHAR, so it is not a lever.
+
+**Taken (this PR):** the eligibility floor is counted over the materialised lean pool instead of
+its own stream of the source (`_aspectrev_base` → `_aspectrev_elig` → `_aspectrev_meta`): two
+streams per build instead of three, identical output on both fixtures (multiset and row order).
+**Next, not taken:** fold the ten arms into one pass — a `CASE` per derived column keyed on
+kw_aspect so each row meets only its own arm's constant-pattern regex — which lives in
+`_ASPECT_EXCERPT_ARM` in build_marts.py and must be re-verified with the differential tests in
+etl/tests/test_mart_aspect_reviews_window_rewrite.py. Everything under this line is the history
+that motivated the rewrite, kept for the reasoning.
+
 **The problem, measured (2026-08-22).** This one mart takes 14,239s of an 18,276s ETL — 78% of
 the whole build, 15× the next-slowest mart. The cost arrived with the full-review columns
 (review_text capped at 2000 chars + steam_url): all ~1.77M surviving rows now carry up to 2KB of
