@@ -84,12 +84,17 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # every morning, and alert_check's check (a) breached every single day (the two real OOMs above
 # were indistinguishable from that noise). With -x, rc 124/143 push success and start the job's
 # success clock for check (d); rc 137 (cgroup OOM) still counts as the failure it is.
-0 6 * * * /root/prospect/deploy/cron-wrap.sh -x review_keeper bash -c 'cd /root/steam-scraper && timeout 25200 systemd-run --scope --quiet -p MemoryMax=1500M -p MemorySwapMax=0 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 20000 --min-reviews 1 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0' >> /root/deepen_backfill.log 2>&1
+#
+# `nice -n 15 ionice -c2 -n7` inside both keepers' scopes (2026-09-04), the same priority every
+# nightly step gets from lib.sh's NICE: on 2 vCPUs a 16-worker drain otherwise competes with
+# the two uvicorn workers as an equal. ionice is a no-op under mq-deadline/none and harmless;
+# nice is what matters. Both go INSIDE systemd-run, before the python, so the scope is unchanged.
+0 6 * * * /root/prospect/deploy/cron-wrap.sh -x review_keeper bash -c 'cd /root/steam-scraper && timeout 25200 systemd-run --scope --quiet -p MemoryMax=1500M -p MemorySwapMax=0 nice -n 15 ionice -c2 -n7 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 20000 --min-reviews 1 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0' >> /root/deepen_backfill.log 2>&1
 
 # ── 06:15 UTC — daytime socials keeper. OWN lock, deliberately: it must run ALONGSIDE the
 # review keeper (different endpoints — store pages vs appreviews), so it must not contend for
 # the refresh lock. This is the job observed leaking to 3.2GB; the MemoryMax is load-bearing.
-15 6 * * * /root/prospect/deploy/cron-wrap.sh -l /root/.prospect-socials.lock socials_keeper bash -c 'cd /root/steam-scraper && timeout 46800 systemd-run --scope --quiet -p MemoryMax=1500M -p MemorySwapMax=0 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db dev-socials --min-reviews 0 --refresh-days 90 --limit 60000 --workers 8 --rate 2.0' >> /root/dev_socials_keeper.log 2>&1
+15 6 * * * /root/prospect/deploy/cron-wrap.sh -l /root/.prospect-socials.lock socials_keeper bash -c 'cd /root/steam-scraper && timeout 46800 systemd-run --scope --quiet -p MemoryMax=1500M -p MemorySwapMax=0 nice -n 15 ionice -c2 -n7 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db dev-socials --min-reviews 0 --refresh-days 90 --limit 60000 --workers 8 --rate 2.0' >> /root/dev_socials_keeper.log 2>&1
 
 # ── 13:30 UTC — midday light mart build: every mart except the two full-text monsters, which
 # are copied from the published mart. Makes a data/code fix visible in ~30min instead of at

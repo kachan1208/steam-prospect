@@ -60,6 +60,7 @@ else
          "restart and the disk gate cannot measure; restore the checkout (cd /root/prospect && git pull)"
     prospect_restart_verify() { docker restart prospect && sleep 15; }
     prospect_free_gb() { :; }   # prints nothing = "unmeasurable", which the gate does not fail on
+    NICE=()                     # un-niced rather than not at all
 fi
 # Unbuffered stdout for EVERY python step. Not cosmetic: a step killed by `timeout` never gets to
 # flush, so a buffered step that dies takes its whole output with it. The 2026-08-21 ETL ran four
@@ -195,7 +196,7 @@ run_step() {
     local slog="$STEP_LOG_DIR/${label}.${RUN_TS}.log"
     t0=$(date -u +%s)
     echo "[$label] start $(date -u) -> $slog"
-    timeout "$tmo" bash -c "$cmd" > "$slog" 2>&1 || rc=$?
+    timeout "$tmo" "${NICE[@]}" bash -c "$cmd" > "$slog" 2>&1 || rc=$?
     dur=$(( $(date -u +%s) - t0 ))
     local ok=1
     [ "$rc" -ne 0 ] && { ok=0; echo "WARN: [$label] exited rc=$rc after ${dur}s"; explain_failure "$label" "$rc" "$slog"; }
@@ -228,7 +229,7 @@ run_step_bg() {
         echo "[$label] start $(date -u) (parallel lane) -> $slog"
         # Redirect is what makes the parallel lane legible: five steps sharing one stdout
         # interleave line-by-line, so a traceback arrives shredded among four other steps.
-        timeout "$tmo" bash -c "$cmd" > "$slog" 2>&1 || rc=$?
+        timeout "$tmo" "${NICE[@]}" bash -c "$cmd" > "$slog" 2>&1 || rc=$?
         dur=$(( $(date -u +%s) - t0 ))
         local ok=1
         [ "$rc" -ne 0 ] && { ok=0; echo "WARN: [$label] exited rc=$rc after ${dur}s"; explain_failure "$label" "$rc" "$slog"; }
@@ -637,7 +638,7 @@ else
         # kernel OOM kill of whatever the kernel picked. Now a breach is rc=137 of the ETL alone:
         # previous mart kept, app untouched. See PROSPECT_DUCKDB_MEMORY_LIMIT for the arithmetic.
         # `timeout` stays outermost, as in the keeper lines, so its deadline and rc are unchanged.
-        timeout 21600 systemd-run --scope --quiet -p MemoryMax=3000M -p MemorySwapMax=0 \
+        timeout 21600 systemd-run --scope --quiet -p MemoryMax=3000M -p MemorySwapMax=0 "${NICE[@]}" \
             /root/prospect/etl/.venv/bin/python -u build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data > "$ETL_LOG" 2>&1 || ETL_RC=$?
         [ "$ETL_RC" -ne 0 ] && explain_failure "etl" "$ETL_RC" "$ETL_LOG"
         # Per-mart timings, slowest first — the run's own profile, kept even on success so a slow

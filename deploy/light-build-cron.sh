@@ -29,6 +29,7 @@ else
          "restart and metric pushes disabled" >&2
     prospect_restart_verify() { docker restart prospect && sleep 15; }
     prospect_push_metrics() { :; }
+    NICE=()   # un-niced rather than not at all
 fi
 
 # Every redirect below writes here. cron-wrap.sh also creates it, but this script is run by
@@ -94,7 +95,7 @@ cd /root/prospect/etl || exit 1
 # instead of letting the box thrash. DuckDB gets 1800MB of the 2400M; the rest is the Python
 # heap. Move the two numbers together.
 if PROSPECT_DUCKDB_MEMORY_LIMIT=1800MB PYTHONUNBUFFERED=1 \
-    timeout 14400 systemd-run --scope --quiet -p MemoryMax=2400M -p MemorySwapMax=0 \
+    timeout 14400 systemd-run --scope --quiet -p MemoryMax=2400M -p MemorySwapMax=0 "${NICE[@]}" \
       /root/prospect/etl/.venv/bin/python -u build_marts.py \
       --source /root/steam-scraper/steam_games.db \
       --data-dir /root/prospect/data --light \
