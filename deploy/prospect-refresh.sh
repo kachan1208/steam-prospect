@@ -505,7 +505,10 @@ run_step "review_refresh"   3600 "python3 -m steam_scraper.scraper --db steam_ga
 # 31.3K of them had missing/zero texts and NOTHING would ever fetch them (one shallow fetch at
 # discovery, then reviews accumulated forever un-refetched). Their whole gap is ~415K texts
 # (~1 request/game), so with cost-ordered selection they clear in days and cost almost nothing.
-run_step "review_deepen"   5400 "python3 -m steam_scraper.scraper --db steam_games.db deepen-reviews --target 20000 --min-reviews 1 --activity-months 12 --refresh-days 30 --limit 1200 --workers 16 --rate 8.0"
+# --target 5000 (2026-09-05, was 20000): the same per-game text-depth cap as the 06:00 keeper —
+# see crontab.txt. The ETL scores at most 5,000 texts per game; deeper text is disk the box
+# does not have (steam_games.db: 40 GB, ~1 GB/day growth, 21 GB free on 09-05).
+run_step "review_deepen"   5400 "python3 -m steam_scraper.scraper --db steam_games.db deepen-reviews --target 5000 --min-reviews 1 --activity-months 12 --refresh-days 30 --limit 1200 --workers 16 --rate 8.0"
 
 # [7c] Tag SYNC — rebuild game_tags (the ETL's niche-membership table) from the
 # games.steamspy_tags JSON the enrichment loops maintain. It was a one-off
