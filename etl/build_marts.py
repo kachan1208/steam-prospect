@@ -16,7 +16,8 @@ Exit codes (deploy/prospect-refresh.sh treats any non-zero as "keep the previous
   1  the build FINISHED but the pre-swap validation gate refused the swap. current.duckdb is
      untouched and the finished artifact is KEPT at data/prospect_<version>.duckdb.building
      (its spill dir is not) — see the remedy the run prints; none of the options need a rebuild.
-  2  refused before doing any work (missing source DB, missing aspect model, --light guard).
+  2  refused before doing any work (missing source DB, missing aspect model, --light guard,
+     contradictory flags such as --light with --fulltext build).
 
 DEPLOY NOTE — the first build after the model-fingerprint change (2026-08). The sentiment
 cache is keyed on a hash of the scoring config, which includes a fingerprint of
@@ -43,6 +44,7 @@ import re
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -3248,13 +3250,28 @@ def compute_press_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> i
 
 def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str,
                build_mode: str = "full", absent_sources: list[str] | tuple[str, ...] = (),
-               classifier_absent: bool = False) -> None:
+               classifier_absent: bool = False, fulltext_mode: str = "build",
+               fulltext_built_at: str = "", fulltext_scored_reviews: str = "") -> None:
     """Provenance/meta rows for the mart. Beyond the headline stats:
 
       build_mode           'full' | 'light' — a --light build copies the heavy teardown/aspect
                            tables verbatim from the previous mart, so downstream consumers (and
                            the light-overwrite guard in main()) need to be able to tell the two
                            apart; the filename alone (prospect_<YYYYMMDD>.duckdb) cannot.
+      fulltext_mode        'build' | 'copy' — whether THIS build ran the two full-text mart
+                           files (mart_game_teardown.sql, mart_game_aspect_reviews.sql) or
+                           copied their tables from the published mart. A --light build always
+                           copies; a full build decides after scoring (see _decide_fulltext)
+                           and stays build_mode='full' either way — every other mart is fresh.
+      fulltext_built_at    when the full-text tables were last actually BUILT (ISO-8601 UTC),
+      fulltext_scored_reviews
+                           and how many reviews the sentiment cache had scored at that point
+                           (COUNT(*) of scored_review; '' when the cache was off and there was
+                           nothing to count). A copy carries BOTH forward unchanged from the
+                           mart it copied, so they describe the tables' real provenance however
+                           many marts have copied them since, and the next full build's `auto`
+                           verdict reads them back (age / scored-delta thresholds). Blank or
+                           missing means unknown, and unknown means rebuild next time.
       absent_sources       comma-joined optional source tables (GUARDED_SOURCE_TABLES) that were
                            genuinely absent this run — the queryable record of which mart
                            families were built empty on purpose (empty string = none).
@@ -3354,6 +3371,9 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
         "ccu_panel_games": str(ccu_panel_games),
         "ccu_history_days": str(ccu_history_days),
         "build_mode": build_mode,
+        "fulltext_mode": fulltext_mode,
+        "fulltext_built_at": fulltext_built_at,
+        "fulltext_scored_reviews": fulltext_scored_reviews,
         "absent_sources": ",".join(absent_sources),
         "source_db_mtime": source_mtime,
         "source_db_size": source_size,
@@ -3660,6 +3680,189 @@ def _light_overwrite_error(versioned: Path) -> str | None:
 
 
 # --------------------------------------------------------------------------------------
+# Full-text mart cadence (2026-09-04). The two full-text monsters — mart_game_teardown.sql's
+# table family and mart_game_aspect_reviews — are re-derived from the WHOLE scored corpus
+# every night, and they are the nightly's cost centre: on the last clean run
+# mart_game_aspect_reviews.sql alone took 1401s of a 3154s build, and its materialisation is
+# the ~18GB spill that filled the disk on 2026-08-30. Yet their input only changes as new
+# reviews get scored into the sentiment cache — tens of thousands a night against a ~16M-row
+# corpus — so a nightly rebuild recomputes the same tables from all but identical data.
+#
+# A FULL build therefore decides, AFTER scoring the night's delta, whether to rebuild them or
+# to copy them verbatim from the published mart — the copy the 13:30 --light build has always
+# done — and records the choice in mart_meta (fulltext_mode) next to the provenance the
+# decision reads (fulltext_built_at, fulltext_scored_reviews). A copy carries that provenance
+# forward UNCHANGED, so "how old are the full-text tables" is answered by their own build time
+# however many marts have copied them since; and build_mode stays 'full' on a copy night —
+# every other mart is fresh, and the --light overwrite guard keys on build_mode precisely so
+# a light build cannot replace a same-day full one.
+# --------------------------------------------------------------------------------------
+FULLTEXT_MAX_AGE_HOURS = 44.0     # `auto` rebuilds once the published full-text tables are older
+                                  # than this. 44h at a nightly cadence = every second night: the
+                                  # age is read at decision time (~half an hour into a run), so
+                                  # consecutive nights see ~23.5h then ~47.5h. Env override
+                                  # PROSPECT_FULLTEXT_MAX_AGE_HOURS; 0 = rebuild every night.
+FULLTEXT_REBUILD_DELTA = 500_000  # ...or once this many reviews were scored into the cache since
+                                  # they were built, whichever comes first — a corpus that moved
+                                  # this much is worth the 23 minutes. Env override
+                                  # PROSPECT_FULLTEXT_REBUILD_DELTA.
+
+# mart file -> the output tables it produces, copied verbatim from the published mart whenever
+# the full-text marts are not rebuilt (every --light build; a full build whose verdict is
+# 'copy'). Was LIGHT_COPY, a local of main(), until the full build started sharing it.
+FULLTEXT_COPY_TABLES: dict[str, list[str]] = {
+    "mart_game_teardown.sql": [
+        "mart_game_review_aspects", "mart_genre_aspect_baseline",
+        "mart_game_press_summary", "mart_game_press_by_source",
+        "mart_game_press_timeline", "mart_game_press_notable",
+    ],
+    "mart_game_aspect_reviews.sql": ["mart_game_aspect_reviews"],
+}
+
+
+def _fulltext_max_age_hours() -> float:
+    raw = os.environ.get("PROSPECT_FULLTEXT_MAX_AGE_HOURS", "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            print(f"[etl] WARNING: ignoring non-numeric PROSPECT_FULLTEXT_MAX_AGE_HOURS={raw!r}")
+    return FULLTEXT_MAX_AGE_HOURS
+
+
+def _fulltext_rebuild_delta() -> int:
+    raw = os.environ.get("PROSPECT_FULLTEXT_REBUILD_DELTA", "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            print(f"[etl] WARNING: ignoring non-integer PROSPECT_FULLTEXT_REBUILD_DELTA={raw!r}")
+    return FULLTEXT_REBUILD_DELTA
+
+
+def _read_mart_meta(db_path: Path) -> dict[str, str]:
+    """Every mart_meta row of a mart file, opened READ-ONLY (it is the mart being served).
+    {} when the file, or its mart_meta, cannot be read — the cadence reads that as "no
+    provenance" and rebuilds, the same verdict a pre-cadence mart gets."""
+    try:
+        con = duckdb.connect(str(db_path), read_only=True)
+        try:
+            rows = con.execute("SELECT key, value FROM mart_meta").fetchall()
+        finally:
+            con.close()
+    except duckdb.Error:
+        return {}
+    return {str(k): "" if v is None else str(v) for k, v in rows}
+
+
+@dataclass(frozen=True)
+class FulltextPlan:
+    """What one build does with the full-text marts, and the provenance it records for it.
+
+      mode            'build' | 'copy' (mart_meta.fulltext_mode).
+      reason          one log line's worth of why; main() prints it verbatim.
+      built_at        mart_meta.fulltext_built_at — the decision's own UTC timestamp for a
+                      build, the published mart's value carried forward unchanged for a copy.
+      scored_reviews  mart_meta.fulltext_scored_reviews — COUNT(*) of the sentiment cache's
+                      scored_review at build time ('' with the cache off: nothing to count),
+                      again carried forward unchanged for a copy."""
+    mode: str
+    reason: str
+    built_at: str
+    scored_reviews: str
+
+
+def _parse_fulltext_provenance(meta: dict[str, str]) -> tuple[datetime, int] | None:
+    """(fulltext_built_at, fulltext_scored_reviews) of a published mart, or None when either is
+    absent, blank or unparseable — a pre-cadence mart, or one built with the cache off."""
+    try:
+        built_at = datetime.fromisoformat(meta.get("fulltext_built_at", ""))
+        scored = int(meta.get("fulltext_scored_reviews", ""))
+    except (TypeError, ValueError):
+        return None
+    if built_at.tzinfo is None:
+        built_at = built_at.replace(tzinfo=timezone.utc)
+    return built_at, scored
+
+
+def _decide_fulltext(requested: str, prev_name: str | None, prev_meta: dict[str, str],
+                     scored_now: int | None, now: datetime | None = None,
+                     max_age_hours: float | None = None,
+                     rebuild_delta: int | None = None) -> FulltextPlan:
+    """The cadence verdict for one build, evaluated after the night's delta has been scored.
+
+      requested    the --fulltext flag. 'build' and 'copy' are obeyed as-is (main() passes
+                   'copy' for --light). 'auto' rebuilds when there is no published mart to
+                   copy from, when its provenance is missing (the first night after this
+                   landed, or a cache-off build), when its full-text tables are older than
+                   max_age_hours, or when more than rebuild_delta reviews were scored since
+                   they were built — and copies otherwise.
+      prev_name    the published mart's name, for the log (None = nothing is published).
+      prev_meta    its mart_meta rows (_read_mart_meta).
+      scored_now   COUNT(*) of cache.scored_review after this run's scoring; None when the
+                   cache is disabled, which 'auto' reads as "the delta cannot be bounded" and
+                   rebuilds (with the cache off every run rescans the whole corpus anyway).
+      now / max_age_hours / rebuild_delta
+                   injectable for tests; None = the clock and the env knobs.
+
+    Pure by design — no I/O — so every branch is unit-testable (tests/test_fulltext_cadence)."""
+    now = datetime.now(timezone.utc) if now is None else now
+    max_age_hours = _fulltext_max_age_hours() if max_age_hours is None else max_age_hours
+    rebuild_delta = _fulltext_rebuild_delta() if rebuild_delta is None else rebuild_delta
+
+    def build(reason: str) -> FulltextPlan:
+        return FulltextPlan("build", reason, now.isoformat(timespec="seconds"),
+                            "" if scored_now is None else str(scored_now))
+
+    def copy(reason: str) -> FulltextPlan:
+        return FulltextPlan("copy", reason, prev_meta.get("fulltext_built_at", ""),
+                            prev_meta.get("fulltext_scored_reviews", ""))
+
+    if requested == "build":
+        return build("rebuilding (--fulltext build)")
+    if requested == "copy":
+        return copy(f"copied from {prev_name or '<nothing published>'} (--fulltext copy)")
+    if requested != "auto":
+        raise ValueError(f"unknown --fulltext mode {requested!r}")
+
+    if prev_name is None:
+        return build("rebuilding (no published mart to copy from)")
+    provenance = _parse_fulltext_provenance(prev_meta)
+    if provenance is None:
+        return build(f"rebuilding ({prev_name} carries no full-text provenance: the first build "
+                     "since the cadence landed, or a cache-off build)")
+    prev_built_at, prev_scored = provenance
+    age_h = (now - prev_built_at).total_seconds() / 3600.0
+    if age_h > max_age_hours:
+        return build(f"rebuilding (age {age_h:.1f}h > {max_age_hours:g}h)")
+    thresholds = f"thresholds {max_age_hours:g}h / {rebuild_delta:,}"
+    if scored_now is None:
+        return build("rebuilding (sentiment cache disabled, so the scored delta cannot be "
+                     f"bounded; {thresholds})")
+    delta = scored_now - prev_scored
+    if delta > rebuild_delta:
+        return build(f"rebuilding ({delta:+,} scored since {prev_name}'s full-text build "
+                     f"{age_h:.1f}h ago > {rebuild_delta:,})")
+    return copy(f"copied from {prev_name} (built {age_h:.1f}h ago, {delta:+,} scored since; "
+                f"{thresholds})")
+
+
+def _count_scored_reviews(con: duckdb.DuckDBPyConnection, data_dir: Path) -> int | None:
+    """COUNT(*) of the sentiment cache's scored_review — the cadence's measure of how far the
+    scored corpus has moved. Read through one short attach of its own (the lock is exclusive
+    and cross-process, see _attach_sentiment_cache; a count holds it for milliseconds) rather
+    than threaded out of compute_aspect_sentiment, whose attach phases stay as they are.
+    None with the cache disabled: there is then no durable scored set to count."""
+    if not _sentiment_cache_enabled():
+        return None
+    _attach_sentiment_cache(con, data_dir)
+    try:
+        return con.execute("SELECT COUNT(*) FROM cache.scored_review").fetchone()[0]
+    finally:
+        _detach_sentiment_cache(con)
+
+
+# --------------------------------------------------------------------------------------
 # Build scratch: `prospect_<version>.duckdb.building` (the in-progress build), its `.wal`,
 # and the `.building.tmp/` DuckDB spill directory (documented to reach 18GB on the droplet).
 # Disk is the droplet's scarcest resource, so a dead build must not leave any of it behind —
@@ -3869,6 +4072,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "keep publishing fresh prices/players meanwhile. Resumable — rerun it "
                          "and it picks up where it stopped (progress: SELECT * FROM "
                          "rescore_status in the cache file).")
+    ap.add_argument("--fulltext", choices=("auto", "build", "copy"), default="auto",
+                    help="FULL builds only: what to do with the two full-text monsters "
+                         "(mart_game_teardown.sql's tables and mart_game_aspect_reviews), "
+                         "decided after the night's reviews are scored. auto (default) "
+                         "rebuilds them when the published mart's copies are older than "
+                         f"PROSPECT_FULLTEXT_MAX_AGE_HOURS ({FULLTEXT_MAX_AGE_HOURS:g}h, i.e. "
+                         "every second night) or more than PROSPECT_FULLTEXT_REBUILD_DELTA "
+                         f"({FULLTEXT_REBUILD_DELTA:,}) reviews were scored since they were "
+                         "built, and otherwise copies them verbatim from the published mart "
+                         "(~23 minutes and most of the spill saved); build / copy force either "
+                         "way. --light always copies and never scores.")
     return ap
 
 
@@ -3914,6 +4128,28 @@ def _env_config_errors() -> list[str]:
     if raw and not re.fullmatch(r"\d+\s*(?:[KMGT]B?)?", raw, re.IGNORECASE):
         errors.append(f"PROSPECT_DUCKDB_MEMORY_LIMIT={raw!r} is not an integer or an "
                       "integer + size unit (e.g. 2500MB) as `SET memory_limit` expects")
+    # The full-text cadence knobs are read AFTER staging and scoring — exactly where a typo
+    # would cost the most — so they are checked here with the rest.
+    raw = os.environ.get("PROSPECT_FULLTEXT_MAX_AGE_HOURS", "").strip()
+    if raw:
+        try:
+            hours = float(raw)
+        except ValueError:
+            hours = -1.0
+        if not hours >= 0.0:   # written this way round so nan is refused too
+            errors.append(f"PROSPECT_FULLTEXT_MAX_AGE_HOURS={raw!r} is not a non-negative number "
+                          "(hours since the published full-text marts were built beyond which "
+                          f"a full build rebuilds them; unset = {FULLTEXT_MAX_AGE_HOURS:g})")
+    raw = os.environ.get("PROSPECT_FULLTEXT_REBUILD_DELTA", "").strip()
+    if raw:
+        try:
+            delta = int(raw)
+        except ValueError:
+            delta = -1
+        if delta < 0:
+            errors.append(f"PROSPECT_FULLTEXT_REBUILD_DELTA={raw!r} is not a non-negative integer "
+                          "(reviews scored since the published full-text marts were built beyond "
+                          f"which a full build rebuilds them; unset = {FULLTEXT_REBUILD_DELTA:,})")
     return errors
 
 
@@ -3954,7 +4190,8 @@ def main() -> int:
     # in that the flags disagreed about what this run was for.
     if args.rescore_only:
         bad = [f for f, on in (("--light", args.light),
-                               ("--skip-validation", args.skip_validation)) if on]
+                               ("--skip-validation", args.skip_validation),
+                               (f"--fulltext {args.fulltext}", args.fulltext != "auto")) if on]
         if bad:
             print(f"ERROR: --rescore-only cannot be combined with {', '.join(bad)} — it builds "
                   "no marts and never swaps, so there is nothing for those flags to affect.",
@@ -3973,6 +4210,20 @@ def main() -> int:
         if err is not None:
             print(f"ERROR: {err}", file=sys.stderr)
             return 2
+
+    # --fulltext is a FULL build's choice. --light never scores, so it has nothing to build the
+    # full-text marts from and always copies: `build` contradicts it outright (`copy`/`auto` are
+    # what it does anyway). And an explicit `copy` with nothing published to copy from is
+    # refused HERE, for the same reason as the --light guard: seconds, not an hour of staging.
+    if args.light and args.fulltext == "build":
+        print("ERROR: --light cannot be combined with --fulltext build — a light build never "
+              "scores and always copies the full-text tables. Drop --light to rebuild them.",
+              file=sys.stderr)
+        return 2
+    if args.fulltext == "copy" and not args.light and not current.exists():
+        print("ERROR: --fulltext copy needs a published mart to copy the full-text tables from "
+              f"({current} missing) — run a full build first.", file=sys.stderr)
+        return 2
 
     # Build into a scratch file and only os.replace() it over the versioned name once the
     # build succeeds. A SAME-DAY rerun otherwise deletes and rebuilds the very file
@@ -4106,37 +4357,48 @@ def main() -> int:
                   f"-c 'SELECT * FROM rescore_status'")
             return 0
 
-        # --light: the two full-text monsters (teardown family + aspect excerpts) are ~80% of
-        # a full build; instead of running them, copy their OUTPUT TABLES verbatim from the
-        # currently published mart. The copies happen at each file's slot in MART_FILES, so
-        # downstream marts that read them (mart_niche_themes reads mart_game_review_aspects)
-        # see them exactly where the full build would have put them. Aspect sentiment scoring
-        # is skipped with them — its staging is read by those two files only (the delta stays
-        # in src and is scored by the next full build; the cache loses nothing).
-        LIGHT_COPY: dict[str, list[str]] = {
-            "mart_game_teardown.sql": [
-                "mart_game_review_aspects", "mart_genre_aspect_baseline",
-                "mart_game_press_summary", "mart_game_press_by_source",
-                "mart_game_press_timeline", "mart_game_press_notable",
-            ],
-            "mart_game_aspect_reviews.sql": ["mart_game_aspect_reviews"],
-        }
+        # The two full-text monsters (teardown family + aspect excerpts) are ~80% of a full
+        # build. Instead of running them, their OUTPUT TABLES can be copied verbatim from the
+        # currently published mart (FULLTEXT_COPY_TABLES). The copies happen at each file's
+        # slot in MART_FILES, so downstream marts that read them (mart_niche_themes reads
+        # mart_game_review_aspects) see them exactly where the build would have put them.
+        #   --light  always copies, and skips aspect sentiment scoring with them — its staging
+        #            is read by those two files only (the delta stays in src and is scored by
+        #            the next full build; the cache loses nothing).
+        #   full     ALWAYS scores the night's delta, then lets the cadence verdict (--fulltext
+        #            auto|build|copy, see _decide_fulltext) choose copy or rebuild: the tables
+        #            only change as reviews get scored, so at the defaults they are rebuilt
+        #            every second night, or sooner when the scored corpus moved a lot.
+        prev_mart = current.resolve() if current.exists() else None
         if args.light:
-            prev_mart = (data_dir / "current.duckdb").resolve()
-            if not prev_mart.exists():
+            if prev_mart is None:
                 print("ERROR: --light needs a published mart to copy the heavy tables from "
-                      f"({prev_mart} missing) — run a full build first.", file=sys.stderr)
+                      f"({current} missing) — run a full build first.", file=sys.stderr)
                 return 2
-            con.execute(f"ATTACH '{prev_mart}' AS prevmart (READ_ONLY)")
             print(f"[etl] LIGHT build: heavy tables copied from {prev_mart.name}, "
                   "aspect sentiment scoring skipped")
             n_sent = 0
+            # Carries the copied tables' provenance forward (see write_meta). The line above
+            # already says it copied, so the verdict is not printed a second time.
+            fulltext = _decide_fulltext("copy", prev_mart.stem, _read_mart_meta(prev_mart), None)
         else:
             print("[etl] scoring aspect text sentiment (VADER) ...")
             t_sent = time.perf_counter()
             n_sent = compute_aspect_sentiment(con, data_dir)
             print(f"[etl] aspect sentiment: scored {n_sent:,} aspect mentions "
                   f"({time.perf_counter() - t_sent:.1f}s)")
+            # Decided HERE: after the delta is scored, so the verdict reads tonight's cache, and
+            # before the mart loop, so the timestamp it stamps is the tables' own input freeze.
+            fulltext = _decide_fulltext(
+                args.fulltext,
+                None if prev_mart is None else prev_mart.stem,
+                {} if prev_mart is None else _read_mart_meta(prev_mart),
+                _count_scored_reviews(con, data_dir),
+            )
+            print(f"[etl] full-text marts: {fulltext.reason}")
+        copy_fulltext = fulltext.mode == "copy"
+        if copy_fulltext:
+            con.execute(f"ATTACH '{prev_mart}' AS prevmart (READ_ONLY)")
 
         print("[etl] scoring press-coverage sentiment (VADER) ...")
         t_press = time.perf_counter()
@@ -4146,24 +4408,27 @@ def main() -> int:
 
         for fname in MART_FILES:
             t = time.perf_counter()
-            if args.light and fname in LIGHT_COPY:
-                for tbl in LIGHT_COPY[fname]:
+            if copy_fulltext and fname in FULLTEXT_COPY_TABLES:
+                for tbl in FULLTEXT_COPY_TABLES[fname]:
                     con.execute(f'CREATE TABLE "{tbl}" AS SELECT * FROM prevmart."{tbl}"')
                 print(f"[etl] copied {fname:21s} ({time.perf_counter() - t:5.2f}s, "
-                      f"{len(LIGHT_COPY[fname])} table(s) from previous mart)")
+                      f"{len(FULLTEXT_COPY_TABLES[fname])} table(s) from previous mart)")
                 continue
             sql_path = HERE / "marts" / fname
             sql = render(sql_path.read_text(), params)
             con.execute(sql)
             print(f"[etl] ran {fname:24s} ({time.perf_counter() - t:5.2f}s)")
 
-        if args.light:
+        if copy_fulltext:
             con.execute("DETACH prevmart")
 
         write_meta(con, source_db, mart_version,
                    build_mode="light" if args.light else "full",
                    absent_sources=absent_sources,
-                   classifier_absent=_CLF_ABSENT)
+                   classifier_absent=_CLF_ABSENT,
+                   fulltext_mode=fulltext.mode,
+                   fulltext_built_at=fulltext.built_at,
+                   fulltext_scored_reviews=fulltext.scored_reviews)
 
         # Per-mart row counts.
         tables = [r[0] for r in con.execute(
