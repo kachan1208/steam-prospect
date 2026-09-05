@@ -213,8 +213,13 @@ prospect_pipeline_step_last_run_timestamp{step=\"$label\"} $(date -u +%s)"
 # built to coexist), so concurrent writers QUEUE instead of erroring. Does NOT touch the
 # global STEP (that tracks the critical Lane-A path for the failure record). PIDs collected
 # in BG_PIDS; wait_bg() is the barrier (called before review_deepen — memory safety, see below).
+# `run_step_bg --tail LABEL …` registers the step in BG_TAIL_PIDS instead: it runs PAST the
+# barrier, and wait_bg_tail (after the restart step) is what the run still ends behind.
 BG_PIDS=()
+BG_TAIL_PIDS=()
 run_step_bg() {
+    local tail=0
+    if [ "$1" = "--tail" ]; then tail=1; shift; fi
     local label="$1" tmo="$2" cmd="$3"
     local slog="$STEP_LOG_DIR/${label}.${RUN_TS}.log"
     (
@@ -234,16 +239,26 @@ run_step_bg() {
 prospect_pipeline_step_success{step=\"$label\"} $ok
 prospect_pipeline_step_last_run_timestamp{step=\"$label\"} $(date -u +%s)"
     ) &
-    BG_PIDS+=("$!")
-    echo "[$label] launched in background (pid $!)"
+    local pid=$! lane="parallel lane"
+    if [ "$tail" -eq 1 ]; then BG_TAIL_PIDS+=("$pid"); lane="tail lane, not on the barrier"; else BG_PIDS+=("$pid"); fi
+    echo "[$label] launched in background (pid $pid, $lane)"
 }
 
-# Barrier: block until every background (Lane B) step has finished. Called before the ETL,
-# which needs a consistent, fully-written DB snapshot.
+# Barrier: block until every background (Lane B) step has finished — the --tail ones excepted.
+# Called before review_deepen/the ETL, which need a quiet, fully-written steam_games.db.
 wait_bg() {
     local pid
     for pid in "${BG_PIDS[@]}"; do wait "$pid"; done
     BG_PIDS=()
+}
+
+# Tail barrier: block until the --tail steps have finished. Called AFTER the restart step and
+# BEFORE step_summary, so the run — its scoreboard, its metrics, and the ledger row the EXIT
+# trap writes — still ends after every step it launched.
+wait_bg_tail() {
+    local pid
+    for pid in "${BG_TAIL_PIDS[@]}"; do wait "$pid"; done
+    BG_TAIL_PIDS=()
 }
 
 record_run() {
@@ -371,8 +386,16 @@ cd /root/steam-scraper || exit 1
 # review_deepen) ensures Lane B finishes before the heavy 16-worker review_deepen starts, so the
 # two big concurrent-worker phases never STACK. On 2026-08-01 the original design (all of Lane B
 # concurrent WITH review_deepen + 2 app workers) peaked past 4GB and swap-thrashed the box into an
-# unreachable state. Lane B (~40min) is hidden under steam_scrape/review_refresh, so the barrier
-# costs ~no wall time; it only caps peak memory.
+# unreachable state. The barrier is meant to cost ~no wall time, Lane B being hidden under
+# steam_scrape — and for every step still on it, it does.
+#
+# EXCEPT followers, a --tail step and NOT on the barrier since 2026-09-04. Measured on the last
+# OK nightly (3h54m in total): Lane A idled at the barrier for 1h43m waiting for it — 3 threads
+# at 0.1 req/s, 391 rows written in 6477s, into its OWN signals.db, never touching the
+# steam_games.db writer slot. It is neither thing the barrier guards against: not a memory load
+# (a few MB, not 16 workers) and not a steam_games.db writer the ETL needs quiet. It gated
+# review_refresh and review_deepen for nothing. It now overlaps them (and the ETL, if it runs
+# its full 7200s) and the run waits for it only at the very end (wait_bg_tail).
 run_step_bg "news"   3000 "./run_news.sh"
 # twitch REMOVED from this lane (2026-08-22). It failed 22 of 26 nightlies here with "database is
 # locked" — not for lack of safeguards (twitch_bulk sets busy_timeout=120000 and commits every 15
@@ -392,7 +415,8 @@ run_step_bg "ccu"    3600 "STEAM_DB=/root/steam-scraper/steam_games.db WORKERS=8
 # series (community-group member counts, can never be backfilled); prices = keyed catalog
 # diff (price_change_number) -> batched GetItems snapshots, the raw material for sale
 # markers and price history.
-run_step_bg "followers" 7200 "/root/steam-scraper/.venv/bin/python -u /root/collectors/followers_bulk.py"
+# followers is --tail (off the barrier — see the Lane B note); prices stays on it.
+run_step_bg --tail "followers" 7200 "/root/steam-scraper/.venv/bin/python -u /root/collectors/followers_bulk.py"
 run_step_bg "prices"    5400 "/root/steam-scraper/.venv/bin/python -u /root/collectors/catalog_prices.py"
 # tags_refresh MOVED OUT of this lane (2026-08-24) to the 19:15 quiet-window cron, following
 # the twitch precedent: it lost the SQLite write race two nights running ("database is
@@ -441,8 +465,9 @@ run_step "steam_scrape"     3600 "./run_full.sh"
 # fix for their staleness (the step only ever refreshed a sliver per night mid-contention).
 
 # ── Barrier: Lane B must finish BEFORE review_deepen so the two heavy concurrent-worker phases
-# never overlap (memory safety — see the Lane B note above). Lane B is already done by here.
-echo "[lane-b] waiting for background service steps to finish before review_deepen ..."
+# never overlap (memory safety — see the Lane B note above). Lane B is already done by here;
+# the --tail followers step is not waited for (it is what used to keep Lane A idle here).
+echo "[lane-b] waiting for background service steps (tail lane excepted) before review_refresh/review_deepen ..."
 wait_bg
 echo "[lane-b] background service steps complete."
 
@@ -546,7 +571,9 @@ else
     # starves it into an OOM kill (rc=137, exactly what happened on 2026-08-18: an overnight
     # socials+demos chain ate the headroom). Every scraper job is resumable by design (staleness
     # markers + daily crons re-select where they left off), so killing strays is always safe;
-    # losing tonight's mart is not. The refresh's OWN scraper steps are long done by this point.
+    # losing tonight's mart is not. The refresh's OWN scraper steps are long done by this point
+    # — except the --tail followers collector, which may still be running: its cmdline
+    # (collectors/followers_bulk.py) does not match this pattern, and it must not be swept.
     pkill -f 'steam_scraper.scraper' 2>/dev/null && echo "[etl] swept stray scraper jobs" || true
     sleep 5
     # Stale-scratch sweep (2026-08-19). build_marts spills to <version>.duckdb.building.tmp/ and
@@ -700,6 +727,9 @@ push "prospect_pipeline_step_duration_seconds{step=\"etl\"} $ETL_DUR
 prospect_pipeline_step_success{step=\"etl\"} $([ "$ETL_RC" -eq 0 ] && echo 1 || echo 0)
 prospect_pipeline_step_last_run_timestamp{step=\"etl\"} $(date -u +%s)"
 echo "etl $ETL_RC $ETL_DUR" >> "$STEP_RESULTS"
+# Tail lane (followers): normally long finished — its 7200s cap runs from 21:00 and the ETL
+# ends past 01:00 — but this is what keeps the scoreboard and the ledger row behind it.
+wait_bg_tail
 step_summary
 rm -f "$STEP_RESULTS"
 echo "=================== refresh done: $(date -u) · $RESULT ==================="
