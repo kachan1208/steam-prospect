@@ -70,7 +70,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # light build every single day. Confirmed: 09-01 13:30 logged "SKIPPED: lock is held".
 #
 # 06:00 + 7h = 13:00, clearing 13:30 with 30 minutes of margin. Safe to truncate because this
-# is an INCREMENTAL backfill: --refresh-days 7 / --target 20000 means a shorter slice deepens
+# is an INCREMENTAL backfill: --refresh-days 7 / --target 5000 means a shorter slice deepens
 # fewer games tonight and the rest are picked up tomorrow. Nothing is lost, and a daily mart
 # refresh is worth more than a few hundred extra games per night.
 #
@@ -89,7 +89,15 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # nightly step gets from lib.sh's NICE: on 2 vCPUs a 16-worker drain otherwise competes with
 # the two uvicorn workers as an equal. ionice is a no-op under mq-deadline/none and harmless;
 # nice is what matters. Both go INSIDE systemd-run, before the python, so the scope is unchanged.
-0 6 * * * /root/prospect/deploy/cron-wrap.sh -x review_keeper bash -c 'cd /root/steam-scraper && timeout 25200 systemd-run --scope --quiet -p MemoryMax=1500M -p MemorySwapMax=0 nice -n 15 ionice -c2 -n7 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 20000 --min-reviews 1 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0' >> /root/deepen_backfill.log 2>&1
+#
+# --target 5000 (2026-09-05, was 20000): review TEXT depth per game is capped at 5,000.
+# steam_games.db is 40 GB with zero free pages (54.5M reviews, avg text 241 chars) and every
+# deepen run grows it by roughly 1 GB a day toward 20k texts per game, while the ETL scores at
+# most 5,000 texts per game — text past that is disk cost with no consumer, and with 21 GB
+# free the nightly's 25 GB preflight gate (prospect-refresh.sh) would start refusing to build
+# within days. Games already deeper than 5,000 are left as they are. The nightly's
+# review_deepen in prospect-refresh.sh carries the same cap.
+0 6 * * * /root/prospect/deploy/cron-wrap.sh -x review_keeper bash -c 'cd /root/steam-scraper && timeout 25200 systemd-run --scope --quiet -p MemoryMax=1500M -p MemorySwapMax=0 nice -n 15 ionice -c2 -n7 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 5000 --min-reviews 1 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0' >> /root/deepen_backfill.log 2>&1
 
 # ── 06:15 UTC — daytime socials keeper. OWN lock, deliberately: it must run ALONGSIDE the
 # review keeper (different endpoints — store pages vs appreviews), so it must not contend for
