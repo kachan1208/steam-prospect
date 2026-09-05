@@ -680,6 +680,37 @@ RESCORE_BUCKET_REVIEWS = 125_000
 SENTIMENT_CACHE_LOCK_WAIT_SECONDS = 1800
 SENTIMENT_CACHE_LOCK_POLL_SECONDS = 2.0
 
+# PER-GAME CAP ON THE SCORING POOL (2026-09-05). compute_aspect_sentiment's pool used to be every
+# English review with text for every game over the TEARDOWN_MIN_REVIEWS floor, with no per-game
+# cap. The daytime keeper deepens review text toward 20,000 per game across ~5,600 games, and every
+# review it fetches is new text the nightly must score once, at ~131 reviews/s (see
+# RESCORE_BUCKET_REVIEWS for the measurement). On a heavy day that is 1-4M never-scored reviews —
+# the nightlies whose delta went past ~1.2M are the ones that failed. A per-aspect share computed
+# from a few thousand mentions is already precise to about ±2 points, and the UI hides anything
+# under 10 rated mentions, so review text beyond a few thousand per game buys nothing the teardown
+# can show. Since 2026-09-05 the pool is therefore, per eligible game, at most this many reviews.
+#
+# WHICH reviews: the cap-many with the HIGHEST recommendationid. Steam ids are monotonic in time
+# (highest = newest) and unique (no ties), so the selection is deterministic and stable night to
+# night: a game whose newest cap-many are already scored contributes NOTHING to the next delta
+# until a genuinely newer review arrives, and the keeper's back-catalogue deepening creates no
+# scoring work at all. NOT "most helpful" — vote counts change nightly, so a helpfulness-ranked
+# pool would churn at the margin every night and the cache would rescore the same games forever.
+#
+# The floor is still evaluated on the UNCAPPED count (a game with >= TEARDOWN_MIN_REVIEWS such
+# reviews is eligible; then it is capped), and the cap only decides what is IN SCOPE: cache rows
+# for reviews that fall outside it are ignored, not deleted, so it can move in either direction
+# without touching the cache. Applied in exactly one place (the _sent_pool_meta CTAS in
+# compute_aspect_sentiment); every consumer — the delta, the read-back, the keyword votes, the
+# rescore_status pool figures and the teardown's n_reviews_sampled — derives from that table.
+#
+# DELIBERATELY NOT PART OF _sentiment_config_hash. That hash wipes and refills the whole ~24M-row
+# cache when it moves; this knob changes which reviews are read, never what a scored mention's
+# value IS, so moving it must never trigger a rescore (pinned by test_sentiment_pool_cap.py).
+# 0 = uncapped, the pre-2026-09-05 behaviour. PROSPECT_SENTIMENT_POOL_CAP overrides it per run
+# (validated up front by _env_config_errors; read by _sentiment_pool_cap).
+SENTIMENT_POOL_CAP_PER_GAME = 5000
+
 # Incremental sentiment cache (2026-07): compute_aspect_sentiment/compute_press_sentiment used to
 # re-run VADER over the ENTIRE ~1.7M-mention / ~204K-article corpus on EVERY ETL run, even though
 # reviews/articles are immutable — a scored (recommendationid, aspect) mention or article_id's
@@ -1587,6 +1618,13 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         --     build that materialises review text at all.
         -- Everything else about the population is unchanged, so the teardown's eligibility
         -- floor (COUNT(*) >= TEARDOWN_MIN_REVIEWS) counts exactly the same rows it did.
+        --
+        -- THE CANDIDATE SET, NOT THE FINAL POOL (2026-09-05): compute_aspect_sentiment applies
+        -- the floor and the per-game cap (SENTIMENT_POOL_CAP_PER_GAME) to this table and then
+        -- REPLACES it, under this same name, with the pool it scored — see the hand-off at
+        -- the end of that function — so the teardown's floor and n_reviews_sampled describe
+        -- the reviews the aspect counts came from. --rescore-only and --light never reach
+        -- that hand-off and leave this table exactly as built here.
         CREATE TEMP TABLE stg_review_key AS
         SELECT r.appid, r.recommendationid, r.voted_up
         FROM src.reviews r
@@ -2085,6 +2123,26 @@ def _sentiment_cache_enabled() -> bool:
     return os.environ.get("PROSPECT_SENTIMENT_CACHE", "").strip().lower() not in ("off", "0")
 
 
+def _sentiment_pool_cap() -> int:
+    """The per-game pool cap in force for this run: PROSPECT_SENTIMENT_POOL_CAP if set, else
+    SENTIMENT_POOL_CAP_PER_GAME (see that constant). 0 means uncapped.
+
+    A garbled, negative, or below-the-floor value is refused up front by _env_config_errors;
+    here it falls back to the constant rather than crash the build hours in, the same contract
+    as the other sentiment knobs. Below the floor is refused because the pool is handed to the
+    teardown as its floored population (see the end of compute_aspect_sentiment): a cap under
+    TEARDOWN_MIN_REVIEWS would leave every capped game short of the floor and silently drop it."""
+    raw = os.environ.get("PROSPECT_SENTIMENT_POOL_CAP", "").strip()
+    if raw:
+        try:
+            cap = int(raw)
+        except ValueError:
+            return SENTIMENT_POOL_CAP_PER_GAME
+        if cap == 0 or cap >= TEARDOWN_MIN_REVIEWS:
+            return cap
+    return SENTIMENT_POOL_CAP_PER_GAME
+
+
 def _aspect_model_fingerprint(path: str | None = None) -> str:
     """SHA-256 of the shipped classifier's CONTENT, folded into the sentiment config hash.
     Swapping the model changes what a cached mention's clf_* verdict would be, so it must
@@ -2140,6 +2198,10 @@ def _sentiment_config_hash(model_fingerprint: str | None = None) -> str:
     which reviews/articles are IN SCOPE this run — those don't change what an already-scored
     mention's compound IS, and _sent_pool/_press_score_set are recomputed fresh every run
     regardless of the cache, so a floor change is picked up automatically.
+    SENTIMENT_POOL_CAP_PER_GAME (and its PROSPECT_SENTIMENT_POOL_CAP override) is in the same
+    class and is kept out for the same reason: it decides WHICH reviews are in the pool, never
+    what their scores are, and a scope change must never wipe and refill a 24M-row cache.
+    test_sentiment_pool_cap.py pins that moving the cap leaves this hash unchanged.
 
     `model_fingerprint` overrides only the model component (the migration below passes the old
     size:mtime form to reconstruct what a pre-2026-08 cache stored); everything else is the
@@ -2249,7 +2311,9 @@ def _attach_sentiment_cache(con: duckdb.DuckDBPyConnection, data_dir: Path,
     # buckets_* describe ONE RUN's slicing, not global progress. The bucket count is derived
     # from the size of the remaining delta, so it shrinks as the rescore advances and
     # "7 of 196" followed by "7 of 189" is correct, not a bug. reviews_scored/reviews_in_pool
-    # is the progress number that means the same thing every night.
+    # is the progress number that means the same thing every night. Both count POOL reviews:
+    # since the per-game cap (SENTIMENT_POOL_CAP_PER_GAME) the cache also holds rows for
+    # reviews outside the pool, so scored_review's own size is not the numerator.
     con.execute(
         "CREATE TABLE IF NOT EXISTS cache.rescore_status("
         "updated_at TIMESTAMP, reviews_in_pool BIGINT, reviews_scored BIGINT, "
@@ -2426,9 +2490,12 @@ def _build_aspect_keyword_votes(con: duckdb.DuckDBPyConnection, mention_table: s
         NO clf filter here: these are the vote-split bars, which count keyword matches. The
         NONE-drop and the reassignment belong to the TEXT-sentiment columns, which come from
         stg_aspect_sentiment.
-      * SAME POPULATION, SAME FLOOR. _sent_pool_meta is stg_review_key (english + non-empty
-        text) narrowed by the same COUNT(*) >= TEARDOWN_MIN_REVIEWS floor _teardown_elig
-        applies, and compute_aspect_sentiment scores every pool review not already in
+      * SAME POPULATION, SAME FLOOR, SAME CAP. _sent_pool_meta is stg_review_key (english +
+        non-empty text) narrowed by the same COUNT(*) >= TEARDOWN_MIN_REVIEWS floor
+        _teardown_elig applies, then capped to the newest SENTIMENT_POOL_CAP_PER_GAME reviews
+        per game (2026-09-05) — and it is handed to the teardown AS stg_review_key when
+        compute_aspect_sentiment finishes, so _teardown_elig counts exactly the reviews these
+        votes were mined from. compute_aspect_sentiment scores every pool review not already in
         cache.scored_review BEFORE the mart loop runs — so by the time the teardown reads this,
         every in-scope review has been scanned. A game below the floor is scored by neither
         path; a game that crosses the floor gets its whole back-catalogue scored on the run it
@@ -2560,6 +2627,15 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
     entirely with PROSPECT_SENTIMENT_CACHE=off — full rescore every run, cache file untouched (see
     _sentiment_cache_enabled).
 
+    THE POOL IS CAPPED PER GAME (2026-09-05): per eligible game only the newest
+    SENTIMENT_POOL_CAP_PER_GAME reviews (highest recommendationid) are in scope — see that
+    constant for the sizing and for why "newest" rather than "most helpful". The cap is applied
+    once, where _sent_pool_meta is built, and every consumer derives from that table: the delta
+    scored tonight, the read-back that builds the mention table, the keyword votes, the
+    rescore_status pool figures and — via the stg_review_key hand-off at the very end — the
+    teardown's n_reviews_sampled. Cache rows for reviews outside the cap are ignored, never
+    deleted, so the cap can move in either direction without touching the cache.
+
     Scoring streams through _stream_vader_scores (a per-mention window table built in SQL, read
     via an independent cursor in bounded batches) — peak memory is one batch, never the whole
     ~1.7M-row corpus (matters on the 2GB Droplet).
@@ -2586,13 +2662,33 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
     con.execute("DROP TABLE IF EXISTS _sent_pool_meta")
     con.execute("DROP TABLE IF EXISTS stg_aspect_keyword_votes")
     # The eligible pool is stg_review_key (built by create_staging, same filters as the old
-    # stg_review_text minus the text column) plus the per-game floor. This meta table is what
-    # every id-keyed step below reads.
+    # stg_review_text minus the text column) plus the per-game floor, CAPPED to the newest
+    # SENTIMENT_POOL_CAP_PER_GAME reviews per game (see that constant for the why; 0 = uncapped).
+    # THE CAP IS APPLIED HERE AND NOWHERE ELSE. This meta table is what every id-keyed step
+    # below reads — the delta (_sent_new_ids), the uncached full-pool path (_sent_pool), the
+    # read-back that builds stg_aspect_mention_sentiment, the keyword votes, the rescore_status
+    # pool count — and the marts inherit it too: it is handed to them AS stg_review_key at the
+    # end of this function, so mart_game_teardown.sql's floor and n_reviews_sampled describe
+    # the same rows the mentions were mined from.
+    #
+    # The floor is evaluated on the UNCAPPED count (elig), the cap on the survivors; a game
+    # with fewer reviews than the cap keeps all of them.
     #
     # voted_up rides along (2026-08-31) so stg_aspect_keyword_votes can be aggregated here,
     # while the cache is attached, without a second pass over anything. It is one byte a row
     # and it is what lets mart_game_teardown.sql stop re-running the 10 aspect regexes over
     # 24.8M reviews to recover a fact this function already knows.
+    _cap = _sentiment_pool_cap()
+    # Newest first = highest recommendationid, compared as a NUMBER. The ids are digit strings
+    # of unequal length (8 digits until ~2016, 9 since), so a string sort would rank every
+    # 2015 review above every 2024 one. TRY_CAST keeps a non-numeric id (test fixtures) from
+    # failing the cast, and the trailing raw key keeps the order total for those too — the
+    # ids are unique, so there are no ties and the pool is the same set night after night.
+    _newest = (
+        "QUALIFY row_number() OVER (PARTITION BY t.appid "
+        "ORDER BY TRY_CAST(t.recommendationid AS BIGINT) DESC NULLS LAST, "
+        f"t.recommendationid DESC) <= {_cap}"
+    ) if _cap > 0 else ""
     con.execute(
         f"""
         CREATE TEMP TABLE _sent_pool_meta AS
@@ -2603,6 +2699,7 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
         SELECT t.appid, t.recommendationid, t.voted_up
         FROM stg_review_key t
         JOIN elig e ON e.appid = t.appid
+        {_newest}
         """
     )
 
@@ -2985,16 +3082,23 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
                 "SELECT (SELECT COUNT(*) FROM cache.scored_review), "
                 "       (SELECT COUNT(*) FROM cache.aspect_mention)"
             ).fetchone()
+            # Progress is POOL reviews scored, not the cache's row count. Since the per-game
+            # cap (SENTIMENT_POOL_CAP_PER_GAME) the cache legitimately holds rows for reviews
+            # outside the pool — ignored, never deleted — so scored_review's size can exceed
+            # the pool and would read as >100%. Every id this run recorded came from the delta,
+            # which is exactly the pool's unscored part as of phase 1, so the pool's scored
+            # count follows from those two numbers without another join over the cache.
+            _pool_scored = _pool_reviews - n_new_reviews + (_scored_reviews - _scored_before)
             con.execute("DELETE FROM cache.rescore_status")
             con.execute(
                 "INSERT INTO cache.rescore_status VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                [datetime.now(timezone.utc), _pool_reviews, _scored_reviews, _mention_rows,
+                [datetime.now(timezone.utc), _pool_reviews, _pool_scored, _mention_rows,
                  len(_todo), n_done, _stopped_early, _bucket_cost],
             )
-            _pct = (100.0 * _scored_reviews / _pool_reviews) if _pool_reviews else 100.0
+            _pct = (100.0 * _pool_scored / _pool_reviews) if _pool_reviews else 100.0
             print(f"[etl] aspect sentiment: {n_done}/{len(_todo)} bucket(s) scored this run "
                   f"({_score_buckets} bucket(s) planned over {n_new_reviews:,} unscored review(s)); "
-                  f"pool {_scored_reviews:,}/{_pool_reviews:,} reviews scored ({_pct:.1f}%)")
+                  f"pool {_pool_scored:,}/{_pool_reviews:,} reviews scored ({_pct:.1f}%)")
             if _stopped_early is not None:
                 # A CLEAN stop, not a failure: the build carries on and publishes, every bucket
                 # this run finished is permanently recorded, and the next run resumes from the
@@ -3009,7 +3113,7 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
                 # solely to feed marts this mode does not build, and the read-back in particular
                 # is the long cache hold this mode is designed to avoid.
                 print(f"[etl] rescore-only: {_scored_reviews - _scored_before:,} review(s) "
-                      f"recorded this run; {_pool_reviews - _scored_reviews:,} still unscored")
+                      f"recorded this run; {_pool_reviews - _pool_scored:,} still unscored")
                 return _scored_reviews - _scored_before
 
             # Full in-scope set, read back from the cache (untouched old rows + just-inserted new
@@ -3134,7 +3238,18 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
             _detach_sentiment_cache(con)
 
     con.execute("DROP TABLE IF EXISTS _sent_pool")
-    con.execute("DROP TABLE IF EXISTS _sent_pool_meta")
+    # HAND THE POOL TO THE MARTS (2026-09-05). mart_game_teardown.sql derives its eligibility
+    # floor and n_reviews_sampled from stg_review_key, and the mention counts it publishes next
+    # to that number were just mined from _sent_pool_meta — so from here on stg_review_key IS
+    # the pool (floor + per-game cap), not staging's uncapped candidate set, and "N sampled
+    # English reviews" means the N reviews the aspect bars were actually computed from. A
+    # rename rather than a copy: same three columns, same rows every step above read, and the
+    # teardown's own DROP at the end of its file still cleans it up. mart_game_aspect_reviews.sql
+    # needs nothing: it reaches reviews only through stg_aspect_mention_sentiment, which is
+    # pool-scoped already. Idempotent — the floor and cap applied to this table give this table.
+    # (--rescore-only returned above and builds no marts, so it leaves staging's table alone.)
+    con.execute("DROP TABLE IF EXISTS stg_review_key")
+    con.execute("ALTER TABLE _sent_pool_meta RENAME TO stg_review_key")
 
     # Aggregate per (appid, aspect). pos/neg/neutral use VADER's ±0.05 band; sum_compound lets
     # the genre baseline pool a mention-weighted mean compound downstream.
@@ -4122,6 +4237,18 @@ def _env_config_errors() -> list[str]:
             errors.append(f"PROSPECT_SENTIMENT_DEADLINE_SECONDS={raw!r} is not a positive number "
                           "(wall-clock seconds from process start after which no NEW sentiment "
                           "bucket is started; unset = no deadline)")
+    raw = os.environ.get("PROSPECT_SENTIMENT_POOL_CAP", "").strip()
+    if raw:
+        try:
+            cap = int(raw)
+        except ValueError:
+            cap = -1
+        if cap < 0 or 0 < cap < TEARDOWN_MIN_REVIEWS:
+            errors.append(f"PROSPECT_SENTIMENT_POOL_CAP={raw!r} is not 0 (uncapped) or an "
+                          f"integer >= TEARDOWN_MIN_REVIEWS ({TEARDOWN_MIN_REVIEWS}) — a cap "
+                          "below the floor leaves every capped game short of it and drops it "
+                          "from the teardown; unset = "
+                          f"{SENTIMENT_POOL_CAP_PER_GAME:,} newest reviews per game")
     raw = os.environ.get("PROSPECT_DUCKDB_MEMORY_LIMIT", "").strip()
     # Deploy sets e.g. 2500MB (deploy/prospect-refresh.sh), so the contract is DuckDB's own
     # memory-limit grammar — a bare integer or an integer + size unit — not a bare int alone.
