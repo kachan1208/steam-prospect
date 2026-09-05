@@ -18,7 +18,7 @@ Checks (all against http://localhost:8428):
   e) time() - prospect_backup_last_success_timestamp > 50h             (deploy/backup.sh)
   f) VictoriaMetrics itself unreachable (evaluated implicitly — it is a breach)
   g) a build hold is still active (deploy/rollback.sh left one and nobody released it)
-  h) free disk on the filesystem holding /root below DISK_MIN_FREE_PCT (default 15%)
+  h) free disk on the filesystem holding /root below DISK_MIN_FREE_PCT (default 30%)
 
 (a) covers far more than it used to: cron-wrap.sh now pushes
 prospect_pipeline_step_success{step="<job>"} for EVERY job it wraps, so the twitch
@@ -40,9 +40,11 @@ completed at all. Persistent skipping therefore pages; a routine one does not.
 the few things that can take VM itself down, so the check must survive exactly the
 condition it exists to catch. Free disk on this box is not slack — it is the ETL's spill
 ceiling (the 2026-08-30 nightly spilled 20.6GB onto a ~75%-full volume and died), and it
-has already killed builds; 15% headroom is what backup.sh's weekly copy also demands.
-The check pushes prospect_disk_free_pct every run so the approach is charted, not just
-the arrival.
+has already killed builds. 30% (2026-09-04; was 15%, which the nightly's ~25 GB need —
+an 18 GB spill plus a 2.3 GB mart — could sit under without a word) is set so this pages
+BEFORE deploy/prospect-refresh.sh's own PROSPECT_DISK_MIN_FREE_GB=25 gate refuses to
+build, not after. The check pushes prospect_disk_free_pct every run so the approach is
+charted, not just the arrival.
 
 On any breach: ONE consolidated notification. Channels, configured in
 /root/.prospect-alerts.env (chmod 600, never in git — see ALERTING.md):
@@ -252,9 +254,9 @@ def collect_breaches(cfg: dict[str, str]) -> dict[str, str]:
     # block above: this must still evaluate (and still try to push its gauge) when VM is
     # down, because a full disk is a prime suspect for VM being down.
     try:
-        min_free_pct = float(cfg.get("DISK_MIN_FREE_PCT", "15"))
+        min_free_pct = float(cfg.get("DISK_MIN_FREE_PCT", "30"))
     except ValueError:
-        min_free_pct = 15.0
+        min_free_pct = 30.0
     free_pct = disk_free_pct("/root")
     if free_pct is not None:
         push_disk_metric(free_pct)

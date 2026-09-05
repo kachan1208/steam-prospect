@@ -20,7 +20,7 @@ pins it — two more always-on containers is exactly the wrong trade.
 | e | age of `prospect_backup_last_success_timestamp` (pushed by `backup.sh`) | > 50h |
 | f | VictoriaMetrics itself unreachable | immediate |
 | g | `prospect_build_hold_active` (a `rollback.sh` hold nobody released) | latest sample is 1 |
-| h | free disk on the filesystem holding `/root` (pushes `prospect_disk_free_pct`; evaluated even when VM is down) | < `DISK_MIN_FREE_PCT` (default 15%) |
+| h | free disk on the filesystem holding `/root` (pushes `prospect_disk_free_pct`; evaluated even when VM is down) | < `DISK_MIN_FREE_PCT` (default 30%, so it pages before the nightly's own 25 GB gate refuses to build) |
 
 **Every wrapped cron job is covered by (a).** `cron-wrap.sh` pushes
 `prospect_pipeline_step_success{step="<job>"}` for whatever it runs, so the twitch
@@ -91,9 +91,10 @@ missed run is normal jitter and two in a row is not.
    # multi-day drain is normal for you — otherwise leave it monitored.
    # (ALERT_IGNORE_SKIPPED_JOBS is accepted as an alias for this.)
    #ALERT_IGNORE_JOBS=light_build
-   # Breach when the filesystem holding /root has less than this percent free. 15 = the
-   # headroom backup.sh's weekly copy demands and the ETL's spill ceiling needs.
-   #DISK_MIN_FREE_PCT=15
+   # Breach when the filesystem holding /root has less than this percent free. 30 pages
+   # before the nightly's own disk gate (PROSPECT_DISK_MIN_FREE_GB=25 in prospect-refresh.sh:
+   # an 18 GB spill + a 2.3 GB mart) refuses to build.
+   #DISK_MIN_FREE_PCT=30
    # When the 19:30 backup job is deliberately NOT scheduled, silence its staleness check
    # with this (otherwise remove it — see the history block in deploy/crontab.txt).
    #ALERT_CHECK_BACKUPS=0

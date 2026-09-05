@@ -25,6 +25,14 @@ prospect_push_metrics() {
     return 0
 }
 
+# prospect_free_gb [PATH] — whole GiB free on the filesystem holding PATH (default
+# /root/prospect/data), the number `df -h` shows. Prints NOTHING if df cannot measure, so a
+# caller can treat "unmeasurable" as its own case instead of as zero. -P for one-line POSIX
+# output, -k so the arithmetic is the same on every df.
+prospect_free_gb() {
+    df -Pk "${1:-/root/prospect/data}" 2>/dev/null | awk 'NR == 2 { printf "%d\n", $4 / 1048576 }'
+}
+
 # prospect_http_code PATH — echo the HTTP status of PATH ("000" if nothing answered).
 # Probes INSIDE the container first (docker exec + the image's own curl against the container
 # port 8080 — immune to whatever host port mapping `docker run` used), then falls back to the

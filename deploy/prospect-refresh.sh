@@ -50,14 +50,23 @@ if [ -f "$(dirname "$0")/lib.sh" ]; then
     . "$(dirname "$0")/lib.sh"
 else
     echo "WARN: $(dirname "$0")/lib.sh missing — restart verification DEGRADED to a blind" \
-         "restart; restore the checkout (cd /root/prospect && git pull)"
+         "restart and the disk gate cannot measure; restore the checkout (cd /root/prospect && git pull)"
     prospect_restart_verify() { docker restart prospect && sleep 15; }
+    prospect_free_gb() { :; }   # prints nothing = "unmeasurable", which the gate does not fail on
 fi
 # Unbuffered stdout for EVERY python step. Not cosmetic: a step killed by `timeout` never gets to
 # flush, so a buffered step that dies takes its whole output with it. The 2026-08-21 ETL ran four
 # hours, hit rc=124, and left ZERO lines to diagnose from — it prints per-mart timings the entire
 # way and every one of them died in the buffer.
 export PYTHONUNBUFFERED=1
+# Disk gate (2026-09-04). Free space on this volume IS the ETL's spill ceiling, and the box was
+# found at 22 GB free against a ~25 GB need: the build's spill has reached 18 GB on this corpus
+# (PROSPECT_DUCKDB_TEMP_MAX above bounds only DuckDB's temp dir), plus a ~2.3 GB new mart, plus
+# SQLite WAL growth. Below this floor the nightly refuses to START (preflight, before any scrape)
+# or to BUILD (pre-ETL, after the scratch sweep had its chance) — a recorded FAILED row with the
+# reason, instead of a build that dies hours in on a full disk. Raise/lower with `df -h`; it sits
+# BELOW the /root/.prospect-env sourcing so the box can override it there.
+DISK_MIN_FREE_GB=${PROSPECT_DISK_MIN_FREE_GB:-25}
 
 LOG=/var/log/prospect-refresh.log
 HISTORY=/root/prospect/data/refresh_history.json   # the run ledger (JSONL) the Data log page reads
@@ -327,6 +336,23 @@ echo "=================== refresh start: $(date -u) ==================="
 push "prospect_pipeline_running 1
 prospect_pipeline_start_timestamp $START"
 
+# ── Preflight: disk (see DISK_MIN_FREE_GB). Sits AFTER the EXIT trap on purpose: a breach must
+# leave a FAILED row with its reason, and must leave it before any scrape lane has started.
+STEP="preflight"
+FREE_GB=$(prospect_free_gb /root/prospect/data)
+if [ -n "$FREE_GB" ] && [ "$FREE_GB" -lt "$DISK_MIN_FREE_GB" ]; then
+    RUN_ERROR="disk: ${FREE_GB} GB free < ${DISK_MIN_FREE_GB} GB"
+    echo "ERROR: [preflight] $RUN_ERROR — not starting. The ETL would spill into a full disk and" \
+         "die hours in; free space (df -h, stale *.building* scratch, old marts) and re-run."
+    push "prospect_pipeline_step_success{step=\"preflight\"} 0
+prospect_pipeline_step_last_run_timestamp{step=\"preflight\"} $(date -u +%s)"
+    rm -f "$STEP_RESULTS"
+    exit 1
+fi
+echo "[preflight] disk: ${FREE_GB:-?} GB free (floor ${DISK_MIN_FREE_GB} GB)"
+push "prospect_pipeline_step_success{step=\"preflight\"} 1
+prospect_pipeline_step_last_run_timestamp{step=\"preflight\"} $(date -u +%s)"
+
 cd /root/steam-scraper || exit 1
 
 # ── Lane B (independent services) — launched in PARALLEL up front so they overlap the serial
@@ -530,7 +556,20 @@ else
     # SIGKILLed rescore leaves it behind.
     find /root/prospect/data -maxdepth 1 -name 'prospect_*.duckdb.building*' \
          ! -name "prospect_$(date -u +%Y%m%d).duckdb.building*" -exec rm -rf {} + 2>/dev/null || true
-    df -h /root/prospect/data | tail -1 | awk '{print "[etl] disk before build: " $4 " free (" $5 " used)"}'
+    # Second disk gate, AFTER the sweep (which may have just freed the headroom): the scrapes
+    # ran and are kept, but a build below the floor is skipped the same way a concurrent build
+    # skips it — previous mart kept, app not restarted, the reason in tonight's ledger row.
+    FREE_GB=$(prospect_free_gb /root/prospect/data)
+    if [ -n "$FREE_GB" ] && [ "$FREE_GB" -lt "$DISK_MIN_FREE_GB" ]; then
+        ETL_SKIPPED=1
+        ETL_RC=125
+        RUN_ERROR="disk: ${FREE_GB} GB free < ${DISK_MIN_FREE_GB} GB"
+        echo "[etl] SKIPPED — $RUN_ERROR even after the scratch sweep: a build would spill into a"
+        echo "       full disk and die hours in. Previous mart kept, app not restarted; tonight's"
+        echo "       scrapes are in steam_games.db for tomorrow's build."
+    else
+        echo "[etl] disk before build: ${FREE_GB:-?} GB free (floor ${DISK_MIN_FREE_GB} GB)"
+    fi
     cd /root/prospect/etl || exit 1
     # The ETL is the one step that does NOT go through run_step (it has a bespoke success path
     # below: restart, prune, metrics). It still needs the same logging contract, so it gets one
@@ -556,13 +595,15 @@ else
     # growing. It also still fits the schedule: the ETL starts ~23:08, so 6h ends ~05:08, before
     # the 06:00 review keeper that shares this flock. The failure mode of a ceiling set too low is
     # losing the ENTIRE night's mart, which is far worse than a run that goes long.
-    ETL_LOG="$STEP_LOG_DIR/etl.${RUN_TS}.log"
-    echo "[etl] log: $ETL_LOG"
-    timeout 21600 /root/prospect/etl/.venv/bin/python -u build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data > "$ETL_LOG" 2>&1 || ETL_RC=$?
-    [ "$ETL_RC" -ne 0 ] && explain_failure "etl" "$ETL_RC" "$ETL_LOG"
-    # Per-mart timings, slowest first — the run's own profile, kept even on success so a slow build
-    # is visible BEFORE it becomes a failed one.
-    grep -E '^\[etl\] ran ' "$ETL_LOG" 2>/dev/null | sort -t'(' -k2 -rn | head -8 | sed 's/^/[etl] slowest: /'
+    if [ "$ETL_SKIPPED" -eq 0 ]; then
+        ETL_LOG="$STEP_LOG_DIR/etl.${RUN_TS}.log"
+        echo "[etl] log: $ETL_LOG"
+        timeout 21600 /root/prospect/etl/.venv/bin/python -u build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data > "$ETL_LOG" 2>&1 || ETL_RC=$?
+        [ "$ETL_RC" -ne 0 ] && explain_failure "etl" "$ETL_RC" "$ETL_LOG"
+        # Per-mart timings, slowest first — the run's own profile, kept even on success so a slow
+        # build is visible BEFORE it becomes a failed one.
+        grep -E '^\[etl\] ran ' "$ETL_LOG" 2>/dev/null | sort -t'(' -k2 -rn | head -8 | sed 's/^/[etl] slowest: /'
+    fi
 fi
 ETL_DUR=$(( $(date -u +%s) - ETL_T0 ))
 if [ "$ETL_RC" -eq 0 ]; then
