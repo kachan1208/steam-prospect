@@ -137,20 +137,42 @@
 -- keyed re-read returns the identical row, and the survivors are chosen by the ranking, which
 -- never looked at text in the first place.
 --
+-- ONE POOL PASS, AND WHERE THE TIME GOES NOW (2026-09-05). The text-last shape above was profiled
+-- statement by statement on a 4.37M-review snapshot of the source (1.66M eligible English reviews
+-- over 15.9K games, 1,464,649 mentions — the same corpus the 2026-08-19 note counted — and 596K
+-- survivors), sqlite-ATTACHed exactly as the nightly attaches it, at the droplet's threads=2 and
+-- memory_limit=2500MB: 34.2s in total, of which the ten excerpt arms 13.7s (40%, ~23us per
+-- survivor), the three full streams of src.reviews 15.8s (46%: _aspectrev_elig 6.3s,
+-- _aspectrev_base 5.1s, _aspectrev_srctext 4.4s), the final join + ORDER BY 1.1s (3%), the
+-- ranking window 0.4s; peak spill 182MB, all of it the survivors' UNCAPPED text in
+-- _aspectrev_surv (helpful reviews average ~1.7KB, five times the corpus mean). So the sort is
+-- not the cost, no stage hashes or sorts text at scale any more, and what is left is the source
+-- streams and the regex. A stream costs the same whether or not review_text is projected
+-- (3.4s vs 4.2s per pass here): the sqlite scanner has projection pushdown but NO filter
+-- pushdown, so every row of every language crosses into DuckDB and the row walk itself is the
+-- price. (sqlite_query() would evaluate the filter inside SQLite, but it returns every column
+-- as VARCHAR — not an option.) The cheap lever, taken here, is therefore fewer streams: the
+-- eligibility floor is derived from the materialised lean pool instead of from its own stream
+-- of the source (_aspectrev_base -> _aspectrev_elig -> _aspectrev_meta), two streams per build
+-- instead of three, same population by construction — see the notes at those tables.
+-- THE NEXT LEVER, NOT TAKEN HERE: the ten arms each SEQ_SCAN _aspectrev_surv (the largest text
+-- table in the step) once — free while it fits the buffer pool, as it did in this profile, but
+-- ten re-reads of a spilled table at production size (~1.8M survivors x ~1.7KB against a 2500MB
+-- limit). Folding the arms into one pass — a CASE per derived column keyed on kw_aspect, so each
+-- row meets only its own arm's constant-pattern regex — is exact by the same argument as the
+-- UNION ALL and belongs to _ASPECT_EXCERPT_ARM in build_marts.py, with the differential tests in
+-- etl/tests/test_mart_aspect_reviews_window_rewrite.py re-run against it.
+--
 -- Placeholder tokens are substituted by build_marts.py.
 
 DROP TABLE IF EXISTS mart_game_aspect_reviews;
 
--- Eligible-game English review pool with the ranking meta and NO TEXT, materialized ONCE from
--- SQLite (identical population + floor to _sent_pool_meta in compute_aspect_sentiment and to
--- stg_review_key / _teardown_elig). recommendationid joins each cached mention back to its
--- helpfulness/recency (for ranking) and, for the few that survive the ranking, to its
--- review_text (see _aspectrev_srctext).
-CREATE TEMP TABLE _aspectrev_elig AS
-SELECT appid FROM src.reviews
-WHERE language = 'english' AND review_text IS NOT NULL AND length(trim(review_text)) > 0
-GROUP BY appid HAVING COUNT(*) >= @TEARDOWN_MIN_REVIEWS@;
-
+-- English review pool with the ranking meta and NO TEXT, materialized from SQLite in ONE stream
+-- (same english + non-empty-text filter as stg_review_key / _sent_pool_meta in
+-- compute_aspect_sentiment; the per-game floor is applied one step down, see _aspectrev_elig).
+-- recommendationid joins each cached mention back to its helpfulness/recency (for ranking) and,
+-- for the few that survive the ranking, to its review_text (see _aspectrev_srctext).
+--
 -- NO review_text (2026-08-31). This pool used to carry it for the WHOLE eligible population —
 -- 24.8M rows / 8.45GB, the second corpus-wide copy of review text in the build after staging's
 -- stg_review_text (now stg_review_key, text removed for the same reason). Both were temp tables
@@ -161,6 +183,18 @@ GROUP BY appid HAVING COUNT(*) >= @TEARDOWN_MIN_REVIEWS@;
 -- about which rows are produced changes: recommendationid is src.reviews' PRIMARY KEY, so the
 -- keyed re-read returns exactly the row this pool would have carried.
 --
+-- NO ELIGIBILITY JOIN HERE (2026-09-05). This used to be the SECOND full stream of src.reviews in
+-- the file: _aspectrev_elig streamed the source once to count each game's English reviews, and
+-- this table streamed it again to join that count back. The sqlite scanner has no filter
+-- pushdown, so a stream costs the same row walk whichever columns it projects (see "ONE POOL
+-- PASS" in the header) — the only way to make it cheaper is to make fewer of them. The floor now
+-- comes from THIS table, so the pool briefly holds the English reviews of games under the floor
+-- too: ~50 bytes a row, and few of them (19% of rows on a 2026-08 snapshot where most games had a
+-- handful of sampled reviews; on the current source the 2026-08-31 counts put the unfloored key
+-- set and the floored pool within 0.01% of each other). Nothing downstream reads them: the
+-- ranking reads _aspectrev_meta (floored), and _aspectrev_text reaches back here by the
+-- survivors' key only.
+--
 -- author_steamid rides along here (and only here) because it is the other half of the permalink;
 -- it is a ~17-char id, so unlike review_text it costs nothing to carry through the pool.
 CREATE TEMP TABLE _aspectrev_base AS
@@ -168,8 +202,17 @@ SELECT r.appid, r.recommendationid, r.author_steamid, r.votes_up,
     COALESCE(r.playtime_at_review, r.playtime_forever) AS playtime_minutes,
     r.timestamp_created, r.language
 FROM src.reviews r
-JOIN _aspectrev_elig e ON e.appid = r.appid
 WHERE r.language = 'english' AND r.review_text IS NOT NULL AND length(trim(r.review_text)) > 0;
+
+-- Eligible games: the same COUNT(*) >= @TEARDOWN_MIN_REVIEWS@ floor as _sent_pool_meta /
+-- _teardown_elig, counted over the pool just built instead of over a second stream of the
+-- source. Identical set by construction: _aspectrev_base holds exactly the rows the old
+-- src.reviews count saw (one row per review, same filter, no dedup), so the same appids clear
+-- the floor. Counting a materialised 50-byte-row temp table is milliseconds where the stream was
+-- a full pass over every language's text.
+CREATE TEMP TABLE _aspectrev_elig AS
+SELECT appid FROM _aspectrev_base
+GROUP BY appid HAVING COUNT(*) >= @TEARDOWN_MIN_REVIEWS@;
 
 -- The ranking below must NOT touch review_text — the mentions join is ~1.5M rows and the window
 -- sort orders them, so a single review_text column dragged along turns into a multi-hundred-MB
@@ -179,10 +222,12 @@ WHERE r.language = 'english' AND r.review_text IS NOT NULL AND length(trim(r.rev
 -- force it with a materialized barrier: a LEAN copy of just the ranking meta. The rank reads only
 -- this. (Since 2026-08-31 _aspectrev_base has no text either, so this is a projection rather than
 -- a text barrier — kept because author_steamid is still not a ranking input, and because the
--- barrier is what the measured plan above depends on.)
+-- barrier is what the measured plan above depends on. Since 2026-09-05 it is also where the
+-- per-game floor is applied: this is the ELIGIBLE pool, _aspectrev_base is the unfloored one.)
 CREATE TEMP TABLE _aspectrev_meta AS
-SELECT appid, recommendationid, votes_up, playtime_minutes, timestamp_created, language
-FROM _aspectrev_base;
+SELECT b.appid, b.recommendationid, b.votes_up, b.playtime_minutes, b.timestamp_created, b.language
+FROM _aspectrev_base b
+JOIN _aspectrev_elig e ON e.appid = b.appid;
 
 -- Rank the ALREADY-COMPUTED mentions (stg_aspect_mention_sentiment: one row per (review, aspect)
 -- match, same lexicon/pool as a fresh 10-arm scan — see the PERFORMANCE note above) by helpfulness
@@ -250,10 +295,11 @@ DROP TABLE _aspectrev_meta;
 -- passes over is never materialized — only the survivors' rows land in a table.
 -- (appid, recommendationid) is the same key the ranking already assumed unique, and
 -- recommendationid is src.reviews' PRIMARY KEY, so this cannot fan a survivor out.
--- COST, stated honestly: this is a THIRD pass over src.reviews in this file (after
--- _aspectrev_elig and _aspectrev_base), and the sqlite scanner has no index lookup to push the
--- join into, so it is a full streaming scan. Traded deliberately: the build's failures are
--- memory/disk-spill, not wall clock, and this buys back 8.45GB of materialised text.
+-- COST, stated honestly: this is a SECOND pass over src.reviews in this file (after
+-- _aspectrev_base; it was the third until _aspectrev_elig stopped streaming the source too, see
+-- 2026-09-05), and the sqlite scanner has no index lookup to push the join into, so it is a full
+-- streaming scan. Traded deliberately: the build's failures are memory/disk-spill, not wall
+-- clock, and this buys back 8.45GB of materialised text.
 CREATE TEMP TABLE _aspectrev_srctext AS
 SELECT k.appid, k.recommendationid, r.review_text
 FROM (SELECT DISTINCT appid, recommendationid FROM _aspectrev_ranked) k
