@@ -88,14 +88,18 @@ find /root/prospect/data -maxdepth 1 -name 'prospect_*.duckdb.building*' \
      -mmin +120 -exec rm -rf {} + 2>/dev/null || true
 
 cd /root/prospect/etl || exit 1
-# Memory (2026-09-04): the same systemd-run cgroup cap the keepers and the nightly ETL run
-# under. 2400M rather than the nightly's 3000M because the 06:15 socials keeper (own lock,
-# capped at 1500M) can still be running at 13:30: 2400M + 1500M + ~900M app/OS is the whole
-# 3.9 GB box only if BOTH peak at once, and then the cgroup kills this opportunistic build
-# instead of letting the box thrash. DuckDB gets 1800MB of the 2400M; the rest is the Python
-# heap. Move the two numbers together.
-if PROSPECT_DUCKDB_MEMORY_LIMIT=1800MB PYTHONUNBUFFERED=1 \
-    timeout 14400 systemd-run --scope --quiet -p MemoryMax=2400M -p MemorySwapMax=0 "${NICE[@]}" \
+# Memory (2026-09-04, resized 2026-09-07): the same systemd-run cgroup cap the keepers and
+# the nightly ETL run under. The first sizing (DuckDB 1800MB inside 2400M) was killed by the
+# kernel on its first run — 2026-09-06 13:44:47, anon-rss 2,411,300kB, fourteen minutes in on
+# mart_game.sql — so a light build carries ~650MB of RSS outside DuckDB's target, and DuckDB
+# overshoots the target itself. Now DuckDB 1700MB (the value every pre-cgroup light build
+# succeeded with) inside 3000M. The socials keeper (own lock, 1500M) has finished within
+# minutes of 06:15 on every recent run and the review keeper yields the refresh lock by
+# 13:00, so nothing overlaps 13:30 in practice; if both ever peak at once the cgroup kills
+# this opportunistic build rather than letting the box thrash. Move the two numbers together,
+# and lower DuckDB before raising the scope.
+if PROSPECT_DUCKDB_MEMORY_LIMIT=1700MB PYTHONUNBUFFERED=1 \
+    timeout 14400 systemd-run --scope --quiet -p MemoryMax=3000M -p MemorySwapMax=0 "${NICE[@]}" \
       /root/prospect/etl/.venv/bin/python -u build_marts.py \
       --source /root/steam-scraper/steam_games.db \
       --data-dir /root/prospect/data --light \

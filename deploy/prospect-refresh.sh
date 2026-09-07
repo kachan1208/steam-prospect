@@ -18,19 +18,29 @@
 set -uo pipefail
 export PATH=/root/steam-scraper/.venv/bin:/root/.local/bin:$PATH
 # DuckDB's own cap, sized to FIT the ETL's cgroup (2026-09-04; was 2500MB with no cgroup at
-# all). The ETL runs under `systemd-run --scope -p MemoryMax=3000M` (see the invocation): on
-# the 3.9 GB box that is 3000M for the ETL and ~900M for the two uvicorn workers plus the OS,
-# and the keepers never overlap the ETL by schedule (06:00/06:15 vs 21:00-05:08). Inside the
-# 3000M, DuckDB gets 2200MB; the rest is the Python classifier heap + its multiprocessing
-# children, and DuckDB treats its limit as a target it can overshoot briefly, so the gap is
-# not slack. Move the two numbers together.
-export PROSPECT_DUCKDB_MEMORY_LIMIT=2200MB
+# all). The ETL runs under `systemd-run --scope -p MemoryMax=3200M` (see the invocation).
+#
+# RESIZED 2026-09-07 after the first kill: the 13:30 light build ran with DuckDB at 1800MB
+# inside a 2400M scope and the kernel killed it at anon-rss 2,411,300kB fourteen minutes in,
+# on mart_game.sql (journalctl -k, 2026-09-06 13:44:47). So a build carries ~650MB of
+# non-DuckDB RSS BEFORE the classifier is loaded, and DuckDB overshoots its target. The full
+# build also holds the aspect classifier (~750MB RSS measured on the rescore) and its spawn
+# children, so the first 3000M/2200MB nightly would have died the same way. Now: DuckDB 2000MB
+# inside 3200M, leaving ~1.2GB for Python + overshoot. The rest of the box — the two uvicorn
+# workers (<60MB RSS each: the mart is mmapped, not heap), dockerd, Grafana, VictoriaMetrics
+# and the OS — measured ~600MB, so 3200M is the ceiling, not a number to round up. The
+# keepers never overlap the ETL by schedule (06:00/06:15 vs 21:00-05:08). Move the two
+# numbers together, and if this kills again, lower DuckDB before raising the scope.
+export PROSPECT_DUCKDB_MEMORY_LIMIT=2000MB
 # Cap the SPILL too (2026-08-31). max_temp_directory_size defaults to all free disk, so the
 # 08-30 nightly spilled 20.6GB until the volume was full, then died after 5.35h with nothing
-# built. 15GB leaves room for the two retained marts (~2.3GB each), the scraper's SQLite + WAL
-# and the next build's scratch, so a runaway query now fails on its own budget instead of
-# taking the filesystem down with it. Raise only alongside `df -h /`.
-export PROSPECT_DUCKDB_TEMP_MAX=15GiB
+# built. The cap leaves room for the two retained marts (~2.3GB each), the scraper's SQLite +
+# WAL and the next build's scratch, so a runaway query now fails on its own budget instead of
+# taking the filesystem down with it. 15GiB -> 12GiB on 2026-09-07, moved TOGETHER with the
+# disk gate below (25 -> 21 GB): the box sits at ~22 GB free with a 40 GB SQLite corpus that
+# nothing else can shrink, and 12GiB spill + ~2.3GB mart + WAL growth fits under 21 GB where
+# 15GiB did not fit under 25. Raise only alongside `df -h /` and the gate.
+export PROSPECT_DUCKDB_TEMP_MAX=12GiB
 # Stop the sentiment phase from running into the `timeout 21600` below (2026-09-02). A full
 # rescore (a SENTIMENT_CACHE_VERSION bump wipes the cache, so the "delta" becomes all 24.4M
 # reviews) is ~52h of scoring at the droplet's measured ~116 mention-rows/s — it CANNOT finish
@@ -74,7 +84,13 @@ export PYTHONUNBUFFERED=1
 # or to BUILD (pre-ETL, after the scratch sweep had its chance) — a recorded FAILED row with the
 # reason, instead of a build that dies hours in on a full disk. Raise/lower with `df -h`; it sits
 # BELOW the /root/.prospect-env sourcing so the box can override it there.
-DISK_MIN_FREE_GB=${PROSPECT_DISK_MIN_FREE_GB:-25}
+#
+# 25 -> 21 GB (2026-09-07): the 25 GB floor refused two nightlies in a row (22 GB and 18 GB
+# free — the 18 was a failed light build's 3.7 GB spill waiting for the next sweep), and there
+# is nothing left to delete: steam_games.db is 40 GB with zero free pages and everything else
+# on the volume is under 1 GB. The floor now matches the spill cap above (12GiB temp + ~2.3 GB
+# mart + WAL growth < 21 GB) instead of the pre-cap 18 GB spill it was sized for.
+DISK_MIN_FREE_GB=${PROSPECT_DISK_MIN_FREE_GB:-21}
 
 LOG=/var/log/prospect-refresh.log
 HISTORY=/root/prospect/data/refresh_history.json   # the run ledger (JSONL) the Data log page reads
@@ -641,7 +657,7 @@ else
         # kernel OOM kill of whatever the kernel picked. Now a breach is rc=137 of the ETL alone:
         # previous mart kept, app untouched. See PROSPECT_DUCKDB_MEMORY_LIMIT for the arithmetic.
         # `timeout` stays outermost, as in the keeper lines, so its deadline and rc are unchanged.
-        timeout 21600 systemd-run --scope --quiet -p MemoryMax=3000M -p MemorySwapMax=0 "${NICE[@]}" \
+        timeout 21600 systemd-run --scope --quiet -p MemoryMax=3200M -p MemorySwapMax=0 "${NICE[@]}" \
             /root/prospect/etl/.venv/bin/python -u build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data > "$ETL_LOG" 2>&1 || ETL_RC=$?
         [ "$ETL_RC" -ne 0 ] && explain_failure "etl" "$ETL_RC" "$ETL_LOG"
         # Per-mart timings, slowest first — the run's own profile, kept even on success so a slow
