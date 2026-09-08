@@ -91,6 +91,14 @@ export PYTHONUNBUFFERED=1
 # on the volume is under 1 GB. The floor now matches the spill cap above (12GiB temp + ~2.3 GB
 # mart + WAL growth < 21 GB) instead of the pre-cap 18 GB spill it was sized for.
 DISK_MIN_FREE_GB=${PROSPECT_DISK_MIN_FREE_GB:-21}
+# The SCRAPE floor is separate and far lower (2026-09-08). The first preflight gated the whole
+# run on the ETL's 21-25 GB need, and three refused nights in a row also cancelled every
+# collector: no news, no CCU samples, no follower or price snapshots since 2026-09-02 — the
+# two series that can never be backfilled, lost to a gate meant for DuckDB's spill. Scraping
+# writes a few hundred MB a night and needs nothing like the ETL's budget, so the run now
+# starts whenever the disk can take the scrapes, and only the ETL step is refused at the floor
+# above. 5 GB is the point below which even SQLite's WAL checkpoint is at risk.
+SCRAPE_MIN_FREE_GB=${PROSPECT_DISK_MIN_FREE_GB_SCRAPE:-5}
 
 LOG=/var/log/prospect-refresh.log
 HISTORY=/root/prospect/data/refresh_history.json   # the run ledger (JSONL) the Data log page reads
@@ -375,20 +383,27 @@ echo "=================== refresh start: $(date -u) ==================="
 push "prospect_pipeline_running 1
 prospect_pipeline_start_timestamp $START"
 
-# ── Preflight: disk (see DISK_MIN_FREE_GB). Sits AFTER the EXIT trap on purpose: a breach must
+# ── Preflight: disk (see SCRAPE_MIN_FREE_GB). Sits AFTER the EXIT trap on purpose: a breach must
 # leave a FAILED row with its reason, and must leave it before any scrape lane has started.
+# This floor is the SCRAPE floor only; the ETL's own floor (DISK_MIN_FREE_GB) is checked right
+# before the ETL step, after the scrapes have run and the scratch sweep has had its chance.
 STEP="preflight"
 FREE_GB=$(prospect_free_gb /root/prospect/data)
-if [ -n "$FREE_GB" ] && [ "$FREE_GB" -lt "$DISK_MIN_FREE_GB" ]; then
-    RUN_ERROR="disk: ${FREE_GB} GB free < ${DISK_MIN_FREE_GB} GB"
-    echo "ERROR: [preflight] $RUN_ERROR — not starting. The ETL would spill into a full disk and" \
-         "die hours in; free space (df -h, stale *.building* scratch, old marts) and re-run."
+if [ -n "$FREE_GB" ] && [ "$FREE_GB" -lt "$SCRAPE_MIN_FREE_GB" ]; then
+    RUN_ERROR="disk: ${FREE_GB} GB free < ${SCRAPE_MIN_FREE_GB} GB (scrape floor)"
+    echo "ERROR: [preflight] $RUN_ERROR — not starting. Even the scrapes' SQLite writes would" \
+         "risk a full disk; free space (df -h, stale *.building* scratch, old marts) and re-run."
     push "prospect_pipeline_step_success{step=\"preflight\"} 0
 prospect_pipeline_step_last_run_timestamp{step=\"preflight\"} $(date -u +%s)"
     rm -f "$STEP_RESULTS"
     exit 1
 fi
-echo "[preflight] disk: ${FREE_GB:-?} GB free (floor ${DISK_MIN_FREE_GB} GB)"
+if [ -n "$FREE_GB" ] && [ "$FREE_GB" -lt "$DISK_MIN_FREE_GB" ]; then
+    echo "[preflight] disk: ${FREE_GB} GB free — scrapes will run, but the ETL will be refused" \
+         "unless the scratch sweep frees it past ${DISK_MIN_FREE_GB} GB"
+else
+    echo "[preflight] disk: ${FREE_GB:-?} GB free (scrape floor ${SCRAPE_MIN_FREE_GB} GB, ETL floor ${DISK_MIN_FREE_GB} GB)"
+fi
 push "prospect_pipeline_step_success{step=\"preflight\"} 1
 prospect_pipeline_step_last_run_timestamp{step=\"preflight\"} $(date -u +%s)"
 
@@ -657,7 +672,13 @@ else
         # kernel OOM kill of whatever the kernel picked. Now a breach is rc=137 of the ETL alone:
         # previous mart kept, app untouched. See PROSPECT_DUCKDB_MEMORY_LIMIT for the arithmetic.
         # `timeout` stays outermost, as in the keeper lines, so its deadline and rc are unchanged.
-        timeout 21600 systemd-run --scope --quiet -p MemoryMax=3200M -p MemorySwapMax=0 "${NICE[@]}" \
+        # MemorySwapMax=2G, not 0 (2026-09-08): with swap forbidden the cgroup KILLS at the
+        # ceiling, and two light builds in a row died that way (anon-rss 2.41 GB under 2400M,
+        # then 3.02 GB under 3000M with DuckDB at only 1700MB — a build's RSS runs well past
+        # DuckDB's target). Every build that ever succeeded on this box ran with swap available.
+        # The ceiling still protects the app's RAM; the overshoot now pages out inside this
+        # scope instead of ending the night, bounded to 2G of the 4G swapfile.
+        timeout 21600 systemd-run --scope --quiet -p MemoryMax=3200M -p MemorySwapMax=2G "${NICE[@]}" \
             /root/prospect/etl/.venv/bin/python -u build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data > "$ETL_LOG" 2>&1 || ETL_RC=$?
         [ "$ETL_RC" -ne 0 ] && explain_failure "etl" "$ETL_RC" "$ETL_LOG"
         # Per-mart timings, slowest first — the run's own profile, kept even on success so a slow

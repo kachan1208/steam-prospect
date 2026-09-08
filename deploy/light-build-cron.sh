@@ -99,7 +99,7 @@ cd /root/prospect/etl || exit 1
 # this opportunistic build rather than letting the box thrash. Move the two numbers together,
 # and lower DuckDB before raising the scope.
 if PROSPECT_DUCKDB_MEMORY_LIMIT=1700MB PYTHONUNBUFFERED=1 \
-    timeout 14400 systemd-run --scope --quiet -p MemoryMax=3000M -p MemorySwapMax=0 "${NICE[@]}" \
+    timeout 14400 systemd-run --scope --quiet -p MemoryMax=3000M -p MemorySwapMax=2G "${NICE[@]}" \
       /root/prospect/etl/.venv/bin/python -u build_marts.py \
       --source /root/steam-scraper/steam_games.db \
       --data-dir /root/prospect/data --light \
