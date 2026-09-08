@@ -88,18 +88,18 @@ find /root/prospect/data -maxdepth 1 -name 'prospect_*.duckdb.building*' \
      -mmin +120 -exec rm -rf {} + 2>/dev/null || true
 
 cd /root/prospect/etl || exit 1
-# Memory (2026-09-04, resized 2026-09-07): the same systemd-run cgroup cap the keepers and
-# the nightly ETL run under. The first sizing (DuckDB 1800MB inside 2400M) was killed by the
-# kernel on its first run — 2026-09-06 13:44:47, anon-rss 2,411,300kB, fourteen minutes in on
-# mart_game.sql — so a light build carries ~650MB of RSS outside DuckDB's target, and DuckDB
-# overshoots the target itself. Now DuckDB 1700MB (the value every pre-cgroup light build
-# succeeded with) inside 3000M. The socials keeper (own lock, 1500M) has finished within
-# minutes of 06:15 on every recent run and the review keeper yields the refresh lock by
-# 13:00, so nothing overlaps 13:30 in practice; if both ever peak at once the cgroup kills
-# this opportunistic build rather than letting the box thrash. Move the two numbers together,
-# and lower DuckDB before raising the scope.
+# NO cgroup here (2026-09-08), by evidence. A systemd-run scope was added on 2026-09-04 and
+# killed every light build it ran: 09-06 at anon-rss 2.41 GB (2400M, DuckDB 1800MB), 09-07 at
+# 3.02 GB (3000M, DuckDB 1700MB), 09-08 at 2.87 GB with the scope's 2 GB of swap ALSO exhausted
+# (3000M + MemorySwapMax=2G, DuckDB 1700MB) — that last one on mart_game_reviews.sql, after
+# every earlier mart had passed. So this build's working set is over 5 GB with DuckDB told to
+# use 1.7 GB: the 54M-row review marts allocate far outside DuckDB's buffer-pool target, and
+# every build that ever succeeded here (08-29 1810s, 09-02 2407s, 09-05 1606s) did so by
+# paging onto the 4 GB swapfile with nothing capping it. Three kills and zero successes later,
+# the cap is the regression. The keepers keep theirs (they leaked); this runs alone at 13:30
+# and, at worst, is slow. nice/ionice stay so the app keeps priority.
 if PROSPECT_DUCKDB_MEMORY_LIMIT=1700MB PYTHONUNBUFFERED=1 \
-    timeout 14400 systemd-run --scope --quiet -p MemoryMax=3000M -p MemorySwapMax=2G "${NICE[@]}" \
+    timeout 14400 "${NICE[@]}" \
       /root/prospect/etl/.venv/bin/python -u build_marts.py \
       --source /root/steam-scraper/steam_games.db \
       --data-dir /root/prospect/data --light \

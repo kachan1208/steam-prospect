@@ -17,21 +17,16 @@
 # retired — `git pull` in /root/prospect is the whole deploy for shell changes).
 set -uo pipefail
 export PATH=/root/steam-scraper/.venv/bin:/root/.local/bin:$PATH
-# DuckDB's own cap, sized to FIT the ETL's cgroup (2026-09-04; was 2500MB with no cgroup at
-# all). The ETL runs under `systemd-run --scope -p MemoryMax=3200M` (see the invocation).
-#
-# RESIZED 2026-09-07 after the first kill: the 13:30 light build ran with DuckDB at 1800MB
-# inside a 2400M scope and the kernel killed it at anon-rss 2,411,300kB fourteen minutes in,
-# on mart_game.sql (journalctl -k, 2026-09-06 13:44:47). So a build carries ~650MB of
-# non-DuckDB RSS BEFORE the classifier is loaded, and DuckDB overshoots its target. The full
-# build also holds the aspect classifier (~750MB RSS measured on the rescore) and its spawn
-# children, so the first 3000M/2200MB nightly would have died the same way. Now: DuckDB 2000MB
-# inside 3200M, leaving ~1.2GB for Python + overshoot. The rest of the box — the two uvicorn
-# workers (<60MB RSS each: the mart is mmapped, not heap), dockerd, Grafana, VictoriaMetrics
-# and the OS — measured ~600MB, so 3200M is the ceiling, not a number to round up. The
-# keepers never overlap the ETL by schedule (06:00/06:15 vs 21:00-05:08). Move the two
-# numbers together, and if this kills again, lower DuckDB before raising the scope.
-export PROSPECT_DUCKDB_MEMORY_LIMIT=2000MB
+# DuckDB's buffer-pool target on the 3.9 GB box. 2500MB is the value every successful full
+# build ran with; it was lowered to 2200MB and then 2000MB on 2026-09-04/07 to fit a
+# systemd-run cgroup around the ETL, and that cgroup is gone again (2026-09-08, see the ETL
+# invocation): three light builds in a row were OOM-killed inside theirs — the last one with
+# 3 GB of RAM AND 2 GB of swap exhausted while DuckDB was told to use 1.7 GB — so a build's
+# working set runs far past this number and the 54M-row review marts are where it happens.
+# This target still bounds DuckDB's own pool and its spill (PROSPECT_DUCKDB_TEMP_MAX below);
+# the rest pages onto the 4 GB swapfile as it always did. The keepers never overlap the ETL by
+# schedule (06:00/06:15 vs 21:00-05:08).
+export PROSPECT_DUCKDB_MEMORY_LIMIT=2500MB
 # Cap the SPILL too (2026-08-31). max_temp_directory_size defaults to all free disk, so the
 # 08-30 nightly spilled 20.6GB until the volume was full, then died after 5.35h with nothing
 # built. The cap leaves room for the two retained marts (~2.3GB each), the scraper's SQLite +
@@ -623,8 +618,16 @@ else
     # (rescore_scratch.duckdb*), so this sweep cannot reach a multi-day rescore's file or its
     # spill. build_marts' own age-scoped sweep owns that name — including collecting it when a
     # SIGKILLed rescore leaves it behind.
+    #
+    # EVERY name, today's included (2026-09-08). The old "not today's version" exclusion was
+    # meant to spare a live build, but the concurrent-build guard a few lines up has just proved
+    # no other build_marts is running, and this run's own scratch does not exist yet — so at this
+    # exact point every prospect_*.duckdb.building* entry is a dead build's leftover. The
+    # exclusion cost real headroom: a 13:30 light build that dies leaves ~3.9 GB under TODAY's
+    # name, which this sweep then skipped, and the disk gate below refused the whole ETL for it
+    # (2026-09-07/08: two such spills, 7.8 GB, sat on a volume with 16 GB free).
     find /root/prospect/data -maxdepth 1 -name 'prospect_*.duckdb.building*' \
-         ! -name "prospect_$(date -u +%Y%m%d).duckdb.building*" -exec rm -rf {} + 2>/dev/null || true
+         -exec rm -rf {} + 2>/dev/null || true
     # Second disk gate, AFTER the sweep (which may have just freed the headroom): the scrapes
     # ran and are kept, but a build below the floor is skipped the same way a concurrent build
     # skips it — previous mart kept, app not restarted, the reason in tonight's ledger row.
@@ -667,18 +670,15 @@ else
     if [ "$ETL_SKIPPED" -eq 0 ]; then
         ETL_LOG="$STEP_LOG_DIR/etl.${RUN_TS}.log"
         echo "[etl] log: $ETL_LOG"
-        # The systemd-run scope is the same cgroup cap the keepers run under (deploy/crontab.txt).
-        # Without it the ETL was the one unbounded process on the box, and an overshoot became a
-        # kernel OOM kill of whatever the kernel picked. Now a breach is rc=137 of the ETL alone:
-        # previous mart kept, app untouched. See PROSPECT_DUCKDB_MEMORY_LIMIT for the arithmetic.
-        # `timeout` stays outermost, as in the keeper lines, so its deadline and rc are unchanged.
-        # MemorySwapMax=2G, not 0 (2026-09-08): with swap forbidden the cgroup KILLS at the
-        # ceiling, and two light builds in a row died that way (anon-rss 2.41 GB under 2400M,
-        # then 3.02 GB under 3000M with DuckDB at only 1700MB — a build's RSS runs well past
-        # DuckDB's target). Every build that ever succeeded on this box ran with swap available.
-        # The ceiling still protects the app's RAM; the overshoot now pages out inside this
-        # scope instead of ending the night, bounded to 2G of the 4G swapfile.
-        timeout 21600 systemd-run --scope --quiet -p MemoryMax=3200M -p MemorySwapMax=2G "${NICE[@]}" \
+        # NO systemd-run cgroup around the ETL (2026-09-08). One was added on 2026-09-04 so an
+        # overshoot would be rc=137 of the ETL alone instead of a kernel kill of whatever it
+        # picked. In practice the same scope on the 13:30 light build killed three builds in a
+        # row — the last with 3 GB of RAM and 2 GB of swap both exhausted while DuckDB was told
+        # to use 1.7 GB, on mart_game_reviews.sql — and the full build carries the classifier on
+        # top, so it would not have survived its first night either. Every successful build on
+        # this box paged freely onto the 4 GB swapfile; that is the configuration restored here.
+        # nice/ionice stay so the app keeps CPU and disk priority. `timeout` stays outermost.
+        timeout 21600 "${NICE[@]}" \
             /root/prospect/etl/.venv/bin/python -u build_marts.py --source /root/steam-scraper/steam_games.db --data-dir /root/prospect/data > "$ETL_LOG" 2>&1 || ETL_RC=$?
         [ "$ETL_RC" -ne 0 ] && explain_failure "etl" "$ETL_RC" "$ETL_LOG"
         # Per-mart timings, slowest first — the run's own profile, kept even on success so a slow
