@@ -103,30 +103,12 @@ describe("/datalog — the SUCCESS badge", () => {
   });
 });
 
-describe("/niches — the ×0.87 supply-brake annotation", () => {
-  const FINDER = readFileSync(resolve(SRC, "pages/NicheFinder.tsx"), "utf8");
-
-  /** The PAPER_nn constant the brake annotation is styled with, read off the source. */
-  function brakeAlpha(): number {
-    const m = FINDER.match(/style=\{\{\s*fontSize:\s*10,\s*color:\s*PAPER_(\d+)\s*\}\}/);
-    if (!m) throw new Error("could not find the brake annotation's colour");
-    return Number(m[1]) / 100;
-  }
-
-  it("passes AA at 10px on the page plane", () => {
-    expect(ratio(mix(TEXT_PRIMARY, brakeAlpha(), PAGE), PAGE)).toBeGreaterThanOrEqual(AA_SMALL);
-  });
-
-  it("is dimmer than the score it annotates — the fix must not flatten the hierarchy", () => {
-    const strong = /const PAPER_80 =/.test(FINDER) ? 0.8 : NaN;
-    expect(brakeAlpha()).toBeLessThan(strong);
-  });
-
-  it("confirms the ORIGINAL alpha really did fail, so this test can fail", () => {
-    // PAPER_50 was the shipped value: 4.32:1, measured in Chromium.
-    expect(ratio(mix(TEXT_PRIMARY, 0.5, PAGE), PAGE)).toBeLessThan(AA_SMALL);
-  });
-});
+// "/niches — the ×0.87 supply-brake annotation" lived here until 2026-09-09. The annotation
+// itself is gone (the finder prints Opp v2 as the Radar's small rank number, with no brake
+// suffix — see pages/NicheFinder.tsx), so a source-scan for its colour token has nothing to
+// measure. The 10px-type-on-page-plane lesson it recorded (PAPER_50 = 4.32:1 fails AA; 60% =
+// 5.60:1 passes) is the general rule this file's helpers encode; no live element sits at 10px
+// on that plane any more.
 
 describe("/niches/combined — the funnel tile on its brand-tinted panel", () => {
   const COMBINED = readFileSync(resolve(SRC, "pages/NicheCombined.tsx"), "utf8");

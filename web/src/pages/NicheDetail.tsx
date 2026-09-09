@@ -59,7 +59,10 @@ import { heatDomain, heatStyle } from "../lib/heat";
 import { CSS_VAR, MONO } from "../lib/palette";
 import { usePageTitle } from "../lib/usePageTitle";
 import { useDetailView } from "../lib/viewMode";
-import { DEFAULT_NICHE_CUT, nicheCombinedPath } from "../lib/nicheSelection";
+import { DEFAULT_NICHE_CUT, findNicheVariant, formatNicheRef, nicheCombinedPath } from "../lib/nicheSelection";
+// The headline is the Radar's dossier — same evaluation, same strings, same colour tokens
+// as the board's tooltip (see the "the dossier, as the board prints it" block there).
+import { radarBoardAbsence, radarDossier, radarSector } from "../lib/radarVerdict";
 
 /** The condensed stack the foundation applies to h1–h6 and .kicker (index.css) — used inline
  * for KPI/panel numerals that aren't semantically headings, so they still read as the
@@ -460,6 +463,18 @@ export default function NicheDetail() {
     [activeVariant, urlWindow, urlMinReviews],
   );
 
+  // THE HEADLINE READS THE RADAR'S CUT, NOT THE CHIPS' (2026-09-09). The board pins its
+  // stats cut (24m × ≥50 — DEFAULT_NICHE_CUT, the same object) because a verdict that moves
+  // when a display chip is clicked is not a verdict (Radar.tsx's BOARD_WINDOW doc). The
+  // dossier strip below inherits that rule: it is judged on this variant whatever chip is
+  // lit, and the caption under it says so. The chips keep driving everything under them
+  // (top games, distributions, the games table). Exact match on BOTH axes, never a near
+  // miss — a near miss is a different population (lib/nicheSelection.ts).
+  const radarVariant = useMemo<NicheRow | null>(
+    () => findNicheVariant(detail?.variants, DEFAULT_NICHE_CUT) ?? null,
+    [detail],
+  );
+
   const gamesParams = useMemo(() => readGamesParams(searchParams, cut), [searchParams, cut]);
   const revenueSelection = readSelection(searchParams, "revenue");
   const priceSelection = readSelection(searchParams, "price");
@@ -595,8 +610,27 @@ export default function NicheDetail() {
   }
 
   const players = detail.players ?? null;
-  const flags = declineFlags(activeVariant, players);
   const tier = detail.tier ?? activeVariant.tier;
+  // The dossier's row: the Radar's cut when the mart scored this niche there, else the
+  // selected cut — and the caption names the fallback, because "judged on a different
+  // population than the board" is exactly the kind of silent substitution this page exists
+  // to avoid. The "Read this first" flags argue with the verdict directly above them, so
+  // they read the SAME row.
+  const dossierVariant = radarVariant ?? activeVariant;
+  const dossier = radarDossier(dossierVariant);
+  const absence = radarBoardAbsence({ dimension, tier, solo_viability: dossierVariant.solo_viability });
+  const flags = declineFlags(dossierVariant, players);
+  // The inverse of the board dossier's "Open deep dive →": select this niche on the board,
+  // in its own class, with the solo lens opened if that is what hides it there. The id is
+  // the board's own "dimension:key" (Radar.tsx handleSelect / RadarBoard's pool lookup).
+  const radarHref = (() => {
+    const sp = new URLSearchParams();
+    const sector = radarSector(dimension, tier);
+    if (sector !== null && sector !== "micro") sp.set("class", sector);
+    if (sector !== null && absence !== null) sp.set("solo", "off");
+    sp.set("niche", formatNicheRef({ dimension, key: nicheKey }));
+    return `/radar?${sp.toString()}`;
+  })();
   const catalogHitRateBenchmark = benchmarksQ.data?.cited.pct_new_releases_over_100k;
   const csvUrl = nicheExportCsvUrl({
     dimension,
@@ -707,44 +741,121 @@ export default function NicheDetail() {
           </div>
         </div>
 
-        {/* The materialized cuts, as links: the cut is URL state, so a shared link opens on
-            the same population the sender was reading. */}
-        {detail.variants.length > 1 && (
-          <div className="flex flex-wrap gap-1.5">
-            {detail.variants.map((v) => {
-              const active = v.window === cut.win && v.min_reviews === cut.min_reviews;
-              return (
-                <button
-                  key={`${v.window}-${v.min_reviews}`}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() => setParam({ win: v.window, min_reviews: v.min_reviews, offset: null })}
-                  className={clsx(
-                    "border px-2.5 py-1 text-[11px] font-medium transition-colors",
-                    active ? "border-brand text-brand" : "border-ink-primary/20 text-ink-muted hover:text-ink-secondary",
-                  )}
-                >
-                  {variantLabel(v)}
-                </button>
-              );
-            })}
-          </div>
-        )}
       </div>
 
-      {/* 4 equal cells, 1px gaps that read as the rules (gap = paper-20% background showing
-          through, cells = the ground colour) — the exact §4b KPI-strip construction. */}
-      <div className="grid grid-cols-1 gap-px border border-ink-primary/20 bg-ink-primary/20 sm:grid-cols-2 lg:grid-cols-4">
-        <KpiCell
-          label="Opportunity v2"
-          valueClassName="text-brand"
-          value={fmtCompact(activeVariant.opportunity_v2)}
-          footnote={
-            activeVariant.supply_brake != null
-              ? `after supply brake ×${activeVariant.supply_brake.toFixed(2)}`
-              : undefined
-          }
-        />
+      {/* THE HEADLINE IS THE RADAR'S DOSSIER (2026-09-09; user: "Opportunity v2 / 77 / after
+          supply brake ×1.00 is still visible on niches page, it's not consistent with radar,
+          use radar numbers in niches"). The numbers agreed all along — at the board's cut
+          this strip's tile equalled the board's row (Action RTS 87 vs 86.69, Clicker 52 vs
+          51.71) — but the strip led with "OPPORTUNITY V2 87 after supply brake ×1.00", a
+          "Why 87" weighted blend and a "SATURATION YOY" tile, while the board leads with a
+          verdict and its two axes and prints the score small in its tooltip. Same model,
+          different vocabulary, and a different vocabulary reads as a different model. So
+          this section now carries exactly the board tooltip's rows — Verdict, Demand 24m,
+          Releases YoY, P90 revenue, Games, Opp v2, Singleplayer share — through the same
+          radarVerdict.ts evaluation, at the board's pinned cut (see radarVariant), with the
+          board's colour tokens and legend words. Players / 7d stays as the one secondary
+          tile: it is real, live and cut-independent, and the board doesn't have it. */}
+      <section aria-label="Radar dossier" data-testid="radar-dossier" className="flex flex-col gap-2.5">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <span className="kicker text-[11px] text-ink-primary/55">Verdict</span>
+          {/* The chip: the board's swatch + legend word, in the board's ring colour. Colour
+              is reinforcement (the word always rides with it), exactly as on the board. */}
+          <span
+            data-testid="radar-verdict-chip"
+            data-verdict={dossier.verdict.ring}
+            title={dossier.verdict.reason}
+            className="inline-flex items-center gap-2 border px-2.5 py-1 leading-none text-ink-primary"
+            style={{
+              fontFamily: CONDENSED,
+              fontWeight: 600,
+              fontSize: 20,
+              borderColor: dossier.color,
+              backgroundColor: `color-mix(in srgb, ${dossier.color} 14%, transparent)`,
+            }}
+          >
+            <span className="inline-block h-2 w-2 shrink-0" style={{ backgroundColor: dossier.color }} aria-hidden />
+            {dossier.verdictLabel}
+          </span>
+          <span className="text-[13px] text-ink-secondary">{dossier.verdict.reason}</span>
+          {/* Opp v2 is the small rank number the board's tooltip shows — nothing more. */}
+          <span className="tabular ml-auto text-[12px] text-ink-muted">
+            Opp v2 <span className="text-ink-primary">{dossier.oppV2}</span> · Singleplayer share{" "}
+            <span className="text-ink-primary">{dossier.singleplayerShare}</span>
+          </span>
+          <Link to={radarHref} className="text-[12px] font-medium text-brand transition-colors hover:text-brand-hover">
+            See on the Radar →
+          </Link>
+        </div>
+
+        {/* 5 equal cells, 1px gaps that read as the rules (gap = paper-20% background showing
+            through, cells = the ground colour) — the §4b KPI-strip construction. */}
+        <div className="grid grid-cols-1 gap-px border border-ink-primary/20 bg-ink-primary/20 sm:grid-cols-2 lg:grid-cols-5">
+          {/* THE X AXIS: review inflow over the last 24 complete months vs the 24 before. An
+              emerging niche never headlines its % (the board's rule — its base is near zero
+              by construction), so the tile says "emerging" and carries the absolute volume. */}
+          <KpiCell
+            label="Demand 24m"
+            valueClassName={
+              !dossier.emerging && dossierVariant.demand_trend_24m_pct != null && dossierVariant.demand_trend_24m_pct >= 0
+                ? "text-brand"
+                : undefined
+            }
+            value={
+              dossier.emerging ? (
+                <span title={dossier.demand24m}>emerging</span>
+              ) : dossierVariant.demand_trend_24m_pct != null ? (
+                dossier.demand24m
+              ) : (
+                // The tooltip's own words, at a size that fits the tile: "no demand data" at
+                // the strip's 38px condensed numeral truncates to "no demand …" in a fifth of
+                // a 1360px strip (measured on the 2026-08-18 snapshot, which predates the
+                // 24m columns — the exact state a mart-lag deploy would show).
+                <span className="text-[22px]">{dossier.demand24m}</span>
+              )
+            }
+            footnoteWrap
+            footnote={
+              dossier.emerging
+                ? `no comparable % base — judged on absolute volume${dossier.reviews24m ? `: ${dossier.reviews24m} reviews / 24m` : ""}`
+                : dossierVariant.demand_trend_24m_pct != null
+                  ? `last 24 months vs the prior 24${
+                      dossierVariant.reviews_prev_24m != null
+                        ? ` · prior window ${fmtCompact(dossierVariant.reviews_prev_24m)} reviews`
+                        : ""
+                    }`
+                  : "no prior-window baseline — the enter/declining verdicts are unreachable"
+            }
+          />
+          {/* THE Y AXIS. The footnote states THIS number's own basis: saturation_yoy compares
+              two FULL CALENDAR YEARS over every member of the niche with no review floor
+              (mart_niche.sql's `sat` CTE) — so the counts printed are the ones the % divides,
+              never n_recent (a 24m AND review-floored count; Trading Card Game once read
+              "▲ +4% / 38 released in the last 24m" against a 124-vs-119 truth). */}
+          <KpiCell
+            label="Releases YoY"
+            value={dossier.releasesYoy}
+            footnoteWrap
+            footnote={
+              dossierVariant.n_recent_year != null && dossierVariant.n_prior_year != null ? (
+                <>
+                  {fmtInt(dossierVariant.n_recent_year)} released last full year vs{" "}
+                  {fmtInt(dossierVariant.n_prior_year)} the year before
+                  <span className="mt-0.5 block text-ink-primary/45">
+                    Whole niche, every review count — this tile ignores the window and review-floor controls above.
+                  </span>
+                </>
+              ) : (
+                "year-over-year release counts unavailable"
+              )
+            }
+          />
+          <KpiCell
+            label="P90 revenue"
+            value={dossier.p90Revenue}
+            footnote={`median ${fmtUsd(dossierVariant.median_rev)} · the successful tail`}
+          />
+          <KpiCell label="Games" value={dossier.games} footnote="scored games at the Radar's cut" />
         {/* §4b specs "Demand / 90d" as a review-velocity trend, which no endpoint serves at
             that horizon (the mart's demand trend is demand_trend_24m_pct — a 24-month
             structural read, deliberately not a 90-day one) — used the real 7-day, same-panel
@@ -788,67 +899,30 @@ export default function NicheDetail() {
             )
           }
         />
-        <KpiCell
-          label="P90 revenue"
-          value={activeVariant.p90_rev != null ? fmtUsd(activeVariant.p90_rev) : "—"}
-          footnote={`median ${fmtUsd(activeVariant.median_rev)} · ${fmtInt(activeVariant.n_games)} scored games`}
-        />
-        <KpiCell
-          label="Saturation YoY"
-          value={
-            activeVariant.saturation_yoy != null
-              ? `${activeVariant.saturation_yoy >= 0 ? "▲" : "▼"} ${fmtSigned(activeVariant.saturation_yoy, 0)}`
-              : "—"
-          }
-          // The footnote must state THIS number's own basis. It used to read
-          // "<n_recent> released in the last 24m", which is a different figure entirely:
-          // n_recent counts the rolling 24 months AND applies the min-reviews cut, while
-          // saturation_yoy compares two FULL CALENDAR YEARS over every member of the niche
-          // with no review floor (mart_niche.sql's `sat` CTE). Trading Card Game showed
-          // "▲ +4% / 38 released in the last 24m" — but the +4% is 124 in the last full year
-          // against 119 the year before, a 243-game base. Reading it as "38 games, up 4%"
-          // makes a solid number look like noise, and on a genuinely small niche it would
-          // make noise look solid.
-          //
-          // The counts and the percentage now share a population, but that population is not
-          // the one the rest of the row uses: it is the WHOLE niche, and it is the same three
-          // numbers at every (window x review-floor) the controls above offer. The tile next
-          // door moves 624 -> 223 -> 177 -> 739 as you click those controls while this one
-          // never budges, so the tile has to disown them itself — a reader must not need to
-          // know mart_niche.sql to read the KPI row left to right. Cut-independence is the
-          // mart's deliberate design (one saturation figure per dimension+key); disclosing it
-          // is presentation's job.
-          //
-          // "this tile ALONE ignores…" until 2026-09-01: the Players / 7d cell two places
-          // left turned out to be cut-independent too (its marts have no window/floor key at
-          // all — 798 measured games against the row's 223), so it now carries the same
-          // sentence and "alone" stopped being true.
-          footnoteWrap
-          footnote={
-            activeVariant.n_recent_year != null && activeVariant.n_prior_year != null ? (
-              <>
-                {fmtInt(activeVariant.n_recent_year)} released last full year vs{" "}
-                {fmtInt(activeVariant.n_prior_year)} the year before
-                <span className="mt-0.5 block text-ink-primary/45">
-                  Whole niche, every review count — this tile ignores the window and review-floor controls above.
-                </span>
-              </>
-            ) : (
-              "year-over-year release counts unavailable"
-            )
-          }
-        />
-      </div>
+        </div>
+
+        {/* The one caption that makes the strip readable left to right: which population it
+            is judged on (the board's), that the chips below do NOT move it, and — when the
+            board would not draw this niche at all — why (the verdict is still computed the
+            same way; only the dot is missing). */}
+        <p className="text-[11px] text-ink-muted">
+          The Radar&rsquo;s dossier, judged at the board&rsquo;s own cut — last 24 months · ≥50 reviews — whichever
+          cut the chips below select; the panels below follow the chips.
+          {radarVariant === null &&
+            " This niche isn't scored at that cut (fewer than 30 qualifying games there), so the verdict is judged on the selected cut instead."}
+          {absence !== null && ` ${absence}`}
+        </p>
+      </section>
 
       {/* MOVED here from below the top-games table (2026-09-01). This card carries the
-          counter-argument to the score in the strip directly above it — "Release pipeline
+          counter-argument to the verdict in the strip directly above it — "Release pipeline
           shrinking 7.4%/yr — 'low competition' here is everyone leaving, not an open
-          market" against an OPPORTUNITY V2 of 87. On /niches/tag/Action RTS at 1440 the
-          score sat at y≈228 and this box at y≈1066 of a 1233px page: a reader had to scroll
-          past the whole overview and the table to find the sentence that qualifies the
-          headline, and most never did. A falsification the reader doesn't reach is not a
-          falsification. It also leaves the overview tab, because the KPI strip it argues
-          with is on every tab. */}
+          market" against an Enter now (then: an OPPORTUNITY V2 of 87). On /niches/tag/Action
+          RTS at 1440 the score sat at y≈228 and this box at y≈1066 of a 1233px page: a
+          reader had to scroll past the whole overview and the table to find the sentence
+          that qualifies the headline, and most never did. A falsification the reader
+          doesn't reach is not a falsification. It also leaves the overview tab, because the
+          strip it argues with is on every tab. */}
       <Card title="Read this first">
         {flags.length > 0 ? (
           <div className="flex flex-col gap-1.5">
@@ -872,6 +946,34 @@ export default function NicheDetail() {
           </div>
         )}
       </Card>
+
+      {/* The materialized cuts, as links — MOVED under the dossier and the flags (2026-09-09):
+          the headline above is pinned to the Radar's cut and does not follow these chips;
+          everything from here down (top games, distributions, the games table) does. Sitting
+          above the strip they read as its controls, which they no longer are. The cut is URL
+          state, so a shared link opens on the same population the sender was reading. */}
+      {detail.variants.length > 1 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="mr-1 text-[11px] text-ink-muted">Panels below read</span>
+          {detail.variants.map((v) => {
+            const active = v.window === cut.win && v.min_reviews === cut.min_reviews;
+            return (
+              <button
+                key={`${v.window}-${v.min_reviews}`}
+                type="button"
+                aria-pressed={active}
+                onClick={() => setParam({ win: v.window, min_reviews: v.min_reviews, offset: null })}
+                className={clsx(
+                  "border px-2.5 py-1 text-[11px] font-medium transition-colors",
+                  active ? "border-brand text-brand" : "border-ink-primary/20 text-ink-muted hover:text-ink-secondary",
+                )}
+              >
+                {variantLabel(v)}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {/* Plain toggled buttons, not ARIA tabs — same call as GameProfile: half a tab widget
           is worse for screen readers than honest pressed-state buttons. */}
@@ -910,13 +1012,16 @@ export default function NicheDetail() {
           Games & distribution tab) sits AFTER it rather than interleaved above it. */}
       {tab === "overview" && (
         <>
-          <div className="flex flex-col gap-[22px] lg:flex-row lg:items-stretch">
+          <div className="flex flex-col gap-[22px]">
             {/* Demand vs pipeline. §4b specs a 24-month MONTHLY two-series chart (review
                 velocity vs releases); no endpoint here carries that granularity — the only
                 real releases-vs-demand series in the mart is yearly (saturation_trend, already
                 the "Saturation trend" card below). Reused that same real data/hook in the new
-                two-line visual language rather than a monthly figure the API doesn't serve. */}
-            <div className="blueprint relative flex-[1.6] border-ink-primary/25 px-6 py-5">
+                two-line visual language rather than a monthly figure the API doesn't serve.
+                Full width since 2026-09-09: the "Why <score>" blend panel that shared this
+                row is gone with the score headline (the dossier above explains the verdict
+                in the board's own terms; the score's parts ride the API rows and the docs). */}
+            <div className="blueprint relative border-ink-primary/25 px-6 py-5">
               <i className="bp-corner" />
               <div className="mb-3.5 flex items-baseline gap-4">
                 <h3 className="text-ink-primary">Demand vs. pipeline, by year</h3>
@@ -1077,73 +1182,6 @@ export default function NicheDetail() {
               )}
             </div>
 
-            {/* Why the headline score — one weighted 4px bar per sub-score, in the same
-                §4b bar+footnote layout. These ARE the four terms mart_niche blends (see
-                its "opportunity_v2 REBUILT" header), so the card takes the score apart
-                into the four claims it makes rather than restating one number. Marts that
-                predate the 2026-08-31 rebuild serve them as undefined and the footnote
-                below falls back to a plain description. */}
-            <div className="blueprint relative flex flex-[1] flex-col gap-3.5 border-ink-primary/25 px-6 py-5">
-              <i className="bp-corner" />
-              <h3 className="text-ink-primary">Why {fmtCompact(activeVariant.opportunity_v2)}</h3>
-              <div className="flex flex-col gap-2.5 text-[13px]">
-                {(
-                  [
-                    { label: "Momentum", value: activeVariant.momentum ?? null, weight: 0.4, positive: true },
-                    { label: "Market pull", value: activeVariant.market_pull ?? null, weight: 0.22, positive: true },
-                    { label: "Revenue spread", value: activeVariant.revenue_spread ?? null, weight: 0.2, positive: true },
-                    { label: "Quality gap", value: activeVariant.quality_gap, weight: 0.18, positive: true },
-                  ] as const
-                ).map((b) => {
-                  const pct = b.value == null ? 0 : Math.max(0, Math.min(100, b.value));
-                  return (
-                    <div key={b.label}>
-                      <div className="mb-1 flex text-ink-primary">
-                        <span>{b.label}</span>
-                        <span className={clsx("tabular ml-auto", b.positive ? "text-brand" : "text-ink-primary/70")}>
-                          {b.value != null ? b.value.toFixed(0) : "—"} × {b.weight >= 0 ? b.weight.toFixed(2) : `−${Math.abs(b.weight).toFixed(2)}`}
-                        </span>
-                      </div>
-                      <div className="h-1 bg-ink-primary/15">
-                        <div
-                          className={clsx("h-full", b.positive ? "bg-brand" : "bg-ink-primary/50")}
-                          style={{ width: `${pct}%` }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="tabular mt-auto border-t border-ink-primary/20 pt-3 text-[12px] text-ink-primary/65">
-                {activeVariant.supply_brake != null
-                  ? (() => {
-                      const terms: [string, number | null | undefined, number][] = [
-                        ["momentum", activeVariant.momentum, 0.4],
-                        ["market pull", activeVariant.market_pull, 0.22],
-                        ["revenue spread", activeVariant.revenue_spread, 0.2],
-                        ["quality gap", activeVariant.quality_gap, 0.18],
-                      ];
-                      const live = terms.filter(([, n]) => n != null);
-                      const skipped = terms.filter(([, n]) => n == null).map(([l]) => l);
-                      // The blend RENORMALISES over the terms that exist — the divisor has
-                      // to be printed, or the products visibly fall short of the score.
-                      const liveWeight = live.reduce((a, [, , w]) => a + w, 0);
-                      return (
-                        <>
-                          {live.map(([, n, w]) => `${w.toFixed(2)}×${n!.toFixed(1)}`).join(" + ")}
-                          {skipped.length > 0 &&
-                            ` ÷ ${liveWeight.toFixed(2)} (${skipped.join(" + ")} — no comparable reading, skipped rather than counted as 0)`}
-                          {` → × supply brake ${activeVariant.supply_brake!.toFixed(2)} = `}
-                          <strong className="text-brand">{fmtCompact(activeVariant.opportunity_v2)}</strong>
-                          {activeVariant.beatable_share != null && (
-                            <>. {fmtPct(activeVariant.beatable_share)} of incumbents are thin or weak — beatable.</>
-                          )}
-                        </>
-                      );
-                    })()
-                  : "This mart predates the score breakdown — rebuild the marts to see the sub-scores."}
-              </div>
-            </div>
           </div>
 
           {/* Top games in the niche — the top five OF THIS CUT, off the same

@@ -194,7 +194,8 @@
  * volume + new-game share + "no comparable base") because no %-check is honest there.
  */
 
-import { fmtCompact, fmtSigned } from "./format";
+import { fmtCompact, fmtInt, fmtSigned, fmtUsd } from "./format";
+import { MONO } from "./palette";
 
 // ---- thresholds -------------------------------------------------------------------------
 //
@@ -625,6 +626,146 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
 export function radarVerdict(input: RadarVerdictInput): RadarVerdict {
   const { ring, caution, reason } = radarVerdictTrace(input);
   return { ring, caution, reason };
+}
+
+// ---- the dossier, as the board prints it ------------------------------------------------
+//
+// THE NICHE PAGES SPEAK THE BOARD'S VOCABULARY (2026-09-09, user: "Opportunity v2 / 77 /
+// after supply brake ×1.00 is still visible on niches page, it's not consistent with radar,
+// use radar numbers in niches"). The numbers never disagreed — at the board's pinned cut the
+// niche page's tile equalled the board's row (Action RTS 87 vs 86.69, Clicker 52 vs 51.71,
+// Auto Battler 80 ×0.98 vs 79.91 ×0.984). The PRESENTATION did: the board leads with a
+// verdict and its two axes and prints the score as a small rank number in its tooltip; the
+// niche page led with the score, a supply-brake line and a weighted "Why" blend. One model
+// in two vocabularies reads as two models. So the strings below ARE the board tooltip's
+// rows — Verdict, Demand 24m, Releases YoY, P90 revenue, Games, Opp v2, Singleplayer share
+// — formatted exactly as components/RadarBoard.tsx formats them (its fmtTrendPct,
+// fmtSigned(sat, 0), fmtUsd, fmtInt, toFixed(1), toFixed(2)); pages/NicheDetail.test.tsx
+// pins the equality by hovering a real board dot and comparing the tooltip to the page.
+
+/** Verdict colour vocabulary — the SAME tokens RadarBoard.tsx's RING_FILL draws with (the
+ * index.css --verdict-* hues; watch stays neutral steel). Exported so a verdict chip off the
+ * board carries the board's colour rather than a re-derived one. Reinforcement only, as on
+ * the board: the RING_LABEL word always rides beside the swatch. */
+export const RING_COLOR: Record<RadarRing, string> = {
+  enter: "var(--verdict-enter)",
+  watch: MONO.paper75,
+  emerging: "var(--verdict-emerging)",
+  crowded: "var(--verdict-crowded)",
+  declining: "var(--verdict-declining)",
+};
+
+/** The board tooltip's Demand 24m value for a non-emerging niche — "▲ +74.1%", "▼ −16.0%",
+ * or "no demand data". Verbatim RadarBoard.tsx's fmtTrendPct. */
+export function fmtDemandTrend24m(v: number | null | undefined): string {
+  const n = num(v);
+  if (n === null) return "no demand data";
+  return `${n >= 0 ? "▲ +" : "▼ −"}${Math.abs(n).toFixed(1)}%`;
+}
+
+/** The board tooltip's Demand 24m value for an EMERGING niche: the trend % never headlines a
+ * young tag (its prior window is near zero by construction), so the honest number is the
+ * absolute volume, carried separately as `reviews24m`. */
+export const EMERGING_DEMAND_LABEL = "emerging — no comparable % base";
+
+/** Structural, so lib/api's NicheRow satisfies it: the verdict inputs plus the two context
+ * numbers the tooltip prints beside them. */
+export interface RadarDossierInput extends RadarVerdictInput {
+  n_games?: number | null;
+  p90_rev?: number | null;
+}
+
+export interface RadarDossier {
+  verdict: RadarVerdictTrace;
+  /** The tooltip's Verdict value: the ring's legend word, plus " · caution" on a hedged
+   * placement ("Watch · caution"). */
+  verdictLabel: string;
+  /** RING_COLOR[verdict.ring] — the swatch beside the word. */
+  color: string;
+  /** The tooltip's Demand 24m value (fmtDemandTrend24m, or EMERGING_DEMAND_LABEL). */
+  demand24m: string;
+  emerging: boolean;
+  /** The tooltip's Releases YoY value: fmtSigned(saturation_yoy, 0), or "unknown". */
+  releasesYoy: string;
+  /** fmtUsd(p90_rev) — "—" when unknown. */
+  p90Revenue: string;
+  /** fmtInt(n_games). */
+  games: string;
+  /** The tooltip's Opp v2 value — one decimal, or "—". The ONLY form the score takes on
+   * the niche pages now: a small rank number, never a headline with a brake behind it. */
+  oppV2: string;
+  /** The tooltip's Singleplayer share value — two decimals, or "unknown". */
+  singleplayerShare: string;
+  /** fmtInt(reviews_24m), or null — the tooltip's extra "Reviews 24m" row on emerging
+   * niches, and the demand tile's footnote there. */
+  reviews24m: string | null;
+}
+
+/** One row -> the seven strings the Radar tooltip prints for it, through the same
+ * radarVerdictTrace evaluation the board rings with. Pure; cut-agnostic — the CALLER picks
+ * the row (the board's pinned 24m x ≥50 cut on the niche page, the table's own cut in the
+ * finder), and says so. */
+export function radarDossier(row: RadarDossierInput): RadarDossier {
+  const verdict = radarVerdictTrace(row);
+  const emerging = row.demand_emerging === true;
+  const sat = num(row.saturation_yoy);
+  const opp = num(row.opportunity_v2);
+  const solo = num(row.solo_viability);
+  const vol = num(row.reviews_24m);
+  return {
+    verdict,
+    verdictLabel: `${RING_LABEL[verdict.ring]}${verdict.caution ? " · caution" : ""}`,
+    color: RING_COLOR[verdict.ring],
+    demand24m: emerging ? EMERGING_DEMAND_LABEL : fmtDemandTrend24m(row.demand_trend_24m_pct),
+    emerging,
+    releasesYoy: sat === null ? "unknown" : fmtSigned(sat, 0),
+    p90Revenue: fmtUsd(row.p90_rev),
+    games: fmtInt(row.n_games),
+    oppV2: opp === null ? "—" : opp.toFixed(1),
+    singleplayerShare: solo === null ? "unknown" : solo.toFixed(2),
+    reviews24m: vol === null ? null : fmtInt(vol),
+  };
+}
+
+// ---- board membership -------------------------------------------------------------------
+
+export type RadarSector = "genre" | "micro" | "theme";
+
+/** Which board class a list row belongs to — pages/Radar.tsx's pool rule, verbatim: genres
+ * are one class; a tag plots only when its tier is micro or theme. null = no class = no
+ * dot (umbrella/meta tags are containers and reception labels, not buildable niches). */
+export function radarSector(dimension: string, tier: string | null | undefined): RadarSector | null {
+  if (dimension === "genre") return "genre";
+  return tier === "micro" ? "micro" : tier === "theme" ? "theme" : null;
+}
+
+/**
+ * Why a niche has no dot on the DEFAULT Radar board — one muted sentence — or null when the
+ * board's population includes it. Mirrors the two population rules the board applies: the
+ * class rule above (pages/Radar.tsx) and the API's solo_only filter (singleplayer share >=
+ * SOLO_FRIENDLY_MIN, unknown excluded — the board's default-on "Solo-friendly only" toggle).
+ * Neither rule touches the verdict: a niche off the board is judged by the same checks, it
+ * just isn't drawn — which is why the niche page still prints its dossier and adds this
+ * line under it, rather than inventing a "not rated" state.
+ */
+export function radarBoardAbsence(row: {
+  dimension: string;
+  tier?: string | null;
+  solo_viability?: number | null;
+}): string | null {
+  if (radarSector(row.dimension, row.tier) === null) {
+    return `Not on the Radar board: it plots micro-genre and theme tags only, and this tag is ${
+      row.tier ? `${row.tier} tier` : "untiered"
+    }.`;
+  }
+  const solo = num(row.solo_viability);
+  if (solo === null) {
+    return "Not on the Radar board by default: its singleplayer share is unknown, and the board's solo-friendly filter excludes unknowns.";
+  }
+  if (solo < SOLO_FRIENDLY_MIN) {
+    return `Not on the Radar board by default: singleplayer share ${solo.toFixed(2)} is under the ${SOLO_FRIENDLY_MIN} solo-friendly bar — it appears, drawn hollow, with the board's “Solo-friendly only” toggle off.`;
+  }
+  return null;
 }
 
 // ---- solo-viability lens (NOT part of the verdict — see module doc) ---------------------
