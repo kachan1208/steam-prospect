@@ -1,8 +1,19 @@
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ReferenceArea,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import type { EntityGameRow } from "../../lib/api";
 import { axisScale, fmtUsd } from "../../lib/format";
 import { CSS_VAR } from "../../lib/palette";
+import { useDragZoom } from "../../lib/useDragZoom";
+import { SELECTION_AREA_PROPS, ZoomFrame } from "./ZoomFrame";
 import { TooltipPanel } from "./TooltipPanel";
 
 /**
@@ -22,10 +33,6 @@ export function EntityReleaseBars({
   height?: number;
   onBarClick?: (appid: number) => void;
 }) {
-  if (games.length === 0) {
-    return <div className="flex h-40 items-center justify-center text-xs text-ink-muted">No releases.</div>;
-  }
-
   const data = games.map((g) => ({
     ...g,
     // Unique category key (years repeat); the tick shows the year only.
@@ -33,14 +40,25 @@ export function EntityReleaseBars({
     rev: g.est_rev_reviews ?? 0,
   }));
 
+  // A career IS a timeline — the bars are seq-ordered and the ticks are release years —
+  // so a drag selects a stretch of a studio's output (the mid-career run, the last five
+  // years). The category key is "#seq" rather than a date because years repeat, which the
+  // hook does not care about: it slices by position either way.
+  const zoom = useDragZoom(data, "key");
+
+  if (games.length === 0) {
+    return <div className="flex h-40 items-center justify-center text-xs text-ink-muted">No releases.</div>;
+  }
+
   // One unit for the whole axis. fmtAxisUsd switches ladder rung per value, so a career
   // topping $1B printed "$0 / $250M / $500M / $750M / $1.0B" — three of the five ticks in
   // millions and the last in billions, which makes an even scale look irregular.
   const y = axisScale(Math.max(0, ...data.map((d) => d.rev)), "usd");
 
   return (
-    <ResponsiveContainer width="100%" height={height}>
-      <BarChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+    <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+      <ResponsiveContainer width="100%" height={height}>
+        <BarChart data={zoom.data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
         <CartesianGrid stroke="var(--gridline)" vertical={false} />
         <XAxis
           dataKey="key"
@@ -96,7 +114,11 @@ export function EntityReleaseBars({
             if (onBarClick && g && typeof g.appid === "number") onBarClick(g.appid);
           }}
         />
-      </BarChart>
-    </ResponsiveContainer>
+        {zoom.selection && (
+          <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />
+        )}
+        </BarChart>
+      </ResponsiveContainer>
+    </ZoomFrame>
   );
 }
