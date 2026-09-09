@@ -16,7 +16,7 @@ refreshing"), not a raw duckdb.CatalogException 500.
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, get_args
 
 import duckdb
 from fastapi import APIRouter, HTTPException, Query
@@ -27,6 +27,22 @@ from .. import analytics_db
 router = APIRouter(prefix="/api/entities", tags=["entities"])
 
 Role = Literal["developer", "publisher"]
+
+# ---- the search contract (same shape as games.py's search_games) -------------------------
+# Columns a client may sort search results on. The sort key is the ONE user-supplied token
+# that reaches SQL as an IDENTIFIER — every other input is a bound parameter — so it is a
+# Literal (FastAPI answers anything else with a 422 before this module sees it) and the
+# ORDER BY reads the identifier out of _SORT_SQL rather than echoing the request string.
+EntitySortKey = Literal[
+    "total_rev", "median_rev", "p90_rev", "n_games", "n_recent_24m",
+    "hit_rate_200k", "last_release_year", "name",
+]
+_SORT_SQL: dict[str, str] = {k: k for k in get_args(EntitySortKey)}
+_ORDER_SQL: dict[str, str] = {"asc": "ASC", "desc": "DESC"}
+# Mirrors games.py's `offset: int = Query(0, ge=0, le=10000)`: OFFSET N walks N rows first,
+# no real paging UI goes this deep, and the web's shared paging footer stops at the same
+# cliff on both search pages.
+MAX_OFFSET = 10000
 
 _MARTS_MISSING_DETAIL = (
     "entity data is refreshing — the developer/publisher marts haven't been built yet "
@@ -148,6 +164,7 @@ class EntitySearchList(BaseModel):
     items: list[EntitySearchRow]
     total: int
     limit: int
+    offset: int = 0
 
 
 class EntitySummary(BaseModel):
@@ -209,8 +226,22 @@ def search_entities(
     role: Role | None = Query(None, description="Restrict to developers or publishers."),
     min_games: int = Query(1, ge=1, description="Floor on n_games — browse views pass e.g. 3 "
                            "so single-release entities don't drown the ranking."),
+    sort: EntitySortKey = Query(
+        "total_rev", description="Column to rank by (allow-listed). Ties break by total_rev, "
+        "then n_games, then name, so a page order is stable across requests."
+    ),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0, le=MAX_OFFSET),
 ) -> EntitySearchList:
+    if sort == "p90_rev" and not _has_p90():
+        # Same stance as games.py's lifetime_months sort on a pre-lifetime mart: the column
+        # is a capability of the loaded mart, not a bad request.
+        raise HTTPException(
+            status_code=503,
+            detail="mart_entity predates p90_rev — rebuild the marts (task etl).",
+        )
+
     where, params = ["n_games >= ?"], [min_games]
     if q:
         where.append("name ILIKE ? ESCAPE '\\'")
@@ -220,17 +251,30 @@ def search_entities(
         params.append(role)
     where_sql = "WHERE " + " AND ".join(where)
 
-    total_rows = _q(f"SELECT COUNT(*) AS n FROM mart_entity {where_sql}", params)
+    # `total` rides on every row as a window count, so the page and its count come out of
+    # ONE pass over mart_entity instead of a COUNT(*) scan followed by a second scan for the
+    # rows. The window is evaluated after WHERE and before ORDER BY/LIMIT, so it counts the
+    # whole match set, not the page.
     rows = _q(
-        f"SELECT {_search_cols()} FROM mart_entity {where_sql} "
-        "ORDER BY total_rev DESC NULLS LAST, n_games DESC, name ASC LIMIT ?",
-        params + [limit],
+        f"SELECT {_search_cols()}, COUNT(*) OVER () AS total_n FROM mart_entity {where_sql} "
+        f"ORDER BY {_SORT_SQL[sort]} {_ORDER_SQL[order]} NULLS LAST, "
+        "total_rev DESC NULLS LAST, n_games DESC, name ASC LIMIT ? OFFSET ?",
+        params + [limit, offset],
     )
-    return EntitySearchList(
-        items=[EntitySearchRow(**{**r, "top_genres": list(r["top_genres"] or [])}) for r in rows],
-        total=int(total_rows[0]["n"] or 0),
-        limit=limit,
-    )
+    if rows:
+        total = int(rows[0]["total_n"] or 0)
+    else:
+        # An empty page has no row to read the window count from — nothing matched, or the
+        # offset ran past the end — so this is the one case that pays for a count scan.
+        total = int(_q(f"SELECT COUNT(*) AS n FROM mart_entity {where_sql}", params)[0]["n"] or 0)
+    items = [
+        EntitySearchRow(**{
+            **{k: v for k, v in r.items() if k != "total_n"},
+            "top_genres": list(r["top_genres"] or []),
+        })
+        for r in rows
+    ]
+    return EntitySearchList(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.get("/profile", response_model=EntityProfileResponse)
