@@ -189,6 +189,15 @@ class AspectClassifier:
             feats = featurize(text)
             if not feats:
                 return NONE_LABEL, "neutral", 0.0
+            # SORTED, because the sum's rounding depends on the order the weights are added in
+            # and a set iterates in an order that follows the process's string-hash seed. Left
+            # unsorted, the same fragment scored in two processes (two nightlies, or a scoring
+            # worker and the main process) disagreed in the margin's last bits — and, for two
+            # classes within a rounding error of each other, could disagree on the verdict.
+            # Found 2026-09-09 by the pooled-vs-inline equality test; costs ~1.4us per fragment
+            # (5% of classify). This changes no verdict the model was evaluated on: the sums are
+            # the same numbers in one fixed order rather than in a seed-dependent one.
+            feats = sorted(feats)
             aspect, margin = self._linear_argmax(*self._lin["aspect"], feats)
             sentiment, _ = self._linear_argmax(*self._lin["sentiment"], feats)
             return aspect, sentiment, margin
