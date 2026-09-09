@@ -38,12 +38,21 @@ build, so:
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
+import json
+import multiprocessing
 import os
 import re
 import subprocess
 import sys
+import tempfile
+import threading
 import time
+import warnings
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -638,6 +647,31 @@ ASPECT_WINDOW_SLICE_CHARS = ASPECT_WINDOW_SLICE_BEFORE + ASPECT_SENTENCE_CHARS +
 SENTIMENT_POS_THRESHOLD = 0.05
 SENTIMENT_NEG_THRESHOLD = -0.05
 SENTIMENT_SCORE_BATCH = 20000    # rows pulled+scored+inserted per streamed batch (bounded memory)
+
+# PARALLEL SCORING (2026-09-09). The VADER + classifier pass over each streamed batch is pure
+# Python behind the GIL, so the main process's one thread was the phase's ceiling while the
+# 4-vCPU droplet sat 67% idle. _stream_scored hands each batch's window texts to a pool of
+# worker processes (_ScoringPool) and keeps EVERY DuckDB call in the main process: connections
+# cannot cross processes, and nothing but the scoring needs to.
+#
+# SCORE_WORKERS_MAX caps the DEFAULT worker count (PROSPECT_SCORE_WORKERS overrides it; 0 or 1
+# = score inline in the main process, the fallback the deterministic tests pin). It is a
+# MEMORY number, not a CPU one. Measured on the 8 GB / 4 vCPU droplet, 2026-09-09:
+#     main build process during scoring      ~3.6 GB RSS   (DuckDB memory_limit 5000MB)
+#     a process holding only the loaded
+#     classifier + VADER analyzer            ~0.75 GB RSS  = the bound on one worker
+#     app + OS + monitoring                  ~0.6 GB
+#     3 workers:  3.6 + 3 x 0.75 + 0.6 = 6.45 GB  ->  ~1.5 GB spare on 8 GB
+#     4 workers:  3.6 + 4 x 0.75 + 0.6 = 7.2 GB   ->  nothing left for DuckDB's own peaks
+# so 3 is the ceiling. The default is ALSO capped at cpu_count - 1, leaving the main process
+# (DuckDB's fetch + insert and, between streams, the per-bucket window regex) a core of its
+# own. A worker's memory is bounded by construction: the classifier, plus at most one chunk of
+# SCORE_CHUNK_WINDOWS texts in flight (2,000 x <= 520 chars ~ 1 MB), and it returns only four
+# scalars per window. Under "fork" the classifier's pages start out shared with the parent
+# and are copied as the worker touches them (refcounts), so a fork worker converges on the
+# same ~0.75 GB rather than staying free — budget for the bound, not the start.
+SCORE_WORKERS_MAX = 3
+SCORE_CHUNK_WINDOWS = 2000       # windows per task handed to one worker (see _ScoringPool.submit)
 
 # THE UNIT OF WORK for compute_aspect_sentiment's scoring loop: how many REVIEWS one hash bucket
 # should hold. The bucket count is derived from this and the size of the delta
@@ -1885,55 +1919,323 @@ def _get_analyzer():
     return _ANALYZER
 
 
+def _default_score_workers() -> int:
+    """max(1, min(SCORE_WORKERS_MAX, cpu_count - 1)) — see that constant for the arithmetic."""
+    return max(1, min(SCORE_WORKERS_MAX, (os.cpu_count() or 1) - 1))
+
+
+def _score_workers() -> int:
+    """Worker processes for the scoring stream: PROSPECT_SCORE_WORKERS if set, else the
+    default above. 0 and 1 both mean "score inline in the main process". A garbled or
+    negative value is refused up front by _env_config_errors; here it falls back to the
+    default rather than crash the build hours in, the same contract as the other knobs."""
+    raw = os.environ.get("PROSPECT_SCORE_WORKERS", "").strip()
+    if raw:
+        try:
+            workers = int(raw)
+            if workers >= 0:
+                return workers
+        except ValueError:
+            pass  # refused by _env_config_errors(); fall back rather than crash mid-build
+    return _default_score_workers()
+
+
+def _score_context() -> str:
+    """The multiprocessing start method for the scoring workers. Default "fork" on Linux (the
+    droplet): the workers inherit the already-loaded classifier copy-on-write, no per-worker
+    load, no re-import. "spawn" everywhere else — macOS cannot fork safely under threads — with
+    _score_worker_init loading the model once per worker (~0.2s). PROSPECT_SCORE_CONTEXT
+    overrides the choice: the escape hatch if fork's footprint on the box turns out larger
+    than the arithmetic at SCORE_WORKERS_MAX — a forked child also pins every parent page the
+    parent later rewrites or frees, which no laptop measurement can size for the droplet's
+    DuckDB — because a spawned worker is bounded by construction."""
+    available = multiprocessing.get_all_start_methods()
+    raw = os.environ.get("PROSPECT_SCORE_CONTEXT", "").strip().lower()
+    if raw in available:
+        return raw
+    if sys.platform.startswith("linux") and "fork" in available:
+        return "fork"
+    return "spawn"
+
+
+def _score_windows(texts: list[str], classify: bool) -> list[tuple]:
+    """THE scoring function: one chunk of window texts in, one tuple of plain scalars per text
+    out, in input order — (compound,) for VADER-only scoring, (compound, clf_aspect,
+    clf_sentiment, clf_margin) with the classifier. Runs in a worker process when a pool is
+    active and in the main process otherwise, so the two paths cannot drift: same function,
+    same cached analyzer (GAMING_LEXICON_OVERRIDES applied by _get_analyzer), same model."""
+    analyzer = _get_analyzer()
+    if not classify:
+        return [(float(analyzer.polarity_scores(text)["compound"]),) for text in texts]
+    clf = _get_classifier()
+    if clf is None:
+        # The callers only take this path with a loaded classifier; a spawned worker re-reads
+        # the same model file, so this means the file vanished under a running build.
+        raise RuntimeError("scoring worker has no aspect classifier (model file missing?)")
+    out = []
+    for text in texts:
+        compound = float(analyzer.polarity_scores(text)["compound"])
+        clf_aspect, clf_sent, margin = clf.classify(text)
+        out.append((compound, clf_aspect, clf_sent, float(margin)))
+    return out
+
+
+def _exit_with_parent() -> None:
+    """Worker-side watchdog: exit the instant the parent build process is gone.
+
+    Without it an orphaned worker lives forever. The nightly runs under `timeout 21600`, which
+    SIGKILLs the build; a killed parent never tells its pool to stop, and every worker holds
+    the call queue's write end, so the queue never reads as closed and each worker blocks on
+    it indefinitely — holding a loaded classifier, and under fork carrying the parent's very
+    command line, so deploy/prospect-refresh.sh's `pgrep -af build_marts` guard would see a
+    build still running and skip the next night. parent_process().join() returns when the
+    parent's sentinel pipe closes, i.e. when it has exited by any route."""
+    parent = multiprocessing.parent_process()
+    if parent is None:
+        return
+    parent.join()
+    os._exit(1)
+
+
+def _score_worker_init() -> None:
+    """Runs once in every worker at pool start: warm the analyzer and the classifier (a no-op
+    under fork, where both globals arrive inherited — that is the point of fork) and start the
+    parent watchdog."""
+    _get_analyzer()
+    _get_classifier()
+    threading.Thread(target=_exit_with_parent, name="parent-watchdog", daemon=True).start()
+
+
+class _ScoringPool:
+    """The worker-process pool for ONE scoring phase — compute_aspect_sentiment's bucket loop
+    (or its uncached full-pool stream) and repair_sentiment_arms' bucket loop each open one
+    through _scoring_pool() and close it on the way out, BEFORE the phase-3 cache read-back
+    where the main process's own memory peaks. The workers only ever see window texts and
+    return scalars; every DuckDB statement stays on the caller's connection."""
+
+    def __init__(self, workers: int, context: str):
+        self.workers = workers
+        self.context = context
+        # Both loaded in the parent BEFORE the fork so fork workers inherit them (spawn
+        # workers load their own in _score_worker_init either way). No-ops when already
+        # loaded, which the classifier always is: every caller fetched it before opening the pool.
+        _get_analyzer()
+        _get_classifier()
+        self._executor = ProcessPoolExecutor(
+            max_workers=workers, mp_context=multiprocessing.get_context(context),
+            initializer=_score_worker_init)
+        # Start the workers NOW rather than on the first batch: a worker that cannot start
+        # (spawn: a model that fails to load) fails here, before any bucket's text is built,
+        # and under fork the snapshot is taken at a known point, before the phase's tables.
+        # gc.freeze() is CPython's idiom for COW-friendly forking: everything alive now moves
+        # to the permanent generation, so a collection in the child never walks — and thereby
+        # copies — the classifier's pages. (Refcount traffic still copies the rows a worker
+        # looks up; the freeze delays the convergence described at SCORE_WORKERS_MAX, it
+        # does not prevent it.) Unfrozen again in the parent once the fork is done.
+        gc.freeze()
+        try:
+            with warnings.catch_warnings():
+                # CPython >= 3.12 warns that forking a process with live threads (DuckDB's
+                # pool) may deadlock the child. Not here: the child never calls into DuckDB
+                # or touches a lock those threads can hold — it runs pure-Python scoring and
+                # leaves through os._exit.
+                warnings.simplefilter("ignore", DeprecationWarning)
+                self._executor.submit(_score_windows, [], False).result()
+        finally:
+            gc.unfreeze()
+        print(f"[etl] scoring with {workers} worker processes (context={context})")
+
+    def submit(self, texts: list[str], classify: bool) -> list:
+        """Hand one batch's texts to the workers in SCORE_CHUNK_WINDOWS-sized tasks; returns
+        the futures in chunk order. A chunk, not the batch, is what one worker holds at a time."""
+        return [self._executor.submit(_score_windows, texts[i:i + SCORE_CHUNK_WINDOWS], classify)
+                for i in range(0, len(texts), SCORE_CHUNK_WINDOWS)]
+
+    @staticmethod
+    def collect(futures: list) -> list[tuple]:
+        """The scores for one batch, in input order."""
+        scored: list[tuple] = []
+        try:
+            for fut in futures:
+                scored.extend(fut.result())
+        except BrokenProcessPool as e:
+            # A worker died (OOM-killed?). Fail the phase loudly: the bucket in flight is not
+            # committed and the next run rescans it — the same contract as any other
+            # mid-bucket death — rather than limping on inline at a third of the speed.
+            raise RuntimeError(
+                "sentiment scoring worker pool broke (a worker process died); the in-flight "
+                "bucket is not committed and the next run will rescore it"
+            ) from e
+        return scored
+
+    def pids(self) -> list[int]:
+        return list(getattr(self._executor, "_processes", {}).keys())
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=True, cancel_futures=True)
+
+
+_SCORE_POOL: _ScoringPool | None = None
+
+
+@contextmanager
+def _scoring_pool():
+    """Open the worker pool for one scoring phase — every _stream_vader_* call inside the block
+    scores through it — and close it on the way out, deadline stop and exception alike (a
+    bucket's commit happens on the caller's connection before the loop reaches the exit, so
+    closing the pool can never lose one). Yields None, and says so, when PROSPECT_SCORE_WORKERS
+    is 0 or 1: the inline path. Module state rather than a parameter so the streaming
+    functions keep their signature (the tests wrap them by name) and so a caller outside any
+    block simply scores inline — there is no way to leak a pool."""
+    global _SCORE_POOL
+    workers = _score_workers()
+    if workers <= 1 or _SCORE_POOL is not None:
+        if _SCORE_POOL is None:
+            print(f"[etl] scoring inline in the main process (workers={workers})")
+        yield _SCORE_POOL
+        return
+    pool = _ScoringPool(workers, _score_context())
+    _SCORE_POOL = pool
+    try:
+        yield pool
+    finally:
+        _SCORE_POOL = None
+        pool.close()
+
+
+_INSERT_VALUES_RX = re.compile(
+    r"^\s*INSERT\s+INTO\s+(?P<table>[\w.]+)\s*(?:\((?P<cols>[^)]*)\))?\s*"
+    r"VALUES\s*\((?P<marks>[\s?,]*)\)\s*$", re.IGNORECASE)
+
+
+class _StagedInsert:
+    """INSERT one batch of scored rows in ONE statement, via a newline-delimited JSON file that
+    DuckDB reads back, instead of con.executemany(insert_sql, rows).
+
+    WHY. executemany is not a bulk path in DuckDB's Python API: it executes the prepared INSERT
+    once per row. Measured on real 106-char windows (dev laptop, 2026-09-09) that is 3,000
+    rows/s — against 30,000 rows/s for VADER and 32,000 rows/s for the classifier. The insert,
+    not the scoring, was five sixths of the stream's main-thread time, and no worker pool can
+    move it: it has to run on the connection's process. Binding the whole batch as one
+    LIST(STRUCT) parameter is no better (3,600 rows/s: the per-value Python-to-DuckDB
+    conversion is the cost). A 20,000-row batch written as ndjson and read with read_json
+    inserts at ~400,000 rows/s — the insert drops from 6.4s to 0.05s per batch.
+
+    JSON rather than CSV because it has real nulls, real strings and no dialect: '' and NULL
+    stay distinct, and quotes, commas, newlines and non-ASCII inside a value need no rules.
+    Column TYPES come from DESCRIBE of the target, so the reader casts every field to exactly
+    the column it lands in — nothing is sniffed. One documented difference from executemany:
+    the reader normalises a negative-zero DOUBLE to 0.0. VADER's round(..., 4) yields -0.0
+    when a valence sum cancels; -0.0 and 0.0 compare, hash, DISTINCT and sort as equal in
+    DuckDB and in Python, so nothing downstream can tell them apart.
+
+    `insert_sql` keeps the callers' `INSERT INTO t [(cols)] VALUES (?, ...)` form; it is parsed
+    here, once per stream, and any other shape is refused loudly."""
+
+    def __init__(self, con: duckdb.DuckDBPyConnection, insert_sql: str):
+        m = _INSERT_VALUES_RX.match(insert_sql)
+        if not m:
+            raise ValueError(
+                f"_StagedInsert expects 'INSERT INTO table [(cols)] VALUES (?, ...)', "
+                f"got {insert_sql!r}")
+        table = m.group("table")
+        n_marks = m.group("marks").count("?")
+        described = con.execute(f"DESCRIBE {table}").fetchall()
+        types = {name: typ for name, typ, *_ in described}
+        if m.group("cols"):
+            names = [c.strip() for c in m.group("cols").split(",")]
+        else:
+            names = [name for name, *_ in described]
+        unknown = [n for n in names if n not in types]
+        if len(names) != n_marks or unknown:
+            raise ValueError(
+                f"_StagedInsert: {insert_sql!r} binds {n_marks} value(s) to columns {names} of "
+                f"{table} ({len(types)} column(s): {sorted(types)}; unknown: {unknown})")
+        self._con = con
+        self._keys = [f"c{i}" for i in range(len(names))]
+        spec = ", ".join(f"'{k}': '{types[n]}'" for k, n in zip(self._keys, names))
+        self._sql = (f"INSERT INTO {table} ({', '.join(names)}) "
+                     f"SELECT * FROM read_json(?, format='newline_delimited', columns={{{spec}}})")
+
+    def insert(self, rows: list[tuple]) -> None:
+        if not rows:
+            return
+        keys = self._keys
+        fd, path = tempfile.mkstemp(prefix="prospect-scored-", suffix=".ndjson")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(json.dumps(dict(zip(keys, row))) for row in rows))
+            self._con.execute(self._sql, [path])
+        finally:
+            os.unlink(path)
+
+
+def _stream_scored(con: duckdb.DuckDBPyConnection, select_sql: str, insert_sql: str,
+                   classify: bool) -> int:
+    """The streaming engine behind _stream_vader_and_classify and _stream_vader_scores.
+    `select_sql` returns key column(s) then the text column LAST; each inserted row is those
+    keys followed by _score_windows' scores for the text. Reads through an INDEPENDENT cursor
+    so the inserts on `con` never invalidate the scan; peak memory is two batches — the one
+    being scored and the one being inserted — never the corpus. DuckDB Python UDFs need numpy
+    (absent — we stay dependency-light), which is why this streams through Python at all.
+
+    With a pool active (see _scoring_pool) the loop runs ONE BATCH AHEAD: batch N's texts are
+    handed to the workers before batch N-1's scores are collected and inserted, so the workers
+    never idle at a batch boundary and the main process's fetch + insert overlap their
+    scoring. Scores come back in input order, so the rows inserted are the same rows, in the
+    same order, as the inline path inserts. Returns the number of rows scored."""
+    target = _StagedInsert(con, insert_sql)
+    pool = _SCORE_POOL
+    read = con.cursor()
+    read.execute(select_sql)
+    n = 0
+    try:
+        if pool is None:
+            while True:
+                batch = read.fetchmany(SENTIMENT_SCORE_BATCH)
+                if not batch:
+                    return n
+                scored = _score_windows([row[-1] or "" for row in batch], classify)
+                target.insert([(*row[:-1], *s) for row, s in zip(batch, scored)])
+                n += len(batch)
+        pending = None  # (key columns, futures) of the batch the workers are scoring now
+        while True:
+            batch = read.fetchmany(SENTIMENT_SCORE_BATCH)
+            futures = pool.submit([row[-1] or "" for row in batch], classify) if batch else None
+            if pending is not None:
+                keys, prev = pending
+                scored = pool.collect(prev)
+                target.insert([(*k, *s) for k, s in zip(keys, scored)])
+                n += len(keys)
+            if futures is None:
+                return n
+            pending = ([row[:-1] for row in batch], futures)
+    finally:
+        read.close()
+
+
 def _stream_vader_and_classify(con: duckdb.DuckDBPyConnection, select_sql: str, insert_sql: str,
                                clf) -> int:
     """Same streaming contract as _stream_vader_scores, but each window is ALSO passed through the
     aspect classifier, so one pass over the corpus produces both the VADER compound (which still
     feeds the numeric text_* columns) and the classifier's verdict on what the fragment is really
     about. Scoring both here rather than in a second pass matters: the window text is the
-    expensive thing to produce, and it is already in hand."""
-    analyzer = _get_analyzer()
-    read = con.cursor()
-    read.execute(select_sql)
-    n = 0
-    while True:
-        batch = read.fetchmany(SENTIMENT_SCORE_BATCH)
-        if not batch:
-            break
-        rows = []
-        for row in batch:
-            text = row[-1] or ""
-            compound = float(analyzer.polarity_scores(text)["compound"])
-            clf_aspect, clf_sent, margin = clf.classify(text)
-            rows.append((*row[:-1], compound, clf_aspect, clf_sent, float(margin)))
-        con.executemany(insert_sql, rows)
-        n += len(rows)
-    read.close()
-    return n
+    expensive thing to produce, and it is already in hand. `clf` is the caller's handle on the
+    process-wide classifier _score_windows scores with (a pooled worker holds its own copy);
+    it is required so the VADER-only contract cannot be reached by accident."""
+    if clf is None:
+        raise ValueError("_stream_vader_and_classify needs a classifier; "
+                         "use _stream_vader_scores for VADER-only scoring")
+    return _stream_scored(con, select_sql, insert_sql, classify=True)
 
 
 def _stream_vader_scores(con: duckdb.DuckDBPyConnection, select_sql: str, insert_sql: str) -> int:
     """Score a text column with VADER in bounded, streamed batches — the shared engine behind
     both compute_aspect_sentiment (review text) and compute_press_sentiment (article text).
     `select_sql` returns key column(s) then the text column LAST; `insert_sql` takes those same
-    key column(s) then the DOUBLE compound. Reads through an INDEPENDENT cursor so the batched
-    INSERTs on `con` never invalidate the scan; peak memory is one batch, not the whole corpus
-    (matters on the 2GB Droplet). DuckDB Python UDFs need numpy (absent — we stay dependency-
-    light), which is why this streams in Python rather than registering a scalar UDF. Returns the
-    number of rows scored."""
-    analyzer = _get_analyzer()
-    read = con.cursor()
-    read.execute(select_sql)
-    n = 0
-    while True:
-        batch = read.fetchmany(SENTIMENT_SCORE_BATCH)
-        if not batch:
-            break
-        scored = [(*row[:-1], float(analyzer.polarity_scores(row[-1] or "")["compound"])) for row in batch]
-        con.executemany(insert_sql, scored)
-        n += len(scored)
-    read.close()
-    return n
+    key column(s) then the DOUBLE compound. See _stream_scored for the mechanics; this is the
+    VADER-only shape of it (the no-classifier fallback, and press articles)."""
+    return _stream_scored(con, select_sql, insert_sql, classify=False)
 
 
 def _aspect_sentence_regex(rx: str) -> str:
@@ -2756,19 +3058,21 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
             "appid INTEGER, recommendationid VARCHAR, aspect VARCHAR, compound DOUBLE, "
             "clf_aspect VARCHAR, clf_sentiment VARCHAR, clf_margin DOUBLE)"
         )
-        if clf is not None:
-            n_scored = _stream_vader_and_classify(
-                con,
-                "SELECT appid, recommendationid, aspect, window_text FROM _sent_windows",
-                "INSERT INTO _sent_raw VALUES (?, ?, ?, ?, ?, ?, ?)",
-                clf,
-            )
-        else:
-            n_scored = _stream_vader_scores(
-                con,
-                "SELECT appid, recommendationid, aspect, window_text FROM _sent_windows",
-                "INSERT INTO _sent_raw (appid, recommendationid, aspect, compound) VALUES (?, ?, ?, ?)",
-            )
+        with _scoring_pool():
+            if clf is not None:
+                n_scored = _stream_vader_and_classify(
+                    con,
+                    "SELECT appid, recommendationid, aspect, window_text FROM _sent_windows",
+                    "INSERT INTO _sent_raw VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    clf,
+                )
+            else:
+                n_scored = _stream_vader_scores(
+                    con,
+                    "SELECT appid, recommendationid, aspect, window_text FROM _sent_windows",
+                    "INSERT INTO _sent_raw (appid, recommendationid, aspect, compound) "
+                    "VALUES (?, ?, ?, ?)",
+                )
         # Same NONE-drop + one-row-per-(review, aspect) rule as the cached branch — the two paths
         # must produce identical tables or PROSPECT_SENTIMENT_CACHE=off would quietly mean
         # "different numbers", which is worse than being slow.
@@ -2968,129 +3272,145 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
         n_new_mentions = 0
         n_done = 0
         _stopped_early = None
-        for _b in _todo:
-            if _deadline is not None and time.monotonic() + _bucket_cost >= _deadline:
-                _stopped_early = (
-                    f"sentiment deadline reached "
-                    f"({time.monotonic() - _PROC_T0:,.0f}s into the build; "
-                    f"~{_bucket_cost:,.0f}s needed for the next bucket)"
+        # The worker pool lives for exactly this loop (see _ScoringPool): opened with the
+        # cache detached, closed before phase 3 re-attaches it for the read-back, and
+        # closed on the deadline stop too — after the last bucket's commit, never before.
+        with _scoring_pool():
+            for _b in _todo:
+                if _deadline is not None and time.monotonic() + _bucket_cost >= _deadline:
+                    _stopped_early = (
+                        f"sentiment deadline reached "
+                        f"({time.monotonic() - _PROC_T0:,.0f}s into the build; "
+                        f"~{_bucket_cost:,.0f}s needed for the next bucket)"
+                    )
+                    break
+                _t_bucket = time.monotonic()
+                # ONE predicate, used verbatim by the DELETE, the text build and the
+                # scored_review INSERT below. See the block comment above: the three agreeing
+                # is the whole invariant, so they share the string rather than each spelling
+                # it out.
+                _sent_pred = f"hash(recommendationid) % {_score_buckets} = {_b}"
+                _bucket_ids = f"SELECT recommendationid FROM _sent_new_ids WHERE {_sent_pred}"
+                # THE ONLY REVIEW TEXT THIS BUILD MATERIALISES. Scope is one bucket of the
+                # delta: pool reviews with no cache.scored_review record — reviews nobody has
+                # ever run the aspect regexes over — narrowed to this bucket. In steady state
+                # the whole delta is ~1-2M reviews / a few hundred MB against a 24.8M-row /
+                # 8.45GB corpus; on a config-wipe rescore the delta is the whole pool, and
+                # this bucket predicate is the only thing standing between that and the spill
+                # budget.
+                #
+                # Text is read straight from src.reviews (sqlite) rather than from a staging
+                # copy: there is no corpus-wide text table any more, and streaming the source
+                # to pick out the bucket's rows never materialises the rows it discards. The
+                # cost of bucketing is one such stream per bucket instead of one in total —
+                # paid deliberately, because the alternative (one full-pool copy, sliced
+                # afterwards) is the 8.45GB TEMP table that just killed the build.
+                #
+                # A TABLE, not a VIEW, so the 10-arm window scan below reads it without
+                # re-running the join per arm (a view here cost a 9.7h phase and a 22.7GiB
+                # spill in 2026-08).
+                #
+                # The bucket filter is applied inside the subquery rather than as an aliased
+                # WHERE on the join, so the predicate text is the SAME _sent_pred the DELETE
+                # above and the INSERT below use. It also shrinks the join's build side to the
+                # bucket instead of hashing the whole delta once per bucket.
+                con.execute(
+                    f"""
+                    CREATE TEMP TABLE _sent_new AS
+                    SELECT n.appid, n.recommendationid, r.review_text
+                    FROM (SELECT appid, recommendationid FROM _sent_new_ids
+                          WHERE {_sent_pred}) n
+                    JOIN src.reviews r ON r.recommendationid = n.recommendationid
+                    """
                 )
-                break
-            _t_bucket = time.monotonic()
-            # ONE predicate, used verbatim by the DELETE, the text build and the
-            # scored_review INSERT below. See the block comment above: the three agreeing
-            # is the whole invariant, so they share the string rather than each spelling
-            # it out.
-            _sent_pred = f"hash(recommendationid) % {_score_buckets} = {_b}"
-            _bucket_ids = f"SELECT recommendationid FROM _sent_new_ids WHERE {_sent_pred}"
-            # THE ONLY REVIEW TEXT THIS BUILD MATERIALISES. Scope is one bucket of the
-            # delta: pool reviews with no cache.scored_review record — reviews nobody has
-            # ever run the aspect regexes over — narrowed to this bucket. In steady state
-            # the whole delta is ~1-2M reviews / a few hundred MB against a 24.8M-row /
-            # 8.45GB corpus; on a config-wipe rescore the delta is the whole pool, and
-            # this bucket predicate is the only thing standing between that and the spill
-            # budget.
-            #
-            # Text is read straight from src.reviews (sqlite) rather than from a staging
-            # copy: there is no corpus-wide text table any more, and streaming the source
-            # to pick out the bucket's rows never materialises the rows it discards. The
-            # cost of bucketing is one such stream per bucket instead of one in total —
-            # paid deliberately, because the alternative (one full-pool copy, sliced
-            # afterwards) is the 8.45GB TEMP table that just killed the build.
-            #
-            # A TABLE, not a VIEW, so the 10-arm window scan below reads it without
-            # re-running the join per arm (a view here cost a 9.7h phase and a 22.7GiB
-            # spill in 2026-08).
-            #
-            # The bucket filter is applied inside the subquery rather than as an aliased
-            # WHERE on the join, so the predicate text is the SAME _sent_pred the DELETE
-            # above and the INSERT below use. It also shrinks the join's build side to the
-            # bucket instead of hashing the whole delta once per bucket.
-            con.execute(
-                f"""
-                CREATE TEMP TABLE _sent_new AS
-                SELECT n.appid, n.recommendationid, r.review_text
-                FROM (SELECT appid, recommendationid FROM _sent_new_ids
-                      WHERE {_sent_pred}) n
-                JOIN src.reviews r ON r.recommendationid = n.recommendationid
-                """
-            )
-            # The expensive regex runs ONLY over this bucket of the delta, never the full
-            # pool. REGULAR (not TEMP) so the INDEPENDENT read cursor in
-            # _stream_vader_scores / _stream_vader_and_classify can see it — that is a
-            # correctness requirement, not a preference, and bucketing must not quietly
-            # turn it into a TEMP table to save spill. Dropped at the end of every
-            # iteration so only one bucket's windows exist at a time and none of it ever
-            # ships in the versioned .duckdb.
-            con.execute(f"CREATE TABLE _sent_windows AS {_aspect_window_sql('_sent_new')}")
-            # Scored into a LOCAL table, not straight into cache.aspect_mention. This is the
-            # single change that makes a multi-day rescore coexist with the nightly light
-            # build: the stream below is ~16 minutes per bucket, and it used to run with the
-            # cache attached, i.e. with every other process on the box locked out of it for
-            # the whole rescore. Nothing about the scoring needs the cache — only the commit
-            # does — so the expensive part now runs detached and the hold drops to ~3s.
-            con.execute("DROP TABLE IF EXISTS _bucket_mentions")
-            con.execute(
-                "CREATE TEMP TABLE _bucket_mentions("
-                "recommendationid VARCHAR, aspect VARCHAR, compound DOUBLE, "
-                "clf_aspect VARCHAR, clf_sentiment VARCHAR, clf_margin DOUBLE)"
-            )
-            if clf is not None:
-                n_bucket_mentions = _stream_vader_and_classify(
-                    con,
-                    "SELECT recommendationid, aspect, window_text FROM _sent_windows",
-                    "INSERT INTO _bucket_mentions VALUES (?, ?, ?, ?, ?, ?)",
-                    clf,
+                # The expensive regex runs ONLY over this bucket of the delta, never the full
+                # pool. REGULAR (not TEMP) so the INDEPENDENT read cursor in
+                # _stream_vader_scores / _stream_vader_and_classify can see it — that is a
+                # correctness requirement, not a preference, and bucketing must not quietly
+                # turn it into a TEMP table to save spill. Dropped at the end of every
+                # iteration so only one bucket's windows exist at a time and none of it ever
+                # ships in the versioned .duckdb.
+                con.execute(f"CREATE TABLE _sent_windows AS {_aspect_window_sql('_sent_new')}")
+                _t_windows = time.monotonic()
+                # Scored into a LOCAL table, not straight into cache.aspect_mention. This is the
+                # single change that makes a multi-day rescore coexist with the nightly light
+                # build: the stream below is ~16 minutes per bucket, and it used to run with the
+                # cache attached, i.e. with every other process on the box locked out of it for
+                # the whole rescore. Nothing about the scoring needs the cache — only the commit
+                # does — so the expensive part now runs detached and the hold drops to ~3s.
+                con.execute("DROP TABLE IF EXISTS _bucket_mentions")
+                con.execute(
+                    "CREATE TEMP TABLE _bucket_mentions("
+                    "recommendationid VARCHAR, aspect VARCHAR, compound DOUBLE, "
+                    "clf_aspect VARCHAR, clf_sentiment VARCHAR, clf_margin DOUBLE)"
                 )
-            else:
-                n_bucket_mentions = _stream_vader_scores(
-                    con,
-                    "SELECT recommendationid, aspect, window_text FROM _sent_windows",
-                    "INSERT INTO _bucket_mentions (recommendationid, aspect, compound) VALUES (?, ?, ?)",
-                )
-            n_new_mentions += n_bucket_mentions
-            con.execute("DROP TABLE IF EXISTS _sent_windows")
-            con.execute("DROP TABLE IF EXISTS _sent_new")
+                if clf is not None:
+                    n_bucket_mentions = _stream_vader_and_classify(
+                        con,
+                        "SELECT recommendationid, aspect, window_text FROM _sent_windows",
+                        "INSERT INTO _bucket_mentions VALUES (?, ?, ?, ?, ?, ?)",
+                        clf,
+                    )
+                else:
+                    n_bucket_mentions = _stream_vader_scores(
+                        con,
+                        "SELECT recommendationid, aspect, window_text FROM _sent_windows",
+                        "INSERT INTO _bucket_mentions (recommendationid, aspect, compound) VALUES (?, ?, ?)",
+                    )
+                _t_scored = time.monotonic()
+                n_new_mentions += n_bucket_mentions
+                con.execute("DROP TABLE IF EXISTS _sent_windows")
+                con.execute("DROP TABLE IF EXISTS _sent_new")
 
-            # PHASE 2, once per bucket: COMMIT THE BUCKET. The cache is attached for exactly
-            # these three statements — measured at ~0.8s for a 125k-review bucket against a
-            # production-sized cache on a laptop, ~3s scaled to the droplet — and released
-            # again before the next bucket's 16 minutes of scoring. If a light build holds
-            # the cache right now, _attach_sentiment_cache waits for it rather than dying
-            # (the 2026-08-31 failure mode).
-            #
-            # ORDER IS THE INVARIANT, and all three use the SAME _sent_pred over the SAME
-            # table:
-            #   DELETE  — idempotent rescan: a previous run that died after writing some of
-            #             these reviews' rows but before recording them leaves those rows
-            #             behind, and they must go before the re-insert or the bucket
-            #             double-counts. Scoped to this bucket, so it can never touch one
-            #             this run has already finished or will never reach.
-            #   INSERT mentions — every row for exactly these ids.
-            #   INSERT ids      — LAST, and only now. From this statement onward "in
-            #             scored_review" means "fully represented in aspect_mention" for
-            #             them, and the next run's anti-join skips them forever. Interrupt
-            #             anything above and the bucket simply never happened.
-            # That identity — not the fact that buckets happen to split on review
-            # boundaries — is what makes the completeness invariant hold, and it keeps
-            # holding if this loop is ever sliced some other way.
-            _attach_sentiment_cache(con, data_dir)
-            try:
-                con.execute(
-                    f"DELETE FROM cache.aspect_mention WHERE recommendationid IN ({_bucket_ids})"
-                )
-                con.execute(
-                    "INSERT INTO cache.aspect_mention "
-                    "SELECT recommendationid, aspect, compound, clf_aspect, clf_sentiment, "
-                    "clf_margin FROM _bucket_mentions"
-                )
-                con.execute(f"INSERT INTO cache.scored_review {_bucket_ids}")
-            finally:
-                _detach_sentiment_cache(con)
-            con.execute("DROP TABLE IF EXISTS _bucket_mentions")
-            _elapsed = time.monotonic() - _t_bucket
-            _bucket_cost = max(_bucket_cost, _elapsed)
-            n_done += 1
+                # PHASE 2, once per bucket: COMMIT THE BUCKET. The cache is attached for exactly
+                # these three statements — measured at ~0.8s for a 125k-review bucket against a
+                # production-sized cache on a laptop, ~3s scaled to the droplet — and released
+                # again before the next bucket's 16 minutes of scoring. If a light build holds
+                # the cache right now, _attach_sentiment_cache waits for it rather than dying
+                # (the 2026-08-31 failure mode).
+                #
+                # ORDER IS THE INVARIANT, and all three use the SAME _sent_pred over the SAME
+                # table:
+                #   DELETE  — idempotent rescan: a previous run that died after writing some of
+                #             these reviews' rows but before recording them leaves those rows
+                #             behind, and they must go before the re-insert or the bucket
+                #             double-counts. Scoped to this bucket, so it can never touch one
+                #             this run has already finished or will never reach.
+                #   INSERT mentions — every row for exactly these ids.
+                #   INSERT ids      — LAST, and only now. From this statement onward "in
+                #             scored_review" means "fully represented in aspect_mention" for
+                #             them, and the next run's anti-join skips them forever. Interrupt
+                #             anything above and the bucket simply never happened.
+                # That identity — not the fact that buckets happen to split on review
+                # boundaries — is what makes the completeness invariant hold, and it keeps
+                # holding if this loop is ever sliced some other way.
+                _attach_sentiment_cache(con, data_dir)
+                try:
+                    con.execute(
+                        f"DELETE FROM cache.aspect_mention WHERE recommendationid IN ({_bucket_ids})"
+                    )
+                    con.execute(
+                        "INSERT INTO cache.aspect_mention "
+                        "SELECT recommendationid, aspect, compound, clf_aspect, clf_sentiment, "
+                        "clf_margin FROM _bucket_mentions"
+                    )
+                    con.execute(f"INSERT INTO cache.scored_review {_bucket_ids}")
+                finally:
+                    _detach_sentiment_cache(con)
+                con.execute("DROP TABLE IF EXISTS _bucket_mentions")
+                _elapsed = time.monotonic() - _t_bucket
+                _bucket_cost = max(_bucket_cost, _elapsed)
+                n_done += 1
+                # Where a bucket's time goes, so the next throughput question can be answered
+                # from the log instead of a profiler on the box: the sqlite stream + the 10-arm
+                # window regex (DuckDB, all cores), the VADER + classifier stream (the worker
+                # pool, or the main thread inline), and the cache commit.
+                _t_stream = _t_scored - _t_windows
+                print(f"[etl] aspect sentiment bucket {n_done}/{len(_todo)} (hash bucket {_b}): "
+                      f"text+windows {_t_windows - _t_bucket:,.0f}s, {n_bucket_mentions:,} "
+                      f"mention(s) scored in {_t_stream:,.0f}s "
+                      f"({(n_bucket_mentions / _t_stream) if _t_stream > 0 else 0.0:,.0f}/s), "
+                      f"commit {_elapsed - (_t_scored - _t_bucket):,.1f}s")
 
         con.execute("DROP TABLE IF EXISTS _sent_new_ids")
 
@@ -3482,173 +3802,176 @@ def repair_sentiment_arms(con: duckdb.DuckDBPyConnection, data_dir: Path) -> dic
     _bucket_cost = max(done.values(), default=0.0)
     n_done = 0
     _stopped_early = None
-    for _b in range(n_buckets):
-        if _b in done:
-            continue
-        if _deadline is not None and time.monotonic() + _bucket_cost >= _deadline:
-            _stopped_early = (
-                f"sentiment deadline reached ({time.monotonic() - _PROC_T0:,.0f}s into the run; "
-                f"~{_bucket_cost:,.0f}s needed for the next bucket)"
-            )
-            break
-        _t_bucket = time.monotonic()
-        # ONE predicate for the bucket, used verbatim by every id-keyed step below — the same
-        # rule as the scoring loop, and for the same reason.
-        _pred = f"hash(recommendationid) % {n_buckets} = {_b}"
-        _bucket_ids = f"SELECT recommendationid FROM _repair_ids WHERE {_pred}"
-        checked = con.execute(f"SELECT COUNT(*) FROM _repair_ids WHERE {_pred}").fetchone()[0]
-        raw = mismatched = missing = superset = mixed = 0
-        con.execute("CREATE TEMP TABLE _repair_mismatch(recommendationid VARCHAR)")
-        if checked:
-            # THE ONLY REVIEW TEXT THIS RUN MATERIALISES: one bucket of the candidates, read
-            # straight from src.reviews — the same shape as the scoring loop's _sent_new.
-            con.execute(
-                f"""
-                CREATE TEMP TABLE _repair_text AS
-                SELECT n.appid, n.recommendationid, r.review_text
-                FROM (SELECT appid, recommendationid FROM _repair_ids WHERE {_pred}) n
-                JOIN src.reviews r ON r.recommendationid = n.recommendationid
-                """
-            )
-            # RAW ARMS: the (review, arm) pairs the text matches TODAY, from the one generator
-            # that defines an arm. Only the two key columns are selected, so the window and
-            # position regexes are pruned and this is the ten-filter keyword scan.
-            con.execute(
-                "CREATE TEMP TABLE _repair_raw AS "
-                "SELECT DISTINCT recommendationid, aspect FROM ("
-                f"{_aspect_window_sql('_repair_text')}"
-                ")"
-            )
-            # CACHED ARMS for the same reviews — the one cache read per bucket, held for the
-            # seconds it takes; the hash filter lets DuckDB cut the 21.7M-row table down to
-            # the bucket before the semi-join.
-            _attach_sentiment_cache(con, data_dir)
-            try:
+    # One worker pool for the whole pass (see _ScoringPool); each bucket's rescore of its
+    # mismatched reviews streams through it, and the deadline stop closes it cleanly.
+    with _scoring_pool():
+        for _b in range(n_buckets):
+            if _b in done:
+                continue
+            if _deadline is not None and time.monotonic() + _bucket_cost >= _deadline:
+                _stopped_early = (
+                    f"sentiment deadline reached ({time.monotonic() - _PROC_T0:,.0f}s into the run; "
+                    f"~{_bucket_cost:,.0f}s needed for the next bucket)"
+                )
+                break
+            _t_bucket = time.monotonic()
+            # ONE predicate for the bucket, used verbatim by every id-keyed step below — the same
+            # rule as the scoring loop, and for the same reason.
+            _pred = f"hash(recommendationid) % {n_buckets} = {_b}"
+            _bucket_ids = f"SELECT recommendationid FROM _repair_ids WHERE {_pred}"
+            checked = con.execute(f"SELECT COUNT(*) FROM _repair_ids WHERE {_pred}").fetchone()[0]
+            raw = mismatched = missing = superset = mixed = 0
+            con.execute("CREATE TEMP TABLE _repair_mismatch(recommendationid VARCHAR)")
+            if checked:
+                # THE ONLY REVIEW TEXT THIS RUN MATERIALISES: one bucket of the candidates, read
+                # straight from src.reviews — the same shape as the scoring loop's _sent_new.
                 con.execute(
                     f"""
-                    CREATE TEMP TABLE _repair_cached AS
-                    SELECT DISTINCT m.recommendationid, m.aspect
-                    FROM cache.aspect_mention m
-                    WHERE hash(m.recommendationid) % {n_buckets} = {_b}
-                      AND m.recommendationid IN ({_bucket_ids})
+                    CREATE TEMP TABLE _repair_text AS
+                    SELECT n.appid, n.recommendationid, r.review_text
+                    FROM (SELECT appid, recommendationid FROM _repair_ids WHERE {_pred}) n
+                    JOIN src.reviews r ON r.recommendationid = n.recommendationid
                     """
+                )
+                # RAW ARMS: the (review, arm) pairs the text matches TODAY, from the one generator
+                # that defines an arm. Only the two key columns are selected, so the window and
+                # position regexes are pruned and this is the ten-filter keyword scan.
+                con.execute(
+                    "CREATE TEMP TABLE _repair_raw AS "
+                    "SELECT DISTINCT recommendationid, aspect FROM ("
+                    f"{_aspect_window_sql('_repair_text')}"
+                    ")"
+                )
+                # CACHED ARMS for the same reviews — the one cache read per bucket, held for the
+                # seconds it takes; the hash filter lets DuckDB cut the 21.7M-row table down to
+                # the bucket before the semi-join.
+                _attach_sentiment_cache(con, data_dir)
+                try:
+                    con.execute(
+                        f"""
+                        CREATE TEMP TABLE _repair_cached AS
+                        SELECT DISTINCT m.recommendationid, m.aspect
+                        FROM cache.aspect_mention m
+                        WHERE hash(m.recommendationid) % {n_buckets} = {_b}
+                          AND m.recommendationid IN ({_bucket_ids})
+                        """
+                    )
+                finally:
+                    _detach_sentiment_cache(con)
+                # THE COMPARISON, as sets: per review, arms the text matches that the cache lacks
+                # (`missing`) and arms the cache holds that the text does not match (`extra`).
+                # A review with no rows on either side is intact and never appears here.
+                con.execute(
+                    """
+                    CREATE TEMP TABLE _repair_diff AS
+                    SELECT COALESCE(r.recommendationid, c.recommendationid) AS recommendationid,
+                           COUNT(*) FILTER (WHERE c.aspect IS NULL) AS missing,
+                           COUNT(*) FILTER (WHERE r.aspect IS NULL) AS extra
+                    FROM _repair_raw r
+                    FULL OUTER JOIN _repair_cached c
+                      ON c.recommendationid = r.recommendationid AND c.aspect = r.aspect
+                    GROUP BY 1
+                    """
+                )
+                raw = con.execute("SELECT COUNT(*) FROM _repair_raw").fetchone()[0]
+                mismatched, missing, superset, mixed = con.execute(
+                    """
+                    SELECT COUNT(*) FILTER (WHERE missing > 0 AND extra = 0),
+                           COALESCE(SUM(missing) FILTER (WHERE missing > 0 AND extra = 0), 0),
+                           COUNT(*) FILTER (WHERE missing = 0 AND extra > 0),
+                           COUNT(*) FILTER (WHERE missing > 0 AND extra > 0)
+                    FROM _repair_diff
+                    """
+                ).fetchone()
+                mismatched, missing, superset, mixed = (int(mismatched), int(missing),
+                                                        int(superset), int(mixed))
+                con.execute(
+                    "INSERT INTO _repair_mismatch "
+                    "SELECT recommendationid FROM _repair_diff WHERE missing > 0 AND extra = 0"
+                )
+                if mismatched:
+                    # RESCORE the mismatched reviews — their text is already in hand — through
+                    # the identical window build and scorer the nightly uses, into a LOCAL table
+                    # committed below. REGULAR window table: the streaming cursor must see it.
+                    con.execute(
+                        """
+                        CREATE TEMP TABLE _repair_fix_text AS
+                        SELECT t.appid, t.recommendationid, t.review_text
+                        FROM _repair_text t
+                        JOIN _repair_mismatch m ON m.recommendationid = t.recommendationid
+                        """
+                    )
+                    con.execute(
+                        f"CREATE TABLE _repair_windows AS {_aspect_window_sql('_repair_fix_text')}"
+                    )
+                    con.execute(
+                        "CREATE TEMP TABLE _repair_mentions("
+                        "recommendationid VARCHAR, aspect VARCHAR, compound DOUBLE, "
+                        "clf_aspect VARCHAR, clf_sentiment VARCHAR, clf_margin DOUBLE)"
+                    )
+                    if clf is not None:
+                        _stream_vader_and_classify(
+                            con,
+                            "SELECT recommendationid, aspect, window_text FROM _repair_windows",
+                            "INSERT INTO _repair_mentions VALUES (?, ?, ?, ?, ?, ?)",
+                            clf,
+                        )
+                    else:
+                        _stream_vader_scores(
+                            con,
+                            "SELECT recommendationid, aspect, window_text FROM _repair_windows",
+                            "INSERT INTO _repair_mentions (recommendationid, aspect, compound) "
+                            "VALUES (?, ?, ?)",
+                        )
+                    con.execute("DROP TABLE IF EXISTS _repair_windows")
+                    con.execute("DROP TABLE IF EXISTS _repair_fix_text")
+                for t in ("_repair_diff", "_repair_cached", "_repair_raw", "_repair_text"):
+                    con.execute(f"DROP TABLE IF EXISTS {t}")
+
+            # COMMIT THE BUCKET — the cache attached for these few statements only. See the
+            # docstring for the order: scored_review out FIRST, back in LAST.
+            _attach_sentiment_cache(con, data_dir)
+            try:
+                if _stored_hash() != current_hash:
+                    raise RuntimeError(
+                        "--repair-arms: the sentiment cache's config hash changed while the pass "
+                        "was running (a concurrent build wiped or re-keyed it) — aborting before "
+                        "any row scored under the previous config is committed"
+                    )
+                if mismatched:
+                    con.execute(
+                        "DELETE FROM cache.scored_review WHERE recommendationid IN "
+                        "(SELECT recommendationid FROM _repair_mismatch)"
+                    )
+                    con.execute(
+                        "DELETE FROM cache.aspect_mention WHERE recommendationid IN "
+                        "(SELECT recommendationid FROM _repair_mismatch)"
+                    )
+                    con.execute(
+                        "INSERT INTO cache.aspect_mention "
+                        "SELECT recommendationid, aspect, compound, clf_aspect, clf_sentiment, "
+                        "clf_margin FROM _repair_mentions"
+                    )
+                    con.execute(
+                        "INSERT INTO cache.scored_review SELECT recommendationid FROM _repair_mismatch"
+                    )
+                _elapsed = time.monotonic() - _t_bucket
+                con.execute(
+                    "INSERT INTO cache.repair_arms_status VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [current_hash, n_buckets, _b, checked, raw, mismatched, missing, mismatched,
+                     superset, mixed, _elapsed, datetime.now(timezone.utc)],
                 )
             finally:
                 _detach_sentiment_cache(con)
-            # THE COMPARISON, as sets: per review, arms the text matches that the cache lacks
-            # (`missing`) and arms the cache holds that the text does not match (`extra`).
-            # A review with no rows on either side is intact and never appears here.
-            con.execute(
-                """
-                CREATE TEMP TABLE _repair_diff AS
-                SELECT COALESCE(r.recommendationid, c.recommendationid) AS recommendationid,
-                       COUNT(*) FILTER (WHERE c.aspect IS NULL) AS missing,
-                       COUNT(*) FILTER (WHERE r.aspect IS NULL) AS extra
-                FROM _repair_raw r
-                FULL OUTER JOIN _repair_cached c
-                  ON c.recommendationid = r.recommendationid AND c.aspect = r.aspect
-                GROUP BY 1
-                """
-            )
-            raw = con.execute("SELECT COUNT(*) FROM _repair_raw").fetchone()[0]
-            mismatched, missing, superset, mixed = con.execute(
-                """
-                SELECT COUNT(*) FILTER (WHERE missing > 0 AND extra = 0),
-                       COALESCE(SUM(missing) FILTER (WHERE missing > 0 AND extra = 0), 0),
-                       COUNT(*) FILTER (WHERE missing = 0 AND extra > 0),
-                       COUNT(*) FILTER (WHERE missing > 0 AND extra > 0)
-                FROM _repair_diff
-                """
-            ).fetchone()
-            mismatched, missing, superset, mixed = (int(mismatched), int(missing),
-                                                    int(superset), int(mixed))
-            con.execute(
-                "INSERT INTO _repair_mismatch "
-                "SELECT recommendationid FROM _repair_diff WHERE missing > 0 AND extra = 0"
-            )
-            if mismatched:
-                # RESCORE the mismatched reviews — their text is already in hand — through
-                # the identical window build and scorer the nightly uses, into a LOCAL table
-                # committed below. REGULAR window table: the streaming cursor must see it.
-                con.execute(
-                    """
-                    CREATE TEMP TABLE _repair_fix_text AS
-                    SELECT t.appid, t.recommendationid, t.review_text
-                    FROM _repair_text t
-                    JOIN _repair_mismatch m ON m.recommendationid = t.recommendationid
-                    """
-                )
-                con.execute(
-                    f"CREATE TABLE _repair_windows AS {_aspect_window_sql('_repair_fix_text')}"
-                )
-                con.execute(
-                    "CREATE TEMP TABLE _repair_mentions("
-                    "recommendationid VARCHAR, aspect VARCHAR, compound DOUBLE, "
-                    "clf_aspect VARCHAR, clf_sentiment VARCHAR, clf_margin DOUBLE)"
-                )
-                if clf is not None:
-                    _stream_vader_and_classify(
-                        con,
-                        "SELECT recommendationid, aspect, window_text FROM _repair_windows",
-                        "INSERT INTO _repair_mentions VALUES (?, ?, ?, ?, ?, ?)",
-                        clf,
-                    )
-                else:
-                    _stream_vader_scores(
-                        con,
-                        "SELECT recommendationid, aspect, window_text FROM _repair_windows",
-                        "INSERT INTO _repair_mentions (recommendationid, aspect, compound) "
-                        "VALUES (?, ?, ?)",
-                    )
-                con.execute("DROP TABLE IF EXISTS _repair_windows")
-                con.execute("DROP TABLE IF EXISTS _repair_fix_text")
-            for t in ("_repair_diff", "_repair_cached", "_repair_raw", "_repair_text"):
-                con.execute(f"DROP TABLE IF EXISTS {t}")
-
-        # COMMIT THE BUCKET — the cache attached for these few statements only. See the
-        # docstring for the order: scored_review out FIRST, back in LAST.
-        _attach_sentiment_cache(con, data_dir)
-        try:
-            if _stored_hash() != current_hash:
-                raise RuntimeError(
-                    "--repair-arms: the sentiment cache's config hash changed while the pass "
-                    "was running (a concurrent build wiped or re-keyed it) — aborting before "
-                    "any row scored under the previous config is committed"
-                )
-            if mismatched:
-                con.execute(
-                    "DELETE FROM cache.scored_review WHERE recommendationid IN "
-                    "(SELECT recommendationid FROM _repair_mismatch)"
-                )
-                con.execute(
-                    "DELETE FROM cache.aspect_mention WHERE recommendationid IN "
-                    "(SELECT recommendationid FROM _repair_mismatch)"
-                )
-                con.execute(
-                    "INSERT INTO cache.aspect_mention "
-                    "SELECT recommendationid, aspect, compound, clf_aspect, clf_sentiment, "
-                    "clf_margin FROM _repair_mentions"
-                )
-                con.execute(
-                    "INSERT INTO cache.scored_review SELECT recommendationid FROM _repair_mismatch"
-                )
-            _elapsed = time.monotonic() - _t_bucket
-            con.execute(
-                "INSERT INTO cache.repair_arms_status VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [current_hash, n_buckets, _b, checked, raw, mismatched, missing, mismatched,
-                 superset, mixed, _elapsed, datetime.now(timezone.utc)],
-            )
-        finally:
-            _detach_sentiment_cache(con)
-        con.execute("DROP TABLE IF EXISTS _repair_mentions")
-        con.execute("DROP TABLE IF EXISTS _repair_mismatch")
-        _bucket_cost = max(_bucket_cost, _elapsed)
-        n_done += 1
-        _drift = (f"; {superset + mixed:,} left alone (cached arms the text does not match)"
-                  if superset or mixed else "")
-        print(f"[etl] repair-arms bucket {_b + 1}/{n_buckets}: checked {checked:,}, "
-              f"mismatched {mismatched:,}, rescored {mismatched:,} "
-              f"({missing:,} missing mention row(s) of {raw:,} raw{_drift}; {_elapsed:,.1f}s)")
+            con.execute("DROP TABLE IF EXISTS _repair_mentions")
+            con.execute("DROP TABLE IF EXISTS _repair_mismatch")
+            _bucket_cost = max(_bucket_cost, _elapsed)
+            n_done += 1
+            _drift = (f"; {superset + mixed:,} left alone (cached arms the text does not match)"
+                      if superset or mixed else "")
+            print(f"[etl] repair-arms bucket {_b + 1}/{n_buckets}: checked {checked:,}, "
+                  f"mismatched {mismatched:,}, rescored {mismatched:,} "
+                  f"({missing:,} missing mention row(s) of {raw:,} raw{_drift}; {_elapsed:,.1f}s)")
     con.execute("DROP TABLE IF EXISTS _repair_ids")
 
     # THE PASS TOTALS, from the status rows — this run's buckets plus any a previous run of
@@ -4693,6 +5016,23 @@ def _env_config_errors() -> list[str]:
             errors.append(f"PROSPECT_SENTIMENT_DEADLINE_SECONDS={raw!r} is not a positive number "
                           "(wall-clock seconds from process start after which no NEW sentiment "
                           "bucket is started; unset = no deadline)")
+    raw = os.environ.get("PROSPECT_SCORE_WORKERS", "").strip()
+    if raw:
+        try:
+            workers = int(raw)
+        except ValueError:
+            workers = -1
+        cpus = os.cpu_count() or 1
+        if workers < 0 or workers > cpus:
+            errors.append(f"PROSPECT_SCORE_WORKERS={raw!r} is not an integer from 0 to this box's "
+                          f"CPU count ({cpus}) (sentiment scoring worker processes; 0 or 1 = "
+                          f"score inline in the main process; unset = "
+                          f"{_default_score_workers()}, see SCORE_WORKERS_MAX)")
+    raw = os.environ.get("PROSPECT_SCORE_CONTEXT", "").strip()
+    if raw and raw.lower() not in multiprocessing.get_all_start_methods():
+        errors.append(f"PROSPECT_SCORE_CONTEXT={raw!r} is not a multiprocessing start method "
+                      f"available here ({', '.join(multiprocessing.get_all_start_methods())}); "
+                      "unset = fork on Linux, spawn elsewhere")
     raw = os.environ.get("PROSPECT_SENTIMENT_POOL_CAP", "").strip()
     if raw:
         try:
