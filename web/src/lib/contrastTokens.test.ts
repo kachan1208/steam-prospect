@@ -159,15 +159,20 @@ describe("/niches/combined — the funnel tile on its brand-tinted panel", () =>
   });
 });
 
-describe("/studios — the inactive role tab", () => {
-  const STUDIOS = readFileSync(resolve(SRC, "pages/Studios.tsx"), "utf8");
+describe("/studios — the unselected role segment", () => {
+  // The Publishers | Developers choice moved off its own bg-surface2 pill onto the shared
+  // Segmented control in the filter chip row (components/search/Segmented.tsx), which sits
+  // straight on the page plane. The bar is kept on BOTH grounds: the page it is read on
+  // now, and the pill the audit measured, so the token cannot regress if a segmented control
+  // is ever put back on a filled surface.
+  const SEGMENTED = readFileSync(resolve(SRC, "components/search/Segmented.tsx"), "utf8");
 
-  /** The tab's RESTING colour token. Variant-prefixed classes (`hover:text-ink-*`) are
-   * dropped first — a hover colour is not what the tab is read at, and matching one is how
-   * the first draft of this test passed against the unfixed muted resting state. */
+  /** The segment's RESTING colour token. Variant-prefixed classes (`hover:text-ink-*`) are
+   * dropped first — a hover colour is not what the segment is read at, and matching one is
+   * how the first draft of this test passed against the unfixed muted resting state. */
   function restingToken(): string {
-    const inactive = STUDIOS.match(/role === r\.id \? "[^"]*" : "([^"]*)"/);
-    if (!inactive) throw new Error("could not find the role tab's inactive classes");
+    const inactive = SEGMENTED.match(/value === o\.value \? "[^"]*" : "([^"]*)"/);
+    if (!inactive) throw new Error("could not find the segmented control's unselected classes");
     const resting = inactive[1]
       .split(/\s+/)
       .filter((c) => !c.includes(":"))
@@ -176,10 +181,11 @@ describe("/studios — the inactive role tab", () => {
     return resting.replace("text-ink-", "text-");
   }
 
-  it("uses a text token that passes AA on the bg-surface2 pill", () => {
+  it("uses a text token that passes AA on the page plane AND on the bg-surface2 pill", () => {
     const token = restingToken();
     // text-primary is opaque; the muted/secondary tokens are color-mix alphas.
     const alpha = token === "text-primary" ? 1 : Number(darkToken(token).match(/(\d+)%/)![1]) / 100;
+    expect(ratio(mix(TEXT_PRIMARY, alpha, PAGE), PAGE)).toBeGreaterThanOrEqual(AA_SMALL);
     expect(ratio(mix(TEXT_PRIMARY, alpha, SURFACE_2), SURFACE_2)).toBeGreaterThanOrEqual(AA_SMALL);
   });
 

@@ -1591,22 +1591,42 @@ export interface EntitySearchList {
   items: EntitySearchRow[];
   total: number;
   limit: number;
+  offset: number;
+}
+
+// Mirrors the allow-list in api/app/routers/entities.py (EntitySortKey) — anything else is a 422.
+export type EntitySortKey =
+  | "total_rev"
+  | "median_rev"
+  | "p90_rev"
+  | "n_games"
+  | "n_recent_24m"
+  | "hit_rate_200k"
+  | "last_release_year"
+  | "name";
+
+/** Same shape as GameSearchParams — /studios and /games page, sort and count the same way. */
+export interface EntitySearchParams {
+  /** Case-insensitive substring of the name. Omit to BROWSE: the whole roster, ranked by `sort`. */
+  q?: string;
+  role?: EntityRole;
+  /** Floor on n_games — browse views pass e.g. 3 so single-release credits don't drown the ranking. */
+  min_games?: number;
+  sort: EntitySortKey;
+  order: "asc" | "desc";
+  limit: number;
+  /** 0-based; the API caps it at 10,000 (a 422 past that), like games/search. */
+  offset: number;
 }
 
 /**
- * Search OR browse entities. An empty `q` is the API's BROWSE mode (top entities by total
- * est. revenue), so the query is always enabled; `minGames` maps to the API's n_games
- * floor — browse views pass e.g. 3 so single-release credits don't drown the ranking.
+ * Search OR browse entities. An empty/absent `q` is the API's BROWSE mode, so the query is
+ * always enabled. `total` counts the whole match set (not the page), so the caller can page.
  */
-export function useEntitySearch(q: string, role: EntityRole | null, minGames = 1, limit = 20) {
-  const query = q.trim();
+export function useEntitySearch(params: EntitySearchParams) {
   return useQuery({
-    queryKey: ["entity-search", query, role, minGames, limit],
-    queryFn: ({ signal }) =>
-      request<EntitySearchList>(
-        `/entities/search${qs({ q: query || undefined, role, min_games: minGames, limit })}`,
-        { signal },
-      ),
+    queryKey: ["entity-search", params],
+    queryFn: ({ signal }) => request<EntitySearchList>(`/entities/search${qs(params)}`, { signal }),
     placeholderData: keepPreviousData,
     staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
     // 503 means "marts not built yet" — a stable answer; surface the refreshing state

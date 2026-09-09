@@ -53,8 +53,11 @@ describe("horizontal scrollers all go through TableScroll", () => {
   it("and the tables really are wired to it — every audited route still has one", () => {
     // One entry per route the audit measured as clipped, plus the scrollers that share
     // their shape. If a page drops back to a bare div, its line here goes to 0.
+    // /studios (@390 hid 799px of 1139) is no longer listed: it left the <table> for the
+    // result rows it shares with /games (components/search/ResultList), which STACK the
+    // metric group under the title below `lg` instead of scrolling it — there is no
+    // clipped edge to cue. The first `it` still catches a bare overflow-x-auto there.
     const expected: Record<string, number> = {
-      "pages/Studios.tsx": 1, // @390 hid 799px of 1139
       "pages/NicheFinder.tsx": 2, // /niches @390 hid 520px of 860
       "pages/NicheDetail.tsx": 5, // /niches/tag/* @390 hid 300px
       "pages/NicheCombined.tsx": 1, // @390 hid 380px
