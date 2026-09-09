@@ -1,9 +1,20 @@
-import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ReferenceArea,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import { errorMessage, useGameTrendsWithComps, type GameTrendPoint } from "../../lib/api";
 import { axisScale, fmtCompact } from "../../lib/format";
 import { compareSeries, type CompareSeriesShape, type CompareSeriesStyle } from "../../lib/palette";
 import { RetryButton } from "../ui/ErrorState";
+import { useDragZoom } from "../../lib/useDragZoom";
+import { SELECTION_AREA_PROPS, ZoomFrame } from "./ZoomFrame";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 
 /**
@@ -130,6 +141,17 @@ export function CompareTrendsChart({
   const comps = ids.slice(1);
   const trendsQ = useGameTrendsWithComps(primary, comps);
 
+  // Derived ABOVE the early returns so useDragZoom below runs on every render — a hook
+  // after a conditional return changes hook order between the loading and loaded frames.
+  // Pure map/filter work; on a loading render the inputs are simply absent.
+  const byAppid = new Map<number, GameTrendPoint[]>();
+  if (trendsQ.data?.eligible && primary !== null) byAppid.set(primary, trendsQ.data.points);
+  for (const s of trendsQ.data?.comps?.series ?? []) byAppid.set(s.appid, s.points);
+  // Keep the caller's column order (and its color slots) rather than response order.
+  const chartIds = ids.filter((id) => byAppid.has(id));
+  const data = mergeSeries(new Map(chartIds.map((id) => [id, byAppid.get(id)!])));
+  const zoom = useDragZoom(data, "period");
+
   if (trendsQ.isLoading) {
     return <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading trends…</div>;
   }
@@ -143,13 +165,6 @@ export function CompareTrendsChart({
       </div>
     );
   }
-
-  const byAppid = new Map<number, GameTrendPoint[]>();
-  if (trendsQ.data.eligible && primary !== null) byAppid.set(primary, trendsQ.data.points);
-  for (const s of trendsQ.data.comps?.series ?? []) byAppid.set(s.appid, s.points);
-  // Keep the caller's column order (and its color slots) rather than response order.
-  const chartIds = ids.filter((id) => byAppid.has(id));
-  const data = mergeSeries(new Map(chartIds.map((id) => [id, byAppid.get(id)!])));
 
   if (chartIds.length === 0 || data.length === 0) {
     return (
@@ -176,8 +191,9 @@ export function CompareTrendsChart({
 
   return (
     <div>
-      <ResponsiveContainer width="100%" height={220}>
-        <LineChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+      <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+        <ResponsiveContainer width="100%" height={220}>
+          <LineChart data={zoom.data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
           <CartesianGrid stroke="var(--gridline)" vertical={false} />
           <XAxis
             dataKey="period"
@@ -244,8 +260,12 @@ export function CompareTrendsChart({
               />
             );
           })}
-        </LineChart>
-      </ResponsiveContainer>
+          {zoom.selection && (
+            <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />
+          )}
+          </LineChart>
+        </ResponsiveContainer>
+      </ZoomFrame>
       {!hideLegend && (
         <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-ink-muted">
           {chartIds.map((id, i) => (

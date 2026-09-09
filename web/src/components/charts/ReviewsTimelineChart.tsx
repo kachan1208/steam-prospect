@@ -1,10 +1,24 @@
 import { useQuery } from "@tanstack/react-query";
-import { Bar, BarChart, CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Line,
+  LineChart,
+  ReferenceArea,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import { gameCatalogEventsQueryOptions, type GameEvent, type ReviewTimelinePoint } from "../../lib/api";
 import { fmtAxisCompact, fmtCompact, fmtPct } from "../../lib/format";
 import { markerMonths } from "../../lib/notable";
 import { CSS_VAR } from "../../lib/palette";
+import { useDragZoom } from "../../lib/useDragZoom";
+import { SELECTION_AREA_PROPS, ZoomFrame } from "./ZoomFrame";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 
 const EVENT_COLOR = CSS_VAR.textMuted;
@@ -41,6 +55,8 @@ function capitalize(s: string): string {
  * carries real tick labels, so this stays an honest read, not a misleading zoom.
  */
 export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimelinePoint[]; appid?: number }) {
+  // Shared by the velocity line and the volume bars below: same months, one range.
+  const zoom = useDragZoom(points, "period");
   // Catalog-event overlay ("why did the curve move HERE" — GET /api/games/{appid}/events,
   // the release, shipped updates, press coverage): optional and additive on the shared
   // factory's contract — a chart without markers is complete, just less explained. Same
@@ -83,8 +99,9 @@ export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimeline
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
       <div>
         <div className="mb-1 text-xs text-ink-muted">Positive rating trend (trailing 3-month)</div>
-        <ResponsiveContainer width="100%" height={160}>
-          <LineChart data={points} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+        <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+          <ResponsiveContainer width="100%" height={160}>
+            <LineChart data={zoom.data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
             <CartesianGrid stroke="var(--gridline)" vertical={false} />
             <XAxis
               dataKey="period"
@@ -127,13 +144,18 @@ export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimeline
               dot={false}
               connectNulls
             />
-          </LineChart>
-        </ResponsiveContainer>
+            {zoom.selection && (
+              <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />
+            )}
+            </LineChart>
+          </ResponsiveContainer>
+        </ZoomFrame>
       </div>
       <div>
         <div className="mb-1 text-xs text-ink-muted">Reviews per month — Steam's full history</div>
-        <ResponsiveContainer width="100%" height={160}>
-          <BarChart data={points} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+        <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+          <ResponsiveContainer width="100%" height={160}>
+            <BarChart data={zoom.data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
             <CartesianGrid stroke="var(--gridline)" vertical={false} />
             <XAxis
               dataKey="period"
@@ -185,8 +207,12 @@ export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimeline
                 }
               />
             ))}
-          </BarChart>
-        </ResponsiveContainer>
+            {zoom.selection && (
+              <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />
+            )}
+            </BarChart>
+          </ResponsiveContainer>
+        </ZoomFrame>
       </div>
     </div>
   );

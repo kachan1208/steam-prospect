@@ -8,6 +8,7 @@ import {
   CartesianGrid,
   Line,
   LineChart,
+  ReferenceArea,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -27,6 +28,8 @@ import { fmtAxisCompact, fmtAxisUsd, fmtCompact, fmtInt, fmtPrice, fmtUsd } from
 import { channelColor, CSS_VAR } from "../../lib/palette";
 import { RetryButton } from "../ui/ErrorState";
 import { BulletMeter } from "../ui/Meter";
+import { useDragZoom } from "../../lib/useDragZoom";
+import { SELECTION_AREA_PROPS, ZoomFrame } from "./ZoomFrame";
 import { TooltipPanel } from "./TooltipPanel";
 
 /**
@@ -165,12 +168,16 @@ function GrowthPanels({
   // Axis ticks get the clip-safe variants (the 44px YAxis truncates "240.0K"/"$463.0M"
   // from the LEFT); tooltips keep the caller's full-precision formatter.
   const axisFormatter = formatter === fmtCompact ? fmtAxisCompact : formatter === fmtUsd ? fmtAxisUsd : formatter;
+  // One range across both panels: they are the cumulative and monthly views of the same
+  // months, so zooming one and not the other would put two different windows side by side.
+  const zoom = useDragZoom(data, "period");
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
       <div>
         <div className="mb-1 text-xs text-ink-muted">{cumulativeLabel}</div>
-        <ResponsiveContainer width="100%" height={168}>
-          <AreaChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+        <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+          <ResponsiveContainer width="100%" height={168}>
+            <AreaChart data={zoom.data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
             <CartesianGrid stroke="var(--gridline)" vertical={false} />
             <XAxis {...XAXIS_PROPS} />
             <YAxis
@@ -209,13 +216,18 @@ function GrowthPanels({
               dot={{ r: 3, fill: color, strokeWidth: 0 }}
               connectNulls
             />
-          </AreaChart>
-        </ResponsiveContainer>
+            {zoom.selection && (
+              <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />
+            )}
+            </AreaChart>
+          </ResponsiveContainer>
+        </ZoomFrame>
       </div>
       <div>
         <div className="mb-1 text-xs text-ink-muted">{monthlyLabel}</div>
-        <ResponsiveContainer width="100%" height={168}>
-          <BarChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+        <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+          <ResponsiveContainer width="100%" height={168}>
+            <BarChart data={zoom.data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
             <CartesianGrid stroke="var(--gridline)" vertical={false} />
             <XAxis {...XAXIS_PROPS} />
             <YAxis
@@ -239,8 +251,12 @@ function GrowthPanels({
               }}
             />
             <Bar dataKey="monthly" fill={color} radius={[4, 4, 0, 0]} maxBarSize={20} />
-          </BarChart>
-        </ResponsiveContainer>
+            {zoom.selection && (
+              <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />
+            )}
+            </BarChart>
+          </ResponsiveContainer>
+        </ZoomFrame>
       </div>
     </div>
   );
@@ -398,6 +414,11 @@ function LivePlayersDrilldown({
   const useDaily = dailyPoints.length > 0;
   const summary = daily?.summary ?? null;
   const trendPct = summary?.players_trend_7d_pct ?? null;
+  // The full-history panel is its own series (monthly averages, not the nightly sample),
+  // so it carries its own range. The daily/monthly toggle above stays unzoomed: it swaps
+  // between two series with different x keys, and a range dragged on one cannot survive
+  // the swap to the other.
+  const monthlyZoom = useDragZoom(daily?.monthly ?? [], "month");
 
   return (
     <div className="flex flex-col gap-4">
@@ -519,8 +540,9 @@ function LivePlayersDrilldown({
       {(daily?.monthly?.length ?? 0) >= 3 && (
         <div>
           <div className="mb-1 text-xs text-ink-muted">Full history — monthly average & peak players</div>
-          <ResponsiveContainer width="100%" height={170}>
-            <LineChart data={daily!.monthly} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+          <ZoomFrame zoomed={monthlyZoom.zoomed} dragging={monthlyZoom.dragging} onReset={monthlyZoom.reset}>
+            <ResponsiveContainer width="100%" height={170}>
+              <LineChart data={monthlyZoom.data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} {...monthlyZoom.handlers}>
               <CartesianGrid stroke="var(--gridline)" vertical={false} />
               <XAxis
                 dataKey="month"
@@ -571,8 +593,12 @@ function LivePlayersDrilldown({
                 connectNulls
               />
               <Line type="linear" dataKey="avg_players" stroke={CSS_VAR.demand} strokeWidth={1.5} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
+              {monthlyZoom.selection && (
+                <ReferenceArea x1={monthlyZoom.selection.x1} x2={monthlyZoom.selection.x2} {...SELECTION_AREA_PROPS} />
+              )}
+              </LineChart>
+            </ResponsiveContainer>
+          </ZoomFrame>
           <p className="mt-1 text-[11px] italic text-ink-muted">
             Historical monthly figures via steamcharts.com (hourly polling of Steam's API since 2012) — period
             AVERAGES and true monthly peaks, a different measure from the nightly samples above; the two are never

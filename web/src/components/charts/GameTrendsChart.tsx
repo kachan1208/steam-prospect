@@ -4,6 +4,7 @@ import {
   CartesianGrid,
   ComposedChart,
   Line,
+  ReferenceArea,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -23,6 +24,8 @@ import {
 import { fmtAxisCompact, fmtCompact } from "../../lib/format";
 import { markerMonths } from "../../lib/notable";
 import { CSS_VAR } from "../../lib/palette";
+import { useDragZoom } from "../../lib/useDragZoom";
+import { SELECTION_AREA_PROPS, ZoomFrame } from "./ZoomFrame";
 import { RetryButton } from "../ui/ErrorState";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 
@@ -194,14 +197,22 @@ export function GameTrendsChart({
 
   const hasCcu = data.some((d) => d.ccu_avg != null);
 
+  // Drag a range on the plot to zoom into it (lib/useDragZoom). Both marker layers are
+  // narrowed to the visible months: a ReferenceLine whose category is not on the sliced
+  // axis has nowhere to stand, and Recharts draws it at the plot's left edge rather than
+  // dropping it — which would plant every out-of-range patch note on top of each other.
+  const zoom = useDragZoom(data, "period");
+  const visibleMonths = new Set(zoom.data.map((d) => d.period));
+
   return (
     <div className="flex flex-col gap-4">
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         {/* Panel 1 — review velocity + live players (+ event markers) */}
         <div>
           <div className="mb-1 text-xs text-ink-muted">Sampled reviews &amp; live players / month</div>
+          <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
           <ResponsiveContainer width="100%" height={168}>
-            <ComposedChart data={data} margin={{ top: 12, right: 8, left: 0, bottom: 0 }}>
+            <ComposedChart data={zoom.data} margin={{ top: 12, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
               <CartesianGrid stroke="var(--gridline)" vertical={false} />
               <XAxis {...XAXIS_PROPS} />
               <YAxis
@@ -260,7 +271,7 @@ export function GameTrendsChart({
                   layer. Dash "2 5" (sparser than the marketing "3 4") so overlapping months
                   stay tellable apart; only the release line gets a text label. Details are
                   in the tooltip, which is what keeps a patch-heavy game readable. */}
-              {catalogMonths.map((month) => (
+              {catalogMonths.filter((m) => visibleMonths.has(m)).map((month) => (
                 <ReferenceLine
                   key={`cat-${month}`}
                   yAxisId="reviews"
@@ -277,7 +288,7 @@ export function GameTrendsChart({
               ))}
               {/* my marketing events — a labelled plumb line at each event's month.
                   Dash "3 4" per the design handoff's event-marker spec. */}
-              {eventMonths.map((month, i) => (
+              {eventMonths.filter((m) => visibleMonths.has(m)).map((month, i) => (
                 <ReferenceLine
                   key={month}
                   yAxisId="reviews"
@@ -294,8 +305,17 @@ export function GameTrendsChart({
                   }}
                 />
               ))}
+              {zoom.selection && (
+                <ReferenceArea
+                  yAxisId="reviews"
+                  x1={zoom.selection.x1}
+                  x2={zoom.selection.x2}
+                  {...SELECTION_AREA_PROPS}
+                />
+              )}
             </ComposedChart>
           </ResponsiveContainer>
+          </ZoomFrame>
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-ink-muted">
             <LegendDot color={CSS_VAR.competition} label="Reviews / mo" />
             <LegendDot color={CSS_VAR.demand} label="Live players (avg)" />

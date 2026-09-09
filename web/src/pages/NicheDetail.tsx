@@ -7,6 +7,7 @@ import {
   CartesianGrid,
   Line,
   LineChart,
+  ReferenceArea,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -63,6 +64,8 @@ import { DEFAULT_NICHE_CUT, findNicheVariant, formatNicheRef, nicheCombinedPath 
 // The headline is the Radar's dossier — same evaluation, same strings, same colour tokens
 // as the board's tooltip (see the "the dossier, as the board prints it" block there).
 import { radarBoardAbsence, radarDossier, radarSector } from "../lib/radarVerdict";
+import { useDragZoom } from "../lib/useDragZoom";
+import { SELECTION_AREA_PROPS, ZoomFrame } from "../components/charts/ZoomFrame";
 
 /** The condensed stack the foundation applies to h1–h6 and .kicker (index.css) — used inline
  * for KPI/panel numerals that aren't semantically headings, so they still read as the
@@ -259,6 +262,7 @@ function declineFlags(v: NicheRow, players: NichePlayers | null): { serious: boo
 }
 
 function PlayersSeriesChart({ points }: { points: NichePlayersPoint[] }) {
+  const zoom = useDragZoom(points, "date");
   if (points.length === 0) {
     return (
       <div className="flex h-24 items-center justify-center text-xs text-ink-muted">
@@ -268,8 +272,9 @@ function PlayersSeriesChart({ points }: { points: NichePlayersPoint[] }) {
   }
   const y = axisScale(Math.max(0, ...points.map((p) => p.total_players ?? 0)), "count");
   return (
-    <ResponsiveContainer width="100%" height={150}>
-      <LineChart data={points} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
+    <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+      <ResponsiveContainer width="100%" height={150}>
+        <LineChart data={zoom.data} margin={{ top: 6, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
         <CartesianGrid stroke="var(--gridline)" vertical={false} />
         <XAxis
           dataKey="date"
@@ -317,8 +322,12 @@ function PlayersSeriesChart({ points }: { points: NichePlayersPoint[] }) {
           strokeWidth={2}
           dot={points.length <= 45 ? { r: 2.5, fill: CSS_VAR.demand, strokeWidth: 0 } : false}
         />
-      </LineChart>
-    </ResponsiveContainer>
+        {zoom.selection && (
+          <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />
+        )}
+        </LineChart>
+      </ResponsiveContainer>
+    </ZoomFrame>
   );
 }
 
@@ -326,9 +335,11 @@ function PlayersSeriesChart({ points }: { points: NichePlayersPoint[] }) {
  * (and same aqua hue) as the game page's PressTimelineChart, since both slice the identical
  * underlying metric (journalist press mentions), just per game vs. pooled per niche. */
 function NichePressChart({ points }: { points: NichePressPoint[] }) {
+  const zoom = useDragZoom(points, "month");
   return (
-    <ResponsiveContainer width="100%" height={150}>
-      <BarChart data={points} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+    <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+      <ResponsiveContainer width="100%" height={150}>
+        <BarChart data={zoom.data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
         <CartesianGrid stroke="var(--gridline)" vertical={false} />
         <XAxis
           dataKey="month"
@@ -360,8 +371,12 @@ function NichePressChart({ points }: { points: NichePressPoint[] }) {
           }}
         />
         <Bar dataKey="n_articles" fill={CSS_VAR.competition} radius={[4, 4, 0, 0]} maxBarSize={20} />
-      </BarChart>
-    </ResponsiveContainer>
+        {zoom.selection && (
+          <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />
+        )}
+        </BarChart>
+      </ResponsiveContainer>
+    </ZoomFrame>
   );
 }
 

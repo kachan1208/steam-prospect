@@ -1,8 +1,19 @@
-import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ReferenceArea,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import { useGamePriceHistory, type PricePoint } from "../../lib/api";
 import { axisScale, fmtPrice, fmtUsd, monthName } from "../../lib/format";
 import { CSS_VAR } from "../../lib/palette";
+import { useDragZoom } from "../../lib/useDragZoom";
+import { SELECTION_AREA_PROPS, ZoomFrame } from "./ZoomFrame";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 
 /**
@@ -58,12 +69,20 @@ const METHOD_CAPTION = "Daily US snapshots via the Steam catalog diff; history a
 export function PriceHistoryChart({ appid, priceInitial }: { appid: number; priceInitial: number | null }) {
   const historyQ = useGamePriceHistory(appid);
 
+  // Derived ABOVE the early returns, not beside the chart, because useDragZoom below is a
+  // hook and a hook after a conditional return is a different hook order on the loading
+  // render. All of this is pure and cheap, and on a loading/empty render it just folds to
+  // an empty series.
+  const points = historyQ.data ?? [];
+  const state = priceSeriesState(points);
+  const data: ChartPoint[] = points
+    .filter((p) => p.final_cents !== null)
+    .map((p) => ({ ...p, usd: (p.final_cents as number) / 100 }));
+  const zoom = useDragZoom(data, "captured_on");
+
   if (historyQ.isLoading) {
     return <div className="flex h-[150px] items-center justify-center text-xs text-ink-muted">Loading…</div>;
   }
-
-  const points = historyQ.data ?? [];
-  const state = priceSeriesState(points);
 
   if (state === "free") {
     return (
@@ -84,10 +103,6 @@ export function PriceHistoryChart({ appid, priceInitial }: { appid: number; pric
       </div>
     );
   }
-
-  const data: ChartPoint[] = points
-    .filter((p) => p.final_cents !== null)
-    .map((p) => ({ ...p, usd: (p.final_cents as number) / 100 }));
 
   // The price axis is anchored at $0 (a -50% sale only reads honestly against zero) with
   // ticks we compute rather than let recharts derive from a x1.1 headroom domain — that
@@ -118,8 +133,9 @@ export function PriceHistoryChart({ appid, priceInitial }: { appid: number; pric
 
   return (
     <div>
-      <ResponsiveContainer width="100%" height={160}>
-        <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+      <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+        <ResponsiveContainer width="100%" height={160}>
+          <LineChart data={zoom.data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }} {...zoom.handlers}>
           <CartesianGrid stroke="var(--gridline)" vertical={false} />
           <XAxis
             dataKey="captured_on"
@@ -164,8 +180,12 @@ export function PriceHistoryChart({ appid, priceInitial }: { appid: number; pric
             activeDot={{ r: 4, fill: CSS_VAR.demand, stroke: "var(--surface-1)", strokeWidth: 2 }}
             isAnimationActive={false}
           />
-        </LineChart>
-      </ResponsiveContainer>
+          {zoom.selection && (
+            <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />
+          )}
+          </LineChart>
+        </ResponsiveContainer>
+      </ZoomFrame>
       {dotsOnly && (
         <p className="mt-2 text-xs text-ink-muted">
           {TRACKING_NOTE} Launch price was {fmtPrice(priceInitial)}.

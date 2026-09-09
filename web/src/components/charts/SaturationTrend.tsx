@@ -1,8 +1,21 @@
-import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Line,
+  LineChart,
+  ReferenceArea,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import type { TrendPoint } from "../../lib/api";
 import { axisScale, fmtCompact, fmtUsd } from "../../lib/format";
 import { CSS_VAR } from "../../lib/palette";
+import { useDragZoom } from "../../lib/useDragZoom";
+import { SELECTION_AREA_PROPS, ZoomFrame } from "./ZoomFrame";
 import { TooltipPanel } from "./TooltipPanel";
 
 /**
@@ -12,6 +25,9 @@ import { TooltipPanel } from "./TooltipPanel";
  * its own scale and its own chart.
  */
 export function SaturationTrend({ points }: { points: TrendPoint[] }) {
+  // One hook for both panels below: they plot the same years, so a range dragged on
+  // either must move the other — two independent zooms on a shared axis would be a lie.
+  const zoom = useDragZoom(points, "year");
   // p90_rev only exists on marts built after 2026-08-14 — fall back to the median line
   // (with its honest label) until the ETL materializes it.
   const hasP90 = points.some((p) => p.p90_rev != null);
@@ -37,8 +53,9 @@ export function SaturationTrend({ points }: { points: TrendPoint[] }) {
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
       <div>
         <div className="mb-1 text-xs text-ink-muted">Releases per year (supply)</div>
-        <ResponsiveContainer width="100%" height={140}>
-          <BarChart data={points} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+        <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+          <ResponsiveContainer width="100%" height={140}>
+            <BarChart data={zoom.data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
             <CartesianGrid stroke="var(--gridline)" vertical={false} />
             <XAxis dataKey="year" tick={{ fontSize: 10 }} tickLine={false} axisLine={{ stroke: "var(--baseline)" }} />
             <YAxis
@@ -69,13 +86,18 @@ export function SaturationTrend({ points }: { points: TrendPoint[] }) {
               }}
             />
             <Bar dataKey="n_releases" fill={CSS_VAR.competition} radius={[4, 4, 0, 0]} maxBarSize={20} />
-          </BarChart>
-        </ResponsiveContainer>
+            {zoom.selection && (
+              <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />
+            )}
+            </BarChart>
+          </ResponsiveContainer>
+        </ZoomFrame>
       </div>
       <div>
         <div className="mb-1 text-xs text-ink-muted">{hasP90 ? "P90 revenue per year" : "Median revenue per year"}</div>
-        <ResponsiveContainer width="100%" height={140}>
-          <LineChart data={points} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+        <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+          <ResponsiveContainer width="100%" height={140}>
+            <LineChart data={zoom.data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
             <CartesianGrid stroke="var(--gridline)" vertical={false} />
             <XAxis dataKey="year" tick={{ fontSize: 10 }} tickLine={false} axisLine={{ stroke: "var(--baseline)" }} />
             <YAxis
@@ -116,8 +138,12 @@ export function SaturationTrend({ points }: { points: TrendPoint[] }) {
               dot={{ r: 4, fill: CSS_VAR.demand, strokeWidth: 2, stroke: "var(--surface-1)" }}
               connectNulls
             />
-          </LineChart>
-        </ResponsiveContainer>
+            {zoom.selection && (
+              <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />
+            )}
+            </LineChart>
+          </ResponsiveContainer>
+        </ZoomFrame>
       </div>
     </div>
   );
