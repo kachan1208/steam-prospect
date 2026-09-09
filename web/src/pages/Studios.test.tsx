@@ -8,7 +8,7 @@ import { ThemeProvider } from "../lib/theme";
 import type { EntityRole, EntitySearchRow } from "../lib/api";
 
 /**
- * THE FILTER STATE IS THE URL (?role=developer&q=larian).
+ * THE FILTER STATE IS THE URL (?role=developer&q=larian&sort=n_games&order=asc&offset=25).
  *
  * Both controls used to be useState, and the reproduction was: click Developers (first
  * row → "FromSoftware, Inc."), type "larian" (→ "Larian Studios"), reload — Publishers,
@@ -22,9 +22,13 @@ import type { EntityRole, EntitySearchRow } from "../lib/api";
  *     role and q, the toggle shows the right side, the box shows the text.
  *  3. The role toggle PUSHES, so the back button walks it (matching /games); the
  *     debounced box REPLACES, so typing doesn't bury the previous page in history.
+ *
+ * Sort, order and offset joined the URL when the page moved onto /games' search
+ * primitives (components/search/*); they follow the same three rules, and the offset is
+ * bounded by what the API will serve — the /games paging cliff, pre-empted here.
  */
 
-function studioRow(name: string, role: EntityRole): EntitySearchRow {
+function studioRow(name: string, role: EntityRole, overrides: Partial<EntitySearchRow> = {}): EntitySearchRow {
   return {
     role,
     name,
@@ -37,20 +41,32 @@ function studioRow(name: string, role: EntityRole): EntitySearchRow {
     p90_rev: 1_000_000,
     hit_rate_200k: 0.5,
     top_genres: ["RPG"],
+    ...overrides,
   };
 }
 
-// What production actually serves for each of the four slices this test drives.
+// What production actually serves for each of the slices this test drives.
 const PUBLISHERS = ["Electronic Arts", "Bandai Namco Entertainment", "Ubisoft"];
 const DEVELOPERS = ["FromSoftware, Inc.", "Capcom", "Ubisoft Montreal"];
+// Per-row top genres for the browse slices: RPG and Action twice each, Strategy once.
+const GENRES = [["RPG"], ["RPG", "Action"], ["Action", "Strategy"]];
 
 let requests: string[] = [];
+/** The `total` the mock reports — larger than the page when a test needs paging. */
+let totalOverride: number | null = null;
+
+function params(url: string): URLSearchParams {
+  return new URL(url, "http://x").searchParams;
+}
 
 function rowsFor(url: string): EntitySearchRow[] {
-  const role: EntityRole = url.includes("role=developer") ? "developer" : "publisher";
-  const q = /[?&]q=([^&]*)/.exec(url)?.[1] ?? "";
-  if (decodeURIComponent(q).toLowerCase() === "larian") return [studioRow("Larian Studios", role)];
-  return (role === "developer" ? DEVELOPERS : PUBLISHERS).map((n) => studioRow(n, role));
+  const sp = params(url);
+  const role: EntityRole = sp.get("role") === "developer" ? "developer" : "publisher";
+  const q = (sp.get("q") ?? "").toLowerCase();
+  if (q === "larian") return [studioRow("Larian Studios", role)];
+  // A two-game record: enough to list, not enough for a hit rate.
+  if (q === "thin") return [studioRow("Two Hit Wonder", role, { n_games: 2, hit_rate_200k: 1 })];
+  return (role === "developer" ? DEVELOPERS : PUBLISHERS).map((n, i) => studioRow(n, role, { top_genres: GENRES[i] }));
 }
 
 /** Mirrors the URL back out so the tests can assert what a share-link would carry. */
@@ -77,16 +93,22 @@ function goBack() {
   fireEvent.click(screen.getByTestId("go-back"));
 }
 
-/** The rendered leaderboard, in row order. */
+/** The rendered leaderboard, in row order — the first line of each profile link. */
 function names(): string[] {
   return screen
-    .getAllByRole("row")
-    .slice(1) // header
-    .map((r) => r.querySelector("td")?.textContent?.trim() ?? "");
+    .getAllByRole("link")
+    .filter((a) => (a.getAttribute("href") ?? "").startsWith("/entity/"))
+    .map((a) => a.firstElementChild?.textContent?.trim() ?? "");
 }
 
 function searchBox(): HTMLInputElement {
   return screen.getByPlaceholderText(/^Search (publishers|developers) by name…$/) as HTMLInputElement;
+}
+
+function lastSearchRequest(): URLSearchParams {
+  const u = [...requests].reverse().find((r) => r.includes("/entities/search"));
+  if (!u) throw new Error("no /entities/search request yet");
+  return params(u);
 }
 
 /** A FRESH mount on `entry` — the "open the copied URL in a new tab" case. */
@@ -107,13 +129,21 @@ function renderStudios(entry = "/studios") {
 
 beforeEach(() => {
   requests = [];
+  totalOverride = null;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const u = String(input);
       requests.push(u);
       const items = rowsFor(u);
-      return new Response(JSON.stringify({ items, total: items.length, limit: 50 }), {
+      const sp = params(u);
+      const body = {
+        items,
+        total: totalOverride ?? items.length,
+        limit: Number(sp.get("limit") ?? 25),
+        offset: Number(sp.get("offset") ?? 0),
+      };
+      return new Response(JSON.stringify(body), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -130,8 +160,15 @@ describe("Studios — shareable URL state", () => {
   it("the role toggle writes ?role=developer; the default view writes nothing", async () => {
     renderStudios();
     await screen.findByText("Electronic Arts");
-    // Defaults omitted — a pristine /studios stays a clean URL.
+    // Defaults omitted — a pristine /studios stays a clean URL…
     expect(url()).toBe("/studios");
+    // …while the request spells every default out, so the API contract is explicit.
+    const req = lastSearchRequest();
+    expect(req.get("role")).toBe("publisher");
+    expect(req.get("sort")).toBe("total_rev");
+    expect(req.get("order")).toBe("desc");
+    expect(req.get("limit")).toBe("25");
+    expect(req.get("offset")).toBe("0");
 
     fireEvent.click(screen.getByRole("button", { name: "Developers" }));
     expect(url()).toBe("/studios?role=developer");
@@ -158,7 +195,8 @@ describe("Studios — shareable URL state", () => {
     expect(screen.queryByText("Electronic Arts")).toBeNull();
     // The controls agree with the URL…
     expect(searchBox().value).toBe("larian");
-    expect(screen.getByRole("button", { name: "Developers" }).className).toContain("bg-surface ");
+    expect(screen.getByRole("button", { name: "Developers" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Publishers" }).getAttribute("aria-pressed")).toBe("false");
     // …and the request carried both, so this is the real slice, not a relabeled default.
     const req = requests.find((u) => u.includes("/entities/search"))!;
     expect(req).toContain("role=developer");
@@ -218,5 +256,119 @@ describe("Studios — shareable URL state", () => {
     await waitFor(() => expect(url()).toBe("/studios"));
     // …and the box follows the URL back rather than keeping the stale draft.
     await waitFor(() => expect(searchBox().value).toBe(""));
+  });
+});
+
+describe("Studios — sort and paging ride the URL like /games", () => {
+  it("the sort control writes ?sort=&order= and the request carries them; re-picking flips the direction", async () => {
+    renderStudios();
+    await screen.findByText("Electronic Arts");
+
+    fireEvent.change(screen.getByLabelText("Sort by"), { target: { value: "n_games" } });
+    expect(url()).toBe("/studios?sort=n_games&order=desc");
+    await waitFor(() => expect(lastSearchRequest().get("sort")).toBe("n_games"));
+    expect(lastSearchRequest().get("order")).toBe("desc");
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle sort direction" }));
+    expect(url()).toBe("/studios?sort=n_games&order=asc");
+    await waitFor(() => expect(lastSearchRequest().get("order")).toBe("asc"));
+
+    // Names read A→Z first, as on /games.
+    fireEvent.change(screen.getByLabelText("Sort by"), { target: { value: "name" } });
+    expect(url()).toBe("/studios?sort=name&order=asc");
+  });
+
+  it("a fresh mount on ?sort=name&order=asc&offset=25 restores all three — request and footer", async () => {
+    totalOverride = 60;
+    renderStudios("/studios?sort=name&order=asc&offset=25");
+    await screen.findByText("Electronic Arts");
+    const req = lastSearchRequest();
+    expect(req.get("sort")).toBe("name");
+    expect(req.get("order")).toBe("asc");
+    expect(req.get("offset")).toBe("25");
+    expect(await screen.findByText(/26–50 of 60/)).toBeTruthy();
+    expect((screen.getByLabelText("Sort by") as HTMLSelectElement).value).toBe("name");
+    // The URL is left exactly as shared — no echo rewrite.
+    expect(url()).toBe("/studios?sort=name&order=asc&offset=25");
+  });
+
+  it("Next pushes ?offset=25 and Prev returns to the clean URL", async () => {
+    totalOverride = 60;
+    renderStudios();
+    await screen.findByText("Electronic Arts");
+    expect(await screen.findByText(/1–25 of 60/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Prev" }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(url()).toBe("/studios?offset=25");
+    await waitFor(() => expect(lastSearchRequest().get("offset")).toBe("25"));
+    expect(await screen.findByText(/26–50 of 60/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Prev" }));
+    expect(url()).toBe("/studios");
+    await waitFor(() => expect(lastSearchRequest().get("offset")).toBe("0"));
+  });
+
+  it("a role or search change restarts paging", async () => {
+    totalOverride = 60;
+    renderStudios("/studios?offset=25");
+    await screen.findByText("Electronic Arts");
+
+    fireEvent.click(screen.getByRole("button", { name: "Developers" }));
+    expect(url()).toBe("/studios?role=developer");
+    await screen.findByText("FromSoftware, Inc.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(url()).toBe("/studios?role=developer&offset=25");
+    fireEvent.change(searchBox(), { target: { value: "larian" } });
+    await waitFor(() => expect(url()).toBe("/studios?role=developer&q=larian"));
+  });
+
+  it("never asks for an offset past the API's cap, and an unknown sort falls back to the default", async () => {
+    renderStudios("/studios?offset=10025&sort=owners");
+    await screen.findByText("Electronic Arts");
+    for (const r of requests.filter((u) => u.includes("/entities/search"))) {
+      expect(Number(params(r).get("offset") ?? 0)).toBeLessThanOrEqual(10_000);
+      expect(params(r).get("sort")).toBe("total_rev");
+    }
+    // Not rewritten either — the URL is what was shared; only the request is bounded.
+    expect(url()).toBe("/studios?offset=10025&sort=owners");
+  });
+});
+
+describe("Studios — the rows", () => {
+  it("opens the profile from a two-line title: name, then games · years · top genre", async () => {
+    renderStudios();
+    await screen.findByText("Electronic Arts");
+    const link = screen.getByRole("link", { name: /Electronic Arts/ });
+    expect(link.getAttribute("href")).toBe("/entity/publisher?name=Electronic%20Arts");
+    expect(link.textContent).toContain("12 games · 2010–2025 · RPG");
+    // Every metric column is labelled and explained on hover, as on /games.
+    expect(screen.getByText("Total est. revenue").getAttribute("title")).toMatch(/estimate, not reported sales/i);
+    expect(screen.getByText("Hit rate").getAttribute("title")).toMatch(/\$200K/);
+    expect(screen.getByText("Games").getAttribute("title")).toMatch(/3\+/);
+  });
+
+  it("withholds the hit rate under three games, and says why", async () => {
+    renderStudios("/studios?q=thin");
+    await screen.findByText("Two Hit Wonder");
+    const cell = screen.getByTitle("needs 3+ games");
+    expect(cell.textContent).toBe("—");
+    // …while a real record prints it.
+    cleanup();
+    renderStudios();
+    await screen.findByText("Electronic Arts");
+    expect(screen.queryByTitle("needs 3+ games")).toBeNull();
+    expect(screen.getAllByText("50%").length).toBe(3);
+  });
+
+  it("pivots on the genres present in these results, most common first, into /games", async () => {
+    renderStudios();
+    await screen.findByText("Genres in these results:");
+    const chips = screen
+      .getAllByRole("link")
+      .filter((a) => (a.getAttribute("href") ?? "").startsWith("/games?genre="));
+    expect(chips.map((a) => a.textContent)).toEqual(["RPG", "Action", "Strategy"]);
+    expect(chips[0].getAttribute("href")).toBe("/games?genre=RPG");
   });
 });

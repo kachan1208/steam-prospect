@@ -6,6 +6,7 @@ dropped per-test."""
 from __future__ import annotations
 
 import duckdb
+import pytest
 
 from app import analytics_db
 from app.routers import entities as entities_router
@@ -83,6 +84,130 @@ def test_search_min_games_applies_with_q_too(client):
     r = client.get("/api/entities/search", params={"q": "o", "role": "developer", "min_games": 2})
     assert r.status_code == 200
     assert [e["name"] for e in r.json()["items"]] == ["Pixel Forge Collective"]
+
+
+# ---- sort / order / offset — the games-search contract shape ----------------------------
+# The four fixture developers, per conftest.ENTITIES:
+#   Solo Dev A              n_games 1, 2024-2024, recent 1, total 150K, median 150K, hit 0
+#   Studio B                n_games 1, 2023-2023, recent 0, total 900K, median 900K, hit 1.0
+#   Big Studio D            n_games 1, 2022-2022, recent 0, total 0,    median 0,    hit 0
+#   Pixel Forge Collective  n_games 3, 2021-2025, recent 2, total 273K, median 20K,  hit 1/3
+# Ties break by total_rev DESC, then n_games DESC, then name ASC.
+
+def _dev_names(client, **params) -> list[str]:
+    r = client.get("/api/entities/search", params={"role": "developer", **params})
+    assert r.status_code == 200, r.text
+    return [e["name"] for e in r.json()["items"]]
+
+
+@pytest.mark.parametrize(
+    "sort", ["total_rev", "median_rev", "n_games", "n_recent_24m", "hit_rate_200k", "last_release_year", "name"]
+)
+def test_search_every_allow_listed_sort_serves_the_whole_set(client, sort):
+    r = client.get("/api/entities/search", params={"role": "developer", "sort": sort})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 4
+    assert len(body["items"]) == 4
+    assert body["offset"] == 0
+
+
+def test_search_sort_n_games_ties_break_by_total_rev(client):
+    assert _dev_names(client, sort="n_games") == [
+        "Pixel Forge Collective", "Studio B", "Solo Dev A", "Big Studio D",
+    ]
+
+
+def test_search_sort_name_both_directions(client):
+    assert _dev_names(client, sort="name", order="asc") == [
+        "Big Studio D", "Pixel Forge Collective", "Solo Dev A", "Studio B",
+    ]
+    assert _dev_names(client, sort="name", order="desc") == [
+        "Studio B", "Solo Dev A", "Pixel Forge Collective", "Big Studio D",
+    ]
+
+
+def test_search_order_asc_flips_the_default_ranking(client):
+    assert _dev_names(client, sort="total_rev", order="asc") == [
+        "Big Studio D", "Solo Dev A", "Pixel Forge Collective", "Studio B",
+    ]
+
+
+def test_search_sort_hit_rate_and_median_rev(client):
+    assert _dev_names(client, sort="hit_rate_200k") == [
+        "Studio B", "Pixel Forge Collective", "Solo Dev A", "Big Studio D",
+    ]
+    assert _dev_names(client, sort="median_rev") == [
+        "Studio B", "Solo Dev A", "Pixel Forge Collective", "Big Studio D",
+    ]
+
+
+def test_search_sort_last_release_year_and_recent(client):
+    assert _dev_names(client, sort="last_release_year") == [
+        "Pixel Forge Collective", "Solo Dev A", "Studio B", "Big Studio D",
+    ]
+    # n_recent_24m: 2, 1, then two zeros broken by total_rev (900K before 0).
+    assert _dev_names(client, sort="n_recent_24m") == [
+        "Pixel Forge Collective", "Solo Dev A", "Studio B", "Big Studio D",
+    ]
+
+
+def test_search_offset_pages_while_total_counts_the_whole_set(client):
+    first = client.get("/api/entities/search", params={"role": "developer", "limit": 2}).json()
+    second = client.get(
+        "/api/entities/search", params={"role": "developer", "limit": 2, "offset": 2}
+    ).json()
+    assert [e["name"] for e in first["items"]] == ["Studio B", "Pixel Forge Collective"]
+    assert [e["name"] for e in second["items"]] == ["Solo Dev A", "Big Studio D"]
+    # The count is the match set, not the page — on both pages — and the response echoes
+    # the paging it served (the web footer's "26–50 of N" reads these back).
+    assert (first["total"], first["offset"], first["limit"]) == (4, 0, 2)
+    assert (second["total"], second["offset"], second["limit"]) == (4, 2, 2)
+
+
+def test_search_total_is_the_filtered_count_with_q_and_offset(client):
+    r = client.get(
+        "/api/entities/search", params={"q": "o", "role": "developer", "limit": 1, "offset": 1}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert [e["name"] for e in body["items"]] == ["Pixel Forge Collective"]
+    assert body["total"] == 4
+
+
+def test_search_offset_past_the_end_still_reports_total(client):
+    # The window count needs a row to ride on; an empty page must not report total=0.
+    r = client.get("/api/entities/search", params={"role": "developer", "offset": 10})
+    assert r.status_code == 200
+    assert r.json()["items"] == []
+    assert r.json()["total"] == 4
+
+
+def test_search_offset_is_capped_like_games(client):
+    assert client.get("/api/entities/search", params={"offset": entities_router.MAX_OFFSET}).status_code == 200
+    assert client.get("/api/entities/search", params={"offset": entities_router.MAX_OFFSET + 1}).status_code == 422
+    assert client.get("/api/entities/search", params={"offset": -1}).status_code == 422
+
+
+def test_search_unknown_sort_is_422(client):
+    r = client.get("/api/entities/search", params={"sort": "owners"})
+    assert r.status_code == 422
+    assert r.json()["detail"][0]["loc"] == ["query", "sort"]
+    # Nothing that isn't in the Literal reaches the ORDER BY — a would-be identifier included.
+    assert client.get("/api/entities/search", params={"sort": "total_rev; DROP TABLE x"}).status_code == 422
+
+
+def test_search_bad_order_is_422(client):
+    assert client.get("/api/entities/search", params={"order": "sideways"}).status_code == 422
+
+
+def test_search_p90_sort_needs_the_column(client):
+    # The fixture mart predates p90_rev, so sorting on it is a mart capability gap (503,
+    # as games.py answers a lifetime sort on a pre-lifetime mart), not a bad request.
+    entities_router._reset_capability_cache()
+    r = client.get("/api/entities/search", params={"sort": "p90_rev"})
+    assert r.status_code == 503
+    assert "p90_rev" in r.json()["detail"]
 
 
 # ---- /api/entities/profile --------------------------------------------------------------

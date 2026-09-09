@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import clsx from "clsx";
 
 import { TagAutocomplete } from "../components/TagAutocomplete";
+import { FilterBar } from "../components/search/FilterChip";
+import { ResultHeader, ResultList, ResultRow, ResultTitle, RevenueCell } from "../components/search/ResultList";
+import { ResultChipRow, topValues } from "../components/search/ResultChipRow";
+import { MAX_OFFSET, PAGE_LIMIT, ResultsFooter } from "../components/search/ResultsFooter";
+import { SearchBar } from "../components/search/SearchBar";
+import { SortControl, sortPatch } from "../components/search/SortControl";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ErrorState } from "../components/ui/ErrorState";
 import { Loading } from "../components/ui/Loading";
@@ -12,17 +18,11 @@ import { fmtCompact, fmtInt, fmtPct, fmtRevenue, fmtUsd } from "../lib/format";
 import { useDebounced } from "../lib/useDebounced";
 import { usePageTitle } from "../lib/usePageTitle";
 
-const LIMIT = 25;
+const LIMIT = PAGE_LIMIT;
 
-// Mirrors api/app/routers/games.py: `offset: int = Query(0, ge=0, le=10000)`. Paging past
-// it is a 422, and the page used to walk straight off that cliff — at ?offset=10000 with
-// 174,265 matches the Next button was still enabled, and one click rendered "0 matches"
-// plus the API's raw pydantic error array (measured on production 2026-09-01). The cap is
-// deliberate server-side (a large OFFSET must walk every skipped row), so the UI's job is
-// to stop at the last reachable page and SAY the deep tail needs a narrower query, not to
-// advertise 6,971 pages when 401 exist.
-const MAX_OFFSET = 10000;
-// Same file: `released_after` / `released_before` are Query(None, ge=1970, le=2100). These
+// The paging cliff (MAX_OFFSET) and the footer that stops at it live in
+// components/search/ResultsFooter — shared with /studios, whose API caps offset the same way.
+// api/app/routers/games.py: `released_after` / `released_before` are Query(None, ge=1970, le=2100). These
 // two were the only filters on the page that passed a raw draft through — every sibling
 // already clamped (min_metacritic and min_positive to their maxima, price_min/min_reviews
 // at 0), so typing "2020" one digit at a time fired `after=2` and `after=202`, each a 422.
@@ -246,10 +246,9 @@ function hasAnyFilterPanelValue(f: Filters): boolean {
 }
 
 // ---- small UI pieces -----------------------------------------------------------------------
-
-// Condensed heading stack, matching the global h1–h6 / .kicker rule in index.css — applied
-// inline here because these are <span>s inside a result row, not heading elements.
-const HEADING_FONT = '"Barlow Condensed", "Barlow", system-ui, sans-serif';
+// The search field, filter chips, "sorted by" control, result rows, "in these results" chips
+// and the paging footer are shared with /studios (components/search/*) — this page owns only
+// what /studios has no counterpart for: the filter panel and the compare button.
 
 // Capsule placeholder: 45°-diagonal paper-12% stripes (mockup 4e), for games with no
 // header_image on this mart.
@@ -316,48 +315,6 @@ function TriToggle({
         ))}
       </span>
     </label>
-  );
-}
-
-/** Active-filter chip — outline accent, accent TEXT (mockup 4e's "released 24m" chip: both
- * the border and the label itself carry accent-300, not paper). Every chip rendered here
- * represents a filter that IS applied, so it always wears the "active" state; the mockup's
- * "inactive" paper-30% chips describe categories with nothing set, which this page already
- * represents by omitting the chip entirely — an empty row is a more honest read than a row
- * of chips reading "any". The ✕ (remove) isn't pictured but keeps the chip functional. */
-function FilterChip({ label, onClear }: { label: string; onClear: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClear}
-      title="Remove filter"
-      className="group inline-flex items-center gap-1 border border-brand px-2 py-0.5 text-[11px] font-medium text-brand transition-colors hover:bg-brand-tint"
-    >
-      {label}
-      <span aria-hidden className="text-ink-muted group-hover:text-brand">✕</span>
-    </button>
-  );
-}
-
-/** Lucide "search" glyph (hand-inlined — the codebase doesn't depend on lucide-react), 1.5
- * stroke per the design system's icon rule. */
-function SearchIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      width="18"
-      height="18"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden
-    >
-      <circle cx="11" cy="11" r="8" />
-      <path d="m21 21-4.3-4.3" />
-    </svg>
   );
 }
 
@@ -458,13 +415,7 @@ export default function GameSearch() {
 
   // Column-header sorting became a compact "sorted by …" control (mockup 4e has no header
   // row) — same URL-backed sort/order state and the same toggle-on-reselect behavior.
-  const toggleSort = (col: GameSortKey) => {
-    if (filters.sort === col) {
-      patchParams({ order: filters.order === "desc" ? "asc" : "desc" });
-    } else {
-      patchParams({ sort: col, order: col === "name" ? "asc" : "desc" });
-    }
-  };
+  const toggleSort = (col: GameSortKey) => patchParams(sortPatch(filters.sort, filters.order, col, ["name"]));
 
   const { data, isLoading, isFetching, isError, error, refetch } = useGameSearch({
     q: filters.q || undefined,
@@ -489,16 +440,7 @@ export default function GameSearch() {
 
   // Tag chips sourced from the current page's own top_tags — quick pivots into the exact
   // tag strings present in these results (complements the autocomplete).
-  const tagChips = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const g of data?.items ?? []) {
-      for (const t of g.top_tags.slice(0, 5)) counts.set(t, (counts.get(t) ?? 0) + 1);
-    }
-    return [...counts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 12)
-      .map(([t]) => t);
-  }, [data?.items]);
+  const tagChips = useMemo(() => topValues(data?.items ?? [], (g) => g.top_tags, 5, 12), [data?.items]);
 
   // Active non-default filters as removable chips. Chip removal writes the URL; the draft
   // resync effect above then clears the matching inputs.
@@ -550,15 +492,6 @@ export default function GameSearch() {
   const advancedCount = chips.filter((c) => c.key !== "q").length;
 
   const total = data?.total ?? 0;
-  const rangeStart = total === 0 ? 0 : filters.offset + 1;
-  const rangeEnd = Math.min(filters.offset + LIMIT, total);
-  // The last offset the API will actually serve for this result set. `total` alone drove
-  // the Next button and it lies about reachability past MAX_OFFSET: with 174,265 matches it
-  // kept Next enabled at offset 10,000, and the click landed on a 422 (production,
-  // 2026-09-01). Deep results are still reachable — by narrowing or re-sorting, which is
-  // what the note below says instead of leaving the reader to guess.
-  const lastOffset = Math.min(MAX_OFFSET, Math.max(0, total - 1));
-  const atPagingCap = filters.offset + LIMIT > lastOffset && total > filters.offset + LIMIT;
 
   return (
     <div className="flex flex-col gap-4">
@@ -568,21 +501,14 @@ export default function GameSearch() {
 
       {/* Large blueprint search field (4e): Lucide search glyph, accent caret, result count
           right in paper 55%. */}
-      <div className="blueprint flex items-center gap-3 px-[18px] py-3" style={{ borderColor: "var(--border-strong)" }}>
-        <i className="bp-corner" />
-        <SearchIcon className="shrink-0 text-brand" />
-        <input
-          type="search"
-          value={drafts.q}
-          onChange={setDraft("q")}
-          placeholder="Search by name…"
-          aria-label="Search games by name"
-          className="min-w-0 flex-1 bg-transparent text-[15px] text-ink-primary outline-none caret-brand placeholder:text-ink-muted"
-        />
-        <span className="shrink-0 whitespace-nowrap text-xs text-ink-muted">
-          {isLoading ? "…" : `${total.toLocaleString()} match${total === 1 ? "" : "es"}`}
-        </span>
-      </div>
+      <SearchBar
+        value={drafts.q}
+        onChange={(q) => setDrafts((d) => ({ ...d, q }))}
+        placeholder="Search by name…"
+        ariaLabel="Search games by name"
+        total={total}
+        loading={isLoading}
+      />
 
       {/* Filter chip row (4e): active filters as accent chips + "sorted by …" caption right —
           exactly what's pictured, plus one addition the mock doesn't draw: "More filters",
@@ -590,73 +516,39 @@ export default function GameSearch() {
           price, rating, Metacritic, revenue, year range, publishing, indie) now lives behind.
           Rather than sit those controls in an unpictured row between the search field and this
           one, they're collapsed into the panel directly below, off by default. */}
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        {chips.length > 0 && (
+      <FilterBar
+        chips={chips.map((c) => ({ key: c.key, label: c.label, onClear: () => patchParams(c.clear) }))}
+        onClearAll={() =>
+          patchParams({
+            q: null, genre: null, tag: null, min_reviews: null, window: null,
+            price_min: null, price_max: null, min_positive: null, min_revenue: null,
+            min_metacritic: null,
+            after: null, before: null, self_pub: null, indie: null,
+          })
+        }
+        trailing={
           <>
-            <span className="text-ink-muted">Filter:</span>
-            {chips.map((c) => (
-              <FilterChip key={c.key} label={c.label} onClear={() => patchParams(c.clear)} />
-            ))}
             <button
               type="button"
-              onClick={() =>
-                patchParams({
-                  q: null, genre: null, tag: null, min_reviews: null, window: null,
-                  price_min: null, price_max: null, min_positive: null, min_revenue: null,
-                  min_metacritic: null,
-                  after: null, before: null, self_pub: null, indie: null,
-                })
-              }
-              className="text-ink-muted underline decoration-dotted hover:text-ink-primary"
+              onClick={() => setMoreOpen((o) => !o)}
+              aria-expanded={moreOpen}
+              className={clsx(
+                "inline-flex items-center gap-1.5 border px-2.5 py-1 text-[11px] font-medium transition-colors",
+                moreOpen || advancedCount > 0
+                  ? "border-brand text-brand"
+                  : "border-chartborder text-ink-muted hover:text-ink-secondary",
+              )}
             >
-              Clear all
+              More filters
+              {advancedCount > 0 && (
+                <span className="bg-brand-tint px-1.5 text-[10px] font-semibold text-brand">{advancedCount}</span>
+              )}
+              <span aria-hidden className="text-[10px]">{moreOpen ? "▲" : "▼"}</span>
             </button>
+            <SortControl keys={SORT_KEYS} labels={SORT_LABELS} sort={filters.sort} order={filters.order} onSort={toggleSort} />
           </>
-        )}
-        <span className="ml-auto flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => setMoreOpen((o) => !o)}
-            aria-expanded={moreOpen}
-            className={clsx(
-              "inline-flex items-center gap-1.5 border px-2.5 py-1 text-[11px] font-medium transition-colors",
-              moreOpen || advancedCount > 0
-                ? "border-brand text-brand"
-                : "border-chartborder text-ink-muted hover:text-ink-secondary",
-            )}
-          >
-            More filters
-            {advancedCount > 0 && (
-              <span className="bg-brand-tint px-1.5 text-[10px] font-semibold text-brand">{advancedCount}</span>
-            )}
-            <span aria-hidden className="text-[10px]">{moreOpen ? "▲" : "▼"}</span>
-          </button>
-          <span className="flex items-center gap-1.5 text-ink-muted">
-            sorted by
-            <select
-              value={filters.sort}
-              onChange={(e) => toggleSort(e.target.value as GameSortKey)}
-              aria-label="Sort by"
-              className="cursor-pointer bg-transparent text-ink-secondary outline-none hover:text-ink-primary"
-            >
-              {SORT_KEYS.map((k) => (
-                <option key={k} value={k}>
-                  {SORT_LABELS[k]}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={() => toggleSort(filters.sort)}
-              title={`Currently sorted ${filters.order === "desc" ? "highest first" : "lowest first"} — click to flip`}
-              className="text-ink-secondary hover:text-ink-primary"
-              aria-label="Toggle sort direction"
-            >
-              {filters.order === "desc" ? "▼" : "▲"}
-            </button>
-          </span>
-        </span>
-      </div>
+        }
+      />
 
       {/* Every filter not pictured in 4e, quick or advanced, behind the one explicit control
           above — off by default so the page opens on exactly what the mock draws. */}
@@ -763,47 +655,33 @@ export default function GameSearch() {
           />
         )}
         {data && data.items.length > 0 && (
-          <div className="border-b border-line-grid">
-            {/* Column headers. 4e draws none — it shows one annotated row on a designer's
-                canvas, where "86% · 9.8M / $464.6M / 841.9K live" is legible because the
-                annotations are on the artboard. Shipped, they aren't: a cold visitor got
-                four unlabelled numbers and an <h1> that is sr-only, so the page had no
-                visible title either (measured on production 2026-09-01). /studios and
-                /niches both label every metric column and explain it on hover; this page
-                was the outlier, so it borrows their pattern rather than inventing one.
-                Widths/gaps mirror the metric group below EXACTLY — change one, change both.
-                sm-only for the same reason the row itself stacks below sm: there is no
-                column layout to head there. */}
-            <div
-              className="hidden items-center gap-4 px-1 pb-2 text-[11px] uppercase tracking-[0.08em] text-ink-secondary sm:flex"
-              style={{ fontFamily: HEADING_FONT }}
-            >
-              <span className="flex-1">Game</span>
-              <div className="flex items-center justify-end gap-4">
-                <span
-                  className="w-[90px] shrink-0"
-                  title="Share of reviews that are positive, then the total review count backing it."
-                >
-                  Rating · reviews
-                </span>
-                <span
-                  className="w-20 shrink-0"
-                  title="Estimated gross lifetime revenue: review count × a genre-fitted owners-per-review ratio × launch price. An estimate, not reported sales."
-                >
-                  Est. gross
-                </span>
-                <span
-                  className="w-[70px] shrink-0"
-                  title="Concurrent players at the latest nightly sample — a point reading, not a daily peak."
-                >
-                  Live players
-                </span>
-                <span className="w-6 shrink-0 text-center" title="Add to the compare tray.">
-                  <span className="sr-only">Compare</span>
-                  <span aria-hidden>+</span>
-                </span>
-              </div>
-            </div>
+          <ResultList>
+            {/* Column headers (see ResultHeader for why 4e's header-less rows grew them).
+                Widths/gaps mirror the metric group below EXACTLY — change one, change both. */}
+            <ResultHeader lead="Game">
+              <span
+                className="w-[90px] shrink-0"
+                title="Share of reviews that are positive, then the total review count backing it."
+              >
+                Rating · reviews
+              </span>
+              <span
+                className="w-20 shrink-0"
+                title="Estimated gross lifetime revenue: review count × a genre-fitted owners-per-review ratio × launch price. An estimate, not reported sales."
+              >
+                Est. gross
+              </span>
+              <span
+                className="w-[70px] shrink-0"
+                title="Concurrent players at the latest nightly sample — a point reading, not a daily peak."
+              >
+                Live players
+              </span>
+              <span className="w-6 shrink-0 text-center" title="Add to the compare tray.">
+                <span className="sr-only">Compare</span>
+                <span aria-hidden>+</span>
+              </span>
+            </ResultHeader>
             {data.items.map((g, i) => {
               const isTop = i === 0 && filters.offset === 0;
               const metaParts = [
@@ -811,135 +689,71 @@ export default function GameSearch() {
                 fmtReleaseMonthYear(g.release_date, g.release_year),
               ].filter((p) => p && p !== "—");
               return (
-                <div
+                <ResultRow
                   key={g.appid}
-                  onClick={() => navigate(`/games/${g.appid}`)}
-                  // Capsule+name and the metric group stack on narrow viewports (below `sm`)
-                  // instead of clipping — the 4e mock (an 880px desktop canvas) doesn't specify
-                  // mobile behavior, so this is an extrapolation, not a pictured requirement.
-                  className="flex cursor-pointer flex-col gap-2 border-t border-line-grid px-1 py-3.5 transition-colors hover:bg-surface2 sm:flex-row sm:items-center sm:gap-4"
-                >
-                  <div className="flex min-w-0 items-center gap-4 sm:flex-1">
-                    {g.header_image ? (
-                      <img
-                        src={g.header_image}
-                        alt=""
-                        loading="lazy"
-                        className="h-[45px] w-24 shrink-0 object-cover"
+                  onOpen={() => navigate(`/games/${g.appid}`)}
+                  lead={
+                    <>
+                      {g.header_image ? (
+                        <img
+                          src={g.header_image}
+                          alt=""
+                          loading="lazy"
+                          className="h-[45px] w-24 shrink-0 object-cover"
+                        />
+                      ) : (
+                        <span aria-hidden className="h-[45px] w-24 shrink-0" style={placeholderStripeStyle} />
+                      )}
+                      <ResultTitle
+                        to={`/games/${g.appid}`}
+                        name={g.name ?? `App ${g.appid}`}
+                        meta={metaParts.length > 0 ? metaParts.join(" · ") : "—"}
                       />
-                    ) : (
-                      <span aria-hidden className="h-[45px] w-24 shrink-0" style={placeholderStripeStyle} />
-                    )}
-                    {/* A real link (not a navigate() button) so middle-click / cmd-click
-                        "open in new tab" works — opening several candidates in tabs IS the
-                        research workflow. */}
-                    <Link
-                      to={`/games/${g.appid}`}
-                      onClick={(e) => e.stopPropagation()}
-                      className="min-w-0 flex-1"
-                    >
+                    </>
+                  }
+                  metrics={
+                    <>
+                      <span className="w-[90px] shrink-0 text-[13px] text-ink-primary">
+                        {fmtPct(g.positive_ratio, 0)} · {fmtCompact(g.total_reviews)}
+                      </span>
+                      <RevenueCell top={isTop}>{fmtRevenue(g.est_rev_reviews, g.price_initial === 0)}</RevenueCell>
+                      {/* The 4e mock shows a "players 7d ▲/▼" verdict; the search API doesn't
+                          expose a 7-day trend (only a point-in-time live count), so this shows
+                          the real current count instead of fabricating a change figure. */}
                       <span
-                        className="block truncate text-[17px] font-semibold text-ink-primary hover:text-brand hover:underline"
-                        style={{ fontFamily: HEADING_FONT }}
+                        className="w-[70px] shrink-0 text-[13px] text-ink-muted"
+                        title="Live players right now — a 7-day trend isn't available from this endpoint."
                       >
-                        {g.name ?? `App ${g.appid}`}
+                        {g.live_players != null ? `${fmtCompact(g.live_players)} live` : "—"}
                       </span>
-                      <span className="block truncate text-xs text-ink-secondary">
-                        {metaParts.length > 0 ? metaParts.join(" · ") : "—"}
-                      </span>
-                    </Link>
-                  </div>
-                  <div className="flex items-center justify-between gap-4 sm:ml-auto sm:w-auto sm:shrink-0 sm:justify-end">
-                    <span className="w-[90px] shrink-0 text-[13px] text-ink-primary">
-                      {fmtPct(g.positive_ratio, 0)} · {fmtCompact(g.total_reviews)}
-                    </span>
-                    <span
-                      className={clsx("w-20 shrink-0 truncate text-[16px] font-semibold", isTop ? "text-brand" : "text-ink-primary")}
-                      style={{ fontFamily: HEADING_FONT }}
-                    >
-                      {fmtRevenue(g.est_rev_reviews, g.price_initial === 0)}
-                    </span>
-                    {/* The 4e mock shows a "players 7d ▲/▼" verdict; the search API doesn't
-                        expose a 7-day trend (only a point-in-time live count), so this shows
-                        the real current count instead of fabricating a change figure. */}
-                    <span
-                      className="w-[70px] shrink-0 text-[13px] text-ink-muted"
-                      title="Live players right now — a 7-day trend isn't available from this endpoint."
-                    >
-                      {g.live_players != null ? `${fmtCompact(g.live_players)} live` : "—"}
-                    </span>
-                    <CompareCell g={g} />
-                  </div>
-                </div>
+                      <CompareCell g={g} />
+                    </>
+                  }
+                />
               );
             })}
-          </div>
+          </ResultList>
         )}
       </div>
 
       {/* Quick tag pivots sourced from this page's own results — not pictured in 4e (which
           ends at the result rows), so this sits below them rather than between the chip row
           and the list. */}
-      {tagChips.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5 text-xs">
-          <span className="text-ink-muted">Tags in these results:</span>
-          {tagChips.map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => patchParams({ tag: t })}
-              className={clsx(
-                "border px-2 py-0.5 text-[10px] font-medium transition-colors",
-                filters.tag === t
-                  ? "border-brand text-brand"
-                  : "border-chartborder text-ink-muted hover:border-borderstrong hover:text-ink-secondary",
-              )}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
-      )}
+      <ResultChipRow
+        label="Tags in these results:"
+        items={tagChips}
+        active={filters.tag}
+        onPick={(t) => patchParams({ tag: t })}
+      />
 
       {data && (
-        <div className="flex items-center justify-between border-t border-chartborder pt-3 text-xs text-ink-muted">
-          <span>
-            {total > 0 ? `${rangeStart.toLocaleString()}–${rangeEnd.toLocaleString()} of ${total.toLocaleString()}` : "0 results"}
-            {atPagingCap && (
-              <span className="ml-2 text-ink-secondary">
-                paging stops at {MAX_OFFSET.toLocaleString()} — narrow the filters or change the sort to reach the rest
-              </span>
-            )}
-          </span>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              disabled={filters.offset === 0}
-              onClick={() =>
-                patchParams(
-                  { offset: filters.offset - LIMIT > 0 ? String(filters.offset - LIMIT) : null },
-                  { keepOffset: true },
-                )
-              }
-              className="border border-chartborder px-2.5 py-1 font-medium text-ink-secondary transition-colors hover:bg-surface2 hover:text-ink-primary disabled:opacity-45 disabled:hover:bg-transparent"
-            >
-              Prev
-            </button>
-            <button
-              type="button"
-              disabled={filters.offset + LIMIT >= total || filters.offset + LIMIT > lastOffset}
-              onClick={() =>
-                patchParams(
-                  { offset: String(Math.min(filters.offset + LIMIT, lastOffset)) },
-                  { keepOffset: true },
-                )
-              }
-              className="border border-chartborder px-2.5 py-1 font-medium text-ink-secondary transition-colors hover:bg-surface2 hover:text-ink-primary disabled:opacity-45 disabled:hover:bg-transparent"
-            >
-              Next
-            </button>
-          </div>
-        </div>
+        <ResultsFooter
+          total={total}
+          offset={filters.offset}
+          limit={LIMIT}
+          // Page 1 has no ?offset= — the URL stays clean and identical to a fresh /games.
+          onPage={(offset) => patchParams({ offset: offset > 0 ? String(offset) : null }, { keepOffset: true })}
+        />
       )}
     </div>
   );
