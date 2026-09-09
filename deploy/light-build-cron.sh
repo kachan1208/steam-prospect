@@ -102,7 +102,9 @@ cd /root/prospect/etl || exit 1
 # this script never did — and each of the three killed runs left ~3.9 GB of temp behind. The
 # same 10GiB runaway budget the nightly uses; a build that needs more than that is broken, not
 # big, and should fail on its own budget rather than fill the volume the nightly needs.
-if PROSPECT_DUCKDB_MEMORY_LIMIT=1700MB PROSPECT_DUCKDB_TEMP_MAX=10GiB PYTHONUNBUFFERED=1 \
+# Post-resize numbers (2026-09-09, 8 GB / 4 vCPU / 160 GB): DuckDB 3500MB, spill 40GiB. The
+# history above is the 3.9 GB era.
+if PROSPECT_DUCKDB_MEMORY_LIMIT=3500MB PROSPECT_DUCKDB_TEMP_MAX=40GiB PYTHONUNBUFFERED=1 \
     timeout 14400 "${NICE[@]}" \
       /root/prospect/etl/.venv/bin/python -u build_marts.py \
       --source /root/steam-scraper/steam_games.db \

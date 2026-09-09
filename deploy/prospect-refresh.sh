@@ -26,7 +26,13 @@ export PATH=/root/steam-scraper/.venv/bin:/root/.local/bin:$PATH
 # This target still bounds DuckDB's own pool and its spill (PROSPECT_DUCKDB_TEMP_MAX below);
 # the rest pages onto the 4 GB swapfile as it always did. The keepers never overlap the ETL by
 # schedule (06:00/06:15 vs 21:00-05:08).
-export PROSPECT_DUCKDB_MEMORY_LIMIT=2500MB
+#
+# RESIZED BOX (2026-09-09): the droplet is now 8 GB RAM / 4 vCPU / 160 GB disk. Everything
+# above describes the 3.9 GB era and is kept as the record of why each number existed. The
+# post-resize set: DuckDB 5000MB (leaves ~3 GB for the app, the OS and a keeper if one ever
+# overlaps), spill cap 40GiB and disk floors 30/10 GB on a volume with ~100 GB free. DuckDB
+# uses all four cores by default, so no threads knob is needed.
+export PROSPECT_DUCKDB_MEMORY_LIMIT=5000MB
 # Cap the SPILL too (2026-08-31). max_temp_directory_size defaults to all free disk, so the
 # 08-30 nightly spilled 20.6GB until the volume was full, then died after 5.35h with nothing
 # built. The cap leaves room for the two retained marts (~2.3GB each), the scraper's SQLite +
@@ -41,7 +47,7 @@ export PROSPECT_DUCKDB_MEMORY_LIMIT=2500MB
 # on this corpus is nowhere near 10GiB on a normal night (the aspect mart's is ~3-4 GB; the
 # 18-20 GB figures were wipe-night sentiment windows, now bounded by the pool cap), so 10GiB
 # is still a runaway budget, not a working one.
-export PROSPECT_DUCKDB_TEMP_MAX=10GiB
+export PROSPECT_DUCKDB_TEMP_MAX=40GiB   # post-resize (2026-09-09): still a runaway budget on 160 GB
 # Stop the sentiment phase from running into the `timeout 21600` below (2026-09-02). A full
 # rescore (a SENTIMENT_CACHE_VERSION bump wipes the cache, so the "delta" becomes all 24.4M
 # reviews) is ~52h of scoring at the droplet's measured ~116 mention-rows/s — it CANNOT finish
@@ -97,7 +103,7 @@ export PYTHONUNBUFFERED=1
 # ~1 GB the scrapes add first. Moved together with PROSPECT_DUCKDB_TEMP_MAX (12 -> 10GiB):
 # 10GiB spill + ~2.3 GB mart + WAL growth < 18 GB. A third refusal in a row for a 1 GB gap is
 # not what the gate is for; it exists to stop the 08-30 disk fill, and the cap does that.
-DISK_MIN_FREE_GB=${PROSPECT_DISK_MIN_FREE_GB:-18}
+DISK_MIN_FREE_GB=${PROSPECT_DISK_MIN_FREE_GB:-30}   # post-resize (2026-09-09): 160 GB volume
 # The SCRAPE floor is separate and far lower (2026-09-08). The first preflight gated the whole
 # run on the ETL's 21-25 GB need, and three refused nights in a row also cancelled every
 # collector: no news, no CCU samples, no follower or price snapshots since 2026-09-02 — the
@@ -105,7 +111,7 @@ DISK_MIN_FREE_GB=${PROSPECT_DISK_MIN_FREE_GB:-18}
 # writes a few hundred MB a night and needs nothing like the ETL's budget, so the run now
 # starts whenever the disk can take the scrapes, and only the ETL step is refused at the floor
 # above. 5 GB is the point below which even SQLite's WAL checkpoint is at risk.
-SCRAPE_MIN_FREE_GB=${PROSPECT_DISK_MIN_FREE_GB_SCRAPE:-5}
+SCRAPE_MIN_FREE_GB=${PROSPECT_DISK_MIN_FREE_GB_SCRAPE:-10}   # post-resize (2026-09-09)
 
 LOG=/var/log/prospect-refresh.log
 HISTORY=/root/prospect/data/refresh_history.json   # the run ledger (JSONL) the Data log page reads
