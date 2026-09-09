@@ -1,7 +1,18 @@
 import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import clsx from "clsx";
-import { Bar, BarChart, CartesianGrid, Cell, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  ReferenceArea,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import { AspectDivergingBars } from "../components/charts/AspectDivergingBars";
 import { ChannelShareBars } from "../components/charts/ChannelShareBars";
@@ -50,6 +61,8 @@ import { markerMonths } from "../lib/notable";
 import { CSS_VAR, MONO} from "../lib/palette";
 import { usePageTitle } from "../lib/usePageTitle";
 import { useDetailView } from "../lib/viewMode";
+import { useDragZoom } from "../lib/useDragZoom";
+import { SELECTION_AREA_PROPS, ZoomFrame } from "../components/charts/ZoomFrame";
 
 const CONDENSED: CSSProperties = { fontFamily: '"Barlow Condensed", "Barlow", system-ui, sans-serif' };
 
@@ -340,10 +353,16 @@ function ReviewVelocityBars({
     ),
   ].sort();
 
+  // Drag a range to zoom (lib/useDragZoom). Event markers are narrowed to the visible
+  // months: a ReferenceLine whose category is off the sliced axis has nowhere to stand.
+  const zoom = useDragZoom(points, "period");
+  const visibleMonths = new Set(zoom.data.map((d) => d.period));
+
   return (
     <div>
-      <ResponsiveContainer width="100%" height={150}>
-        <BarChart data={points} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+      <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+        <ResponsiveContainer width="100%" height={150}>
+          <BarChart data={zoom.data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
           <CartesianGrid stroke="var(--gridline)" vertical={false} />
           <XAxis
             dataKey="period"
@@ -364,7 +383,7 @@ function ReviewVelocityBars({
             width={40}
             allowDecimals={false}
           />
-          {eventMarker && (
+          {eventMarker && visibleMonths.has(eventMarker.period) && (
             <ReferenceLine
               x={eventMarker.period}
               stroke="var(--text-primary)"
@@ -377,7 +396,7 @@ function ReviewVelocityBars({
               }}
             />
           )}
-          {eventMonths.map((month) => (
+          {eventMonths.filter((m) => visibleMonths.has(m)).map((month) => (
             <ReferenceLine
               key={`ev-${month}`}
               x={month}
@@ -416,8 +435,12 @@ function ReviewVelocityBars({
               <Cell key={p.period} fill={p.period === peak.period ? "var(--brand)" : BAR_MUTED} />
             ))}
           </Bar>
-        </BarChart>
-      </ResponsiveContainer>
+          {zoom.selection && (
+            <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />
+          )}
+          </BarChart>
+        </ResponsiveContainer>
+      </ZoomFrame>
       <p className="mt-2 text-[11px] italic text-ink-muted">
         Highlighted: {monthLabel(peak.period)} — the highest-volume month of reviews since launch.
       </p>

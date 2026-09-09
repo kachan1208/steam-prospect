@@ -1,8 +1,19 @@
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ReferenceArea,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import type { PressTimelinePoint } from "../../lib/api";
 import { fmtInt } from "../../lib/format";
 import { CSS_VAR } from "../../lib/palette";
+import { useDragZoom } from "../../lib/useDragZoom";
+import { SELECTION_AREA_PROPS, ZoomFrame } from "./ZoomFrame";
 import { TooltipPanel } from "./TooltipPanel";
 
 /**
@@ -13,6 +24,8 @@ import { TooltipPanel } from "./TooltipPanel";
  * mentions), just by source vs. by month, so they should read as one measure, not two.
  */
 export function PressTimelineChart({ points }: { points: PressTimelinePoint[] }) {
+  // Before the empty guard: useDragZoom is a hook, so it must run on every render.
+  const zoom = useDragZoom(points, "period");
   if (points.length === 0) {
     return (
       <div className="flex h-32 items-center justify-center text-xs text-ink-muted">
@@ -21,8 +34,9 @@ export function PressTimelineChart({ points }: { points: PressTimelinePoint[] })
     );
   }
   return (
-    <ResponsiveContainer width="100%" height={180}>
-      <BarChart data={points} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+    <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+      <ResponsiveContainer width="100%" height={180}>
+        <BarChart data={zoom.data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
         <CartesianGrid stroke="var(--gridline)" vertical={false} />
         <XAxis
           dataKey="period"
@@ -54,7 +68,11 @@ export function PressTimelineChart({ points }: { points: PressTimelinePoint[] })
           }}
         />
         <Bar dataKey="n_mentions" fill={CSS_VAR.competition} radius={[4, 4, 0, 0]} maxBarSize={20} />
-      </BarChart>
-    </ResponsiveContainer>
+        {zoom.selection && (
+          <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />
+        )}
+        </BarChart>
+      </ResponsiveContainer>
+    </ZoomFrame>
   );
 }
