@@ -457,6 +457,12 @@ export default function NicheDetail() {
   const detailQ = useNicheDetail(dimension ?? "tag", dimension ? nicheKey : null);
   const benchmarksQ = useMarketBenchmarks();
   const detail = detailQ.data;
+  // Drag-to-zoom for the two charts inlined in this render (the yearly demand/pipeline
+  // panel and the full-history players line). Their hooks live up here, above every
+  // early return below, because a hook that runs only on the loaded frame changes hook
+  // order between renders. Optional chaining keeps them harmless while the query is out.
+  const yearZoom = useDragZoom(detail?.saturation_trend ?? [], "year");
+  const playersMonthlyZoom = useDragZoom(detail?.players?.monthly ?? [], "month");
 
   // The cut shown is whatever the URL asks for, falling back to the nearest materialized
   // variant — the mart only builds a handful of (window × min_reviews) combinations.
@@ -1090,8 +1096,9 @@ export default function NicheDetail() {
                   const partialYear = partialTrendYear(detail.saturation_trend);
                   return (
                     <>
-                      <ResponsiveContainer width="100%" height={180}>
-                        <LineChart data={detail.saturation_trend} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                      <ZoomFrame zoomed={yearZoom.zoomed} dragging={yearZoom.dragging} onReset={yearZoom.reset}>
+                        <ResponsiveContainer width="100%" height={180}>
+                          <LineChart data={yearZoom.data} margin={{ top: 4, right: 4, left: 0, bottom: 0 }} {...yearZoom.handlers}>
                           <CartesianGrid stroke="var(--gridline)" vertical={false} />
                           <XAxis
                             dataKey="year"
@@ -1183,8 +1190,12 @@ export default function NicheDetail() {
                             strokeDasharray="4 3"
                             dot={false}
                           />
-                        </LineChart>
-                      </ResponsiveContainer>
+                          {yearZoom.selection && (
+                            <ReferenceArea yAxisId="revenue" x1={yearZoom.selection.x1} x2={yearZoom.selection.x2} {...SELECTION_AREA_PROPS} />
+                          )}
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </ZoomFrame>
                       <p className="mt-2 text-[11px] text-ink-muted">
                         Two units, two scales — the left axis is dollars, the right is a count of releases. Where the
                         lines cross means nothing; only each line&apos;s own slope does.
@@ -1378,8 +1389,9 @@ export default function NicheDetail() {
                     <div className="mb-1 text-xs text-ink-muted">
                       Niche audience over the years — summed monthly average players
                     </div>
-                    <ResponsiveContainer width="100%" height={150}>
-                      <LineChart data={players!.monthly} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
+                    <ZoomFrame zoomed={playersMonthlyZoom.zoomed} dragging={playersMonthlyZoom.dragging} onReset={playersMonthlyZoom.reset}>
+                      <ResponsiveContainer width="100%" height={150}>
+                        <LineChart data={playersMonthlyZoom.data} margin={{ top: 6, right: 8, left: 0, bottom: 0 }} {...playersMonthlyZoom.handlers}>
                         <CartesianGrid stroke="var(--gridline)" vertical={false} />
                         <XAxis
                           dataKey="month"
@@ -1435,8 +1447,12 @@ export default function NicheDetail() {
                           strokeWidth={2}
                           dot={false}
                         />
-                      </LineChart>
-                    </ResponsiveContainer>
+                        {playersMonthlyZoom.selection && (
+                          <ReferenceArea x1={playersMonthlyZoom.selection.x1} x2={playersMonthlyZoom.selection.x2} {...SELECTION_AREA_PROPS} />
+                        )}
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </ZoomFrame>
                     <p className="mt-1 text-[11px] italic text-ink-muted">
                       Historical monthly averages via steamcharts.com, summed over the niche's measured games — covers
                       the top ~8k games by reviews only, so this is the niche's HEAD, and rising coverage over the years

@@ -414,6 +414,11 @@ function LivePlayersDrilldown({
   const useDaily = dailyPoints.length > 0;
   const summary = daily?.summary ?? null;
   const trendPct = summary?.players_trend_7d_pct ?? null;
+  // The panel swaps between a nightly-sample series and a monthly fallback with different
+  // x keys, so each alternative carries its own range; both hooks run every render and the
+  // rendered branch picks one.
+  const dailyZoom = useDragZoom(dailyPoints, "date");
+  const ccuMonthZoom = useDragZoom(points, "period");
   // The full-history panel is its own series (monthly averages, not the nightly sample),
   // so it carries its own range. The daily/monthly toggle above stays unzoomed: it swaps
   // between two series with different x keys, and a range dragged on one cannot survive
@@ -429,7 +434,7 @@ function LivePlayersDrilldown({
           </div>
           <ResponsiveContainer width="100%" height={168}>
             {useDaily ? (
-              <LineChart data={dailyPoints} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+              <LineChart data={dailyZoom.data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} {...dailyZoom.handlers}>
                 <CartesianGrid stroke="var(--gridline)" vertical={false} />
                 <XAxis {...XAXIS_PROPS} dataKey="date" tickFormatter={(v: string) => v.slice(5)} />
                 <YAxis
@@ -461,9 +466,12 @@ function LivePlayersDrilldown({
                   strokeWidth={1.5}
                   dot={dailyPoints.length <= 45 ? { r: 2.5, fill: CSS_VAR.demand, strokeWidth: 0 } : false}
                 />
+                {dailyZoom.selection && (
+                  <ReferenceArea x1={dailyZoom.selection.x1} x2={dailyZoom.selection.x2} {...SELECTION_AREA_PROPS} />
+                )}
               </LineChart>
             ) : (
-              <LineChart data={points} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+              <LineChart data={ccuMonthZoom.data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} {...ccuMonthZoom.handlers}>
                 <CartesianGrid stroke="var(--gridline)" vertical={false} />
                 <XAxis {...XAXIS_PROPS} />
                 <YAxis
@@ -502,6 +510,9 @@ function LivePlayersDrilldown({
                   strokeWidth={1.5}
                   dot={{ r: 3, fill: CSS_VAR.demand, strokeWidth: 0 }}
                 />
+                {ccuMonthZoom.selection && (
+                  <ReferenceArea x1={ccuMonthZoom.selection.x1} x2={ccuMonthZoom.selection.x2} {...SELECTION_AREA_PROPS} />
+                )}
               </LineChart>
             )}
           </ResponsiveContainer>

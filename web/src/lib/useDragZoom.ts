@@ -45,8 +45,16 @@ export interface DragZoom<T> {
   zoomed: boolean;
   /** True mid-drag; the caller sets `select-none` so the drag does not select text. */
   dragging: boolean;
-  /** The in-progress selection as category labels, for a `<ReferenceArea x1 x2>`. */
-  selection: { x1: string; x2: string } | null;
+  /**
+   * The in-progress selection, for a `<ReferenceArea x1 x2>`.
+   *
+   * These carry the category's ORIGINAL type, not a stringified copy. Half these axes are
+   * numeric (`year`), and Recharts matches a ReferenceArea's x against the axis domain by
+   * value: handing it "2014" for a domain of 2014 positions nothing, so the band silently
+   * never drew on those charts while the zoom itself still worked — which read as the drag
+   * doing nothing at all.
+   */
+  selection: { x1: string | number; x2: string | number } | null;
   /** Spread onto the Recharts chart element. */
   handlers: {
     onMouseDown: (e: ChartMouseEvent) => void;
@@ -65,8 +73,10 @@ export interface DragZoom<T> {
  */
 export function useDragZoom<T>(data: T[], xKey: keyof T & string): DragZoom<T> {
   const [range, setRange] = useState<[number, number] | null>(null);
-  const [anchor, setAnchor] = useState<string | null>(null);
-  const [cursor, setCursor] = useState<string | null>(null);
+  // Raw category values, not stringified: the ReferenceArea below needs the axis's own
+  // type to position itself (see `selection`). Comparisons go through String().
+  const [anchor, setAnchor] = useState<string | number | null>(null);
+  const [cursor, setCursor] = useState<string | number | null>(null);
 
   const visible = useMemo(
     () => (range ? data.slice(range[0], range[1] + 1) : data),
@@ -110,8 +120,8 @@ export function useDragZoom<T>(data: T[], xKey: keyof T & string): DragZoom<T> {
   const onMouseDown = useCallback((e: ChartMouseEvent) => {
     const label = e?.activeLabel;
     if (label == null) return;
-    setAnchor(String(label));
-    setCursor(String(label));
+    setAnchor(label);
+    setCursor(label);
   }, []);
 
   const onMouseMove = useCallback(
@@ -119,7 +129,7 @@ export function useDragZoom<T>(data: T[], xKey: keyof T & string): DragZoom<T> {
       if (anchor === null) return;
       const label = e?.activeLabel;
       if (label == null) return;
-      setCursor(String(label));
+      setCursor(label);
     },
     [anchor],
   );
@@ -130,8 +140,9 @@ export function useDragZoom<T>(data: T[], xKey: keyof T & string): DragZoom<T> {
       setCursor(null);
       return;
     }
-    let i = visible.findIndex((row) => String(row[xKey]) === anchor);
-    let j = visible.findIndex((row) => String(row[xKey]) === cursor);
+    const key = (row: T) => String(row[xKey]);
+    let i = visible.findIndex((row) => key(row) === String(anchor));
+    let j = visible.findIndex((row) => key(row) === String(cursor));
     setAnchor(null);
     setCursor(null);
     if (i < 0 || j < 0) return;
@@ -149,7 +160,7 @@ export function useDragZoom<T>(data: T[], xKey: keyof T & string): DragZoom<T> {
   }, []);
 
   const selection =
-    anchor !== null && cursor !== null && anchor !== cursor
+    anchor !== null && cursor !== null && String(anchor) !== String(cursor)
       ? { x1: anchor, x2: cursor }
       : null;
 
