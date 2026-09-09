@@ -525,15 +525,17 @@ export default function Docs() {
         >
           <p>
             Ranks every Steam community tag and genre by the{" "}
-            <span className="text-ink-primary">Opportunity score</span> (explained in full below), alongside the
-            evidence you should check before believing it: how many games compete there, what the successful ones earn
-            (P90 revenue), how big the total audience is (owners), <span className="text-ink-primary">who is actually
-            playing right now</span> (live concurrent players, updated nightly, with a 7-day trend), and whether the
-            release pipeline is growing or shrinking. Click any niche for the deep dive, in the order the page actually
-            presents it: the stat tiles, demand-vs-pipeline by year, the score breakdown (headed{" "}
-            <span className="text-ink-primary">“Why”</span> plus that niche's score), the niche's top games, and then
-            the <span className="text-ink-primary">“Read this first”</span> flags that argue against the score.
-            Switching that page to <span className="text-ink-primary">Detailed</span> adds live-player history, revenue
+            <span className="text-ink-primary">Opportunity score</span> (explained in full below) and labels each row
+            with the <span className="text-ink-primary">Radar's verdict</span> — the same words, rules and two axes as
+            the board (demand trend over 24 months, releases year-over-year) — alongside the evidence you should
+            check before believing it: how many games compete there, what the successful ones earn (P90 revenue), how
+            big the total audience is (owners), and <span className="text-ink-primary">who is actually playing right
+            now</span> (live concurrent players, updated nightly, with a 7-day trend). Click any niche for the deep
+            dive, in the order the page actually presents it: the Radar's dossier (verdict, Demand 24m, Releases YoY,
+            P90 revenue, games — the board's own numbers at the board's own cut, with the score as the small rank
+            number the board's tooltip shows), the <span className="text-ink-primary">“Read this first”</span> flags
+            that argue against it, demand-vs-pipeline by year, then the niche's top games. Switching that page to{" "}
+            <span className="text-ink-primary">Detailed</span> adds live-player history, revenue
             spread, hit rates, the saturation trend, what players praise and complain about, press coverage, the
             revenue and price distributions, and the full games table.
           </p>
@@ -565,8 +567,10 @@ export default function Docs() {
               part company on purpose: the ring flags a pipeline growing more than +15%/yr, full stop, while the
               brake flags a pipeline outgrowing <em>demand</em> by that much and then brakes again if recent entrants
               earn below the niche median (a tell that never moves a ring). So a calm ring can sit beside a heavily
-              braked score, and about a quarter of the board does. Hover any ⓘ in the finder for the same math with
-              that row's real numbers.
+              braked score, and about a quarter of the board does. The finder and the deep dive print the score only
+              as the Radar's small rank number; its parts (<Code>momentum</Code>, <Code>market_pull</Code>,{" "}
+              <Code>revenue_spread</Code>, <Code>quality_gap</Code>, <Code>supply_brake</Code>) ride every{" "}
+              <Code>/api/niches</Code> row and the MCP's <Code>find_niches</Code>.
             </p>
             <FormulaFlow />
             <div>
@@ -913,13 +917,14 @@ export default function Docs() {
               months) × review floor (no floor / ≥50 / ≥100) — and a niche needs at least 30 qualifying games in a cut
               to be scored at all. A score is an{" "}
               <span className="text-ink-primary">absolute reading, but a screening one</span>: an 85 means "this niche
-              clears the bars the Radar draws," not "85% likely to succeed." That's why the app always shows the
-              parts, never just the blend.
+              clears the bars the Radar draws," not "85% likely to succeed." That's why the app prints it small,
+              beside the Radar verdict and the two axes it is read from, never as a headline — and why the parts ride
+              every API row and the MCP rather than the pages.
             </p>
             <ReadBox label="Columns that are evidence, not score inputs">
-              The finder still serves the older <Code>demand</Code>, <Code>competition</Code>,{" "}
-              <Code>quality_gap</Code> and <Code>opportunity</Code> columns, plus{" "}
-              <Code>decline_gate</Code>. These are kept because they are useful to inspect and to argue with —{" "}
+              The <Code>/api/niches</Code> rows still carry the older <Code>demand</Code>, <Code>competition</Code>,{" "}
+              <Code>quality_gap</Code> and <Code>opportunity</Code> columns, plus <Code>decline_gate</Code> (the finder
+              no longer draws them). These are kept because they are useful to inspect and to argue with —{" "}
               <span className="text-ink-primary">none of them multiplies or feeds the ranked score</span>.{" "}
               <Code>decline_gate</Code> in particular stopped being a score factor and is now purely a falsification
               tell: a low value is a reason to go and check the saturation trend, not a penalty that has already been

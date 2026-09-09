@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useParams, useSearchParams } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+
+import { EMERGING_DEMAND_LABEL, RING_COLOR, type RadarRing } from "../lib/radarVerdict";
+import { radarListRow, readRadarTooltip } from "../test/radarTooltip";
 
 import NicheDetail, {
   GAMES_PAGE_SIZE,
@@ -216,20 +219,22 @@ describe("selection labels", () => {
 });
 
 /**
- * The Saturation YoY tile sits in the same 4-cell KPI strip as "P90 revenue · N scored games",
- * directly under the window/review-floor controls. Clicking those controls moves the scored-games
- * count (Souls-like, live API: 624 -> 223 -> 177 -> 739 across the six materialized cuts) while
- * the saturation figures never move — saturation_yoy is computed once per dimension+key over the
+ * The Releases YoY tile (the Radar's Y axis; "Saturation YoY" until 2026-09-09) sits in the
+ * headline KPI strip. Clicking the cut controls used to move the neighbouring scored-games count
+ * (Souls-like, live API: 624 -> 223 -> 177 -> 739 across the six materialized cuts) while the
+ * saturation figures never moved — saturation_yoy is computed once per dimension+key over the
  * whole niche with NO review floor (mart_niche.sql's `sat` CTE), and that is deliberate. What is
  * not acceptable is leaving a reader to infer it: two numbers side by side in one row read as one
- * population. So the tile has to disown the controls in its own footnote.
+ * population. So the tile has to disown the controls in its own footnote — and since the whole
+ * strip became the Radar's dossier at the board's pinned cut, the chips move only the panels
+ * BELOW it, which the third test now pins.
  *
  * (This tile already carries scar tissue from the related bug where the percentage and the count
  * came from different populations — n_recent, a 24m AND review-floored count, printed under a
  * two-full-calendar-year percentage. Both numbers asserted below come from the `sat` CTE, so the
  * fix for the tile's basis disclosure cannot reintroduce that shape.)
  */
-describe("NicheDetail — the Saturation YoY tile disowns the cut controls", () => {
+describe("NicheDetail — the Releases YoY tile disowns the cut controls", () => {
   // GET /api/niches/tag/Souls-like, verbatim: six materialized cuts, one saturation figure.
   const VARIANTS = [
     { window: "24m", min_reviews: 0, n_games: 624, opportunity_v2: 57.73 },
@@ -316,30 +321,38 @@ describe("NicheDetail — the Saturation YoY tile disowns the cut controls", () 
 
   it("keeps the percentage and its counts on one population — the sat CTE's, not the cut's", async () => {
     renderNiche();
-    // 346 vs 340 IS +1.76% -> "+2%". The counts printed must be the ones the % divides.
+    // 346 vs 340 IS +1.76% -> "+2%", printed as the Radar's tooltip prints it (fmtSigned at 0
+    // decimals, no glyph). The counts printed must be the ones the % divides.
     expect(await screen.findByText(/346 released last full year vs 340 the year before/)).toBeTruthy();
-    expect(await screen.findByText("▲ +2%")).toBeTruthy();
+    expect(await screen.findByText("+2%")).toBeTruthy();
     // The cut-dependent count lives in the neighbouring tile and must not leak into this one.
     expect(screen.queryByText(/223 released/)).toBeNull();
   });
 
-  it("holds the disclosure while the neighbouring scored-games count moves with the cut", async () => {
+  it("holds the disclosure — and the whole headline — while the panels below move with the cut", async () => {
     renderNiche();
-    expect(await screen.findByText(/223 scored games/)).toBeTruthy();
+    // The Games tile is the Radar's cut (24m × ≥50 = 223), and since 2026-09-09 so is the whole
+    // strip: the chips drive the panels below it ("All N →" on the top-games panel), never the
+    // dossier.
+    const dossier = await screen.findByTestId("radar-dossier");
+    expect(within(dossier).getByText("223")).toBeTruthy();
+    expect(await screen.findByText("All 223 →")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Last 24m · ≥0 reviews" }));
-    expect(await screen.findByText(/624 scored games/)).toBeTruthy();
+    expect(await screen.findByText("All 624 →")).toBeTruthy();
+    expect(within(dossier).getByText("223")).toBeTruthy();
     // Same tile, same three numbers, disclosure still on screen.
     expect(screen.getByText(/346 released last full year vs 340 the year before/)).toBeTruthy();
-    expect(screen.getByText("▲ +2%")).toBeTruthy();
+    expect(screen.getByText("+2%")).toBeTruthy();
     expect(
       screen.getByText(/Whole niche, every review count — this tile ignores the window and review-floor controls above/),
     ).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "All-time · ≥50 reviews" }));
-    expect(await screen.findByText(/739 scored games/)).toBeTruthy();
+    expect(await screen.findByText("All 739 →")).toBeTruthy();
+    expect(within(dossier).getByText("223")).toBeTruthy();
     expect(screen.getByText(/346 released last full year vs 340 the year before/)).toBeTruthy();
-    expect(screen.getByText("▲ +2%")).toBeTruthy();
+    expect(screen.getByText("+2%")).toBeTruthy();
   });
 });
 
@@ -609,12 +622,12 @@ describe("NicheDetail — the overview Top games panel is the SELECTED CUT's top
     const disclosure = /Every measured game in the niche \(798\) — this tile ignores the window and review-floor controls above/;
     expect(await screen.findByText(disclosure)).toBeTruthy();
     expect(screen.getByText(/207\.0K playing now/)).toBeTruthy();
-    expect(screen.getByText(/223 scored games/)).toBeTruthy();
+    expect(screen.getByText("All 223 →")).toBeTruthy();
 
-    // The neighbouring count moves 223 -> 739; the players figure is the same 207.0K over the
-    // same 798 games, and still says so.
+    // The top-games count moves 223 -> 739 with the chip; the players figure is the same 207.0K
+    // over the same 798 games, and still says so.
     fireEvent.click(screen.getByRole("button", { name: "All-time · ≥50 reviews" }));
-    expect(await screen.findByText(/739 scored games/)).toBeTruthy();
+    expect(await screen.findByText("All 739 →")).toBeTruthy();
     expect(screen.getByText(/207\.0K playing now/)).toBeTruthy();
     expect(screen.getByText(disclosure)).toBeTruthy();
   });
@@ -1076,22 +1089,202 @@ describe("NicheDetail — breadcrumb and falsification placement", () => {
     expect(crumb.endsWith("/")).toBe(false);
   });
 
-  it("puts the falsification next to the score it argues with, not at the end of the page", async () => {
+  it("puts the falsification next to the verdict it argues with, not at the end of the page", async () => {
     renderActionRts();
     const warning = await screen.findByText("Read this first");
-    const score = screen.getByText("Opportunity v2");
+    const dossier = screen.getByTestId("radar-dossier");
     const table = screen.getByText("Top games in the niche");
 
     // DOM order stands in for reading order (jsdom has no layout). On production the box sat
-    // at y≈1066 of a 1233px page — BELOW the top-games table — while the OPPORTUNITY V2 87 it
-    // qualifies was at y≈228. Both relations are asserted so moving it too far up (above the
-    // score) fails too.
-    expect(score.compareDocumentPosition(warning) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // at y≈1066 of a 1233px page — BELOW the top-games table — while the headline it qualifies
+    // (then OPPORTUNITY V2 87, now the Radar's "Enter now" dossier) was at y≈228. Both relations
+    // are asserted so moving it too far up (above the dossier) fails too.
+    expect(dossier.compareDocumentPosition(warning) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(warning.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("still says the thing it exists to say", async () => {
     renderActionRts();
     expect(await screen.findByText(/Release pipeline shrinking/)).toBeTruthy();
+  });
+});
+
+/**
+ * THE HEADLINE IS THE RADAR'S DOSSIER (2026-09-09). User: "Opportunity v2 / 77 / after supply
+ * brake ×1.00 is still visible on niches page, it's not consistent with radar, use radar numbers
+ * in niches." The numbers agreed (Action RTS 87 here vs 86.69 on the board's row at the same
+ * cut); the vocabulary didn't. So the strip now prints the board tooltip's rows through
+ * lib/radarVerdict.ts — and the oracle for "the same" is the board itself: src/test/radarTooltip
+ * renders a real RadarBoard around the same row, hovers the dot and reads its tooltip back.
+ */
+describe("NicheDetail — the headline is the Radar's dossier", () => {
+  // The board's list row for Action RTS at its pinned cut (24m × ≥50), as the pool reads it.
+  const RADAR_ROW = radarListRow({ key: "Action RTS" });
+  // The ≥0 cut is a DIFFERENT population — bigger, winner-take-most, a far lower score — so a
+  // headline that followed the chips would visibly change numbers.
+  const OTHER_ROW = radarListRow({
+    key: "Action RTS",
+    min_reviews: 0,
+    n_games: 300,
+    opportunity_v2: 40.2,
+    winner_concentration: 0.95,
+    p90_rev: 2_000_000,
+  });
+
+  function detailOf(variants: object[], tier: string | null = "micro") {
+    return {
+      dimension: "tag",
+      key: "Action RTS",
+      tier,
+      variants,
+      saturation_trend: [],
+      revenue_histogram: [],
+      representative_games: [],
+      players: null,
+      themes: [],
+      press: null,
+      hit_rates: { hit_rate_200k: null, hit_rate_500k: null, median_rev: null, n_games: null, winner_concentration: null },
+    };
+  }
+
+  function stub(detail: object) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        const body = url.includes("/niches/tag/")
+          ? detail
+          : url.includes("/market/benchmarks")
+            ? { cited: { pct_new_releases_over_100k: 0.085, revenue_benchmark_marks: [], dev_tiers: [] } }
+            : {};
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+  }
+
+  function renderNiche(entry = "/niches/tag/Action%20RTS") {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    return render(
+      <QueryClientProvider client={client}>
+        <ThemeProvider>
+          <MemoryRouter initialEntries={[entry]}>
+            <Routes>
+              <Route path={NICHE_ROUTE_PATH} element={<NicheDetail />} />
+            </Routes>
+          </MemoryRouter>
+        </ThemeProvider>
+      </QueryClientProvider>,
+    );
+  }
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("renders the verdict and every axis string exactly as the board's tooltip renders them for the same row", async () => {
+    // The oracle first (it unmounts itself), then the page.
+    const tip = readRadarTooltip(RADAR_ROW);
+    expect(tip.rows["Verdict"]).toBe("Enter now"); // the legend word, read off the real board
+    stub(detailOf([RADAR_ROW, OTHER_ROW]));
+    renderNiche();
+
+    const dossier = await screen.findByTestId("radar-dossier");
+    const chip = within(dossier).getByTestId("radar-verdict-chip");
+    expect(chip.textContent).toBe(tip.rows["Verdict"]);
+    // The chip paints with the board's dot colour — the same token, read off the real dot.
+    const ring = chip.getAttribute("data-verdict") as RadarRing;
+    expect(ring).toBe("enter");
+    expect(RING_COLOR[ring]).toBe(tip.dotFill);
+    // The two axes, P90, games, the small score and the solo share — label for label.
+    for (const label of ["Demand 24m", "Releases YoY", "P90 revenue", "Games", "Opp v2", "Singleplayer share"]) {
+      expect(tip.rows[label], label).toBeTruthy();
+      expect(within(dossier).getByText(tip.rows[label]!), label).toBeTruthy();
+    }
+    expect(tip.rows["Demand 24m"]).toBe("▲ +74.1%");
+    expect(tip.rows["Releases YoY"]).toBe("-7%");
+    expect(tip.rows["Opp v2"]).toBe("86.7");
+    // ...and the verdict's reason, in the board's words.
+    expect(within(dossier).getByText("demand in structural growth, supply not flooding")).toBeTruthy();
+    // On the board, so no absence line; and the link back selects this niche there.
+    expect(within(dossier).queryByText(/Not on the Radar board/)).toBeNull();
+    expect(within(dossier).getByRole("link", { name: "See on the Radar →" }).getAttribute("href")).toBe(
+      "/radar?niche=tag%3AAction+RTS",
+    );
+  });
+
+  it("judges the headline on the Radar's cut whatever chip is lit — the chips drive the panels below", async () => {
+    stub(detailOf([RADAR_ROW, OTHER_ROW]));
+    renderNiche("/niches/tag/Action%20RTS?win=24m&min_reviews=0");
+    const dossier = await screen.findByTestId("radar-dossier");
+    // The URL asked for the ≥0 cut: the panels get it (300 games); the dossier does not.
+    expect(await screen.findByText("All 300 →")).toBeTruthy();
+    expect(within(dossier).getByTestId("radar-verdict-chip").textContent).toBe("Enter now");
+    expect(within(dossier).getByText("86")).toBeTruthy();
+    expect(within(dossier).getByText("86.7")).toBeTruthy();
+    expect(within(dossier).queryByText("40.2")).toBeNull();
+    expect(within(dossier).getByText(/judged at the board.s own cut — last 24 months · ≥50 reviews/)).toBeTruthy();
+
+    // Flipping the chip moves the panel and leaves the headline where it was.
+    fireEvent.click(screen.getByRole("button", { name: "Last 24m · ≥50 reviews" }));
+    expect(await screen.findByText("All 86 →")).toBeTruthy();
+    expect(within(dossier).getByTestId("radar-verdict-chip").textContent).toBe("Enter now");
+    expect(within(dossier).getByText("86.7")).toBeTruthy();
+  });
+
+  it("still judges a niche the board does not draw, and says why it has no dot", async () => {
+    stub(detailOf([radarListRow({ key: "Action RTS", tier: "umbrella" })], "umbrella"));
+    renderNiche();
+    const dossier = await screen.findByTestId("radar-dossier");
+    expect(within(dossier).getByTestId("radar-verdict-chip").textContent).toBe("Enter now");
+    expect(
+      within(dossier).getByText(
+        /Not on the Radar board: it plots micro-genre and theme tags only, and this tag is umbrella tier\./,
+      ),
+    ).toBeTruthy();
+  });
+
+  it("names the solo filter when that is what hides the dot, and opens the lens on the way back", async () => {
+    stub(detailOf([radarListRow({ key: "Action RTS", solo_viability: 0.353 })]));
+    renderNiche();
+    const dossier = await screen.findByTestId("radar-dossier");
+    expect(within(dossier).getByText(/singleplayer share 0\.35 is under the 0\.8 solo-friendly bar/)).toBeTruthy();
+    expect(within(dossier).getByText("0.35")).toBeTruthy(); // the tooltip's Singleplayer share row
+    expect(within(dossier).getByRole("link", { name: "See on the Radar →" }).getAttribute("href")).toBe(
+      "/radar?solo=off&niche=tag%3AAction+RTS",
+    );
+  });
+
+  it("no longer prints the score headline, the supply brake or the Why blend — the score is one small number", async () => {
+    stub(detailOf([RADAR_ROW]));
+    renderNiche();
+    await screen.findByTestId("radar-dossier");
+    expect(screen.queryByText("Opportunity v2")).toBeNull();
+    expect(screen.queryByText(/supply brake/i)).toBeNull();
+    expect(screen.queryByText(/^Why /)).toBeNull();
+    expect(screen.queryByText("Saturation YoY")).toBeNull();
+    expect(screen.queryByText(/Momentum/)).toBeNull();
+    expect(screen.queryByText(/Market pull/)).toBeNull();
+    // The numbers sit in their own spans (the outer span's own text is the two labels).
+    expect(screen.getByText(/^Opp v2 · Singleplayer share$/).textContent).toBe("Opp v2 86.7 · Singleplayer share 0.98");
+  });
+
+  it("never headlines an emerging niche's % — the board's phrase and its volume instead", async () => {
+    const row = radarListRow({
+      key: "Action RTS",
+      demand_emerging: true,
+      demand_trend_24m_pct: 4775,
+      reviews_24m_new_share: 0.9,
+    });
+    const tip = readRadarTooltip(row);
+    expect(tip.rows["Verdict"]).toBe("Emerging");
+    expect(tip.rows["Demand 24m"]).toBe(EMERGING_DEMAND_LABEL);
+    stub(detailOf([row]));
+    renderNiche();
+    const dossier = await screen.findByTestId("radar-dossier");
+    expect(within(dossier).getByTestId("radar-verdict-chip").textContent).toBe(tip.rows["Verdict"]);
+    expect(within(dossier).getByTitle(EMERGING_DEMAND_LABEL).textContent).toBe("emerging");
+    expect(within(dossier).queryByText(/4775/)).toBeNull();
+    expect(within(dossier).getByText(/120,000 reviews \/ 24m/)).toBeTruthy();
   });
 });

@@ -18,10 +18,10 @@ import {
   type SortKey,
   type Window,
 } from "../lib/api";
-import { fmtCompact, fmtInt, fmtMonths, fmtPct, fmtSigned, fmtUsd } from "../lib/format";
-// The "strong score" bar and the supply bars are the Radar's own — one set of constants,
-// so the table, the board and the mart cannot disagree about what they mean.
-import { ENTRANT_RATIO_CATALOG_NORM, OPP_WATCH_SCORE, SAT_FLOOD_YOY } from "../lib/radarVerdict";
+import { fmtCompact, fmtInt, fmtMonths, fmtPct, fmtUsd } from "../lib/format";
+// The verdict, its two axes and the small score are the Radar's own strings — one builder
+// (radarDossier), so the table, the deep dive and the board cannot disagree in wording.
+import { EMERGING_DEMAND_LABEL, radarDossier } from "../lib/radarVerdict";
 import { useDebounced } from "../lib/useDebounced";
 import { usePageTitle } from "../lib/usePageTitle";
 // From the leaf module, NEVER from pages/NicheCombined (which is where these lived until
@@ -47,17 +47,9 @@ const LIMIT = 50;
 // These mix off --text-primary exactly the way index.css derives --text-muted/--text-secondary,
 // so they stay theme-correct in both light and dark rather than pinning a raw hex.
 // ---------------------------------------------------------------------------------------
-const PAPER_15 = "color-mix(in srgb, var(--text-primary) 15%, transparent)";
 const PAPER_30 = "color-mix(in srgb, var(--text-primary) 30%, transparent)";
 const PAPER_35 = "color-mix(in srgb, var(--text-primary) 35%, transparent)";
 const PAPER_45 = "color-mix(in srgb, var(--text-primary) 45%, transparent)";
-const PAPER_50 = "color-mix(in srgb, var(--text-primary) 50%, transparent)";
-// The floor for de-emphasized BODY TEXT on this page. PAPER_50 is a fine hairline/fill
-// alpha but fails AA as 10px type: the ×0.87 supply-brake annotation measured 4.32:1 on
-// the dark page plane (2026-09-01), against 4.5. 60% reads 5.60:1 there and still sits a
-// clear step below the PAPER_80 score it annotates.
-const PAPER_60 = "color-mix(in srgb, var(--text-primary) 60%, transparent)";
-const PAPER_80 = "color-mix(in srgb, var(--text-primary) 80%, transparent)";
 const CONDENSED = '"Barlow Condensed", "Barlow", system-ui, sans-serif';
 
 // Umbrella/meta tags are containers/reception labels, not buildable niches — excluded by
@@ -66,14 +58,17 @@ const DEFAULT_TIERS: NicheTier[] = ["micro", "theme"];
 
 const DEFAULT_SORT: SortKey = "opportunity_v2";
 
-/** The sortable columns THIS page offers — the eight in the mockup grid plus the five in
- * the "More metrics" panel. The URL's `sort` is validated against it (an unknown key
- * falls back to the default) so a hand-edited link can't ask the API to order by a
- * column the table can't even draw an arrow on. */
+/** The sortable columns THIS page offers — the seven server-sortable ones in the grid (the
+ * Verdict column is the board's call, computed client-side per row, so it has no server
+ * sort — order by its two axes instead) plus the four in the "More metrics" panel. The
+ * URL's `sort` is validated against it (an unknown key falls back to the default) so a
+ * hand-edited link can't ask the API to order by a column the table can't even draw an
+ * arrow on — which since 2026-09-09 includes the retired `demand` / `competition` /
+ * `quality_gap` percentile meters. */
 const FINDER_SORT_KEYS: readonly SortKey[] = [
-  "key", "n_games", "p90_rev", "demand", "competition", "quality_gap", "opportunity_v2",
+  "key", "n_games", "p90_rev", "demand_trend_24m_pct", "saturation_yoy", "opportunity_v2",
   "players_trend_7d_pct",
-  "lifetime_survival_12m", "total_owners", "hit_rate_200k", "saturation_yoy", "total_players_now",
+  "lifetime_survival_12m", "total_owners", "hit_rate_200k", "total_players_now",
 ] as const;
 
 /** The review floors the mart materializes — 0 (no floor), 50 and 100. Anything else in
@@ -103,16 +98,19 @@ const TIER_TITLE: Record<NicheTier, string> = {
   meta: "Reception tags (Great Soundtrack…) — never buildable",
 };
 
-// Mockup 4a draws exactly 8 columns, at this exact fr-weighted grid — Niche | Games |
-// P90 rev | Demand | Competition | Quality gap | Opp v2 ↓ | Players 7d. The real table
-// carries more sortable metrics than that (longevity, total owners, hit rate, saturation)
-// plus a multi-select checkbox; a prior pass widened this grid to cram all 14 in, which is
-// why the page still read as "the old table, recoloured" instead of the mockup's composition.
-// Nothing is dropped: the checkbox rides inside the (2fr-wide) Niche cell instead of owning
-// its own track, and the four extra metrics move to a second, explicitly-toggled panel
-// below the mockup-faithful table (see MORE_METRICS_GRID / "More metrics" below).
-const GRID_TEMPLATE = "2fr .7fr 1fr 1fr 1fr 1fr .9fr 1fr";
-const TABLE_MIN_WIDTH = 860;
+// Mockup 4a draws exactly 8 columns at an fr-weighted grid; the three middle ones changed
+// vocabulary on 2026-09-09 (user: "use radar numbers in niches") — Niche | Games | P90 rev
+// | Demand 24m | Releases YoY | Verdict | Opp v2 ↓ | Players 7d. The Demand / Competition
+// / Quality gap percentile meters were the retired v1 grammar drawn beside the v2 score;
+// what the Radar draws is its two axes and a verdict, so that is what the grid carries now.
+// The real table still tracks more sortable metrics than eight (longevity, total owners,
+// hit rate, live players) plus a multi-select checkbox; nothing is dropped: the checkbox
+// rides inside the (2fr-wide) Niche cell instead of owning its own track, and the extra
+// metrics live in a second, explicitly-toggled panel below (MORE_METRICS_GRID / "More
+// metrics"). The verdict track is the widest of the middle five: "Crowded · caution" has
+// to fit on one line at the table's minimum width.
+const GRID_TEMPLATE = "2fr .7fr 1fr 1fr 1fr 1.25fr .7fr 1fr";
+const TABLE_MIN_WIDTH = 920;
 
 const ROW_GRID: CSSProperties = {
   display: "grid",
@@ -185,20 +183,6 @@ function ColHead({
   return (
     <div role="columnheader" aria-sort={active ? (order === "desc" ? "descending" : "ascending") : "none"}>
       {children}
-    </div>
-  );
-}
-
-/** 4px opportunity meter: track paper 15%, fill accent-300 (demand/quality) or paper 50%
- * (competition — higher is worse, so it never reads as "more of the good color"). */
-function MetricBar({ value, tone }: { value: number | null; tone: "accent" | "neutral" }) {
-  const pct = value == null ? 0 : Math.max(0, Math.min(100, value));
-  return (
-    <div className="h-1 w-full" style={{ backgroundColor: PAPER_15 }}>
-      <div
-        className="h-full"
-        style={{ width: `${pct}%`, backgroundColor: tone === "accent" ? "var(--brand)" : PAPER_50 }}
-      />
     </div>
   );
 }
@@ -498,149 +482,108 @@ export default function NicheFinder() {
           );
         },
       }),
-      columnHelper.accessor((row) => row.demand ?? null, {
-        id: "demand",
+      // THE RADAR'S TWO AXES AND ITS CALL (2026-09-09). The three 0–100 percentile meters
+      // (Demand / Competition / Quality gap) that sat here were the retired v1 vocabulary
+      // drawn beside the v2 score, and none of them is what the board plots. These three
+      // columns are the board's X axis, its Y axis and its verdict, through the SAME
+      // radarDossier() strings the deep dive's headline and the board's tooltip print, so a
+      // row here, its page and its dot cannot disagree in wording. Judged on THIS table's
+      // cut — the board pins 24m × ≥50 — and the header sentence says which is which.
+      columnHelper.accessor((row) => row.demand_trend_24m_pct ?? null, {
+        id: "demand_trend_24m_pct",
         header: () => (
-          <SortLabel label="Demand" help="How hot the market is, 0–100 percentile vs other niches in this cut. Calculated: 0.4×pctile(median revenue) + 0.3×pctile(median owners) + 0.3×pctile(recent 24m review velocity)." col="demand" active={sort === "demand"} order={order} onSort={toggleSort} />
+          <SortLabel label="Demand 24m" help="The Radar's X axis: the niche's review inflow over the last 24 complete months vs the 24 before, in percent. At or above +40% is the board's 'enter' bar; at or below −30% its 'declining' bar. One value per niche, identical on every cut. An emerging niche shows no % — its prior window is near zero by construction — and is judged on absolute volume instead." col="demand_trend_24m_pct" active={sort === "demand_trend_24m_pct"} order={order} onSort={toggleSort} />
         ),
         cell: (info) => {
+          const d = radarDossier(info.row.original);
+          if (d.emerging) {
+            return (
+              <span
+                className="text-ink-muted"
+                title={`${EMERGING_DEMAND_LABEL}${d.reviews24m ? ` · ${d.reviews24m} reviews / 24m` : ""}`}
+              >
+                emerging
+              </span>
+            );
+          }
           const v = info.getValue();
+          if (v == null) return <span style={{ color: "var(--verdict-flat)" }} title={d.demand24m}>—</span>;
+          // Same up/flat steel as the Players 7d column: direction reads from the glyph and
+          // the sign, hue only reinforces.
           return (
-            <div title={`Demand: ${v != null ? v.toFixed(1) : "no data"} (0–100 percentile)`}>
-              <MetricBar value={v} tone="accent" />
-            </div>
+            <span
+              className="tabular font-medium"
+              style={{ color: v >= 0 ? "var(--verdict-up)" : "var(--verdict-flat)" }}
+              title="Last 24 complete months vs the prior 24 — the Radar's demand axis"
+            >
+              {d.demand24m}
+            </span>
           );
         },
       }),
-      columnHelper.accessor((row) => row.competition ?? null, {
-        id: "competition",
+      columnHelper.accessor((row) => row.saturation_yoy ?? null, {
+        id: "saturation_yoy",
         header: () => (
-          <SortLabel label="Competition" help="How crowded it is, 0–100 percentile. Calculated: 0.6×pctile(recently released games) + 0.4×pctile(winner concentration — the top 5% of titles' revenue share). HIGHER IS WORSE for a new entrant." col="competition" active={sort === "competition"} order={order} onSort={toggleSort} />
+          <SortLabel label="Releases YoY" help="The Radar's Y axis: is the release pipeline growing? Calculated: (releases last calendar year − releases the year before) ÷ the year before, over the whole niche at every review count. Above +15% is the board's 'flooding' bar. Negative = SHRINKING — 'low competition' in a shrinking niche is decline, not opportunity." col="saturation_yoy" active={sort === "saturation_yoy"} order={order} onSort={toggleSort} />
         ),
         cell: (info) => {
+          const row = info.row.original;
           const v = info.getValue();
+          if (v == null) return <span className="text-ink-muted">—</span>;
+          const title =
+            row.n_recent_year != null && row.n_prior_year != null
+              ? `(${fmtInt(row.n_recent_year)} releases last year − ${fmtInt(row.n_prior_year)} the year before) ÷ ${fmtInt(row.n_prior_year)} = ${(v * 100).toFixed(1)}%${v < -0.05 ? " — the pipeline is shrinking" : ""}`
+              : undefined;
           return (
-            <div title={`Competition: ${v != null ? v.toFixed(1) : "no data"} (0–100 percentile, higher is worse)`}>
-              <MetricBar value={v} tone="neutral" />
-            </div>
+            <span title={title} className="tabular text-ink-secondary">
+              {radarDossier(row).releasesYoy}
+            </span>
           );
         },
       }),
-      columnHelper.accessor((row) => row.quality_gap ?? null, {
-        id: "quality_gap",
+      columnHelper.display({
+        id: "verdict",
         header: () => (
-          <SortLabel label="Quality gap" help="How beatable the field is, 0–100 percentile. Calculated: pctile(share of incumbents that are weak — rating under 80% positive OR fewer than 50 reviews). Higher = easier to out-execute." col="quality_gap" active={sort === "quality_gap"} order={order} onSort={toggleSort} />
+          // Not a SortLabel: the verdict is computed client-side per row from the two axes
+          // and winner concentration, so there is no server order to ask for — a sort arrow
+          // here would 422. Same type as its neighbours, minus the button.
+          <span
+            title="The Radar board's call for this row — Enter now / Watch / Emerging / Crowded / Declining — from the same rules the board rings with, read off Demand 24m, Releases YoY and winner concentration. Judged on this table's cut (the board pins last 24 months · ≥50 reviews). Not sortable: order by its two axes instead."
+            className="inline-flex items-center whitespace-nowrap uppercase text-ink-muted"
+            style={{ fontFamily: CONDENSED, fontSize: 12, letterSpacing: ".08em", fontWeight: 600 }}
+          >
+            Verdict
+          </span>
         ),
         cell: (info) => {
-          const v = info.getValue();
+          const d = radarDossier(info.row.original);
           return (
-            <div title={`Quality gap: ${v != null ? v.toFixed(1) : "no data"} (0–100 percentile)`}>
-              <MetricBar value={v} tone="accent" />
-            </div>
+            <span
+              className="inline-flex items-center gap-1.5 text-ink-primary"
+              title={d.verdict.reason}
+              data-verdict={d.verdict.ring}
+            >
+              <span className="inline-block h-2 w-2 shrink-0" style={{ backgroundColor: d.color }} aria-hidden />
+              {d.verdictLabel}
+            </span>
           );
         },
       }),
       columnHelper.accessor("opportunity_v2", {
         header: () => (
           <SortLabel
-            label="Opp v2" help="The headline score, and the same model the Radar board rings on: a weighted blend of momentum (demand growth — 50 at flat, 88 at the radar's +40%/24m 'enter' bar), market pull (typical revenue + audience size), revenue spread (50 exactly at the 0.85 winner-take-most bar) and quality gap, then multiplied by the supply brake (0.35–1.0; bites when the release pipeline outgrows demand, or when newcomers earn under the catalog norm). A missing input is skipped, never counted as zero."
+            label="Opp v2"
+            help="The Radar's rank number: the 0–100 opportunity_v2 score, printed exactly as the board's tooltip prints it. It orders the rows; the Verdict column is the board's call. How it is built — four blended sub-scores × a supply brake — is in the docs' score guide, and its parts ride every API row."
             col="opportunity_v2"
             active={sort === "opportunity_v2"}
             order={order}
             onSort={toggleSort}
           />
         ),
-        cell: (info) => {
-          const v = info.getValue();
-          const row = info.row.original;
-          const brake = row.supply_brake;
-          // >= OPP_WATCH_SCORE is the "scores like a niche the radar would say enter" bar
-          // (median of the enter ring on the live catalog) — one constant, shared with the
-          // board, so the table and the radar can't disagree about what "strong" means.
-          const strong = v != null && v >= OPP_WATCH_SCORE;
-          // The row's REAL sub-scores substituted into the formula, so the hover answers
-          // "why is it this value" without leaving the table. Absent on marts that predate
-          // the 2026-08-31 rebuild — then the generic explanation stands in.
-          const terms: [string, number | null | undefined, number][] = [
-            ["momentum", row.momentum, 0.4],
-            ["market", row.market_pull, 0.22],
-            ["spread", row.revenue_spread, 0.2],
-            ["quality", row.quality_gap, 0.18],
-          ];
-          const live = terms.filter(([, n]) => n != null);
-          // The blend RENORMALISES over the terms that exist, so the printed equation has
-          // to show the divisor — otherwise the products visibly don't reach the score
-          // whenever a sub-score is null (an emerging niche has no momentum).
-          const liveWeight = live.reduce((a, [, , w]) => a + w, 0);
-          const skipped = terms.filter(([, n]) => n == null).map(([label]) => label);
-          const calc =
-            live.length > 0 && brake != null
-              ? `${live.map(([label, n, w]) => `${label} ${n!.toFixed(0)}×${w.toFixed(2)}`).join(" + ")}` +
-                (skipped.length > 0
-                  ? ` ÷ ${liveWeight.toFixed(2)} (${skipped.join(" + ")} unknown — skipped, never counted as 0)`
-                  : "") +
-                ` → × supply brake ${brake.toFixed(2)} = ${v != null ? v.toFixed(1) : "—"}`
-              : null;
-          const title =
-            calc ??
-            "Blend of momentum + market pull + revenue spread + quality gap, × the supply brake";
-          return (
-            <div className="flex items-baseline gap-1.5" title={title}>
-              <span
-                className="tabular"
-                style={{ fontFamily: CONDENSED, fontWeight: 600, fontSize: 17, color: v == null ? undefined : strong ? "var(--brand)" : PAPER_80 }}
-              >
-                {v != null ? v.toFixed(1) : "—"}
-              </span>
-              {brake != null && brake < 0.995 && (
-                <span
-                  className="tabular"
-                  style={{ fontSize: 10, color: PAPER_60 }}
-                  title={(() => {
-                    // supply_room = MIN(flood_room, entrant_room), so the driver is
-                    // whichever of the two is LOWER — not whichever raw signal looks bad.
-                    // Naming it from `saturation_yoy > SAT_FLOOD_YOY` alone gets it wrong
-                    // exactly when the score most needs explaining: a niche whose demand
-                    // is outrunning a fast pipeline has flood_room 100 and is braked by
-                    // its entrants, and vice versa. Both sub-scores are recomputed here
-                    // from the row's own raw columns (same formula as mart_niche.sql).
-                    const sat = row.saturation_yoy;
-                    const er = row.entrant_ratio;
-                    const trend = row.demand_trend_24m_pct;
-                    const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
-                    const demandG = trend == null ? 0 : Math.log(Math.max(1 + trend / 100, 0.001)) / 2;
-                    const floodRoom =
-                      sat == null
-                        ? null
-                        : 100 *
-                          (1 -
-                            clamp01(
-                              (Math.log(Math.max(1 + sat, 0.001)) - demandG) /
-                                (2 * Math.log(1 + SAT_FLOOD_YOY)),
-                            ));
-                    const entrantRoom =
-                      er == null
-                        ? null
-                        : 100 * clamp01((er - 0.5) / (ENTRANT_RATIO_CATALOG_NORM - 0.5));
-                    const floodDriver =
-                      sat != null &&
-                      (entrantRoom == null || (floodRoom != null && floodRoom <= entrantRoom));
-                    const driver = floodDriver
-                      ? `the release pipeline is growing ${((sat ?? 0) * 100).toFixed(0)}%/yr — faster than demand${
-                          trend != null ? ` (${trend >= 0 ? "+" : ""}${trend.toFixed(0)}% / 24m)` : ""
-                        }`
-                      : er != null
-                        ? `newcomers earn ${er.toFixed(2)}× the back catalog, under the ~${ENTRANT_RATIO_CATALOG_NORM} catalog norm`
-                        : "supply is outrunning demand";
-                    return `Supply brake ×${brake.toFixed(2)} — ${driver}. The brake takes the WORSE of the two supply reads, so either alone can sink the score.`;
-                  })()}
-                >
-                  ×{brake.toFixed(2)}
-                </span>
-              )}
-            </div>
-          );
-        },
+        // The small rank number and nothing else (2026-09-09): no 17px display numeral, no
+        // "strong" tint, no "×0.96" brake suffix, no blend formula in the hover. The score
+        // is the table's order; the verdict two cells left is the headline, as on the board.
+        cell: (info) => <span className="tabular text-ink-secondary">{radarDossier(info.row.original).oppV2}</span>,
       }),
       columnHelper.accessor("players_trend_7d_pct", {
         header: () => (
@@ -681,11 +624,13 @@ export default function NicheFinder() {
   });
 
   // ---- "more metrics" panel --------------------------------------------------------
-  // Everything the app tracks that mockup 4a does NOT draw — longevity, total owners,
-  // hit rate, saturation, and the raw "playing now" count (the mockup only draws the 7d
-  // *trend*). Not deleted, just not crammed into the mockup-faithful grid above: reachable
-  // below the table, behind an explicit toggle, sharing the exact same sort/order state
-  // (and so the exact same row order) as the primary table above it.
+  // Everything the app tracks that the grid above does NOT draw — longevity, total owners,
+  // hit rate, and the raw "playing now" count (the grid only draws the 7d *trend*).
+  // Saturation YoY left this panel on 2026-09-09: it is the grid's Releases YoY column
+  // now, and one number under two names is exactly the drift this table stopped carrying.
+  // Not deleted, just not crammed into the grid: reachable below the table, behind an
+  // explicit toggle, sharing the exact same sort/order state (and so the exact same row
+  // order) as the primary table above it.
   //
   // Routed too (?more=1) precisely BECAUSE it shares that sort state: a link carrying
   // sort=saturation_yoy without the panel would land on a table that has no such column
@@ -741,23 +686,6 @@ export default function NicheFinder() {
         },
       },
       {
-        col: "saturation_yoy" as SortKey,
-        label: "Saturation YoY",
-        help: "Is the pipeline growing? Calculated: (releases last calendar year − releases the year before) ÷ the year before. Negative = SHRINKING — 'low competition' in a shrinking niche is decline, not opportunity.",
-        render: (row: NicheRow) => {
-          const v = row.saturation_yoy;
-          const title =
-            row.n_recent_year != null && row.n_prior_year != null && v != null
-              ? `(${fmtInt(row.n_recent_year)} releases last year − ${fmtInt(row.n_prior_year)} the year before) ÷ ${fmtInt(row.n_prior_year)} = ${(v * 100).toFixed(1)}%${v < -0.05 ? " — the pipeline is shrinking" : ""}`
-              : undefined;
-          return (
-            <span title={title} className="tabular text-ink-secondary">
-              {fmtSigned(v)}
-            </span>
-          );
-        },
-      },
-      {
         col: "total_players_now" as SortKey,
         label: "Playing now",
         help: "Who's playing right now. Calculated: SUM of each scored game's latest nightly player capture (kept up to 7 days). Captures are ~21–22:00 UTC point samples, not daily peaks. Dominated by the niche's hits.",
@@ -791,15 +719,18 @@ export default function NicheFinder() {
         <h1 className="text-ink-primary" style={{ fontSize: 25 }}>
           Niche Finder
         </h1>
-        {/* NOT "growth-gated" — there is no gate in the current model. opportunity_v2 is a
-            weighted blend of four sub-scores times a supply brake (etl/marts/mart_niche.sql,
-            `scored_v2`). decline_gate still exists as a column, but it stopped multiplying the
-            score and is now a falsification tell only, so describing the ranking as gated
-            promised a safety net the score does not apply. */}
+        {/* The ranking is Opp v2 (etl/marts/mart_niche.sql `scored_v2`); the labels are the
+            Radar's verdicts through lib/radarVerdict.ts — the board's rules, words and colour
+            tokens (2026-09-09, user: "use radar numbers in niches"). The board pins its cut at
+            24m × ≥50 while this table has chips, so away from that cut the sentence says the
+            verdicts are judged HERE, on this cut. NOT "growth-gated" — there is no gate in the
+            model; decline_gate is a falsification tell only. */}
         <span className="text-[13px] text-ink-secondary">
-          {total > 0
-            ? `${total.toLocaleString()} niches · ranked by opportunity — momentum, market pull, revenue spread and quality gap, braked by supply`
-            : "ranked by opportunity — momentum, market pull, revenue spread and quality gap, braked by supply"}
+          {total > 0 ? `${total.toLocaleString()} niches · ` : ""}
+          ranked and labelled as on the Radar — Opp v2 order, the board&rsquo;s verdicts
+          {windowParam === DEFAULT_NICHE_CUT.win && minReviews === DEFAULT_NICHE_CUT.min_reviews
+            ? " on its own cut (last 24 months · ≥50 reviews)"
+            : " judged on this cut (the board itself pins last 24 months · ≥50 reviews)"}
         </span>
         <a
           href={csvUrl}
@@ -981,10 +912,10 @@ export default function NicheFinder() {
       )}
 
       {/* Mockup 4a draws exactly 8 columns. This page already tracked more sortable
-          metrics than that (longevity, total owners, hit rate, saturation, raw live-player
-          count) — kept, not deleted, but pushed below the mockup-faithful table and behind
-          an explicit toggle rather than crammed into its grid. Shares the same sort/order
-          state, so its row order always matches the table above it. */}
+          metrics than that (longevity, total owners, hit rate, raw live-player count) —
+          kept, not deleted, but pushed below the table and behind an explicit toggle rather
+          than crammed into its grid. Shares the same sort/order state, so its row order
+          always matches the table above it. */}
       {data && data.items.length > 0 && (
         <div className="flex flex-col" style={{ gap: 10 }}>
           <button
@@ -995,7 +926,7 @@ export default function NicheFinder() {
             style={{ fontSize: 11, border: `1px solid ${PAPER_30}`, padding: "6px 12px" }}
           >
             <span aria-hidden>{showMoreMetrics ? "−" : "+"}</span>
-            More metrics — longevity, owners, hit rate, saturation, live players
+            More metrics — longevity, owners, hit rate, live players
           </button>
           {showMoreMetrics && (
             <div className="blueprint">
