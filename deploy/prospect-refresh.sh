@@ -35,7 +35,13 @@ export PROSPECT_DUCKDB_MEMORY_LIMIT=2500MB
 # disk gate below (25 -> 21 GB): the box sits at ~22 GB free with a 40 GB SQLite corpus that
 # nothing else can shrink, and 12GiB spill + ~2.3GB mart + WAL growth fits under 21 GB where
 # 15GiB did not fit under 25. Raise only alongside `df -h /` and the gate.
-export PROSPECT_DUCKDB_TEMP_MAX=12GiB
+# 12GiB -> 10GiB (2026-09-09), again together with the gate (21 -> 18 GB): the 09-08 nightly
+# swept 7.8 GB of dead spill and STILL measured 20 GB, one under the floor, because the
+# scrapes that run first add ~1 GB and the box's steady state is 21-22 GB free. Measured spill
+# on this corpus is nowhere near 10GiB on a normal night (the aspect mart's is ~3-4 GB; the
+# 18-20 GB figures were wipe-night sentiment windows, now bounded by the pool cap), so 10GiB
+# is still a runaway budget, not a working one.
+export PROSPECT_DUCKDB_TEMP_MAX=10GiB
 # Stop the sentiment phase from running into the `timeout 21600` below (2026-09-02). A full
 # rescore (a SENTIMENT_CACHE_VERSION bump wipes the cache, so the "delta" becomes all 24.4M
 # reviews) is ~52h of scoring at the droplet's measured ~116 mention-rows/s — it CANNOT finish
@@ -85,7 +91,13 @@ export PYTHONUNBUFFERED=1
 # is nothing left to delete: steam_games.db is 40 GB with zero free pages and everything else
 # on the volume is under 1 GB. The floor now matches the spill cap above (12GiB temp + ~2.3 GB
 # mart + WAL growth < 21 GB) instead of the pre-cap 18 GB spill it was sized for.
-DISK_MIN_FREE_GB=${PROSPECT_DISK_MIN_FREE_GB:-21}
+#
+# 21 -> 18 GB (2026-09-09): the 09-08 nightly ran every scrape, swept the dead spill, and was
+# refused at 20 GB — one under the floor, the box's steady state being 21-22 GB free minus the
+# ~1 GB the scrapes add first. Moved together with PROSPECT_DUCKDB_TEMP_MAX (12 -> 10GiB):
+# 10GiB spill + ~2.3 GB mart + WAL growth < 18 GB. A third refusal in a row for a 1 GB gap is
+# not what the gate is for; it exists to stop the 08-30 disk fill, and the cap does that.
+DISK_MIN_FREE_GB=${PROSPECT_DISK_MIN_FREE_GB:-18}
 # The SCRAPE floor is separate and far lower (2026-09-08). The first preflight gated the whole
 # run on the ETL's 21-25 GB need, and three refused nights in a row also cancelled every
 # collector: no news, no CCU samples, no follower or price snapshots since 2026-09-02 — the
