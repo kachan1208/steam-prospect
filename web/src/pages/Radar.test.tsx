@@ -109,6 +109,21 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/** Re-stub fetch with a specific population (the default beforeEach serves GENRES/TAGS). */
+function fetchMock(genres: unknown[], tags: unknown[]) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const items = url.includes("dimension=genre") ? genres : url.includes("dimension=tag") ? tags : [];
+      return new Response(JSON.stringify({ items, total: items.length, limit: 500, offset: 0 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }),
+  );
+}
+
 describe("Radar — class sectors and the emphasis control", () => {
   it("plots EVERY class on one board and defaults the emphasis to Micro-genres", async () => {
     renderRadar();
@@ -194,6 +209,43 @@ describe("Radar — class sectors and the emphasis control", () => {
  * linked — class, solo lens, Top-N and the open dossier all lived in useState. They ride
  * search params now, with DEFAULTS OMITTED so a pristine /radar stays a clean URL.
  */
+describe("Radar — every ring the board draws is reachable", () => {
+  /**
+   * The board labels five bands, so all five must be able to hold dots. They could not: the
+   * plotted set was the head of an opportunity_v2-sorted pool, and the very thing that puts a
+   * niche in DECLINING (demand in sustained decay) also puts it at the bottom of that sort.
+   * Measured on production, the five declining tag niches ranked 179, 185, 207, 208 and 209
+   * of 209 — so DECLINING was drawn, labelled and permanently empty at every cap the control
+   * offers, which reads as "there are none" and is a claim about the market, not the cut.
+   */
+  it("plots a declining niche even though it ranks last on opportunity", async () => {
+    // 30 healthy micro tags outrank the decliner on opportunity by a mile; a plain
+    // slice(0, cap) at Top 40 (cap 14 per class) could never reach it.
+    const crowd = Array.from({ length: 30 }, (_, i) =>
+      row("tag", `Healthy ${i}`, "micro", 120, 0.05, 90 - i),
+    );
+    const dying = row("tag", "Dying Tag", "micro", -55, 0.05, 4);
+    fetchMock([...GENRES], [...crowd, dying]);
+
+    renderRadar("/radar?top=40");
+    expect(await screen.findByText("Dying Tag")).toBeTruthy();
+  });
+
+  it("still gives the bulk of the slots to the ring that holds the bulk", async () => {
+    const crowd = Array.from({ length: 30 }, (_, i) =>
+      row("tag", `Healthy ${i}`, "micro", 120, 0.05, 90 - i),
+    );
+    const dying = row("tag", "Dying Tag", "micro", -55, 0.05, 4);
+    fetchMock([...GENRES], [...crowd, dying]);
+
+    renderRadar("/radar?top=40");
+    await screen.findByText("Dying Tag");
+    // The floor is a handful, not an equal split: the healthy ring keeps most of the cap.
+    const healthy = crowd.filter((r) => screen.queryByText(r.key) !== null).length;
+    expect(healthy).toBeGreaterThan(5);
+  });
+});
+
 describe("Radar — shareable URL state", () => {
   it("writes nothing for the default view", async () => {
     renderRadar();

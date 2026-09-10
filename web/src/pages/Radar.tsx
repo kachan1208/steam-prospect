@@ -5,7 +5,8 @@ import clsx from "clsx";
 import { RadarBoard, RADAR_REGIONS, type RadarBoardBlip, type RadarRegion, type RadarSector } from "../components/RadarBoard";
 import { Loading } from "../components/ui/Loading";
 import { useNiches, type NicheRow } from "../lib/api";
-import { SOLO_FRIENDLY_MIN, radarVerdictTrace } from "../lib/radarVerdict";
+import { RING_ORDER, SOLO_FRIENDLY_MIN, radarVerdictTrace } from "../lib/radarVerdict";
+import type { RadarRing } from "../lib/radarVerdict";
 import { usePageTitle } from "../lib/usePageTitle";
 
 /**
@@ -115,6 +116,66 @@ const CLASS_KICKER: Record<RadarSector, string> = {
  * it is NOT padded — an under-populated class is a real finding about the class.
  */
 const perClassCap = (topN: number): number => Math.ceil(topN / CLASS_OPTIONS.length);
+
+/** Slots every non-empty ring is guaranteed before the rest is shared out. */
+const RING_FLOOR = 3;
+
+/**
+ * Choose which of a class's niches get a dot, spreading the budget ACROSS the rings.
+ *
+ * A plain `slice(0, cap)` of the opportunity-sorted pool cannot ever reach the outer bands,
+ * because the thing that puts a niche in "declining" is also what puts it last: measured on
+ * production, the five declining tag niches ranked 179, 185, 207, 208 and 209 of 209, so the
+ * DECLINING ring was drawn, labelled, and permanently empty at every cap the control offers.
+ * An empty labelled band reads as "there are none", which is a claim about the market rather
+ * than about the cut — and a false one.
+ *
+ * So each non-empty ring is guaranteed RING_FLOOR slots (or all it has, if fewer), and what
+ * is left is shared out in proportion to what each ring still holds. WATCH keeps its bulk
+ * because it genuinely is the bulk; DECLINING gets its handful. Within a ring the pick is
+ * still best-opportunity-first, and the incoming order is preserved on the way out so the
+ * rail's numbering stays the board's rank order.
+ */
+function pickAcrossRings<T extends { verdict: { ring: RadarRing } }>(rows: T[], cap: number): T[] {
+  if (rows.length <= cap) return rows;
+  const byRing = new Map<RadarRing, T[]>();
+  for (const row of rows) {
+    const list = byRing.get(row.verdict.ring);
+    if (list) list.push(row);
+    else byRing.set(row.verdict.ring, [row]);
+  }
+  const present = RING_ORDER.filter((r) => (byRing.get(r)?.length ?? 0) > 0);
+  const quota = new Map<RadarRing, number>();
+  let left = cap;
+  for (const ring of present) {
+    const take = Math.min(RING_FLOOR, byRing.get(ring)!.length, Math.floor(left / present.length));
+    quota.set(ring, take);
+    left -= take;
+  }
+  // Remainder by proportion of what each ring still has unclaimed, largest share first so a
+  // rounding leftover lands where it represents the most rows.
+  const remaining = present
+    .map((ring) => ({ ring, spare: byRing.get(ring)!.length - quota.get(ring)! }))
+    .filter((e) => e.spare > 0);
+  const spareTotal = remaining.reduce((n, e) => n + e.spare, 0);
+  if (spareTotal > 0) {
+    for (const e of remaining.sort((a, b) => b.spare - a.spare)) {
+      if (left <= 0) break;
+      const share = Math.min(e.spare, left, Math.max(1, Math.round((e.spare / spareTotal) * left)));
+      quota.set(e.ring, quota.get(e.ring)! + share);
+      left -= share;
+    }
+  }
+  const taken = new Map<RadarRing, number>();
+  return rows.filter((row) => {
+    const ring = row.verdict.ring;
+    const used = taken.get(ring) ?? 0;
+    if (used >= (quota.get(ring) ?? 0)) return false;
+    taken.set(ring, used + 1);
+    return true;
+  });
+}
+
 /** The page-level population toggle (default ON — the radar is solo-first). ON asks the
  * SERVER (solo_only) for solo-friendly niches only (singleplayer share >= 0.8, unknown
  * excluded); OFF reveals the full population, where the solo lens draws team-scale dots
@@ -462,7 +523,7 @@ export default function Radar() {
    */
   const blips = useMemo(() => {
     const cap = perClassCap(topN);
-    return CLASS_OPTIONS.flatMap((o) => pool.filter((b) => b.sector === o.v).slice(0, cap));
+    return CLASS_OPTIONS.flatMap((o) => pickAcrossRings(pool.filter((b) => b.sector === o.v), cap));
   }, [pool, topN]);
 
   /** The selection channel. A search hit can belong to another class; selecting it moves the
