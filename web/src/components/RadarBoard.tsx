@@ -1207,8 +1207,13 @@ export function RadarBoard({
                   y1={a.y}
                   x2={b.x}
                   y2={b.y}
-                  stroke="var(--gridline)"
-                  strokeWidth={1}
+                  // --baseline, not --gridline: the spokes now carry the board's primary
+                  // grouping (which class a niche is in), so they must out-read the band
+                  // circles rather than tie with them. At gridline weight they vanished on
+                  // the first render of this layout — the sectors were there and invisible,
+                  // which is worse than not having them.
+                  stroke="var(--baseline)"
+                  strokeWidth={1.5}
                 />
               );
             })}
