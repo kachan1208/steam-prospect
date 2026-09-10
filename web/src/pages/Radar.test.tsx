@@ -7,14 +7,20 @@ import Radar from "./Radar";
 import { ThemeProvider } from "../lib/theme";
 
 /**
- * The CLASS PICKER contract (2026-08-27 directive: "score Genres, Micro-genres and
- * Themes separately — user has to pick what he wants to research"):
+ * The CLASS CONTROL contract, rebuilt 2026-09-10 (user: "Make it better, right now it looks
+ * like a slop"):
  *
- * 1. The board scores ONE class at a time — default Micro-genres — and the rail list +
- *    counts follow the picker honestly (a themes count never leaks into a micro view).
- * 2. The SEARCH deliberately ignores the picker: it spans the whole pool across all
- *    classes, and selecting a cross-class hit switches the picker to that class first,
- *    so the dossier always opens over the board that contains the niche.
+ * 1. ALL THREE CLASSES ARE ALWAYS ON THE BOARD, one 120° wedge each — that is what took the
+ *    dial from 80 blips in a single full-circle sector to the reference's ~14 per quadrant.
+ *    The picker (default Micro-genres) selects EMPHASIS: the chosen wedge reads at full
+ *    strength and the other two recede, on the dial and in the rail alike. Nothing is
+ *    removed and no count is hidden.
+ * 2. EACH CLASS IS STILL RANKED ONLY AGAINST ITS OWN KIND — the 2026-08-27 directive's
+ *    substance ("score Genres, Micro-genres and Themes separately"). The Top-N control
+ *    distributes: Top 80 plots the top ~27 of EVERY class, so a genre never competes with a
+ *    micro-tag for a slot.
+ * 3. The SEARCH spans the whole pool, as it always did, and selecting a cross-class hit
+ *    moves the emphasis to that niche's own wedge so its dot is the lit one.
  */
 
 /** A minimal /api/niches row with everything Radar's pool builder reads. */
@@ -103,59 +109,83 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("Radar — class picker", () => {
-  it("defaults to Micro-genres and scopes the board + rail to that class, honest counts", async () => {
+describe("Radar — class sectors and the emphasis control", () => {
+  it("plots EVERY class on one board and defaults the emphasis to Micro-genres", async () => {
     renderRadar();
+    // All six niches, all three classes, one board — the density fix.
     expect(await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder")).toBeTruthy();
     expect(screen.getByTestId("radar-row-tag:City Builder")).toBeTruthy();
-    // No cross-class leakage into the rail list…
-    expect(screen.queryByTestId("radar-row-genre:Simulation")).toBeNull();
-    expect(screen.queryByTestId("radar-row-tag:Fishing")).toBeNull();
-    // …and the header count is the CLASS count, not the pool count.
-    expect(screen.getByText("Verdicts").parentElement?.textContent).toContain("2");
-    // The kicker names the active class.
-    expect(screen.getByText(/micro-genre tags/)).toBeTruthy();
+    expect(screen.getByTestId("radar-row-genre:Simulation")).toBeTruthy();
+    expect(screen.getByTestId("radar-row-tag:Fishing")).toBeTruthy();
+    expect(screen.getByTestId("radar-row-genre:Strategy")).toBeTruthy();
+    expect(screen.getByTestId("radar-row-tag:Horror")).toBeTruthy();
+    // …and every one of them has a dot in its own wedge.
+    for (const id of ["tag:Roguelike Deckbuilder", "genre:Simulation", "tag:Fishing"]) {
+      expect(screen.getByTestId(`radar-blip-${id}`)).toBeTruthy();
+    }
+    // The header count is the whole plotted board now, not one class of it.
+    expect(screen.getByText("Verdicts").parentElement?.textContent).toContain("6");
+    // The kicker names the EMPHASISED class, and says that is what it is.
+    expect(screen.getByText(/micro-genre tags emphasised/)).toBeTruthy();
     // The search still states the whole pool (all six niches, every class).
     expect((screen.getByTestId("radar-search") as HTMLInputElement).placeholder).toContain("all 6 niches");
   });
 
-  it("switching the class re-scopes the board and recomputes the counts", async () => {
+  it("switching the emphasis dims the other wedges instead of emptying the board", async () => {
     renderRadar();
     await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder");
+    const offClass = (id: string) => screen.getByTestId(`radar-row-${id}`).getAttribute("data-off-class");
+    // Default micro: the tag micro rows read at full strength, the rest recede.
+    expect(offClass("tag:Roguelike Deckbuilder")).toBeNull();
+    expect(offClass("tag:Fishing")).toBe("theme");
+    expect(offClass("genre:Simulation")).toBe("genre");
 
     fireEvent.click(screen.getByRole("button", { name: "Themes" }));
-    expect(screen.getByTestId("radar-row-tag:Fishing")).toBeTruthy();
-    expect(screen.getByTestId("radar-row-tag:Horror")).toBeTruthy();
-    expect(screen.queryByTestId("radar-row-tag:Roguelike Deckbuilder")).toBeNull();
-    expect(screen.getByText(/theme tags/)).toBeTruthy();
+    expect(offClass("tag:Fishing")).toBeNull();
+    expect(offClass("tag:Roguelike Deckbuilder")).toBe("micro");
+    // Nothing left the board — the micro rows and their dots are still there.
+    expect(screen.getByTestId("radar-row-tag:Roguelike Deckbuilder")).toBeTruthy();
+    expect(screen.getByTestId("radar-blip-tag:Roguelike Deckbuilder")).toBeTruthy();
+    expect(screen.getByText(/theme tags emphasised/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Genres" }));
-    expect(screen.getByTestId("radar-row-genre:Simulation")).toBeTruthy();
-    expect(screen.getByTestId("radar-row-genre:Strategy")).toBeTruthy();
-    expect(screen.queryByTestId("radar-row-tag:Fishing")).toBeNull();
+    expect(offClass("genre:Simulation")).toBeNull();
+    expect(offClass("genre:Strategy")).toBeNull();
+    expect(offClass("tag:Fishing")).toBe("theme");
   });
 
-  it("a cross-class search hit switches the picker to its class and opens its dossier", async () => {
+  it("gives every class its OWN Top-N slice, so one class can never crowd another out", async () => {
+    // Top 40 across three classes is the top 14 of EACH — not 40 of whichever class scores
+    // highest. This fixture's six rows all fit, and the wedge counts say so at the rim.
+    renderRadar("/radar?top=40");
+    await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder");
+    expect(screen.getByTestId("radar-sector-label-genre").textContent).toContain("GENRES · 2");
+    expect(screen.getByTestId("radar-sector-label-micro").textContent).toContain("MICRO-GENRES · 2");
+    expect(screen.getByTestId("radar-sector-label-theme").textContent).toContain("THEMES · 2");
+  });
+
+  it("a cross-class search hit moves the emphasis to its wedge and opens its dossier", async () => {
     renderRadar();
     await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder");
 
-    // Search spans ALL classes while the board shows micro only.
+    // Search spans ALL classes (as it always did — the board now does too).
     fireEvent.change(screen.getByTestId("radar-search"), { target: { value: "simulation" } });
     const hit = screen.getByTestId("radar-row-genre:Simulation");
     expect(hit).toBeTruthy();
 
     fireEvent.click(hit);
-    // The dossier opens — and because the picker switched to Genres first, Simulation
-    // is now PLOTTED (top of its class), so no beyond-plot note appears.
+    // The dossier opens, and Simulation is plotted (top of its own class), so no beyond-plot
+    // note appears.
     const dossier = screen.getByTestId("verdict-dossier");
     expect(dossier.textContent).toContain("Simulation");
     expect(dossier.textContent).not.toContain("Beyond the Top");
 
-    // Back + clear: the rail now lists the GENRE class — the picker really moved.
+    // Back + clear: the emphasis really moved to Genres — and the micro rows are still on
+    // the board, just dimmed.
     fireEvent.click(screen.getByRole("button", { name: /back to all verdicts/i }));
     fireEvent.keyDown(screen.getByTestId("radar-search"), { key: "Escape" });
-    expect(screen.getByTestId("radar-row-genre:Strategy")).toBeTruthy();
-    expect(screen.queryByTestId("radar-row-tag:Roguelike Deckbuilder")).toBeNull();
+    expect(screen.getByTestId("radar-row-genre:Strategy").getAttribute("data-off-class")).toBeNull();
+    expect(screen.getByTestId("radar-row-tag:Roguelike Deckbuilder").getAttribute("data-off-class")).toBe("micro");
   });
 });
 
@@ -172,12 +202,16 @@ describe("Radar — shareable URL state", () => {
   });
 
   it("restores class, solo lens and Top-N from the URL on load", async () => {
+    // ?class= is unchanged as a contract and changed in meaning: it now selects the
+    // EMPHASISED wedge. An old ?class=theme link still opens the view it named — the themes
+    // wedge, lit — it just also shows the other two classes around it.
     renderRadar("/radar?class=theme&solo=off&top=40");
     expect(await screen.findByTestId("radar-row-tag:Fishing")).toBeTruthy();
     expect(screen.getByTestId("radar-row-tag:Horror")).toBeTruthy();
-    expect(screen.queryByTestId("radar-row-tag:Roguelike Deckbuilder")).toBeNull();
+    expect(screen.getByTestId("radar-row-tag:Fishing").getAttribute("data-off-class")).toBeNull();
+    expect(screen.getByTestId("radar-row-tag:Roguelike Deckbuilder").getAttribute("data-off-class")).toBe("micro");
     // The controls reflect the URL, not their defaults.
-    expect(screen.getByText(/theme tags/)).toBeTruthy();
+    expect(screen.getByText(/theme tags emphasised/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Off" }).className).toContain("bg-brand");
     expect(screen.getByRole("button", { name: "40" }).className).toContain("bg-brand");
   });

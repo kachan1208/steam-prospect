@@ -18,8 +18,8 @@ import { usePageTitle } from "../lib/usePageTitle";
  * endpoint itself is untouched (MCP and external consumers).
  *
  * THE INSTRUMENT (RadarBoardSection) — a single frame: the CONCENTRIC-RING DIAL on the
- * left (RadarBoard.tsx — the verdict as a ring band, best in the middle; the tag tier as
- * a sector; opportunity_v2 as the rank inside the band), the RIGHT RAIL as its only
+ * left (RadarBoard.tsx — the verdict as a ring band, best in the middle; the niche CLASS
+ * as a 120° sector; opportunity_v2 as the rank inside the band), the RIGHT RAIL as its only
  * reading pane (the ranked verdict list with the full-population niche search on top, or
  * the selected niche's verdict dossier), and ONE toolbar row in the header carrying every
  * control plus the Niche Finder escape hatch (that link matters more now: "Niches" left
@@ -27,13 +27,20 @@ import { usePageTitle } from "../lib/usePageTitle";
  * "I think circle is a better representation for radar … Best - niches are in the middle")
  * — RadarBoard.tsx's header records what each of the plate's honesty rules became.
  *
- * ONE CLASS AT A TIME (user directive, 2026-08-27: "score Genres, Micro-genres and
- * Themes separately — user has to pick what he wants to research"): the CLASS PICKER
- * (Genres · Micro-genres · Themes, default Micro-genres, deliberately no "All") scopes
- * the board and the rail list to one class, so every dot on the dial is scored against
- * its own kind. The SEARCH deliberately ignores the picker — it spans all classes, and
- * picking a cross-class hit switches the picker to that class before selecting (see
- * handleSelect).
+ * THE CLASS IS THE DIAL'S ANGULAR AXIS, AND THE PICKER IS AN EMPHASIS (2026-09-10, second
+ * pass — user: "Make it better, right now it looks like a slop"). Genres, Micro-genres and
+ * Themes each hold a fixed 120° wedge and ALL THREE ALWAYS DRAW; the picker chooses which
+ * wedge is emphasised, and the other two recede rather than leaving. This is what fixed the
+ * density: one class at a time put 80 blips into a single full-circle sector where the
+ * reference puts ~14 per quadrant.
+ *
+ * It keeps the 2026-08-27 directive's substance ("score Genres, Micro-genres and Themes
+ * separately — user has to pick what he wants to research") and pays it better: each class
+ * is still ranked ONLY against its own kind — the Top-N control now takes the top N/3 of
+ * EACH class rather than the top N of the board, so a genre never competes with a micro-tag
+ * for a slot — and now you can also see the three rankings side by side instead of one at a
+ * time. The SEARCH still spans every class, and picking a hit moves the emphasis to that
+ * niche's own wedge (see handleSelect).
  *
  * Fed by the /api/niches LIST endpoint (two cuts: dimension=genre and dimension=tag
  * tiers=micro,theme). The stats cut is PINNED (24m × 50+ reviews) — see BOARD_WINDOW's
@@ -71,28 +78,43 @@ const BOARD_MIN_REVIEWS = 50;
  * opportunity — the same rows every other surface can rank. */
 const POPULATION_LIMIT = 500;
 
-/** Blip cap so the board stays readable; "top N by opportunity_v2" within the active
- * class. A display cap only: the rail search sees past it (see POPULATION_LIMIT). */
+/** Blip cap so the board stays readable. A display cap only: the rail search sees past it
+ * (see POPULATION_LIMIT). Since the three-sector rebuild it is DISTRIBUTED, not a board
+ * total — see perClassCap. */
 const TOP_N_OPTIONS = [
   { v: 40, label: "40" },
   { v: 80, label: "80" },
   { v: 120, label: "120" },
 ];
 
-/** The class picker — the board scores ONE class at a time (a genre's saturation and a
- * micro-tag's saturation are not the same market claim, so they must not share a plot).
- * Deliberately no "All": mixing classes is exactly what the directive retired. Default
- * micro — the class the opportunity work targets. */
+/** The class picker — since the three-sector rebuild it selects EMPHASIS, not contents: all
+ * three classes are always on the dial, and this decides which wedge reads at full strength
+ * while the other two recede. Each class is still ranked only against its own kind (see
+ * perClassCap), which is what the 2026-08-27 "score them separately" directive was for.
+ * Deliberately no "All": the reader is always researching something. Default micro — the
+ * class the opportunity work targets. */
 const CLASS_OPTIONS: { v: RadarSector; label: string }[] = [
   { v: "genre", label: "Genres" },
   { v: "micro", label: "Micro-genres" },
   { v: "theme", label: "Themes" },
 ];
 const CLASS_KICKER: Record<RadarSector, string> = {
-  genre: "genres",
-  micro: "micro-genre tags",
-  theme: "theme tags",
+  genre: "genres emphasised",
+  micro: "micro-genre tags emphasised",
+  theme: "theme tags emphasised",
 };
+
+/**
+ * THE TOP-N IS PER SECTOR, NOT PER BOARD. With three wedges a single board-wide cap would
+ * hand every slot to whichever class happens to score highest on opportunity_v2 — the micro
+ * tags — and leave the other two wedges empty, which is exactly the density failure the
+ * rebuild set out to fix. So the cap splits: Top 80 plots the top ~27 of EACH class.
+ *
+ * It is a ceiling, never a floor. Genres has ~9 solo-friendly niches at this cut, so the
+ * genre wedge draws 9 and looks sparser than its neighbours. That is the honest picture and
+ * it is NOT padded — an under-populated class is a real finding about the class.
+ */
+const perClassCap = (topN: number): number => Math.ceil(topN / CLASS_OPTIONS.length);
 /** The page-level population toggle (default ON — the radar is solo-first). ON asks the
  * SERVER (solo_only) for solo-friendly niches only (singleplayer share >= 0.8, unknown
  * excluded); OFF reveals the full population, where the solo lens draws team-scale dots
@@ -190,7 +212,7 @@ function RadarBoardSection({
       <div className="flex flex-wrap items-end gap-x-6 gap-y-3 pb-5">
         <div className="flex flex-col gap-1.5">
           <div className="kicker text-[10px] tracking-[.12em] text-brand">
-            Verdict rings · best in the middle · last 24 months · {CLASS_KICKER[boardClass]}
+            Verdict rings · best in the middle · three class sectors · last 24 months · {CLASS_KICKER[boardClass]}
             {soloOnly ? " · solo-friendly only" : ""}
           </div>
           {/* h1, not h2: this is the index route's only heading, and a page whose
@@ -199,7 +221,9 @@ function RadarBoardSection({
           <h1 className="text-[26px] text-ink-primary sm:text-[30px]">Niche radar</h1>
         </div>
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 sm:ml-auto">
-          <SegRow label="Class" options={CLASS_OPTIONS} value={boardClass} onChange={onBoardClass} />
+          {/* "Emphasis", not "Class": the control no longer decides what is on the board —
+              every class is — it decides which sector reads at full strength. */}
+          <SegRow label="Emphasis" options={CLASS_OPTIONS} value={boardClass} onChange={onBoardClass} />
           <SegRow
             label="Solo-friendly only"
             options={SOLO_ONLY_OPTIONS}
@@ -225,6 +249,7 @@ function RadarBoardSection({
           pool={pool}
           plotCap={plotCap}
           soloOnly={soloOnly}
+          emphasis={boardClass}
           selectedId={selectedId}
           onSelect={onSelect}
           zoom={zoom}
@@ -249,14 +274,17 @@ function RadarBoardSection({
         </summary>
         <p className="pb-2 text-[11px] text-ink-muted">
           Stats cut: last 24 months, niches with 50+ review games — pinned, so a display toggle can never move a
-          verdict (the mart precomputes each cut as its own population). The board scores ONE class at a time (the
-          picker): a genre and a micro-tag are different market claims, so they are never plotted against each other.
-          THE RING IS THE VERDICT, best in the middle: Enter now (innermost) → Watch → Emerging → Crowded → Declining
-          (outermost) — so a niche&rsquo;s distance from the centre IS the call, not a colour you have to decode. The
-          SECTOR is the tag tier (micro-genre / theme / umbrella / meta, plus an honest &ldquo;ungrouped&rdquo; for
-          genre rows and untiered tags), labelled at the rim; angle is given only to the tiers that actually have
-          rows, so the class picker&rsquo;s single-tier board draws one full-circle sector rather than three empty
-          quadrants. Inside a band, distance encodes opportunity v2 — nearer the centre = higher — as the RANK within
+          verdict (the mart precomputes each cut as its own population). THE RING IS THE VERDICT, best in the middle:
+          Enter now (innermost) → Watch → Emerging → Crowded → Declining (outermost) — so a niche&rsquo;s distance
+          from the centre IS the call, not a colour you have to decode. THE SECTOR IS THE CLASS: Genres,
+          Micro-genres and Themes hold a fixed 120° wedge each, all three always drawn and labelled at the rim, and
+          each class is ranked ONLY against its own kind — the Top N control plots the top N/3 of every class, so a
+          genre never competes with a micro-tag for a slot and no wedge can crowd another out. The class control is
+          an EMPHASIS: it lights one wedge and dims the other two, it never empties the board. Genres has far fewer
+          solo-friendly niches than the tag classes, so that wedge is genuinely sparser — it is not padded. Blips are
+          placed by a short, seeded force relaxation clamped inside their own band and wedge (the same technique the
+          reference radar uses), so segments fill evenly and a niche still lands in exactly the same spot on every
+          visit. Inside a band, distance encodes opportunity v2 — nearer the centre = higher — as the RANK within
           the band, not the raw score; the score itself stays in the tooltip and the dossier, where it can carry its
           supply brake with it. Dot area = P90 revenue; the number in a dot is its rank in the rail list beside the
           board; dot colour repeats the verdict the band already names (green = enter, steel = watch, violet =
@@ -272,9 +300,9 @@ function RadarBoardSection({
           dossier — the same checks that placed it, spelled out with the bars they were judged against, and a deep-dive
           button into the full workup. Click a ring&rsquo;s empty space to ZOOM into it: that band expands to fill the
           dial and the rail filters to its members; Esc, the rail chip&rsquo;s ✕, or a click on the board background
-          restores the full view. The board plots the class&rsquo;s Top N by opportunity; the rail&rsquo;s search
-          covers the whole population of the cut — all classes, past the plot cap (while zoomed, the search reads
-          within the zoomed ring).{" "}
+          restores the full view. The board plots each class&rsquo;s own Top N/3 by opportunity; the rail lists every
+          plotted dot across all three sectors, and its search covers the whole population of the cut — past the plot
+          cap (while zoomed, the search reads within the zoomed ring).{" "}
           {soloOnly
             ? `Population: solo-friendly niches only (singleplayer share ≥ ${SOLO_FRIENDLY_MIN}, filtered server-side; a niche with no solo reading is excluded — unknown is not a claim). Singleplayer share is a no-netcode proxy, not a production-scope measure — the dossier's solo row shows the member evidence behind it. Solo never changes a verdict.`
             : `Population: all niches — the solo lens restyles team-scale dots (hollow, singleplayer share < ${SOLO_FRIENDLY_MIN}) without ever changing a verdict. Singleplayer share is a no-netcode proxy, not a production-scope measure — the dossier's solo row shows the member evidence behind it.`}
@@ -301,6 +329,11 @@ export default function Radar() {
   // bury the previous page under a dozen history entries.
   const [searchParams, setSearchParams] = useSearchParams();
 
+  // ?class= IS UNCHANGED AS A URL CONTRACT AND CHANGED IN MEANING: it still names one of
+  // genre | micro | theme and still defaults to micro, but since the three-sector rebuild it
+  // selects the EMPHASISED wedge rather than the board's contents — every class is plotted
+  // either way. An old /radar?class=theme link therefore still opens the view it named (the
+  // themes wedge, lit), it just also shows the other two classes around it.
   const rawClass = searchParams.get("class");
   const boardClass: RadarSector = rawClass === "genre" || rawClass === "micro" || rawClass === "theme" ? rawClass : "micro";
   const soloOnly = searchParams.get("solo") !== "off"; // default ON — the radar is solo-first
@@ -418,16 +451,24 @@ export default function Radar() {
     return rows;
   }, [genreQ.data, tagQ.data]);
 
-  /** The plotted board: the ACTIVE CLASS only (one class at a time — the directive),
-   * then its Top-N by opportunity. The pool stays all-class for the search. */
-  const blips = useMemo(
-    () => pool.filter((b) => b.sector === boardClass).slice(0, topN),
-    [pool, boardClass, topN],
-  );
+  /**
+   * The plotted board: EVERY class, each cut to its OWN Top N/3 by opportunity (see
+   * perClassCap). Three sectors, three independent rankings — which is what keeps a genre
+   * from being judged against a micro-tag, and what keeps one class from eating the board.
+   * `pool` is already in opportunity order, so a filter-and-slice per class is the ranking.
+   *
+   * Deliberately NOT dependent on boardClass: the emphasis must not change what is plotted,
+   * or flipping it would re-run the force layout and move every dot on the dial.
+   */
+  const blips = useMemo(() => {
+    const cap = perClassCap(topN);
+    return CLASS_OPTIONS.flatMap((o) => pool.filter((b) => b.sector === o.v).slice(0, cap));
+  }, [pool, topN]);
 
-  /** The selection channel. A search hit can belong to another class (search spans all
-   * classes on purpose); selecting it switches the picker to that class FIRST, so the
-   * dossier opens over the board that actually contains the niche. */
+  /** The selection channel. A search hit can belong to another class; selecting it moves the
+   * EMPHASIS to that niche's own wedge, so the dot you just opened is the lit one. (Before
+   * the three-sector rebuild this was load-bearing — the other class simply was not on the
+   * board — and it stays because a dossier open over a dimmed dot is a worse read.) */
   const handleSelect = (id: string | null) => {
     // Both the class switch and the selection go in ONE param write — two setParams calls
     // in a row would each read the same stale `searchParams` snapshot and the second
@@ -454,7 +495,7 @@ export default function Radar() {
       <RadarBoardSection
         blips={blips}
         pool={pool}
-        plotCap={topN}
+        plotCap={perClassCap(topN)}
         loading={loading}
         bothFailed={bothFailed}
         partialFail={partialFail}
