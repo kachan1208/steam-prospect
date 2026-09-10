@@ -98,8 +98,9 @@
  * flat "the board and the score can't disagree". They can, and they do — measured on the
  * 222-niche default Radar cut (tag / 24m / min50):
  *   - This file's ring reads supply ABSOLUTELY and binary: `saturation_yoy > SAT_FLOOD_YOY`
- *     (line ~464). It is the +15%/yr line RadarBoard.tsx literally draws across the plate
- *     as the quadrant divider, so the ring and the picture cannot disagree.
+ *     (line ~464). Since the 2026-09-10 ring rebuild the board draws the RING rather than
+ *     this bar, so the bar no longer has a hairline of its own on the plate — but it is
+ *     still the line this ring is decided on, and the dossier prints it verbatim.
  *   - mart_niche.sql's supply_brake reads supply RELATIVELY and continuously: flood_room
  *     subtracts annualised DEMAND growth from annualised SUPPLY growth, then takes
  *     supply_room = LEAST(flood_room, entrant_room) and brakes by
@@ -523,7 +524,8 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
       // beside it answer two different questions about supply, and the bare word "Supply"
       // implied one answer: readers took the passing row as a promise the score would not
       // brake. This row is the ABSOLUTE read — how fast the pipeline is growing, the same
-      // +15%/yr line RadarBoard.tsx draws as the quadrant divider. The score's brake is the
+      // +15%/yr line the ring is decided on (RadarBoard.tsx drew it as a quadrant divider
+      // until the 2026-09-10 dial; it is now the boundary between bands). The brake is the
       // RELATIVE read (pipeline growth NET of demand growth) and additionally brakes on
       // entrant_ratio. They contradict on 59 of 211 comparable niches (28.0%) on the default
       // cut — deliberately; see the ONE MODEL, TWO VIEWS block. value/pass/decides are
@@ -737,6 +739,41 @@ export type RadarSector = "genre" | "micro" | "theme";
 export function radarSector(dimension: string, tier: string | null | undefined): RadarSector | null {
   if (dimension === "genre") return "genre";
   return tier === "micro" ? "micro" : tier === "theme" ? "theme" : null;
+}
+
+/**
+ * THE RING BOARD'S ANGULAR AXIS — the tag TIER, as a sector of the dial (2026-09-10, the
+ * concentric-ring rebuild). Distinct from RadarSector above, which is the board's CLASS
+ * PICKER value (Genres / Micro-genres / Themes) and decides which rows are on the board at
+ * all. The tier decides WHERE ON THE RIM a row sits once it is there.
+ *
+ * "ungrouped" is the honest fifth state for a row whose tier is not one of the four tag
+ * tiers — every genre-dimension row (the API stamps those tier "genre"), and any tag whose
+ * tier is missing. It is a NAMED SECTOR, not a parking spot on the divider spokes: a blip
+ * sitting on a boundary reads as belonging to both neighbours, and the spokes are already
+ * carrying the band captions. See components/radarRings.ts for how the dial allocates
+ * angle to the sectors that actually have members.
+ */
+export type RadarTierSector = "micro" | "theme" | "umbrella" | "meta" | "ungrouped";
+
+/** Sector order around the dial, clockwise from 12 o'clock. Narrowest-scope tier first:
+ * micro-genres are the buildable end of the tag vocabulary, meta is the reception end. */
+export const TIER_SECTOR_ORDER: RadarTierSector[] = ["micro", "theme", "umbrella", "meta", "ungrouped"];
+
+/** Rim wording. "Ungrouped" says exactly what it is — no tier — and never pretends to be
+ * a tier of its own. */
+export const TIER_SECTOR_LABEL: Record<RadarTierSector, string> = {
+  micro: "Micro-genre",
+  theme: "Theme",
+  umbrella: "Umbrella",
+  meta: "Meta",
+  ungrouped: "Ungrouped · no tier",
+};
+
+/** A row's tier -> its dial sector. Total: anything outside the four tag tiers (genres
+ * included, whose tier column reads "genre") lands in "ungrouped". */
+export function tierSector(tier: string | null | undefined): RadarTierSector {
+  return tier === "micro" || tier === "theme" || tier === "umbrella" || tier === "meta" ? tier : "ungrouped";
 }
 
 /**

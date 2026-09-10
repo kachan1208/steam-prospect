@@ -17,17 +17,20 @@ import { usePageTitle } from "../lib/usePageTitle";
  * re-statement of the top riser the list already leads with. The /api/niches/radar
  * endpoint itself is untouched (MCP and external consumers).
  *
- * THE INSTRUMENT (RadarBoardSection) — a single frame: the XY quadrant plate on the left
- * (RadarBoard.tsx — demand trend × release saturation, quadrant lines at the verdict's
- * own thresholds), the RIGHT RAIL as its only reading pane (the ranked verdict list with
- * the full-population niche search on top, or the selected niche's verdict dossier), and
- * ONE toolbar row in the header carrying every control plus the Niche Finder escape
- * hatch (that link matters more now: "Niches" left the top nav — see App.tsx).
+ * THE INSTRUMENT (RadarBoardSection) — a single frame: the CONCENTRIC-RING DIAL on the
+ * left (RadarBoard.tsx — the verdict as a ring band, best in the middle; the tag tier as
+ * a sector; opportunity_v2 as the rank inside the band), the RIGHT RAIL as its only
+ * reading pane (the ranked verdict list with the full-population niche search on top, or
+ * the selected niche's verdict dossier), and ONE toolbar row in the header carrying every
+ * control plus the Niche Finder escape hatch (that link matters more now: "Niches" left
+ * the top nav — see App.tsx). The dial replaced the XY quadrant plate on 2026-09-10 (user:
+ * "I think circle is a better representation for radar … Best - niches are in the middle")
+ * — RadarBoard.tsx's header records what each of the plate's honesty rules became.
  *
  * ONE CLASS AT A TIME (user directive, 2026-08-27: "score Genres, Micro-genres and
  * Themes separately — user has to pick what he wants to research"): the CLASS PICKER
  * (Genres · Micro-genres · Themes, default Micro-genres, deliberately no "All") scopes
- * the board and the rail list to one class, so every dot on the plate is scored against
+ * the board and the rail list to one class, so every dot on the dial is scored against
  * its own kind. The SEARCH deliberately ignores the picker — it spans all classes, and
  * picking a cross-class hit switches the picker to that class before selecting (see
  * handleSelect).
@@ -187,7 +190,7 @@ function RadarBoardSection({
       <div className="flex flex-wrap items-end gap-x-6 gap-y-3 pb-5">
         <div className="flex flex-col gap-1.5">
           <div className="kicker text-[10px] tracking-[.12em] text-brand">
-            Verdict quadrants · last 24 months · {CLASS_KICKER[boardClass]}
+            Verdict rings · best in the middle · last 24 months · {CLASS_KICKER[boardClass]}
             {soloOnly ? " · solo-friendly only" : ""}
           </div>
           {/* h1, not h2: this is the index route's only heading, and a page whose
@@ -248,31 +251,30 @@ function RadarBoardSection({
           Stats cut: last 24 months, niches with 50+ review games — pinned, so a display toggle can never move a
           verdict (the mart precomputes each cut as its own population). The board scores ONE class at a time (the
           picker): a genre and a micro-tag are different market claims, so they are never plotted against each other.
-          The axes are the verdict&rsquo;s own decisive inputs — X: demand trend, review inflow over the last 24
-          months vs the prior 24 (a structural read a release spike or a sale week cannot move) · Y: release
-          saturation YoY (the pipeline), drawn CALMER-UP: fewer releases toward the top, flooding toward the bottom,
-          so the washed top-right quadrant (growing demand, calm pipeline) is the focus zone — and the dashed
-          quadrant lines are the verdict&rsquo;s own bars (lib/radarVerdict.ts): the vertical at +40% / 24m (the
-          enter bar), the horizontal at +15% releases YoY (the flood bar; flooding sits below it). Dot area = P90
-          revenue; dot color = the FINAL verdict (a 2026-08-27 amendment to the old mono-steel rule: green = enter,
-          steel = watch, violet = emerging, amber = crowded, terracotta = declining — reinforcement only, every
-          meaning survives grayscale) — position is evidence, color is the call: a dot in the growing-open quadrant
-          can still read Watch when winner-take-most concentration vetoes entry, and the dossier spells out which
-          check did it. Verdicts: Enter now = demand past the bar without a flooding
-          pipeline · Watch = demand holding or softening, or score-only evidence · Emerging = no comparable demand
-          base — either a young label (≥80% of its reviews from games released in the last 24 months) or a prior base
-          too small for a % read; no trustworthy trend % exists, so those rows sit in the dashed strip below the plot,
-          sized by absolute 24-month review volume, never at a fake position · Crowded = releases up &gt;15% YoY
-          against flat-to-down demand, or winner-take-most · Declining = demand down ≥30% per 24 months. Axes are
-          linear over labeled domains (X −100…+300% / 24m, Y −60…+120% YoY); a value beyond a domain pins its dot at
-          the plot edge with a chevron and the true number stays in the tooltip and dossier. Click a dot for its
-          verdict dossier — the same checks that placed it, spelled out with the bars they were judged against.
-          Click a quadrant&rsquo;s empty space to ZOOM into it: the axes re-domain to that quadrant&rsquo;s own
-          bounds and the rail filters to its members (the strip zooms as a rail filter + an enlarged strip — an
-          emerging niche never gets a fake XY position); Esc, the rail chip&rsquo;s ✕, or a click on the plot
-          background restores the full view. The board plots the class&rsquo;s Top N by opportunity; the
-          rail&rsquo;s search covers the whole population of the cut — all classes, past the plot cap (while
-          zoomed, the search reads within the zoomed region).{" "}
+          THE RING IS THE VERDICT, best in the middle: Enter now (innermost) → Watch → Emerging → Crowded → Declining
+          (outermost) — so a niche&rsquo;s distance from the centre IS the call, not a colour you have to decode. The
+          SECTOR is the tag tier (micro-genre / theme / umbrella / meta, plus an honest &ldquo;ungrouped&rdquo; for
+          genre rows and untiered tags), labelled at the rim; angle is given only to the tiers that actually have
+          rows, so the class picker&rsquo;s single-tier board draws one full-circle sector rather than three empty
+          quadrants. Inside a band, distance encodes opportunity v2 — nearer the centre = higher — as the RANK within
+          the band, not the raw score; the score itself stays in the tooltip and the dossier, where it can carry its
+          supply brake with it. Dot area = P90 revenue; the number in a dot is its rank in the rail list beside the
+          board; dot colour repeats the verdict the band already names (green = enter, steel = watch, violet =
+          emerging, amber = crowded, terracotta = declining — reinforcement only, every meaning survives grayscale);
+          a hollow dot is team-scale under the solo lens and a dotted ring means the verdict is hedged. Verdicts:
+          Enter now = demand past +40% / 24m without a flooding release pipeline · Watch = demand holding or
+          softening, or score-only evidence · Emerging = no comparable demand base — either a young label (≥80% of its
+          reviews from games released in the last 24 months) or a prior base too small for a % read, so no trustworthy
+          trend % exists and the rail shows absolute 24-month volume instead of a percentage · Crowded = releases up
+          &gt;15% YoY against flat-to-down demand, or winner-take-most · Declining = demand down ≥30% per 24 months.
+          Nothing clamps on this board and nothing sits in a &ldquo;no position&rdquo; strip: a ring board has no axis
+          to fall off, and every niche has a verdict, so every niche has an honest place. Click a dot for its verdict
+          dossier — the same checks that placed it, spelled out with the bars they were judged against, and a deep-dive
+          button into the full workup. Click a ring&rsquo;s empty space to ZOOM into it: that band expands to fill the
+          dial and the rail filters to its members; Esc, the rail chip&rsquo;s ✕, or a click on the board background
+          restores the full view. The board plots the class&rsquo;s Top N by opportunity; the rail&rsquo;s search
+          covers the whole population of the cut — all classes, past the plot cap (while zoomed, the search reads
+          within the zoomed ring).{" "}
           {soloOnly
             ? `Population: solo-friendly niches only (singleplayer share ≥ ${SOLO_FRIENDLY_MIN}, filtered server-side; a niche with no solo reading is excluded — unknown is not a claim). Singleplayer share is a no-netcode proxy, not a production-scope measure — the dossier's solo row shows the member evidence behind it. Solo never changes a verdict.`
             : `Population: all niches — the solo lens restyles team-scale dots (hollow, singleplayer share < ${SOLO_FRIENDLY_MIN}) without ever changing a verdict. Singleplayer share is a no-netcode proxy, not a production-scope measure — the dossier's solo row shows the member evidence behind it.`}
@@ -289,7 +291,7 @@ export default function Radar() {
   // client-side display slices (see POPULATION_LIMIT), so only the solo toggle changes
   // what is fetched.
   //
-  // ALL FIVE RIDE THE URL (class/solo/top/niche 2026-08-28; the quadrant ZOOM joined
+  // ALL FIVE RIDE THE URL (class/solo/top/niche 2026-08-28; the region ZOOM joined
   // them 2026-09-01) — the flagship page was the only surface whose view couldn't be
   // linked or bookmarked, while six others already use useSearchParams. "Look at
   // Roguelike Deckbuilder on the themes board" is now a URL you can send. Same contract
@@ -305,10 +307,13 @@ export default function Radar() {
   const rawTop = Number(searchParams.get("top"));
   const topN = TOP_N_OPTIONS.some((o) => o.v === rawTop) ? rawTop : 80;
   const selectedId = searchParams.get("niche");
-  // The click-to-zoom region. It was RadarBoard-local useState until 2026-09-01, which
-  // made it the one radar control you couldn't share: clicking a quadrant filtered the
-  // rail to "FLAT/SHRINKING · OPEN 32 niches ✕" and titled the plate "— ZOOMED" while
-  // the address bar still read /radar, so a reload silently threw the zoom away.
+  // The click-to-zoom region — a RING BAND since the 2026-09-10 dial rebuild (it was one
+  // of the XY plate's four quadrants or its strip before; RADAR_REGIONS now IS RING_ORDER,
+  // so an old ?zoom=growing-open link falls back to the unzoomed board instead of
+  // throwing). It was RadarBoard-local useState until 2026-09-01, which made it the one
+  // radar control you couldn't share: clicking a region filtered the rail and titled the
+  // plate "— ZOOMED" while the address bar still read /radar, so a reload silently threw
+  // the zoom away.
   const rawZoom = searchParams.get("zoom");
   const zoom: RadarRegion | null = RADAR_REGIONS.includes(rawZoom as RadarRegion) ? (rawZoom as RadarRegion) : null;
 
