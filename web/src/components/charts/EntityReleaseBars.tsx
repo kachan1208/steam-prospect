@@ -44,7 +44,11 @@ export function EntityReleaseBars({
   // so a drag selects a stretch of a studio's output (the mid-career run, the last five
   // years). The category key is "#seq" rather than a date because years repeat, which the
   // hook does not care about: it slices by position either way.
-  const zoom = useDragZoom(data, "key");
+  // Keyed "#seq" because release years repeat, so the shared page window reads the
+  // release date instead (falling back to the year when the exact day is unknown).
+  const zoom = useDragZoom(data, "key", {
+    dateOf: (g) => g.release_date ?? g.release_year,
+  });
 
   if (games.length === 0) {
     return <div className="flex h-40 items-center justify-center text-xs text-ink-muted">No releases.</div>;
@@ -56,7 +60,7 @@ export function EntityReleaseBars({
   const y = axisScale(Math.max(0, ...data.map((d) => d.rev)), "usd");
 
   return (
-    <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+    <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
       <ResponsiveContainer width="100%" height={height}>
         <BarChart data={zoom.data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
         <CartesianGrid stroke="var(--gridline)" vertical={false} />

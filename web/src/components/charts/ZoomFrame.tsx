@@ -1,14 +1,11 @@
 /**
- * The chrome around a drag-zoomable chart: the positioning context the reset control sits
- * in, and the `select-none` that stops a drag from turning into a text selection.
+ * The chrome around a drag-zoomable chart: the positioning context for its reset control,
+ * the `select-none` that stops a drag becoming a text selection, the cursor that says the
+ * plot is draggable at all, and the note for a series the page's window excludes entirely.
  *
- * Kept as one component rather than repeated per chart because seven charts adopting the
- * same interaction is exactly how a wrapper div and a button end up drifting into seven
- * slightly different affordances (which is the lesson of the ten hand-rolled blueprint
- * frames recorded in IDEAS.md).
- *
- * The control only exists while zoomed: an always-present "Reset" on an unzoomed chart is
- * a dead control, and these panels are dense enough already.
+ * One component rather than the same wrapper repeated per chart, because fourteen charts
+ * adopting one interaction is exactly how a div and a button drift into fourteen slightly
+ * different affordances (the lesson of the ten hand-rolled blueprint frames in IDEAS.md).
  */
 import type { ReactNode } from "react";
 import clsx from "clsx";
@@ -16,12 +13,14 @@ import clsx from "clsx";
 export function ZoomFrame({
   zoomed,
   dragging,
+  outOfRange = false,
   onReset,
   className,
   children,
 }: {
   zoomed: boolean;
   dragging: boolean;
+  outOfRange?: boolean;
   onReset: () => void;
   className?: string;
   children: ReactNode;
@@ -29,46 +28,60 @@ export function ZoomFrame({
   return (
     <div
       // `cursor-crosshair` is the affordance: without it a zoomable chart looks exactly
-      // like a static one and nobody discovers the drag (the first thing reported about
-      // this feature was "there is a lack of visual change when you grab"). Crosshair over
-      // the plot, `col-resize` while sweeping, so the pointer says "pick a range" before
-      // the band exists and "you are sizing one" during.
+      // like a static one and nobody discovers the drag. Crosshair at rest, `col-resize`
+      // while sweeping — the pointer says "pick a range" before the band exists and "you
+      // are sizing one" during.
       className={clsx(
         "relative",
         dragging ? "cursor-col-resize select-none" : "cursor-crosshair",
         className,
       )}
     >
-      {zoomed && (
+      {zoomed && !outOfRange && (
         <button
           type="button"
           onClick={onReset}
-          // Caption vocabulary, not button vocabulary: uppercase 10px muted, no fill and no
-          // border, so it reads as the chart's own annotation layer (same family as the
-          // "MONTHLY" / "PARTIAL" marks) instead of competing with the page's real buttons.
-          className="absolute right-0 top-0 z-10 text-[10px] font-semibold uppercase tracking-wide text-ink-muted underline decoration-dotted underline-offset-2 hover:text-ink-primary focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-brand"
+          // A REAL button, bordered and filled. The first version of this was a 10px muted
+          // caption in the corner and the report was "I can't find a button or a way to
+          // deselect this range" — which is what a control styled as an annotation earns.
+          // It still sits inside the plot's top-right margin so it never displaces the
+          // chart, but it now reads as something to press.
+          className="absolute right-0 top-0 z-10 rounded-sm border border-borderstrong bg-surface px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-secondary shadow-sm hover:border-brand hover:text-ink-primary focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-brand"
         >
           Reset zoom
         </button>
       )}
-      {children}
+      {outOfRange ? (
+        // Honest rather than blank: this series has nothing inside the page's window, and
+        // an empty pair of axes reads as a broken chart instead of an empty one.
+        <div className="flex h-full min-h-[100px] flex-col items-center justify-center gap-1.5 py-6 text-center text-xs text-ink-muted">
+          <span>No data in the selected date range.</span>
+          <button
+            type="button"
+            onClick={onReset}
+            className="rounded-sm border border-borderstrong bg-surface px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-secondary hover:border-brand hover:text-ink-primary"
+          >
+            Reset zoom
+          </button>
+        </div>
+      ) : (
+        children
+      )}
     </div>
   );
 }
 
 /**
- * The translucent band drawn under the cursor mid-drag. Props are spread onto Recharts'
- * `ReferenceArea`, which must be rendered INSIDE the chart element to be positioned by its
- * scales — hence a props object rather than a component of its own.
+ * The translucent band drawn under the cursor mid-drag. Spread onto Recharts'
+ * `ReferenceArea`, which must render INSIDE the chart element to be positioned by its
+ * scales — hence a props object rather than a component.
  *
- * Hairline stroke + a wash of the accent: the blueprint identity has no filled shapes, so
- * the selection reads as a measurement band rather than a highlight.
+ * Hairline edges plus a wash of the accent: the blueprint identity has no filled shapes, so
+ * the selection reads as a measurement band, not a highlight. The wash is 0.22 because the
+ * first pass at 0.12 was nearly invisible over bars on these dark panels, which read as the
+ * drag not working.
  */
 export const SELECTION_AREA_PROPS = {
-  // Opacity raised from the first pass (0.12 wash, 0.9 hairline): against these dense
-  // dark panels that band was almost invisible over bars, which read as the drag not
-  // working at all. 0.22 still lets the marks under it show through — it is a selection,
-  // not a mask — and the full-strength 1px edges give the sweep two crisp boundaries.
   strokeOpacity: 1,
   stroke: "var(--accent-300)",
   strokeWidth: 1,

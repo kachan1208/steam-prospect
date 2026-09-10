@@ -175,7 +175,7 @@ function GrowthPanels({
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
       <div>
         <div className="mb-1 text-xs text-ink-muted">{cumulativeLabel}</div>
-        <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+        <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
           <ResponsiveContainer width="100%" height={168}>
             <AreaChart data={zoom.data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
             <CartesianGrid stroke="var(--gridline)" vertical={false} />
@@ -225,7 +225,7 @@ function GrowthPanels({
       </div>
       <div>
         <div className="mb-1 text-xs text-ink-muted">{monthlyLabel}</div>
-        <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+        <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
           <ResponsiveContainer width="100%" height={168}>
             <BarChart data={zoom.data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
             <CartesianGrid stroke="var(--gridline)" vertical={false} />
@@ -551,7 +551,7 @@ function LivePlayersDrilldown({
       {(daily?.monthly?.length ?? 0) >= 3 && (
         <div>
           <div className="mb-1 text-xs text-ink-muted">Full history — monthly average & peak players</div>
-          <ZoomFrame zoomed={monthlyZoom.zoomed} dragging={monthlyZoom.dragging} onReset={monthlyZoom.reset}>
+          <ZoomFrame zoomed={monthlyZoom.zoomed} dragging={monthlyZoom.dragging} outOfRange={monthlyZoom.outOfRange} onReset={monthlyZoom.reset}>
             <ResponsiveContainer width="100%" height={170}>
               <LineChart data={monthlyZoom.data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} {...monthlyZoom.handlers}>
               <CartesianGrid stroke="var(--gridline)" vertical={false} />

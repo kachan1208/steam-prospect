@@ -12,11 +12,20 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 
 import { PressTimelineChart } from "./PressTimelineChart";
 import { SaturationTrend } from "./SaturationTrend";
 import { axisTicks, installChartLayout } from "../../test/recharts";
+import { ZoomRangeProvider } from "../../lib/zoomRange";
 import type { PressTimelinePoint, TrendPoint } from "../../lib/api";
+
+/** The window is page-level state, so every chart under test needs the shell that owns it. */
+const Page = ({ children }: { children: React.ReactNode }) => (
+  <MemoryRouter>
+    <ZoomRangeProvider>{children}</ZoomRangeProvider>
+  </MemoryRouter>
+);
 
 const WIDTH = 900;
 let restore: () => void;
@@ -49,7 +58,7 @@ function dragAcross(container: HTMLElement, fromX: number, toX: number) {
 
 describe("drag-to-zoom on a time axis", () => {
   it("shrinks the axis to the dragged window and offers a way back", () => {
-    const { container } = render(<PressTimelineChart points={months} />);
+    const { container } = render(<PressTimelineChart points={months} />, { wrapper: Page });
 
     const before = axisTicks(container, "x");
     expect(before.length).toBeGreaterThan(2);
@@ -74,7 +83,7 @@ describe("drag-to-zoom on a time axis", () => {
   });
 
   it("leaves the chart alone on a click that never moved", () => {
-    const { container } = render(<PressTimelineChart points={months} />);
+    const { container } = render(<PressTimelineChart points={months} />, { wrapper: Page });
     const before = axisTicks(container, "x");
 
     const wrapper = container.querySelector(".recharts-wrapper")!;
@@ -95,7 +104,7 @@ describe("drag-to-zoom on a time axis", () => {
       p90_rev: 9000 * (i + 1),
     })) as TrendPoint[];
 
-    const { container } = render(<SaturationTrend points={years} />);
+    const { container } = render(<SaturationTrend points={years} />, { wrapper: Page });
     const beforeLeft = axisTicks(container, "x", 0);
     const beforeRight = axisTicks(container, "x", 1);
     expect(beforeLeft).toEqual(beforeRight);

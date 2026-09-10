@@ -272,7 +272,7 @@ function PlayersSeriesChart({ points }: { points: NichePlayersPoint[] }) {
   }
   const y = axisScale(Math.max(0, ...points.map((p) => p.total_players ?? 0)), "count");
   return (
-    <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+    <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
       <ResponsiveContainer width="100%" height={150}>
         <LineChart data={zoom.data} margin={{ top: 6, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
         <CartesianGrid stroke="var(--gridline)" vertical={false} />
@@ -337,7 +337,7 @@ function PlayersSeriesChart({ points }: { points: NichePlayersPoint[] }) {
 function NichePressChart({ points }: { points: NichePressPoint[] }) {
   const zoom = useDragZoom(points, "month");
   return (
-    <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+    <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
       <ResponsiveContainer width="100%" height={150}>
         <BarChart data={zoom.data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
         <CartesianGrid stroke="var(--gridline)" vertical={false} />
@@ -1096,7 +1096,7 @@ export default function NicheDetail() {
                   const partialYear = partialTrendYear(detail.saturation_trend);
                   return (
                     <>
-                      <ZoomFrame zoomed={yearZoom.zoomed} dragging={yearZoom.dragging} onReset={yearZoom.reset}>
+                      <ZoomFrame zoomed={yearZoom.zoomed} dragging={yearZoom.dragging} outOfRange={yearZoom.outOfRange} onReset={yearZoom.reset}>
                         <ResponsiveContainer width="100%" height={180}>
                           <LineChart data={yearZoom.data} margin={{ top: 4, right: 4, left: 0, bottom: 0 }} {...yearZoom.handlers}>
                           <CartesianGrid stroke="var(--gridline)" vertical={false} />
@@ -1389,7 +1389,7 @@ export default function NicheDetail() {
                     <div className="mb-1 text-xs text-ink-muted">
                       Niche audience over the years — summed monthly average players
                     </div>
-                    <ZoomFrame zoomed={playersMonthlyZoom.zoomed} dragging={playersMonthlyZoom.dragging} onReset={playersMonthlyZoom.reset}>
+                    <ZoomFrame zoomed={playersMonthlyZoom.zoomed} dragging={playersMonthlyZoom.dragging} outOfRange={playersMonthlyZoom.outOfRange} onReset={playersMonthlyZoom.reset}>
                       <ResponsiveContainer width="100%" height={150}>
                         <LineChart data={playersMonthlyZoom.data} margin={{ top: 6, right: 8, left: 0, bottom: 0 }} {...playersMonthlyZoom.handlers}>
                         <CartesianGrid stroke="var(--gridline)" vertical={false} />
