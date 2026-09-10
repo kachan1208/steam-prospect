@@ -389,6 +389,20 @@ describe("Radar — the ring zoom is shareable", () => {
     expect(screen.getByTestId("radar-row-tag:City Builder")).toBeTruthy();
   });
 
+  it("keeps the sector labels while zoomed — the wedges do not go away, so their names must not", async () => {
+    // Reported after the ring rebuild: "why themes/genres/micro themes gets missing when you
+    // zoom in into category on a radar". The zoom banner had REPLACED the rim labels in the
+    // annotation layer, while the three divider spokes kept drawing — so the reader was left
+    // with three unlabelled wedges and no way to tell which class was which.
+    renderRadar("/radar?zoom=enter");
+    expect(await screen.findByText("ENTER NOW — ZOOMED")).toBeTruthy();
+    for (const sector of ["genre", "micro", "theme"]) {
+      expect(screen.getByTestId(`radar-sector-label-${sector}`)).toBeTruthy();
+    }
+    // And the spokes they name are still on the dial.
+    expect(screen.getByTestId("radar-spoke-genre")).toBeTruthy();
+  });
+
   it("the zoom composes with its four siblings in one shareable URL", async () => {
     renderRadar("/radar?class=theme&solo=off&top=40");
     await screen.findByTestId("radar-row-tag:Fishing");

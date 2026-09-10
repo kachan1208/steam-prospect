@@ -1406,18 +1406,7 @@ export function RadarBoard({
               annotation rule, applied to the labels it was written for. pointerEvents none:
               every dot keeps its own hover and click. */}
           <g pointerEvents="none" data-testid="ring-annotations">
-            {zoom !== null ? (
-              <>
-                {/* Both lines live in the top rim pad, clear of the dial's own frame (the
-                    zoomed view draws no rim sector label there, so the pad is free). */}
-                <HaloText x={cx} y={10} anchor="middle" size={11.5} fill={REGION_TONE[zoom]}>
-                  {REGION_NAME[zoom]} — ZOOMED
-                </HaloText>
-                <HaloText x={cx} y={21} anchor="middle" size={8.5} halo={4}>
-                  ESC · BACKGROUND CLICK · OR THE RAIL CHIP ✕ EXITS
-                </HaloText>
-              </>
-            ) : compact ? (
+            {compact ? (
               /* A phone spends its side margins on RADIUS, not on rim labels (see
                  radarRings.ts's RIM_PAD_SIDE_COMPACT) — reserving room for "MICRO-GENRES ·
                  27" out at the wedge's mid angle would halve the dial. So the sector order
@@ -1458,6 +1447,22 @@ export function RadarBoard({
                   </HaloText>
                 );
               })
+            )}
+            {/* The zoom banner is ADDITIVE, not a replacement. It used to take the sector
+                labels' place, which left the reader looking at three still-drawn spokes with
+                nothing naming them ("why themes/genres/micro themes gets missing when you
+                zoom in") — the wedges do not go away on zoom, so neither may their labels.
+                Its two lines sit in the top rim pad, and with three sectors no wedge's mid
+                angle lands at 12 o'clock, so nothing collides. */}
+            {zoom !== null && (
+              <>
+                <HaloText x={cx} y={10} anchor="middle" size={11.5} fill={REGION_TONE[zoom]}>
+                  {REGION_NAME[zoom]} — ZOOMED
+                </HaloText>
+                <HaloText x={cx} y={21} anchor="middle" size={8.5} halo={4}>
+                  ESC · BACKGROUND CLICK · OR THE RAIL CHIP ✕ EXITS
+                </HaloText>
+              </>
             )}
           </g>
         </svg>
