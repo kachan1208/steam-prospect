@@ -53,7 +53,7 @@ export function SaturationTrend({ points }: { points: TrendPoint[] }) {
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
       <div>
         <div className="mb-1 text-xs text-ink-muted">Releases per year (supply)</div>
-        <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+        <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
           <ResponsiveContainer width="100%" height={140}>
             <BarChart data={zoom.data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
             <CartesianGrid stroke="var(--gridline)" vertical={false} />
@@ -95,7 +95,7 @@ export function SaturationTrend({ points }: { points: TrendPoint[] }) {
       </div>
       <div>
         <div className="mb-1 text-xs text-ink-muted">{hasP90 ? "P90 revenue per year" : "Median revenue per year"}</div>
-        <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} onReset={zoom.reset}>
+        <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
           <ResponsiveContainer width="100%" height={140}>
             <LineChart data={zoom.data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
             <CartesianGrid stroke="var(--gridline)" vertical={false} />

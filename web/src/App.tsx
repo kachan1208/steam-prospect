@@ -7,6 +7,8 @@ import { useHealth } from "./lib/api";
 import { initAnalytics, trackPageview } from "./lib/analytics";
 import { NICHE_ROUTE_PATH } from "./lib/nichePath";
 import { CompareTray } from "./components/CompareTray";
+import { ZoomBanner } from "./components/charts/ZoomBanner";
+import { ZoomRangeProvider } from "./lib/zoomRange";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Loading } from "./components/ui/Loading";
 import Terms from "./pages/Terms";
@@ -236,6 +238,12 @@ function AppShell() {
   // stay alive and usable when a page blows up, which is the whole point.
   const { pathname } = useLocation();
   return (
+    // ZoomRangeProvider holds ONE date window for the whole page: a range dragged on any
+    // chart applies to every other chart that has a date axis (lib/zoomRange). It sits at
+    // the shell so the window survives a panel re-rendering and clears on navigation, and
+    // so ZoomBanner — the always-visible way back out — can live outside the scrolling
+    // content.
+    <ZoomRangeProvider>
     <div className="flex min-h-full flex-col bg-page">
       <Header />
       <main className="flex-1">
@@ -253,7 +261,11 @@ function AppShell() {
       {/* Compare tray on every page (sticky above the footer; renders nothing when empty). */}
       <CompareTray />
       <Footer />
+      {/* Pinned to the viewport, so the way out of a zoom is visible from anywhere on the
+          page rather than only beside the chart the drag started on. */}
+      <ZoomBanner />
     </div>
+    </ZoomRangeProvider>
   );
 }
 
