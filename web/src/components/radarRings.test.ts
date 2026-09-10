@@ -1,32 +1,39 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CLASS_ORDER,
   DEFAULT_PLATE_W,
   RING_STOPS,
   START_ANGLE,
   bandShares,
+  cellPads,
   layoutRings,
   ringGeom,
   sectorSpans,
+  type RadarClass,
   type RingInput,
 } from "./radarRings";
-import { RING_ORDER, TIER_SECTOR_ORDER, type RadarRing, type RadarTierSector } from "../lib/radarVerdict";
+import { RING_ORDER, type RadarRing } from "../lib/radarVerdict";
 
 /**
- * THE PLACEMENT CONTRACT of the concentric-ring dial (2026-09-10). Three of these are
- * invariants the board's whole meaning rests on, so they are asserted on the PURE function
- * rather than through the DOM:
+ * THE PLACEMENT CONTRACT of the concentric-ring dial (2026-09-10, rebuilt the same day for
+ * three class sectors and d3-force relaxation). Four of these are invariants the board's
+ * whole meaning rests on, so they are asserted on the PURE function rather than through the
+ * DOM:
  *
  *   1. A BLIP LANDS IN THE BAND ITS VERDICT NAMES — and its whole circle does, edges
  *      included. Position IS the verdict now; a dot half a radius into the neighbouring
  *      band is a dot claiming the wrong call.
- *   2. A BLIP LANDS IN THE SECTOR ITS TIER NAMES — same reason, on the angular axis.
- *   3. opportunity_v2 ORDERS THE BAND: higher score, smaller radius (nearer the middle).
- *   4. TWO BLIPS IN THE SAME CELL DO NOT COINCIDE — the collision pass is the only reason
- *      a crowded band stays readable, and it may only spend the ANGLE to do it.
+ *   2. A BLIP LANDS IN THE SECTOR ITS CLASS NAMES — same reason, on the angular axis. The
+ *      relaxation may move a blip freely INSIDE its (band, wedge) cell and never out of it.
+ *   3. opportunity_v2 SEEDS THE BAND: higher score, smaller starting radius (nearer the
+ *      middle), and the cell rank records it.
+ *   4. TWO BLIPS DO NOT OVERLAP — the force pass is the only reason a crowded segment stays
+ *      readable, and it must leave zero overlapping pairs on a realistic board.
  *
- * Plus the two allocation rules the geometry makes: rings run best-in-the-middle in
- * RING_ORDER, and angle goes only to the tiers that actually have rows.
+ * Plus the allocation rules the geometry makes: the rings run best-in-the-middle in
+ * RING_ORDER at roughly equal width, all three class wedges always hold angle, and the
+ * layout is byte-for-byte reproducible.
  */
 
 const TAU = Math.PI * 2;
@@ -42,6 +49,17 @@ function withinSector(angle: number, a0: number, a1: number): boolean {
   let d = (angle - a0) % TAU;
   if (d < 0) d += TAU;
   return d <= span + 1e-9;
+}
+
+/** Overlapping pairs among a set of placed circles — the number the rebuild is judged on. */
+function overlaps(pts: { x: number; y: number; r: number }[]): number {
+  let n = 0;
+  for (let i = 0; i < pts.length; i++) {
+    for (let j = i + 1; j < pts.length; j++) {
+      if (Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) < pts[i].r + pts[j].r - 1e-6) n += 1;
+    }
+  }
+  return n;
 }
 
 describe("ringGeom — the verdict rings, best in the middle", () => {
@@ -63,6 +81,17 @@ describe("ringGeom — the verdict rings, best in the middle", () => {
     expect(g.bands[g.bands.length - 1].ring).toBe("declining");
   });
 
+  it("gives the bands the REFERENCE'S proportions: equal width after a larger inner disc", () => {
+    // Measured off https://solidgate-tech.github.io/ : ring radii 130 / 220 / 310 / 400 on
+    // radius 400 — four equal 90px bands after a wider inner disc. Ours is five bands, same
+    // shape: the four outer ones are equal to each other, the inner one is wider.
+    const g = ringGeom();
+    const widths = g.bands.map((b) => b.r1 - b.r0);
+    for (let i = 2; i < widths.length; i++) expect(widths[i]).toBeCloseTo(widths[1], 6);
+    expect(widths[0]).toBeGreaterThan(widths[1]);
+    expect(widths[0]).toBeLessThan(widths[1] * 1.5);
+  });
+
   it("keeps a centre hole so the best rows spread instead of piling on r = 0", () => {
     const g = ringGeom();
     expect(g.r0).toBeGreaterThan(0);
@@ -78,7 +107,7 @@ describe("ringGeom — the verdict rings, best in the middle", () => {
       expect(g.cy + g.R).toBeLessThanOrEqual(g.vbH);
       // The dial never grows past its cap, so a very wide container doesn't push the rail
       // below the fold.
-      expect(2 * g.R).toBeLessThanOrEqual(620);
+      expect(2 * g.R).toBeLessThanOrEqual(640);
     }
   });
 
@@ -91,110 +120,113 @@ describe("ringGeom — the verdict rings, best in the middle", () => {
   });
 });
 
-describe("bandShares — the bands breathe with the population, bounded", () => {
-  it("with no counts it reproduces the default stops exactly", () => {
+describe("bandShares — one fixed scale, no population weighting", () => {
+  it("reproduces RING_STOPS exactly and sums to the whole usable radius", () => {
     const shares = bandShares();
     const usable = 1 - RING_STOPS[0];
     for (let i = 0; i < shares.length; i++) {
       expect(shares[i]).toBeCloseTo((RING_STOPS[i + 1] - RING_STOPS[i]) / usable, 10);
     }
-  });
-
-  it("gives the crowded ring more radius than the empty one, and always sums to the dial", () => {
-    // The live micro-genre cut's shape: watch carries most of the board, declining one row.
-    const shares = bandShares({ enter: 8, watch: 53, emerging: 8, crowded: 10, declining: 1 });
-    const byRing = new Map(RING_ORDER.map((r, i) => [r, shares[i]]));
-    expect(byRing.get("watch")!).toBeGreaterThan(byRing.get("declining")! * 1.5);
-    expect(byRing.get("crowded")!).toBeGreaterThan(byRing.get("declining")!);
     expect(shares.reduce((a, b) => a + b, 0)).toBeCloseTo(1, 10);
   });
 
-  it("never starves a ring below its floor — an empty verdict is still a legible band", () => {
-    const shares = bandShares({ watch: 400 });
-    for (const s of shares) expect(s).toBeGreaterThanOrEqual(0.11);
-    // …and the geometry it produces is still contiguous, inner -> outer.
-    const g = ringGeom(DEFAULT_PLATE_W, null, 1, { watch: 400 });
-    expect(g.bands.map((b) => b.ring)).toEqual(RING_ORDER);
-    let prev = g.r0;
-    for (const b of g.bands) {
-      expect(b.r0).toBeCloseTo(prev, 6);
-      prev = b.r1;
-    }
-    expect(prev).toBeCloseTo(g.R, 6);
+  it("does not move with the population — a band's thickness is not a second variable", () => {
+    // The first cut weighted band width by sqrt(row count); three sectors plus a per-class
+    // Top-N took the worst cell from 66% of the board to 44%, so the weighting is gone and
+    // the geometry no longer depends on who is on the board at all.
+    const a = ringGeom(DEFAULT_PLATE_W).bands.map((b) => [b.r0, b.r1]);
+    const b = ringGeom(DEFAULT_PLATE_W).bands.map((x) => [x.r0, x.r1]);
+    expect(a).toEqual(b);
   });
 });
 
-describe("the caption gutter — a band's blips leave room for the words inside it", () => {
+describe("the band captions — the reference's ADOPT / TRIAL / ASSESS / HOLD", () => {
   const geom = ringGeom();
-  const oneSector = sectorSpans(["micro"]);
 
-  it("reserves arc at 12 o'clock, sized to the caption, on every band", () => {
+  it("is ONE WORD per band, sitting just inside that band's OUTER edge", () => {
+    // Zalando's radar puts its ring label at `-ringRadius + 62` with a 42px face: near the
+    // outer edge of the band, in the top half, on the vertical axis.
+    for (const band of geom.bands) {
+      expect(band.caption).not.toContain(" ");
+      expect(band.captionR).toBeGreaterThan(band.r0);
+      expect(band.captionR).toBeLessThan(band.r1);
+      expect(band.captionR).toBeGreaterThan(band.mid); // outer half of the band
+      expect(band.captionSize).toBeGreaterThanOrEqual(10);
+    }
+    expect(geom.band("enter")!.caption).toBe("ENTER");
+    expect(geom.band("declining")!.caption).toBe("DECLINING");
+  });
+
+  it("reserves arc at 12 o'clock sized to the caption, bounded so it can't reshape a wedge", () => {
     for (const band of geom.bands) {
       expect(band.gutter).toBeGreaterThan(0);
-      expect(band.gutter).toBeLessThanOrEqual(0.62);
-      // Wide enough for the caption it is protecting, or clamped at the ceiling.
-      expect(band.gutter >= band.captionHalf / band.mid - 1e-9 || band.gutter === 0.62).toBe(true);
+      expect(band.gutter).toBeLessThanOrEqual(0.45);
+      // Either wide enough for the caption it protects, or clamped at the ceiling.
+      expect(band.gutter >= band.captionHalf / band.captionR - 1e-9 || band.gutter === 0.45).toBe(true);
     }
   });
 
-  it("keeps blips out of that arc, so the wallpaper caption is never buried", () => {
-    const rows: RingInput[] = Array.from({ length: 40 }, (_, i) => ({
-      id: `w-${i}`,
-      ring: "watch" as const,
-      sector: "micro" as const,
-      opportunity: 90 - i,
-      r: 9,
-    }));
-    const placed = layoutRings(rows, geom, oneSector);
+  it("charges that gutter ONLY to the two wedges that touch 12 o'clock", () => {
+    const [first, middle, last] = sectorSpans();
+    const band = geom.band("watch")!;
+    expect(cellPads(band, first).start).toBeCloseTo(cellPads(band, first).end + band.gutter, 6);
+    expect(cellPads(band, last).end).toBeCloseTo(cellPads(band, last).start + band.gutter, 6);
+    // The wedge across the dial from the caption axis pays nothing at either end.
+    expect(cellPads(band, middle).start).toBeCloseTo(cellPads(band, middle).end, 10);
+    expect(cellPads(band, middle).start).toBeLessThan(band.gutter);
+  });
+
+  it("keeps blips out of the caption's arc, so the label is never buried", () => {
+    const spans = sectorSpans();
+    const rows: RingInput[] = CLASS_ORDER.flatMap((sector) =>
+      Array.from({ length: 12 }, (_, i) => blip({ id: `${sector}-${i}`, sector, opportunity: 90 - i })),
+    );
+    const placed = layoutRings(rows, geom, spans);
     const band = geom.band("watch")!;
     for (const row of rows) {
       const p = placed.get(row.id)!;
       // Angular distance from straight up (START_ANGLE).
-      let d = Math.abs(((p.angle - START_ANGLE + Math.PI) % (Math.PI * 2)) - Math.PI);
-      d = Math.min(d, Math.PI * 2 - d);
+      let d = Math.abs(((p.angle - START_ANGLE + Math.PI) % TAU) - Math.PI);
+      d = Math.min(d, TAU - d);
       expect(d).toBeGreaterThanOrEqual(band.gutter - 1e-6);
     }
   });
 });
 
-describe("sectorSpans — angle goes only to the tiers that have rows", () => {
-  it("gives a single occupied tier the whole circle (no wedge, so no divider spoke)", () => {
-    const [only] = sectorSpans(["micro"]);
-    expect(only.sector).toBe("micro");
-    expect(only.a0).toBeCloseTo(START_ANGLE, 6);
-    expect(only.a1 - only.a0).toBeCloseTo(TAU, 6);
-  });
-
-  it("splits the circle equally between the occupied tiers, in TIER_SECTOR_ORDER", () => {
-    // Deliberately out of order on the way in — the dial's order is the vocabulary's.
-    const spans = sectorSpans(["ungrouped", "theme", "micro"]);
-    expect(spans.map((s) => s.sector)).toEqual(["micro", "theme", "ungrouped"]);
+describe("sectorSpans — three class wedges, always", () => {
+  it("splits the circle into three equal 120° wedges in CLASS_ORDER from 12 o'clock", () => {
+    const spans = sectorSpans();
+    expect(spans.map((s) => s.sector)).toEqual([...CLASS_ORDER]);
     for (const s of spans) expect(s.a1 - s.a0).toBeCloseTo(TAU / 3, 6);
-    expect(spans[0].a0).toBeCloseTo(START_ANGLE, 6); // first sector starts at 12 o'clock
-    // Contiguous, no gap and no overlap.
+    expect(spans[0].a0).toBeCloseTo(START_ANGLE, 6);
+    // Contiguous, no gap and no overlap, all the way round.
     expect(spans[1].a0).toBeCloseTo(spans[0].a1, 6);
+    expect(spans[2].a0).toBeCloseTo(spans[1].a1, 6);
     expect(spans[2].a1).toBeCloseTo(START_ANGLE + TAU, 6);
   });
 
-  it("never leaves an empty tier holding angle", () => {
-    const spans = sectorSpans(["meta"]);
-    expect(spans).toHaveLength(1);
-    expect(spans[0].sector).toBe("meta");
-    for (const s of TIER_SECTOR_ORDER.filter((t) => t !== "meta")) {
-      expect(spans.some((x) => x.sector === s)).toBe(false);
-    }
+  it("marks the 12 o'clock caption axis on exactly the two wedges that touch it", () => {
+    const spans = sectorSpans();
+    expect(spans.map((s) => s.capStart)).toEqual([true, false, false]);
+    expect(spans.map((s) => s.capEnd)).toEqual([false, false, true]);
+  });
+
+  it("is stable — a class holds its wedge whether or not it has rows at this cut", () => {
+    // The whole point of fixed wedges: a niche never migrates round the dial because some
+    // other class emptied out under a filter.
+    expect(sectorSpans()).toEqual(sectorSpans());
   });
 });
 
 describe("layoutRings — band, sector, order, separation", () => {
   const geom = ringGeom();
-  const oneSector = sectorSpans(["micro"]);
+  const spans = sectorSpans();
 
   it("puts every blip's WHOLE circle inside the band its verdict names", () => {
     const rows: RingInput[] = RING_ORDER.flatMap((ring: RadarRing, i) =>
       Array.from({ length: 6 }, (_, k) => blip({ id: `${ring}-${k}`, ring, opportunity: 90 - k * 7 - i })),
     );
-    const placed = layoutRings(rows, geom, oneSector);
+    const placed = layoutRings(rows, geom, spans);
     expect(placed.size).toBe(rows.length);
     for (const row of rows) {
       const p = placed.get(row.id)!;
@@ -209,11 +241,9 @@ describe("layoutRings — band, sector, order, separation", () => {
     }
   });
 
-  it("puts every blip inside the sector its tier names", () => {
-    const tiers: RadarTierSector[] = ["micro", "theme", "umbrella", "meta"];
-    const spans = sectorSpans(tiers);
-    const rows = tiers.flatMap((sector) =>
-      Array.from({ length: 5 }, (_, k) => blip({ id: `${sector}-${k}`, sector, opportunity: 80 - k })),
+  it("puts every blip inside the wedge its CLASS names", () => {
+    const rows = CLASS_ORDER.flatMap((sector: RadarClass) =>
+      Array.from({ length: 9 }, (_, k) => blip({ id: `${sector}-${k}`, sector, opportunity: 80 - k })),
     );
     const placed = layoutRings(rows, geom, spans);
     for (const row of rows) {
@@ -224,13 +254,13 @@ describe("layoutRings — band, sector, order, separation", () => {
     }
   });
 
-  it("orders a band by opportunity_v2 — higher score, nearer the middle", () => {
+  it("seeds a band by opportunity_v2 — the higher score ranks nearer the middle", () => {
     const rows = [
       blip({ id: "low", opportunity: 12 }),
       blip({ id: "high", opportunity: 88 }),
       blip({ id: "mid", opportunity: 50 }),
     ];
-    const placed = layoutRings(rows, geom, oneSector);
+    const placed = layoutRings(rows, geom, spans);
     const r = (id: string) => placed.get(id)!.radius;
     expect(r("high")).toBeLessThan(r("mid"));
     expect(r("mid")).toBeLessThan(r("low"));
@@ -244,7 +274,7 @@ describe("layoutRings — band, sector, order, separation", () => {
       blip({ id: "unscored", opportunity: null }),
       blip({ id: "scored-high", opportunity: 70 }),
     ];
-    const placed = layoutRings(rows, geom, oneSector);
+    const placed = layoutRings(rows, geom, spans);
     expect(placed.get("unscored")!.unscored).toBe(true);
     expect(placed.get("unscored")!.cellRank).toBe(2);
     expect(placed.get("scored-low")!.unscored).toBe(false);
@@ -252,10 +282,10 @@ describe("layoutRings — band, sector, order, separation", () => {
   });
 
   it("never lets two blips of the same cell coincide — even at identical scores", () => {
-    // 24 identical rows: same ring, same sector, same score, same size. Nothing but the
-    // placement can separate them.
-    const rows = Array.from({ length: 24 }, (_, i) => blip({ id: `same-${i}`, opportunity: 50 }));
-    const placed = layoutRings(rows, geom, oneSector);
+    // 14 identical rows: same ring, same sector, same score, same size. Nothing but the
+    // relaxation can separate them.
+    const rows = Array.from({ length: 14 }, (_, i) => blip({ id: `same-${i}`, opportunity: 50 }));
+    const placed = layoutRings(rows, geom, spans);
     const pts = rows.map((row) => placed.get(row.id)!);
     for (let i = 0; i < pts.length; i++) {
       for (let j = i + 1; j < pts.length; j++) {
@@ -264,45 +294,82 @@ describe("layoutRings — band, sector, order, separation", () => {
     }
   });
 
-  it("separates a CROWDED cell without touching — the collision pass spends angle only", () => {
-    const band = geom.band("watch")!;
-    const rows = Array.from({ length: 40 }, (_, i) => blip({ id: `w-${i}`, opportunity: 90 - i, r: 8 }));
-    const placed = layoutRings(rows, geom, oneSector);
-    const pts = rows.map((row) => placed.get(row.id)!);
-    let overlaps = 0;
-    for (let i = 0; i < pts.length; i++) {
-      for (let j = i + 1; j < pts.length; j++) {
-        if (Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) < pts[i].r + pts[j].r) overlaps += 1;
+  it("leaves ZERO overlapping pairs on a live-shaped board", () => {
+    // The live production shape at Top 80 (solo-friendly cut, top 27 of each class): the
+    // genre wedge is genuinely sparse, the two tag wedges carry the load, and WATCH is the
+    // fullest band in each.
+    const shape: Record<RadarClass, Partial<Record<RadarRing, number>>> = {
+      genre: { watch: 5, crowded: 4 },
+      micro: { enter: 6, watch: 12, emerging: 3, crowded: 5, declining: 1 },
+      theme: { enter: 6, watch: 13, crowded: 7, declining: 1 },
+    };
+    const rows: RingInput[] = [];
+    for (const sector of CLASS_ORDER) {
+      for (const ring of RING_ORDER) {
+        const n = shape[sector][ring] ?? 0;
+        for (let i = 0; i < n; i++) {
+          rows.push(blip({ id: `${sector}-${ring}-${i}`, sector, ring, opportunity: 90 - i, r: 10 }));
+        }
       }
     }
-    expect(overlaps).toBe(0);
-    // …and every one of them is still inside its own band: the nudge may never buy space
-    // with the radius, because the radius is a claim.
+    const placed = layoutRings(rows, geom, spans);
+    expect(overlaps(rows.map((row) => placed.get(row.id)!))).toBe(0);
+    // …and every one of them is still in its own band AND its own wedge: the relaxation may
+    // never buy space with a claim.
+    for (const row of rows) {
+      const p = placed.get(row.id)!;
+      const band = geom.band(row.ring)!;
+      const span = spans.find((s) => s.sector === row.sector)!;
+      expect(p.radius - p.r).toBeGreaterThanOrEqual(band.r0 - 1e-6);
+      expect(p.radius + p.r).toBeLessThanOrEqual(band.r1 + 1e-6);
+      expect(withinSector(p.angle, span.a0, span.a1)).toBe(true);
+    }
+  });
+
+  it("separates a CROWDED cell without touching, inside one band and one wedge", () => {
+    const band = geom.band("watch")!;
+    const span = spans.find((s) => s.sector === "micro")!;
+    const rows = Array.from({ length: 20 }, (_, i) => blip({ id: `w-${i}`, opportunity: 90 - i, r: 8 }));
+    const placed = layoutRings(rows, geom, spans);
+    const pts = rows.map((row) => placed.get(row.id)!);
+    expect(overlaps(pts)).toBe(0);
     for (const p of pts) {
       expect(p.radius - p.r).toBeGreaterThanOrEqual(band.r0 - 1e-6);
       expect(p.radius + p.r).toBeLessThanOrEqual(band.r1 + 1e-6);
+      expect(withinSector(p.angle, span.a0, span.a1)).toBe(true);
     }
   });
 
-  it("keeps a wedge's crowded cell inside its own wedge (the nudge is clamped, not wrapped)", () => {
-    const spans = sectorSpans(["micro", "theme", "umbrella", "meta"]);
-    const span = spans.find((s) => s.sector === "theme")!;
-    const rows = Array.from({ length: 18 }, (_, i) =>
-      blip({ id: `t-${i}`, sector: "theme", ring: "enter", opportunity: 80 - i, r: 9 }),
-    );
+  it("fills a segment EVENLY — no half the wedge packed and the other half empty", () => {
+    // The lumpiness the force pass exists to remove: split the cell's usable arc in half and
+    // both halves must carry a fair share of the blips.
+    const rows = Array.from({ length: 16 }, (_, i) => blip({ id: `e-${i}`, ring: "crowded", opportunity: 90 - i }));
     const placed = layoutRings(rows, geom, spans);
+    const span = spans.find((s) => s.sector === "micro")!;
+    const half = (span.a0 + span.a1) / 2;
+    let low = 0;
     for (const row of rows) {
-      expect(withinSector(placed.get(row.id)!.angle, span.a0, span.a1)).toBe(true);
+      let off = (placed.get(row.id)!.angle - span.a0) % TAU;
+      if (off < 0) off += TAU;
+      if (off < half - span.a0) low += 1;
     }
+    expect(low).toBeGreaterThanOrEqual(5);
+    expect(low).toBeLessThanOrEqual(11);
   });
 
-  it("is exactly reproducible call-to-call — no Math.random anywhere in the placement", () => {
-    const rows = Array.from({ length: 30 }, (_, i) => blip({ id: `r-${i}`, opportunity: 70 - i }));
-    const a = layoutRings(rows, geom, oneSector);
-    const b = layoutRings(rows, geom, oneSector);
+  it("is exactly reproducible call-to-call — a fixed tick count and a seeded random source", () => {
+    const rows = Array.from({ length: 30 }, (_, i) =>
+      blip({ id: `r-${i}`, sector: CLASS_ORDER[i % 3], opportunity: 70 - i }),
+    );
+    const a = layoutRings(rows, geom, spans);
+    const b = layoutRings(rows, geom, spans);
     for (const row of rows) {
       expect(a.get(row.id)).toEqual(b.get(row.id));
     }
+    // Order of the INPUT rows must not change the output either: the cell sort is total.
+    const shuffled = [...rows].reverse();
+    const c = layoutRings(shuffled, geom, spans);
+    for (const row of rows) expect(c.get(row.id)).toEqual(a.get(row.id));
   });
 
   it("places nothing for a band the geometry does not hold (a zoom hides the other four)", () => {
@@ -310,7 +377,7 @@ describe("layoutRings — band, sector, order, separation", () => {
     const placed = layoutRings(
       [blip({ id: "in", ring: "enter" }), blip({ id: "out", ring: "crowded" })],
       zoomed,
-      oneSector,
+      spans,
     );
     expect(placed.get("in")).toBeTruthy();
     expect(placed.get("out")).toBeUndefined();

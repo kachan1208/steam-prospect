@@ -9,8 +9,9 @@ import {
   layoutBoard,
   type RadarBoardBlip,
   type RadarRegion,
+  type RadarSector,
 } from "./RadarBoard";
-import { ringGeom, sectorSpans } from "./radarRings";
+import { CLASS_ORDER, ringGeom, sectorSpans } from "./radarRings";
 import {
   RING_ORDER,
   SOLO_FRIENDLY_MIN,
@@ -43,7 +44,8 @@ import {
  * 5. THE CONCENTRIC-RING DIAL (2026-09-10 directive: "I think circle is a better
  *    representation for radar. Like we do there: https://solidgate-tech.github.io/ Best -
  *    niches are in the middle"). The band IS the verdict, inner to outer in RING_ORDER;
- *    the sector is the tag tier; distance inside a band is the opportunity rank; each dot
+ *    the sector is the niche class (three fixed 120° wedges, all three always drawn — the
+ *    2026-09-10 second pass); distance inside a band is the opportunity rank; each dot
  *    carries the rail number that keys it to the list. The old plate's clamp chevrons and
  *    its no-XY strip are gone WITH their reasons — a ring board has no axis to fall off,
  *    and every row has a verdict, so every row has an honest place. layoutBoard is
@@ -108,11 +110,13 @@ function Harness({
   soloOnly,
   pool,
   plotCap,
+  emphasis = null,
 }: {
   blips: RadarBoardBlip[];
   soloOnly: boolean;
   pool?: RadarBoardBlip[];
   plotCap?: number;
+  emphasis?: RadarSector | null;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [zoom, setZoom] = useState<RadarRegion | null>(null);
@@ -123,6 +127,7 @@ function Harness({
         pool={pool ?? blips}
         plotCap={plotCap ?? blips.length}
         soloOnly={soloOnly}
+        emphasis={emphasis}
         selectedId={selectedId}
         onSelect={setSelectedId}
         zoom={zoom}
@@ -135,9 +140,17 @@ function Harness({
 function renderBoard(
   blips: RadarBoardBlip[],
   soloOnly: boolean,
-  extra: { pool?: RadarBoardBlip[]; plotCap?: number } = {},
+  extra: { pool?: RadarBoardBlip[]; plotCap?: number; emphasis?: RadarSector | null } = {},
 ) {
-  return render(<Harness blips={blips} soloOnly={soloOnly} pool={extra.pool} plotCap={extra.plotCap} />);
+  return render(
+    <Harness
+      blips={blips}
+      soloOnly={soloOnly}
+      pool={extra.pool}
+      plotCap={extra.plotCap}
+      emphasis={extra.emphasis ?? null}
+    />,
+  );
 }
 
 afterEach(cleanup);
@@ -367,7 +380,7 @@ describe("RadarBoard — niche search over the full pool", () => {
     fireEvent.click(screen.getByTestId("radar-row-tag:Cozy Fishing"));
     const dossier = screen.getByTestId("verdict-dossier");
     expect(dossier.textContent).toContain("Cozy Fishing");
-    expect(dossier.textContent).toContain("Beyond the Top 2 plot");
+    expect(dossier.textContent).toContain("Beyond the Top 2 of Micro-genres");
     // Still a full dossier: trace rows and the deep-dive link are all there.
     expect(dossier.textContent).toContain("bar");
     expect(screen.getByRole("link", { name: /open deep dive/i })).toBeTruthy();
@@ -436,20 +449,38 @@ describe("RadarBoard — the concentric-ring dial", () => {
     for (const b of geom.bands) {
       expect(screen.getByTestId(`ring-band-${b.ring}`)).toBeTruthy();
       const cap = screen.getByTestId(`ring-caption-${b.ring}`);
-      // The caption sits ON the 12 o'clock axis, INSIDE its own band — the reference's
-      // ADOPT / TRIAL / ASSESS / HOLD placement.
+      // The caption sits ON the 12 o'clock axis, INSIDE its own band and in its OUTER half —
+      // the reference's ADOPT / TRIAL / ASSESS / HOLD placement, measured (`-ringRadius + 62`).
       expect(Number(cap.getAttribute("x"))).toBeCloseTo(geom.cx, 3);
       const up = geom.cy - Number(cap.getAttribute("y"));
-      expect(up).toBeGreaterThan(b.r0 - 12);
-      expect(up).toBeLessThan(b.r1 + 12);
+      expect(up).toBeGreaterThan(b.mid - b.captionSize);
+      expect(up).toBeLessThan(b.r1);
     }
-    // The band words themselves, in the verdict's own vocabulary.
-    expect(screen.getByTestId("ring-caption-enter").textContent).toBe("ENTER NOW");
+    // One word per band — the reference's own wording length. The full ring phrasing lives
+    // in the rail group header, the legend and the dossier.
+    expect(screen.getByTestId("ring-caption-enter").textContent).toBe("ENTER");
     expect(screen.getByTestId("ring-caption-declining").textContent).toBe("DECLINING");
     // Captions run outward: each one is drawn further from the centre than the last.
     const up = (ring: string) => geom.cy - Number(screen.getByTestId(`ring-caption-${ring}`).getAttribute("y"));
     for (let i = 1; i < RING_ORDER.length; i++) {
       expect(up(RING_ORDER[i])).toBeGreaterThan(up(RING_ORDER[i - 1]));
+    }
+    // …and every one of them is in the TOP half of the dial, stacked on one axis.
+    for (const b of geom.bands) {
+      expect(Number(screen.getByTestId(`ring-caption-${b.ring}`).getAttribute("y"))).toBeLessThan(geom.cy);
+    }
+  });
+
+  it("colours each caption to its OWN ring, like the reference's green ADOPT", () => {
+    renderBoard(ringBlips(), true);
+    // The blip fill and the band caption must be the same token: that is the whole trick
+    // that turns five words into structure instead of grey wallpaper.
+    for (const ring of RING_ORDER) {
+      const cap = screen.getByTestId(`ring-caption-${ring}`);
+      const dot = screen.getByTestId(`radar-blip-tag:${{ enter: "Grower", watch: "Holder", emerging: "Newborn", crowded: "Packed", declining: "Fading" }[ring]}`);
+      expect(cap.style.fill).toBe(dot.getAttribute("fill"));
+      // Legible, not wallpaper: the first cut drew these at 0.4.
+      expect(Number(cap.getAttribute("opacity"))).toBeGreaterThanOrEqual(0.6);
     }
   });
 
@@ -481,41 +512,73 @@ describe("RadarBoard — the concentric-ring dial", () => {
     }
   });
 
-  it("names the sector at the rim from the tag TIER, and draws no divider when there is one tier", () => {
-    renderBoard(ringBlips(), true); // every fixture row is tier "micro"
-    expect(screen.getByTestId("radar-sector-label-micro").textContent).toContain("MICRO-GENRE");
+  it("always draws THREE class wedges with dividers, even when a class has no rows", () => {
+    renderBoard(ringBlips(), true); // every fixture row is class "micro"
+    expect(screen.getByTestId("radar-sector-label-micro").textContent).toContain("MICRO-GENRES");
     expect(screen.getByTestId("radar-sector-label-micro").textContent).toContain("5");
-    // A divider between a sector and itself would be a lie.
-    expect(screen.queryByTestId("radar-spoke-micro")).toBeNull();
-    // …and the tiers with no rows hold no angle at all.
-    expect(screen.queryByTestId("radar-sector-label-theme")).toBeNull();
-    expect(screen.queryByTestId("radar-sector-label-ungrouped")).toBeNull();
+    // An empty class is an empty WEDGE with an honest count, never a wedge that vanishes —
+    // that is what keeps a niche in the same place from one visit to the next.
+    expect(screen.getByTestId("radar-sector-label-genre").textContent).toContain("GENRES · 0");
+    expect(screen.getByTestId("radar-sector-label-theme").textContent).toContain("THEMES · 0");
+    for (const sector of CLASS_ORDER) expect(screen.getByTestId(`radar-spoke-${sector}`)).toBeTruthy();
   });
 
-  it("splits the dial into wedges when the board really holds more than one tier", () => {
+  it("puts each blip in the wedge its CLASS names — three sectors on ONE board", () => {
     const mixed = [
-      makeBlip("Micro One", { demand_trend_24m_pct: 10 }, { tier: "micro" }),
-      makeBlip("Theme One", { demand_trend_24m_pct: 10 }, { tier: "theme" }),
-      // A genre row: the API stamps tier "genre", which is no tag tier at all -> ungrouped.
+      makeBlip("Micro One", { demand_trend_24m_pct: 10 }, { tier: "micro", sector: "micro" }),
+      makeBlip("Theme One", { demand_trend_24m_pct: 10 }, { tier: "theme", sector: "theme" }),
       makeBlip("Genre One", { demand_trend_24m_pct: 10 }, { tier: "genre", dimension: "genre", sector: "genre" }),
     ];
     renderBoard(mixed, true);
-    for (const sector of ["micro", "theme", "ungrouped"]) {
-      expect(screen.getByTestId(`radar-sector-label-${sector}`)).toBeTruthy();
+    for (const sector of CLASS_ORDER) {
+      expect(screen.getByTestId(`radar-sector-label-${sector}`).textContent).toContain("· 1");
       expect(screen.getByTestId(`radar-spoke-${sector}`)).toBeTruthy();
     }
-    // "ungrouped" is a NAMED sector, never a parking spot on the divider lines.
-    expect(screen.getByTestId("radar-sector-label-ungrouped").textContent).toContain("UNGROUPED · NO TIER");
-    // Each blip lands in the wedge its tier names.
+    // Each blip lands in the wedge its class names, and all three are on the dial at once —
+    // the density fix: the reference's ~14-per-quadrant, not 80 in one full circle.
     const layout = layoutBoard(mixed);
     const spans = new Map(layout.sectors.map((s) => [s.sector, s]));
     for (const d of layout.dots) {
+      expect(d.wedge).toBe(d.sector);
       const span = spans.get(d.wedge)!;
       let off = (d.angle - span.a0) % (Math.PI * 2);
       if (off < 0) off += Math.PI * 2;
       expect(off).toBeLessThanOrEqual(span.a1 - span.a0 + 1e-6);
     }
-    expect(layout.dots.find((d) => d.key === "Genre One")!.wedge).toBe("ungrouped");
+    expect(layout.dots.find((d) => d.key === "Genre One")!.wedge).toBe("genre");
+  });
+
+  it("EMPHASIS dims the other two wedges instead of removing them", () => {
+    const mixed = [
+      makeBlip("Micro One", { demand_trend_24m_pct: 10 }, { tier: "micro", sector: "micro" }),
+      makeBlip("Theme One", { demand_trend_24m_pct: 10 }, { tier: "theme", sector: "theme" }),
+      makeBlip("Genre One", { demand_trend_24m_pct: 10 }, { tier: "genre", dimension: "genre", sector: "genre" }),
+    ];
+    renderBoard(mixed, true, { emphasis: "theme" });
+    // Every dot is still ON the board — the class control is a lens, not a filter.
+    const dot = (id: string) => screen.getByTestId(`radar-blip-${id}`);
+    expect(Number(dot("tag:Theme One").getAttribute("opacity"))).toBe(1);
+    expect(Number(dot("tag:Micro One").getAttribute("opacity"))).toBeLessThan(1);
+    expect(Number(dot("genre:Genre One").getAttribute("opacity"))).toBeLessThan(1);
+    expect(Number(dot("tag:Micro One").getAttribute("opacity"))).toBeGreaterThan(0.2);
+    // The rail says the same thing at the same strength, and removes nothing.
+    expect(screen.getByTestId("radar-row-tag:Micro One").getAttribute("data-off-class")).toBe("micro");
+    expect(screen.getByTestId("radar-row-tag:Theme One").getAttribute("data-off-class")).toBeNull();
+    expect(screen.getByTestId("radar-row-genre:Genre One")).toBeTruthy();
+    // …and so does the rim: the emphasised class is the one in primary ink.
+    expect(screen.getByTestId("radar-sector-label-theme").style.fill).toBe("var(--text-primary)");
+    expect(screen.getByTestId("radar-sector-label-micro").style.fill).toBe("var(--text-muted)");
+  });
+
+  it("with no emphasis every wedge reads at full strength", () => {
+    const mixed = [
+      makeBlip("Micro One", { demand_trend_24m_pct: 10 }, { tier: "micro", sector: "micro" }),
+      makeBlip("Theme One", { demand_trend_24m_pct: 10 }, { tier: "theme", sector: "theme" }),
+    ];
+    renderBoard(mixed, true);
+    expect(Number(screen.getByTestId("radar-blip-tag:Micro One").getAttribute("opacity"))).toBe(1);
+    expect(Number(screen.getByTestId("radar-blip-tag:Theme One").getAttribute("opacity"))).toBe(1);
+    expect(screen.getByTestId("radar-row-tag:Micro One").getAttribute("data-off-class")).toBeNull();
   });
 
   it("has no clamp chevrons and no no-position strip — the form removed the need for both", () => {
@@ -548,6 +611,9 @@ describe("RadarBoard — the concentric-ring dial", () => {
     expect(screen.getByText(/ring = the verdict, best in the middle/)).toBeTruthy();
     expect(screen.getByText(/nearer the centre = higher opportunity v2/)).toBeTruthy();
     expect(screen.getByText(/nothing clamps here: a ring board has no axis to fall off/)).toBeTruthy();
+    // The two new claims of the three-sector rebuild, said where the reader is looking.
+    expect(screen.getByText(/the three sectors are the niche classes/)).toBeTruthy();
+    expect(screen.getByText(/emphasises a sector, it never empties the board/)).toBeTruthy();
     // Every hue is still doubled by its word, inner ring named as such.
     const key = screen.getByTestId("verdict-color-key");
     expect(key.textContent).toContain("Enter now (inner ring)");
@@ -584,17 +650,25 @@ describe("layoutBoard — deterministic, honest placement", () => {
     }
   });
 
-  it("orders a band by opportunity_v2 — the higher score sits nearer the middle", () => {
+  it("orders a band by opportunity_v2 — the higher score ranks nearer the middle", () => {
     const layout = layoutBoard(watchers(12));
     const sorted = [...layout.dots].sort((a, b) => (b.opportunity_v2 ?? 0) - (a.opportunity_v2 ?? 0));
-    for (let i = 1; i < sorted.length; i++) {
-      expect(sorted[i].radius).toBeGreaterThan(sorted[i - 1].radius);
-    }
+    // The rank IS the radial order; the relaxation may shuffle neighbours a little inside
+    // the band, so the claim is a monotone TREND across the cell, not a strict per-pair
+    // ordering (the rank itself is exact — cellRank).
+    expect(sorted.map((d) => d.cellRank)).toEqual(sorted.map((_, i) => i));
+    expect(sorted[0].radius).toBeLessThan(sorted[sorted.length - 1].radius);
+    const half = Math.floor(sorted.length / 2);
+    const mean = (xs: typeof sorted) => xs.reduce((a, d) => a + d.radius, 0) / xs.length;
+    expect(mean(sorted.slice(0, half))).toBeLessThan(mean(sorted.slice(half)));
   });
 
-  it("is exactly reproducible call-to-call, collision pass included", () => {
+  it("is exactly reproducible call-to-call, force relaxation included", () => {
     const rows = watchers(24);
     const one = layoutBoard(rows);
+    // A different call in between must not leak into the next one (the layout memo is a
+    // one-slot cache keyed on the row set, so this also pins that the key is honest).
+    layoutBoard(watchers(9));
     const two = layoutBoard(rows);
     expect(one.dots.map(({ id, x, y, r, n }) => ({ id, x, y, r, n }))).toEqual(
       two.dots.map(({ id, x, y, r, n }) => ({ id, x, y, r, n })),
@@ -608,6 +682,40 @@ describe("layoutBoard — deterministic, honest placement", () => {
         expect(Math.hypot(same[i].x - same[j].x, same[i].y - same[j].y)).toBeGreaterThan(1);
       }
     }
+  });
+
+  it("leaves ZERO overlapping dot pairs on a three-sector board at the live Top-80 shape", () => {
+    // ~27 rows per class, the live production split (solo-friendly cut). The whole point of
+    // the d3-force placement: every segment fills evenly and nothing touches.
+    const rows: RadarBoardBlip[] = [];
+    const mk = (sector: RadarSector, ring: "enter" | "watch" | "crowded", i: number) =>
+      makeBlip(
+        `${sector}-${ring}-${i}`,
+        ring === "enter"
+          ? { demand_trend_24m_pct: 120, saturation_yoy: 0.02, opportunity_v2: 90 - i }
+          : ring === "crowded"
+            ? { demand_trend_24m_pct: -5, saturation_yoy: 0.9, opportunity_v2: 60 - i }
+            : { demand_trend_24m_pct: 10, saturation_yoy: 0.05, opportunity_v2: 75 - i },
+        { sector, dimension: sector === "genre" ? "genre" : "tag", tier: sector === "genre" ? "genre" : sector },
+      );
+    for (let i = 0; i < 5; i++) rows.push(mk("genre", "watch", i));
+    for (let i = 0; i < 4; i++) rows.push(mk("genre", "crowded", i));
+    for (const sector of ["micro", "theme"] as const) {
+      for (let i = 0; i < 6; i++) rows.push(mk(sector, "enter", i));
+      for (let i = 0; i < 13; i++) rows.push(mk(sector, "watch", i));
+      for (let i = 0; i < 8; i++) rows.push(mk(sector, "crowded", i));
+    }
+    const dots = layoutBoard(rows, { plateW: DEFAULT_PLATE_W }).dots;
+    expect(dots).toHaveLength(63);
+    let overlapping = 0;
+    for (let i = 0; i < dots.length; i++) {
+      for (let j = i + 1; j < dots.length; j++) {
+        if (Math.hypot(dots[i].x - dots[j].x, dots[i].y - dots[j].y) < dots[i].r + dots[j].r - 1e-6) overlapping += 1;
+      }
+    }
+    expect(overlapping).toBe(0);
+    // Every class really got its own wedge's worth of the board.
+    for (const sector of CLASS_ORDER) expect(dots.some((d) => d.wedge === sector)).toBe(true);
   });
 
   it("sizes the dial from the measured width and keeps every dot inside the viewBox", () => {
@@ -624,23 +732,51 @@ describe("layoutBoard — deterministic, honest placement", () => {
   });
 
   it("shrinks every blip by ONE factor when a cell is too crowded to separate", () => {
-    // Same 46 rows, twice: once on a desktop dial with room, once on a phone dial without.
-    const rows = watchers(46);
-    const roomy = layoutBoard(rows, { plateW: DEFAULT_PLATE_W });
-    const tight = layoutBoard(rows, { plateW: 330 });
-    const rOf = (l: typeof roomy, key: string) => l.dots.find((d) => d.key === key)!.r;
-    // The phone dial is smaller AND its blips took the extra crowd-fit shrink…
-    expect(rOf(tight, "Watcher 00")).toBeLessThan(rOf(roomy, "Watcher 00"));
+    // Three P90 revenues, so the size channel has something to preserve. The same three
+    // values appear in BOTH fixtures (and so does the maximum), which is what makes the
+    // ratio comparison below meaningful rather than a comparison of two different scales.
+    const P90 = [200_000, 700_000, 1_600_000];
+    const mk = (sector: RadarSector, i: number): RadarBoardBlip =>
+      makeBlip(
+        `${sector} ${String(i).padStart(2, "0")}`,
+        i % 5 === 0
+          ? { demand_trend_24m_pct: 120, saturation_yoy: 0.02, opportunity_v2: 95 - i }
+          : i % 5 === 4
+            ? { demand_trend_24m_pct: -5, saturation_yoy: 0.9, opportunity_v2: 95 - i }
+            : { demand_trend_24m_pct: 10, saturation_yoy: 0.05, opportunity_v2: 95 - i },
+        {
+          sector,
+          dimension: sector === "genre" ? "genre" : "tag",
+          tier: sector === "genre" ? "genre" : sector,
+          p90_rev: P90[i % 3],
+        },
+      );
+    // A REAL phone board at the biggest cap: Top 120 is 40 rows per class.
+    const crowded = CLASS_ORDER.flatMap((sector) => Array.from({ length: 40 }, (_, i) => mk(sector, i)));
+    // …and the same rows in a cut sparse enough that no crowd fit fires at all.
+    const airy = CLASS_ORDER.flatMap((sector) => [mk(sector, 0), mk(sector, 1), mk(sector, 2)]);
+
+    const tight = layoutBoard(crowded, { plateW: 390 });
+    const loose = layoutBoard(airy, { plateW: 390 });
+    const rOf = (l: typeof tight, key: string) => l.dots.find((d) => d.key === key)!.r;
+    // Same dial, same revenue scale — so the only difference is the crowd fit, and it really
+    // fired.
+    expect(rOf(tight, "micro 00")).toBeLessThan(rOf(loose, "micro 00"));
     // …and it is ONE factor: every pairwise size ratio (the P90-revenue channel) survives.
-    const a = rows[0].key;
-    const b = rows[10].key;
-    expect(rOf(tight, a) / rOf(tight, b)).toBeCloseTo(rOf(roomy, a) / rOf(roomy, b), 6);
+    expect(rOf(tight, "micro 00") / rOf(tight, "micro 02")).toBeCloseTo(
+      rOf(loose, "micro 00") / rOf(loose, "micro 02"),
+      6,
+    );
+    expect(rOf(tight, "micro 00") / rOf(loose, "micro 00")).toBeCloseTo(
+      rOf(tight, "theme 02") / rOf(loose, "theme 02"),
+      6,
+    );
     // The point of the shrink: nothing on the phone dial ends up touching.
     const pts = tight.dots;
     for (let i = 0; i < pts.length; i++) {
       for (let j = i + 1; j < pts.length; j++) {
         expect(Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y)).toBeGreaterThanOrEqual(
-          pts[i].r + pts[j].r,
+          pts[i].r + pts[j].r - 1e-6,
         );
       }
     }
@@ -648,9 +784,12 @@ describe("layoutBoard — deterministic, honest placement", () => {
 
   it("keeps the geometry the renderer draws with in step with the sectors it allocated", () => {
     const layout = layoutBoard(watchers(4));
-    expect(layout.sectors).toEqual(sectorSpans(["micro"]));
-    expect(layout.geom.R).toBeCloseTo(ringGeom(DEFAULT_PLATE_W, null, 1).R, 6);
+    expect(layout.sectors).toEqual(sectorSpans());
+    expect(layout.geom.R).toBeCloseTo(ringGeom(DEFAULT_PLATE_W, null).R, 6);
     expect(layout.sectorCount.get("micro")).toBe(4);
+    // Every class is counted, including the ones with nothing in them.
+    expect(layout.sectorCount.get("genre")).toBe(0);
+    expect(layout.sectorCount.get("theme")).toBe(0);
   });
 });
 

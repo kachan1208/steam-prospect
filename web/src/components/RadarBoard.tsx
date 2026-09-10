@@ -11,25 +11,25 @@ import {
   RING_LABEL,
   RING_ORDER,
   SOLO_FRIENDLY_MIN,
-  TIER_SECTOR_LABEL,
-  TIER_SECTOR_ORDER,
   blipRadius,
   soloBucket,
-  tierSector,
   type RadarRing,
-  type RadarTierSector,
   type RadarVerdict,
   type VerdictCheck,
 } from "../lib/radarVerdict";
 import { TooltipPanel } from "./charts/TooltipPanel";
 import { nicheDetailPath } from "../lib/nichePath";
 import {
+  CLASS_LABEL,
+  CLASS_ORDER,
   DEFAULT_PLATE_W,
   annulusPath,
+  cellArea,
   layoutRings,
   polar,
   ringGeom,
   sectorSpans,
+  type RadarClass,
   type RingGeom,
   type RingPlaced,
   type SectorSpan,
@@ -51,18 +51,14 @@ import {
  *   RING BAND = THE VERDICT, BEST IN THE MIDDLE. enter (innermost) -> watch -> emerging ->
  *       crowded -> declining (outermost). lib/radarVerdict.ts's RING_ORDER has spelled this
  *       order "inner -> outer" since the first polar board; the XY plate simply never drew
- *       it. Each band carries a large, low-contrast caption inside it, exactly the way the
- *       reference labels ADOPT / TRIAL / ASSESS / HOLD.
- *   SECTOR = THE TAG TIER (micro / theme / umbrella / meta, plus an honest "ungrouped" for
- *       genre rows and untiered tags), labelled at the rim. See radarRings.ts's
- *       sectorSpans() for the one open call this rebuild made: angle is allocated only to
- *       the tiers that actually have rows, because the CLASS PICKER (unchanged) admits one
- *       class at a time and the API serves genres as tier "genre" and the tag cut as
- *       tiers=micro,theme — so on today's board every row shares one tier, and four
- *       labelled quadrants with three of them structurally empty would be a picture of data
- *       that cannot exist.
+ *       it. Each band carries a one-word caption in its OWN RING'S COLOUR, stacked up the
+ *       vertical axis in the top half just inside the band's outer edge — the reference's
+ *       ADOPT / TRIAL / ASSESS / HOLD, measured and matched.
+ *   SECTOR = THE NICHE CLASS. Genres / Micro-genres / Themes, three fixed 120° wedges,
+ *       always all three, labelled at the rim. See "THE THREE-SECTOR REBUILD" below.
  *   RADIUS INSIDE A BAND = opportunity_v2's rank in the blip's own cell, best nearest the
- *       band's inner edge. Rank, not raw score — see radarRings.ts.
+ *       band's inner edge — the SEED of a d3-force relaxation, not a fixed spiral. Rank,
+ *       not raw score — see radarRings.ts.
  *   dot AREA = P90 revenue (sqrt scale, like every bubble on this site) — unchanged.
  *   dot NUMBER = the rail's rank, drawn inside the dot and keyed to the rail list exactly
  *       the way the reference numbers its blips. This is what makes the dial and the rail
@@ -90,11 +86,12 @@ import {
  *     ranked by the same score. The rail keeps its NEW · volume glyph, and the dossier still
  *     refuses to headline a young tag's trend %.
  *   - "DETERMINISTIC, NEVER Math.random" jitter: KEPT and generalised. Placement is a pure
- *     function of the blips (hash01-seeded phyllotaxis + a bounded collision pass), so a
- *     niche holds its spot across renders, visits and machines.
- *   - "COLLISION NUDGING": KEPT, re-aimed. The band is the verdict and the sector is the
- *     tier, so both are claims; the ANGLE is the only free coordinate and therefore the only
- *     one the nudge may spend. A blip can never be pushed out of its own band or sector.
+ *     function of the blips (hash01-seeded rank positions, a fixed tick count and a seeded
+ *     random source for d3-force), so a niche holds its spot across renders, visits and
+ *     machines.
+ *   - "COLLISION NUDGING": KEPT, re-aimed, and now done by d3-force. The band is the verdict
+ *     and the sector is the class, so both are claims; the relaxation is clamped back inside
+ *     both every tick. A blip can never be pushed out of its own band or sector.
  *   - "THE RAIL IS THE ACCESSIBLE PATH": KEPT verbatim. The SVG dots are mouse conveniences
  *     (aria-hidden); every niche's keyboard route is its rail row, a real <button>, and
  *     navigation lives on the dossier's deep-dive button.
@@ -132,42 +129,62 @@ import {
  * the dial is a square inscribed in it, bounded so it neither pushes the rail below the fold
  * at 1440x900 nor collapses its five bands on a phone. See radarRings.ts's ringGeom().
  *
- * THREE THINGS THE DIAL DOES ABOUT CROWDING, all measured on the live board rather than
- * guessed (screenshots at 1440x900 and 390x844, production data through the dev proxy):
- *   1. THE BANDS BREATHE. Equal fifths gave the WATCH ring — 53 of the board's 80 rows —
- *      a hairline annulus and handed a fifth of the dial to DECLINING's single dot. Band
- *      thickness is now weighted by sqrt(row count) with a floor per band, so no verdict
- *      loses its caption and the crowd gets the room. radarRings.ts's bandShares().
- *   2. EACH BAND KEEPS A CAPTION GUTTER. The captions paint UNDER the dots (below), so a
- *      53-row band would bury its own label; the placement leaves the caption's arc at 12
- *      o'clock empty instead — the reference's quadrant boundary, arrived at from the
- *      other direction. radarRings.ts's RingBand.gutter.
- *   3. THE BLIP SCALE FITS THE WORST CELL. One shared factor, so every P90-revenue ratio
- *      survives, floored so a dot never gets too small for its number. cellFitScale below.
- * Together these took the 390x844 board from 90 overlapping dot pairs to none.
+ * ─────────────────────────────────────────────────────────────────────────────────────
+ * THE THREE-SECTOR REBUILD (2026-09-10, second pass — user: "Make it better, right now it
+ * looks like a slop. On a link I provided before there is a library used to render radar").
+ * The first cut of the dial was rejected on sight, and measuring the reference against it
+ * said exactly why. Four things changed, in the order they mattered:
+ *
+ *   1. DENSITY — the real defect. The reference puts 55 blips across FOUR quadrants (~14
+ *      each); the first cut put 80 into ONE full-circle sector, ~4x denser, so the middle
+ *      clumped and the rim sat empty. The class picker is now the ANGULAR AXIS: Genres,
+ *      Micro-genres and Themes each hold a fixed 120° wedge and all three always draw. The
+ *      Top-N control distributes per sector rather than capping the whole board (the page
+ *      slices the top N/3 of each class), so no wedge is empty and none dominates. Genres
+ *      only has ~9 solo-friendly niches at this cut — that wedge is simply sparser, and it
+ *      is NOT padded to look full.
+ *   2. PLACEMENT — d3-force, as the reference does it. A short, fixed-length simulation
+ *      with forceCollide plus a per-tick clamp back into the blip's own (band, wedge). The
+ *      old deterministic spiral put consecutive ranks on a fixed stride and left the
+ *      segments visibly lumpy; relaxation fills them evenly. Determinism is preserved by
+ *      construction — see radarRings.ts's layoutRings.
+ *   3. RING CAPTIONS were large grey wallpaper. They are now ONE WORD in their OWN RING'S
+ *      COLOUR (ADOPT-is-green, in the reference's terms), stacked up the vertical axis in
+ *      the top half just inside each band's outer edge, at ~0.085R. 12 o'clock is a sector
+ *      boundary on this dial, exactly as it is on the reference, so the captions sit on a
+ *      divider instead of in a crowd.
+ *   4. NUMBERS were too small to read. The blip scale runs 9–11.5px on a desktop dial with
+ *      the number at up to 11px, semibold, knocked out of the fill.
+ *
+ * And the two mechanisms that hold it together, both measured on the live board (production
+ * data through the dev proxy, screenshots at 1440x900 and 390x844):
+ *   - THE BANDS ARE EQUAL-WIDTH AGAIN. The sqrt(count) weighting existed because a
+ *     one-class board gave WATCH 53 of 80 rows; three sectors and a per-sector cap take the
+ *     worst cell to 12 of 27, which the collision force clears with room to spare. See
+ *     radarRings.ts's RING_STOPS.
+ *   - THE BLIP SCALE FITS THE WORST CELL. One shared factor, so every P90-revenue ratio
+ *     survives, floored so a dot never gets too small for its number. cellFitScale below.
  */
 
-/** The board's CLASS — the picker's value (Genres / Micro-genres / Themes), NOT the dial's
- * sector. It decides which rows are on the board at all; the tier decides where on the rim
- * a row sits once it is there. Kept under its historical name because pages/Radar.tsx and
- * the ?class= URL contract both spell it. */
-export type RadarSector = "genre" | "micro" | "theme";
+/** The board's CLASS — and, since the three-sector rebuild, the dial's SECTOR as well. The
+ * picker's value (Genres / Micro-genres / Themes) no longer decides which rows are on the
+ * board (all three classes are), it decides which wedge is EMPHASISED. Kept under its
+ * historical name because pages/Radar.tsx and the ?class= URL contract both spell it. */
+export type RadarSector = RadarClass;
 
-const SECTOR_LABEL: Record<RadarSector, string> = {
-  genre: "Genres",
-  micro: "Micro-genres",
-  theme: "Themes",
-};
-/** One-letter class marker for rail rows — the search spans all classes, so a cross-class
- * match needs its class named ("Roguelike" the tag vs "Roguelike" the genre). */
+const SECTOR_LABEL = CLASS_LABEL;
+/** One-letter class marker for rail rows — the rail carries all three classes now, so every
+ * row names its own ("Roguelike" the tag vs "Roguelike" the genre). */
 const SECTOR_SHORT: Record<RadarSector, string> = { genre: "G", micro: "M", theme: "T" };
 
 export interface RadarBoardBlip {
   dimension: string;
   key: string;
   /** The mart's tag tier — "micro" | "theme" | "umbrella" | "meta" for tags, "genre" (or
-   * null on older marts) for genre rows. THE DIAL'S SECTOR, via tierSector(). */
+   * null on older marts) for genre rows. Carried for the dossier and the API contract; the
+   * dial's sector comes from `sector` (the CLASS) since the three-sector rebuild. */
   tier: string | null;
+  /** THE DIAL'S SECTOR: the niche class. */
   sector: RadarSector;
   n_games: number;
   p90_rev: number | null;
@@ -234,8 +251,9 @@ export interface PlacedBlip extends RadarBoardBlip {
   n: number;
   /** Ring band == verdict == hover/zoom region. */
   region: RadarRegion;
-  /** The dial sector this blip's tier puts it in. */
-  wedge: RadarTierSector;
+  /** The dial sector this blip's CLASS puts it in (== `sector`; kept as its own field so
+   * the geometry contract reads on the placed blip, not on the row it came from). */
+  wedge: RadarClass;
   x: number;
   y: number;
   r: number;
@@ -259,10 +277,10 @@ export type RailBlip = RadarBoardBlip & { id: string; n: number | null };
 
 export interface RingBoardLayout {
   dots: PlacedBlip[];
-  /** The occupied sectors, in dial order — the rim labels and the divider spokes. */
+  /** The three class sectors, in dial order — the rim labels and the divider spokes. */
   sectors: SectorSpan[];
-  /** Member count per sector, for the rim label's honest count. */
-  sectorCount: Map<RadarTierSector, number>;
+  /** Member count per sector, for the rim label's honest count (0 is a real answer). */
+  sectorCount: Map<RadarClass, number>;
   /** The geometry this layout was computed in — the renderer draws with the SAME object so
    * bands, hit areas and dot positions can never disagree. */
   geom: RingGeom;
@@ -279,66 +297,79 @@ export interface LayoutOpts {
 /**
  * BLIP SIZE. blipRadius() still owns the sqrt(P90 revenue) scale — the same one every bubble
  * on this site uses — but its [3, 9] px range was tuned for a plate where a dot carried no
- * text. A dot must now hold its rail number, so the range is re-mapped to the dial's size:
- * big enough for two digits at the small end, still an honest area ratio at the large end.
- * On a phone the range COMPRESSES rather than shrinking (the size channel loses some
- * resolution) so that every blip can still carry its number — the number keys the dot to the
- * rail, and a dot with no key is worse than a dot with a coarse area.
+ * text. A dot must now hold its rail number, so the range is re-mapped to the dial's size.
+ * THE REFERENCE'S BLIP IS r=9 WITH A 9px NUMBER IN IT on a 400px radius; ours runs 9–11.5 on
+ * a 320px radius, which is the same dot-to-dial ratio with a little more room for a
+ * three-digit rank. On a phone the range COMPRESSES rather than shrinking (the size channel
+ * loses some resolution) so that every blip can still carry its number — the number keys the
+ * dot to the rail, and a dot with no key is worse than a dot with a coarse area.
  */
 function dialBlipR(p90: number | null, maxP90: number, R: number): number {
   const t = (blipRadius(p90, maxP90) - BLIP_R_MIN) / (BLIP_R_MAX - BLIP_R_MIN);
-  const rMin = Math.min(7, Math.max(5, R / 46));
-  const rMax = Math.min(13, Math.max(7.5, R / 24));
+  const rMin = Math.min(9, Math.max(5.5, R / 36));
+  const rMax = Math.min(11.5, Math.max(8, R / 28));
   return rMin + t * (rMax - rMin);
 }
 
 /** Share of a cell's area the blips may fill before the dial reads as a smear. Above it the
- * collision pass runs out of arc and starts leaving overlaps. */
-const CELL_FILL_TARGET = 0.32;
+ * collision force runs out of room and starts leaving overlaps. */
+const CELL_FILL_TARGET = 0.38;
 /** …and the scale never goes below this, because a dot too small to carry its rail number
  * has lost the thing that keys it to the list. Past the floor the board accepts some
  * touching instead — the honest failure, and only ever on a phone-sized dial. */
-const MIN_FIT_SCALE = 0.72;
+const MIN_FIT_SCALE = 0.7;
 
 /**
- * THE CROWD FIT. The blip scale is nominal, not final: a band that holds 53 of the board's
- * 80 rows on a 300px phone dial cannot separate them at desktop dot sizes however clever the
- * placement is, and the collision pass would just give up and leave a smear. So the layout
- * measures the WORST cell's area fill first and shrinks every blip by ONE shared factor
- * until that cell is under CELL_FILL_TARGET (bounded by MIN_FIT_SCALE).
+ * THE CROWD FIT. The blip scale is nominal, not final: a cell too full cannot separate at
+ * desktop dot sizes however good the relaxation is, and forceCollide would just leave a
+ * smear. So the layout measures the WORST cell's area fill first and shrinks every blip by
+ * ONE shared factor until that cell is under CELL_FILL_TARGET (bounded by MIN_FIT_SCALE).
+ * The cell's area comes from radarRings.ts's cellArea(), which already subtracts the wedge
+ * pads and the 12 o'clock caption gutter — the arc the placement will never use.
  *
  * One shared factor is the point: the size channel is P90 revenue, and scaling every dot by
  * the same number leaves every ratio between two dots exactly as it was. A per-cell fit
  * would have quietly made "big dot" mean something different in different rings.
  */
 function cellFitScale(
-  inputs: { ring: RadarRing; sector: RadarTierSector; r: number }[],
+  inputs: { ring: RadarRing; sector: RadarClass; r: number }[],
   geom: RingGeom,
-  sectorCount: number,
+  sectors: SectorSpan[],
 ): number {
-  const area = new Map<string, number>();
-  const cells = new Map<string, { ring: RadarRing; blipArea: number }>();
+  const spanBySector = new Map(sectors.map((s) => [s.sector, s]));
+  const cells = new Map<string, { ring: RadarRing; sector: RadarClass; blipArea: number }>();
   for (const i of inputs) {
     const key = `${i.ring}|${i.sector}`;
     const cur = cells.get(key);
     if (cur) cur.blipArea += Math.PI * i.r * i.r;
-    else cells.set(key, { ring: i.ring, blipArea: Math.PI * i.r * i.r });
+    else cells.set(key, { ring: i.ring, sector: i.sector, blipArea: Math.PI * i.r * i.r });
   }
   let worst = 0;
-  for (const [key, cell] of cells) {
+  for (const cell of cells.values()) {
     const band = geom.band(cell.ring);
-    if (!band) continue;
-    if (!area.has(key)) {
-      // The cell is this band's annulus, cut to the sector's share and minus the caption
-      // gutter the placement will not use.
-      const gutterLoss = sectorCount > 1 ? 0 : (2 * band.gutter) / (Math.PI * 2);
-      const share = (1 / sectorCount) * (1 - gutterLoss);
-      area.set(key, Math.max(1, share * Math.PI * (band.r1 * band.r1 - band.r0 * band.r0)));
-    }
-    worst = Math.max(worst, cell.blipArea / area.get(key)!);
+    const span = spanBySector.get(cell.sector) ?? sectors[0];
+    if (!band || !span) continue;
+    worst = Math.max(worst, cell.blipArea / cellArea(band, span));
   }
   if (worst <= CELL_FILL_TARGET) return 1;
   return Math.max(MIN_FIT_SCALE, Math.sqrt(CELL_FILL_TARGET / worst));
+}
+
+/**
+ * THE LAYOUT IS MEMOISED ON THE ROW SET, not recomputed per render. The relaxation is a
+ * force simulation now — cheap (~3ms for 120 blips) but not free, and React will call the
+ * render path for a hover, a search keystroke or a rail scroll. RadarBoard's useMemo already
+ * guards the common case; this one-slot cache also covers the callers that don't memoise
+ * (tests, and any future consumer), keyed on everything the placement reads: the ids, their
+ * rings and sectors, their scores and sizes, plus the plate width and the zoom.
+ */
+let layoutCache: { key: string; value: RingBoardLayout } | null = null;
+
+function layoutKey(blips: RadarBoardBlip[], plateW: number | undefined, zoom: RadarRegion | null): string {
+  const rows = blips
+    .map((b) => `${b.dimension}:${b.key}|${b.verdict.ring}|${b.sector}|${b.opportunity_v2 ?? "x"}|${b.p90_rev ?? "x"}`)
+    .join(";");
+  return `${plateW ?? "d"}|${zoom ?? "-"}|${rows}`;
 }
 
 /**
@@ -348,6 +379,8 @@ function cellFitScale(
  */
 export function layoutBoard(blips: RadarBoardBlip[], opts: LayoutOpts = {}): RingBoardLayout {
   const zoom = opts.zoom ?? null;
+  const key = layoutKey(blips, opts.plateW, zoom);
+  if (layoutCache && layoutCache.key === key) return layoutCache.value;
 
   // Rail numbering — UNCHANGED from the XY plate: ring order, then opportunity desc, then
   // key. The dial draws these same numbers inside the dots, so rail and board are one list.
@@ -359,50 +392,39 @@ export function layoutBoard(blips: RadarBoardBlip[], opts: LayoutOpts = {}): Rin
     return a.key.localeCompare(b.key);
   });
 
-  const wedgeOf = new Map<string, RadarTierSector>();
-  const sectorCount = new Map<RadarTierSector, number>();
-  for (const b of ordered) {
-    const w = tierSector(b.tier);
-    wedgeOf.set(`${b.dimension}:${b.key}`, w);
-    sectorCount.set(w, (sectorCount.get(w) ?? 0) + 1);
-  }
-  const present = TIER_SECTOR_ORDER.filter((s) => (sectorCount.get(s) ?? 0) > 0);
-  const sectors = sectorSpans(present);
-  // Rows per ring — the band widths breathe with them (see radarRings.ts's bandShares).
-  const ringCounts: Partial<Record<RadarRing, number>> = {};
-  for (const b of ordered) ringCounts[b.verdict.ring] = (ringCounts[b.verdict.ring] ?? 0) + 1;
-  const geom = ringGeom(opts.plateW, zoom, sectors.length, ringCounts);
+  // The sector is the CLASS, and all three wedges always exist — an empty class is an empty
+  // wedge with an honest "· 0" at the rim, never a wedge that quietly disappears.
+  const sectorCount = new Map<RadarClass, number>(CLASS_ORDER.map((c) => [c, 0]));
+  for (const b of ordered) sectorCount.set(b.sector, (sectorCount.get(b.sector) ?? 0) + 1);
+  const sectors = sectorSpans();
+  const geom = ringGeom(opts.plateW, zoom);
 
   const maxP90 = blips.reduce<number>((m, b) => Math.max(m, b.p90_rev ?? 0), 0);
-  const inputs = ordered.map((b) => {
-    const id = `${b.dimension}:${b.key}`;
-    return {
-      id,
-      ring: b.verdict.ring,
-      sector: wedgeOf.get(id)!,
-      opportunity: b.opportunity_v2,
-      r: dialBlipR(b.p90_rev, maxP90, geom.R),
-    };
-  });
+  const inputs = ordered.map((b) => ({
+    id: `${b.dimension}:${b.key}`,
+    ring: b.verdict.ring,
+    sector: b.sector,
+    opportunity: b.opportunity_v2,
+    r: dialBlipR(b.p90_rev, maxP90, geom.R),
+  }));
   // THE CROWD FIT (see cellFitScale): one bounded scale over every blip so the tightest
   // cell has room to separate. Applied to all of them together, so the P90-revenue AREA
   // ratios between any two dots are exactly what they were — the whole board just breathes
   // down a notch on a phone, or when Top 120 packs a band that Top 40 left airy.
-  const fit = cellFitScale(inputs, geom, sectors.length);
+  const fit = cellFitScale(inputs, geom, sectors);
   if (fit < 1) for (const i of inputs) i.r *= fit;
   const placed: Map<string, RingPlaced> = layoutRings(inputs, geom, sectors);
 
   const dots: PlacedBlip[] = ordered.map((b, i) => {
     const id = `${b.dimension}:${b.key}`;
     const p = placed.get(id);
-    const wedge = wedgeOf.get(id)!;
     const hidden = zoom !== null && b.verdict.ring !== zoom;
     return {
       ...b,
       id,
       n: i + 1,
       region: b.verdict.ring,
-      wedge,
+      wedge: b.sector,
       // A hidden blip has no placement (its band is absent from the zoomed geometry); it
       // parks at the centre and never renders.
       x: p?.x ?? geom.cx,
@@ -416,7 +438,9 @@ export function layoutBoard(blips: RadarBoardBlip[], opts: LayoutOpts = {}): Rin
     };
   });
 
-  return { dots, sectors, sectorCount, geom, vbH: geom.vbH };
+  const value: RingBoardLayout = { dots, sectors, sectorCount, geom, vbH: geom.vbH };
+  layoutCache = { key, value };
+  return value;
 }
 
 // ---- rendering ------------------------------------------------------------------------------
@@ -436,16 +460,20 @@ const RING_FILL: Record<RadarRing, string> = {
   declining: "var(--verdict-declining)",
 };
 
-/** BAND WASHES — whisper alphas in each ring's OWN tone (the region and the ring are the
- * same thing now, so the old semantic re-mapping is gone). `enter` runs a touch stronger:
- * it is the standing focus wash the XY plate painted over its focus quadrant, carried over
- * to the place the eye should land on this form — the middle. */
+/**
+ * BAND WASHES. The reference draws NO band fills at all — four hairline circles and the
+ * coloured captions carry the whole structure, and that is most of why it reads clean. So
+ * only ONE band keeps a resting wash here: `enter`, the standing focus tint the XY plate
+ * painted over its focus quadrant, carried to the place the eye should land on this form —
+ * the middle. The other four are transparent at rest and only light up under the pointer
+ * (RING_HOVER_WASH), where the tint is feedback rather than decoration.
+ */
 const RING_WASH: Record<RadarRing, string> = {
-  enter: "color-mix(in srgb, var(--verdict-enter) 9%, transparent)",
-  watch: "color-mix(in srgb, var(--text-primary) 3.5%, transparent)",
-  emerging: "color-mix(in srgb, var(--verdict-emerging) 5%, transparent)",
-  crowded: "color-mix(in srgb, var(--verdict-crowded) 5%, transparent)",
-  declining: "color-mix(in srgb, var(--verdict-declining) 5%, transparent)",
+  enter: "color-mix(in srgb, var(--verdict-enter) 7%, transparent)",
+  watch: "transparent",
+  emerging: "transparent",
+  crowded: "transparent",
+  declining: "transparent",
 };
 
 /** The extra wash a band takes WHILE HOVERED (painted over the resting one, so a hovered
@@ -460,6 +488,20 @@ const RING_HOVER_WASH: Record<RadarRing, string> = {
 };
 
 const REGION_TONE: Record<RadarRegion, string> = RING_FILL;
+
+/**
+ * BAND CAPTION COLOURS — the reference's rule, measured: ADOPT is drawn in the same green
+ * as the adopt blips, TRIAL in the trial violet, and so on. Each caption is its own ring's
+ * hue, which is what turns five words into structure instead of five pieces of grey
+ * wallpaper. WATCH is the exception in kind, not in rule: its ring has no hue (it is the
+ * neutral steel verdict), so its caption takes the same receding paper tone the ring does.
+ */
+const RING_CAPTION_FILL: Record<RadarRing, string> = RING_FILL;
+/** Resting caption alpha. High enough to read as a label — the complaint the second pass
+ * fixed was that these were unreadable grey at 0.4 — low enough that a dot crossing one
+ * still wins. A hovered or zoomed band steps to CAPTION_ALPHA_LIT. */
+const CAPTION_ALPHA = 0.7;
+const CAPTION_ALPHA_LIT = 0.95;
 
 function fmtTrendPct(v: number | null): string {
   if (v === null) return "no demand data";
@@ -576,8 +618,8 @@ function DossierBody({ blip, plotCap }: { blip: RailBlip; plotCap: number }) {
           the verdict is computed the same way — it just has no dot at this Top-N. */}
       {blip.n == null && (
         <p className="pt-1 text-[11px] text-ink-muted">
-          Beyond the Top {plotCap} plot — no dot on the board at this cap; the verdict below is judged by the same
-          checks.
+          Beyond the Top {plotCap} of {SECTOR_LABEL[blip.sector]} — no dot in that sector at this cap; the verdict below
+          is judged by the same checks.
         </p>
       )}
       <p className="border-b border-chartborder pb-2 pt-1 text-[12px] text-ink-secondary">
@@ -847,21 +889,27 @@ export function RadarBoard({
   pool,
   plotCap,
   soloOnly,
+  emphasis,
   selectedId,
   onSelect,
   zoom,
   onZoom,
 }: {
-  /** What the dial plots: the active class's Top-N by opportunity (the page slices). */
+  /** What the dial plots: the top N/3 of EVERY class by opportunity (the page slices per
+   * class — see pages/Radar.tsx), so all three wedges are filled from their own ranking. */
   blips: RadarBoardBlip[];
   /** The FULL population at this cut + solo setting, ALL classes merged, opportunity order —
    * the rail search's scope. A superset of `blips`: search must reach every niche of the
    * cut, never just the plotted class or its Top-N. */
   pool: RadarBoardBlip[];
-  /** The Top-N plot cap — names the honest "beyond the Top N plot" dossier note for a search
-   * selection that has no dot. */
+  /** The PER-CLASS plot cap — names the honest "beyond the Top N of its class" dossier note
+   * for a search selection that has no dot. */
   plotCap: number;
   soloOnly: boolean;
+  /** THE CLASS CONTROL, as EMPHASIS. All three wedges always draw; this one is the wedge the
+   * reader asked for, so the other two recede (dimmed dots, muted rail rows) instead of
+   * disappearing. null emphasises nothing — every wedge at full strength. */
+  emphasis: RadarSector | null;
   /** Controlled selection — "dimension:key" of ANY pool niche, or null. Owned by the page
    * (which also switches the class picker when a search hit is cross-class). */
   selectedId: string | null;
@@ -984,13 +1032,23 @@ export function RadarBoard({
   /** Band membership by id for the rail's left-edge ticks (plotted rows only — a beyond-board
    * search hit has no dot, so no band and never a tick). */
   const regionById = useMemo(() => new Map<string, RadarRegion>(placed.map((d) => [d.id, d.region])), [placed]);
-  /** Dot opacity under the hover channels. DOT hover takes precedence (existing tooltip
-   * behavior: only the hovered dot stays full); otherwise a hovered band lifts its members
-   * and mutes everything outside; no hover leaves everyone full. */
+  /** The CLASS EMPHASIS channel: a wedge the reader did not ask for recedes, it never
+   * leaves. Deliberately a MILD dim rather than a near-erasure — the whole reason all three
+   * wedges draw is that the comparison between them is the reading, and a dot whose rail
+   * number you can no longer read has lost the thing that keys it to the list. Measured on
+   * the live board at 1440x900: at 0.5 the emphasised wedge still pops unmistakably and the
+   * other two stay countable. */
+  const OFF_CLASS = 0.5;
+  const emphasised = (b: PlacedBlip): boolean => emphasis === null || b.sector === emphasis;
+  /** Dot opacity under the hover channels, multiplied by the emphasis channel. DOT hover
+   * takes precedence (existing tooltip behavior: only the hovered dot stays full); otherwise
+   * a hovered band lifts its members and mutes everything outside; no hover leaves everyone
+   * at their class's own strength. */
   const dotOpacity = (b: PlacedBlip): number => {
-    if (hoverId !== null) return hoverId === b.id ? 1 : 0.35;
-    if (hoverRegion !== null) return b.region === hoverRegion ? 1 : 0.35;
-    return 1;
+    const cls = emphasised(b) ? 1 : OFF_CLASS;
+    if (hoverId !== null) return hoverId === b.id ? 1 : 0.35 * cls;
+    if (hoverRegion !== null) return (b.region === hoverRegion ? 1 : 0.35) * cls;
+    return cls;
   };
   // Selection resolves against the PLOTTED board first (dot highlight comes free), then the
   // full pool — a search hit beyond the board still opens its dossier. It survives population
@@ -1067,10 +1125,9 @@ export function RadarBoard({
   /** What actually renders: a zoom hides every non-member. */
   const visible = placed.filter((d) => !d.hidden);
   /** COMPACT decor for narrow dials (phones): labels keep their TRUE point size (1 viewBox
-   * unit = 1 px), so a 300px dial can't fit the full band wording — the geometry shortens the
-   * captions and this steps the rest of the decor type down a notch to match. */
+   * unit = 1 px), so a 300px dial can't fit desktop decor type — this steps it down a notch
+   * (the band captions size themselves off the band; see radarRings.ts). */
   const compact = geom.compact;
-  const multiSector = layout.sectors.length > 1;
 
   return (
     <div className="flex flex-col gap-5 lg:flex-row lg:items-stretch">
@@ -1089,9 +1146,11 @@ export function RadarBoard({
           role="img"
           aria-label={
             `Radar dial: ${visible.length} niches on concentric verdict rings, best in the middle — ` +
-            `${RING_ORDER.map((r) => RING_LABEL[r]).join(" then ")} outward; the sector is the tag tier, ` +
+            `${RING_ORDER.map((r) => RING_LABEL[r]).join(" then ")} outward; the three sectors are the ` +
+            `niche classes (${CLASS_ORDER.map((c) => `${CLASS_LABEL[c]} ${layout.sectorCount.get(c) ?? 0}`).join(", ")}), ` +
             `distance inside a band is the opportunity rank, dot area is P90 revenue and each dot carries ` +
             `its rail number` +
+            (emphasis !== null ? `; ${CLASS_LABEL[emphasis]} emphasised` : "") +
             (zoom !== null ? `; zoomed to the ${REGION_NAME[zoom]} ring` : "")
           }
         >
@@ -1100,15 +1159,15 @@ export function RadarBoard({
               may ever be interactive, so a click landing on a caption reads as the band under
               it, never as a dead dot.
 
-              THE BAND CAPTIONS DELIBERATELY PAINT *UNDER* THE DOTS — the opposite of the
-              2026-09-01 rule that moved the XY plate's bar labels above them. That rule
-              existed because the flood-bar label was a 9px string being erased by the dense
-              cluster sitting on the very line it named. These captions are 20-26px wallpaper
-              at ~30% contrast, one per band, and they say the same word the rail group header
-              and the legend already say; painting them over 80 numbered dots would cost the
-              data to protect a label that is redundant three times over. The RIM LABELS and
-              the ZOOM TITLE — small, load-bearing, unique — still paint last, in
-              ring-annotations. */}
+              THE BAND CAPTIONS DELIBERATELY PAINT *UNDER* THE DOTS — the reference's own
+              order (its ring labels sit in the grid group, below the blips) and the opposite
+              of the 2026-09-01 rule that moved the XY plate's bar labels above them. That
+              rule existed because the flood-bar label was a 9px string being erased by the
+              dense cluster sitting on the very line it named. These are one word per band,
+              in the band's own hue, on a divider axis the placement keeps clear (see the
+              caption gutter in radarRings.ts) — so they rarely meet a dot at all, and when
+              they do the DATA must win. The RIM LABELS and the ZOOM TITLE — small,
+              load-bearing, unique — still paint last, in ring-annotations. */}
           <g pointerEvents="none" data-testid="ring-decor">
             {geom.bands.map((b) => (
               <path
@@ -1134,26 +1193,30 @@ export function RadarBoard({
             ))}
             <circle cx={cx} cy={cy} r={r0} fill="none" stroke="var(--gridline)" strokeWidth={1} />
 
-            {/* SECTOR SPOKES — only when the dial actually holds more than one tier. A
-                divider between a sector and itself is a lie, and it would sit exactly under
-                the band captions. */}
-            {multiSector &&
-              layout.sectors.map((s) => {
-                const a = polar(cx, cy, s.a0, r0);
-                const b = polar(cx, cy, s.a0, R);
-                return (
-                  <line
-                    key={`spoke-${s.sector}`}
-                    data-testid={`radar-spoke-${s.sector}`}
-                    x1={a.x}
-                    y1={a.y}
-                    x2={b.x}
-                    y2={b.y}
-                    stroke="var(--gridline)"
-                    strokeWidth={1}
-                  />
-                );
-              })}
+            {/* SECTOR SPOKES — the three class dividers, drawn from the centre hole to the
+                rim exactly like the reference's quadrant axes. Always three: the wedges are
+                fixed, so a class that happens to be empty at this cut still owns its arc. */}
+            {layout.sectors.map((s) => {
+              const a = polar(cx, cy, s.a0, r0);
+              const b = polar(cx, cy, s.a0, R);
+              return (
+                <line
+                  key={`spoke-${s.sector}`}
+                  data-testid={`radar-spoke-${s.sector}`}
+                  x1={a.x}
+                  y1={a.y}
+                  x2={b.x}
+                  y2={b.y}
+                  // --baseline, not --gridline: the spokes now carry the board's primary
+                  // grouping (which class a niche is in), so they must out-read the band
+                  // circles rather than tie with them. At gridline weight they vanished on
+                  // the first render of this layout — the sectors were there and invisible,
+                  // which is worse than not having them.
+                  stroke="var(--baseline)"
+                  strokeWidth={1.5}
+                />
+              );
+            })}
 
             {/* THE CENTRE MARK — "best in the middle", said once, in the one place the form
                 puts it. */}
@@ -1161,9 +1224,13 @@ export function RadarBoard({
               BEST
             </HaloText>
 
-            {/* BAND CAPTIONS — large, low-contrast, inside the band, on the 12 o'clock axis,
-                exactly the way the reference labels ADOPT / TRIAL / ASSESS / HOLD. Each takes
-                its own ring's hue; a hovered band's caption steps up to full ink. */}
+            {/* BAND CAPTIONS — ONE WORD in the band's OWN HUE, stacked up the vertical axis
+                in the TOP half, each just inside its band's outer edge. That is the
+                reference's ADOPT / TRIAL / ASSESS / HOLD, measured off it: 42px at
+                `-ringRadius + 62` on a 400px radius, coloured to the ring (ADOPT is the same
+                green as the adopt blips). The vertical axis is a SECTOR DIVIDER here, as it
+                is there, so the captions sit on a boundary rather than in a crowd. A hovered
+                or zoomed band's caption steps up to nearly full strength. */}
             {geom.bands.map((b) => {
               const lit = effectiveRegion === b.ring || zoom === b.ring;
               return (
@@ -1171,12 +1238,12 @@ export function RadarBoard({
                   key={`cap-${b.ring}`}
                   testId={`ring-caption-${b.ring}`}
                   x={cx}
-                  y={cy - b.mid + b.captionSize * 0.36}
+                  y={cy - b.captionR + b.captionSize * 0.36}
                   anchor="middle"
                   size={b.captionSize}
-                  halo={b.captionSize * 0.24}
-                  fill={lit ? "var(--text-primary)" : RING_FILL[b.ring]}
-                  opacity={lit ? 0.8 : 0.4}
+                  halo={b.captionSize * 0.2}
+                  fill={RING_CAPTION_FILL[b.ring]}
+                  opacity={lit ? CAPTION_ALPHA_LIT : CAPTION_ALPHA}
                 >
                   {b.caption}
                 </HaloText>
@@ -1236,7 +1303,10 @@ export function RadarBoard({
             {visible.map((b) => {
               const team = soloBucket(b.solo_viability) === "team";
               const label = String(b.n);
-              const numSize = Math.min(b.r * 1.22, 11) * (label.length >= 3 ? 0.78 : 1);
+              // THE NUMBER HAS TO BE READABLE (the fourth complaint of the second pass). The
+              // reference runs a 9px number inside an r=9 blip; ours goes up to 11px inside
+              // an r≈9–11.5 blip, stepping down only for a three-digit rank.
+              const numSize = Math.min(b.r * 1.3, 11) * (label.length >= 3 ? 0.76 : 1);
               return (
                 <g key={b.id}>
                   {b.verdict.caution && (
@@ -1290,7 +1360,8 @@ export function RadarBoard({
                     opacity={dotOpacity(b)}
                     style={{
                       fontSize: numSize,
-                      fontWeight: 600,
+                      fontWeight: 700,
+                      letterSpacing: "-0.02em",
                       fill: team ? RING_FILL[b.verdict.ring] : "var(--page-plane)",
                       transition: "opacity 120ms, x 240ms, y 240ms",
                     }}
@@ -1346,30 +1417,44 @@ export function RadarBoard({
                   ESC · BACKGROUND CLICK · OR THE RAIL CHIP ✕ EXITS
                 </HaloText>
               </>
-            ) : compact && multiSector ? (
-              /* A narrow dial has no room for side rim labels; the sector order becomes one
-                 honest caption under the dial instead of a clipped label. */
-              <HaloText x={cx} y={geom.vbH - 6} anchor="middle" size={8.5}>
-                {`SECTORS ↻ FROM 12: ${layout.sectors
-                  .map((s) => `${TIER_SECTOR_LABEL[s.sector].toUpperCase()} ${layout.sectorCount.get(s.sector) ?? 0}`)
-                  .join(" · ")}`}
+            ) : compact ? (
+              /* A phone spends its side margins on RADIUS, not on rim labels (see
+                 radarRings.ts's RIM_PAD_SIDE_COMPACT) — reserving room for "MICRO-GENRES ·
+                 27" out at the wedge's mid angle would halve the dial. So the sector order
+                 becomes one honest caption line under the dial, reading clockwise from 12,
+                 with the emphasised class marked. */
+              <HaloText testId="radar-sector-legend" x={cx} y={geom.vbH - 6} anchor="middle" size={8}>
+                {`↻ FROM 12 · ${layout.sectors
+                  .map(
+                    (s) =>
+                      `${emphasis === s.sector ? "▸" : ""}${SECTOR_SHORT[s.sector]} ${
+                        layout.sectorCount.get(s.sector) ?? 0
+                      }`,
+                  )
+                  .join(" · ")} · G=GENRES M=MICRO T=THEMES`}
               </HaloText>
             ) : (
+              /* SECTOR RIM LABELS — the class each wedge holds and its honest count, at the
+                 wedge's mid angle, the way the reference names its four quadrants around the
+                 dial. The EMPHASISED class is drawn in primary ink; the other two recede to
+                 muted, so the label layer says the same thing the dots do. */
               layout.sectors.map((s) => {
                 const p = polar(cx, cy, s.mid, R + 13);
                 const c = Math.cos(s.mid);
                 const anchor = c > 0.3 ? "start" : c < -0.3 ? "end" : "middle";
+                const on = emphasis === null || emphasis === s.sector;
                 return (
                   <HaloText
                     key={`rim-${s.sector}`}
                     testId={`radar-sector-label-${s.sector}`}
                     x={p.x}
-                    y={p.y + (Math.sin(s.mid) > 0.3 ? 6 : Math.sin(s.mid) < -0.3 ? -1 : 3)}
+                    y={p.y + (Math.sin(s.mid) > 0.3 ? 7 : Math.sin(s.mid) < -0.3 ? -1 : 3)}
                     anchor={anchor}
-                    size={compact ? 8.5 : 10}
-                    fill="var(--text-secondary)"
+                    size={compact ? 8.5 : 10.5}
+                    fill={on ? "var(--text-primary)" : "var(--text-muted)"}
+                    opacity={on ? 1 : 0.75}
                   >
-                    {`${TIER_SECTOR_LABEL[s.sector].toUpperCase()} · ${layout.sectorCount.get(s.sector) ?? 0}`}
+                    {`${CLASS_LABEL[s.sector].toUpperCase()} · ${layout.sectorCount.get(s.sector) ?? 0}`}
                   </HaloText>
                 );
               })
@@ -1425,10 +1510,11 @@ export function RadarBoard({
           <span>
             ring = the verdict, best in the middle · the number in a dot is its rail rank · inside a band, nearer the
             centre = higher opportunity v2 (the rank, not the score — the score is in the tooltip and the dossier) ·
-            sector = the tag tier · dot area = P90 revenue · colour repeats the verdict the band already names
-            (reinforcement, never the only channel) · nothing clamps here: a ring board has no axis to fall off ·
-            click a ring&rsquo;s empty space to zoom into it and filter the rail (Esc, the rail chip&rsquo;s ✕, or a
-            background click exits)
+            the three sectors are the niche classes, each showing its OWN top {plotCap} by opportunity · the Class
+            control emphasises a sector, it never empties the board · dot area = P90 revenue · colour repeats the
+            verdict the band already names (reinforcement, never the only channel) · nothing clamps here: a ring board
+            has no axis to fall off · click a ring&rsquo;s empty space to zoom into it and filter the rail (Esc, the
+            rail chip&rsquo;s ✕, or a background click exits)
           </span>
         </div>
 
@@ -1591,19 +1677,28 @@ export function RadarBoard({
                             // so no band and never a tick.
                             const rowRegion = regionById.get(b.id);
                             const ticked = effectiveRegion !== null && rowRegion === effectiveRegion;
+                            // THE CLASS EMPHASIS reaches the rail too, at the same strength
+                            // it reaches the dots — one instrument, one channel. Nothing is
+                            // removed or reordered: an off-class row keeps its rank, its
+                            // glyphs and its click.
+                            const offClass = emphasis !== null && b.sector !== emphasis;
                             return (
                             <button
                               type="button"
                               key={b.id}
                               data-testid={`radar-row-${b.id}`}
                               data-region-tick={ticked ? effectiveRegion : undefined}
+                              data-off-class={offClass ? b.sector : undefined}
                               onClick={() => onSelect(b.id)}
                               onMouseEnter={() => setHoverId(b.id)}
                               onMouseLeave={clearHover}
-                              title={`${b.key} — ${RING_LABEL[b.verdict.ring]}: ${b.verdict.reason}${
-                                b.n == null ? ` (beyond the Top ${plotCap} plot — no dot on the board)` : ""
-                              }`}
-                              style={ticked ? { boxShadow: `inset 2px 0 0 ${REGION_TONE[effectiveRegion!]}` } : undefined}
+                              title={`${b.key} — ${SECTOR_LABEL[b.sector]} · ${RING_LABEL[b.verdict.ring]}: ${
+                                b.verdict.reason
+                              }${b.n == null ? ` (beyond the Top ${plotCap} of its class — no dot on the board)` : ""}`}
+                              style={{
+                                ...(ticked ? { boxShadow: `inset 2px 0 0 ${REGION_TONE[effectiveRegion!]}` } : null),
+                                ...(offClass ? { opacity: OFF_CLASS + 0.25 } : null),
+                              }}
                               className={clsx(
                                 "group/rl flex min-w-0 items-baseline gap-2 py-[3px] text-left text-[13px] transition-colors",
                                 (hoverId === b.id || (q && flatRows[activeIdx]?.id === b.id)) &&

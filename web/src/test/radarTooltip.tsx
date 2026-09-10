@@ -115,6 +115,7 @@ function Harness({ blips }: { blips: RadarBoardBlip[] }) {
         pool={blips}
         plotCap={blips.length}
         soloOnly={false}
+        emphasis={null}
         selectedId={selectedId}
         onSelect={setSelectedId}
         zoom={zoom}
