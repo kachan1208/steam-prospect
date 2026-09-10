@@ -364,9 +364,9 @@ export default function Docs() {
                 [
                   "Radar",
                   <>
-                    The landing screen (<Code>/</Code> redirects here). Every niche plotted on the board's verdict
-                    quadrants for the last 24 months — the fastest read on where the openings are, and the way into
-                    the Niche Finder.
+                    The landing screen (<Code>/</Code> redirects here). Every niche plotted on the board's
+                    concentric verdict rings for the last 24 months, best in the middle — the fastest read on where
+                    the openings are, and the way into the Niche Finder.
                   </>,
                 ],
                 [
@@ -483,12 +483,14 @@ export default function Docs() {
           question="Where are the openings right now, at a glance?"
         >
           <p>
-            The board every session starts on: <Code>/</Code> redirects here. Every scored niche is plotted on the
-            last-24-months cut into <span className="text-ink-primary">verdict quadrants</span>, so the shape of the
-            market reads before any number does. Filter by class, restrict to{" "}
-            <span className="text-ink-primary">solo-friendly</span> niches, or cap the board to the top N. Click a
-            quadrant to zoom it; <span className="text-ink-primary">Open Niche Finder →</span> takes the same cut into
-            the sortable table.
+            The board every session starts on: <Code>/</Code> redirects here. Every scored niche sits on the
+            last-24-months cut&rsquo;s <span className="text-ink-primary">concentric verdict rings</span> — Enter now
+            innermost, then Watch, Emerging, Crowded, Declining — so distance from the middle IS the call, and the
+            shape of the market reads before any number does. The sector is the tag tier; inside a ring, nearer the
+            centre means a higher opportunity rank; the number in a dot is its rank in the list beside the board.
+            Filter by class, restrict to <span className="text-ink-primary">solo-friendly</span> niches, or cap the
+            board to the top N. Click a ring to zoom it;{" "}
+            <span className="text-ink-primary">Open Niche Finder →</span> takes the same cut into the sortable table.
           </p>
           {/* The old copy here read "the same evidence, on the same thresholds ... it is why the
               board and the score can't disagree about direction". The first half is true of the

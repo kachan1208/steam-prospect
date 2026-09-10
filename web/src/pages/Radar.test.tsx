@@ -49,9 +49,13 @@ function row(
 }
 
 const GENRES = [row("genre", "Simulation", null, 60, 0.05, 70), row("genre", "Strategy", null, 10, 0.2, 55)];
+// Verdict rings, which are also the board's zoom regions since the 2026-09-10 dial:
+// Roguelike Deckbuilder (demand past the bar but supply flooding) = WATCH, City Builder
+// (past the bar, pipeline calm) = ENTER NOW, Fishing = ENTER NOW, Horror (flooding against
+// falling demand) = CROWDED. Two different rings per class, so a ring zoom really filters.
 const TAGS = [
   row("tag", "Roguelike Deckbuilder", "micro", 196, 0.409, 71),
-  row("tag", "City Builder", "micro", 12, 0.1, 60),
+  row("tag", "City Builder", "micro", 90, 0.1, 60),
   row("tag", "Fishing", "theme", 80, 0.05, 65),
   row("tag", "Horror", "theme", -20, 0.3, 50),
 ];
@@ -217,77 +221,83 @@ describe("Radar — shareable URL state", () => {
   });
 
   it("garbage params fall back to the defaults instead of breaking the board", async () => {
-    renderRadar("/radar?class=nonsense&top=9999&zoom=narnia");
+    // ?zoom=growing-open is a REAL link the XY plate used to mint, before the 2026-09-10
+    // rebuild made RADAR_REGIONS the ring vocabulary — it must degrade to the full board,
+    // exactly like any other unknown value.
+    renderRadar("/radar?class=nonsense&top=9999&zoom=growing-open");
     expect(await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder")).toBeTruthy();
     expect(screen.getByText(/micro-genre tags/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "80" }).className).toContain("bg-brand");
-    // An unknown region is the FULL board, not an empty one.
+    // An unknown ring is the FULL board, not an empty one.
     expect(screen.queryByTestId("radar-zoom-chip")).toBeNull();
     expect(screen.getByTestId("radar-row-tag:City Builder")).toBeTruthy();
   });
 });
 
 /**
- * THE QUADRANT ZOOM RIDES THE URL TOO (2026-09-01) — it was the one radar control that
- * didn't, while class / solo / top / niche all did. Reproduction: click a quadrant, the
- * rail filters to a chip ("FLAT/SHRINKING · OPEN 32 niches ✕") and the plate titles
- * itself "— ZOOMED", but the address bar still says /radar and a reload loses it.
+ * THE RING ZOOM RIDES THE URL TOO (2026-09-01) — it was the one radar control that didn't,
+ * while class / solo / top / niche all did. Reproduction: click a region, the rail filters
+ * to a chip and the plate titles itself "— ZOOMED", but the address bar still says /radar
+ * and a reload loses it.
  *
- * The fixture puts exactly one micro niche in each of two quadrants (the verdict bars
- * are +40% demand / +15% saturation YoY): Roguelike Deckbuilder at demand 196 / sat
- * 0.409 is GROWING · FLOODING, City Builder at 12 / 0.1 is FLAT/SHRINKING · OPEN.
+ * The zoom's vocabulary changed with the 2026-09-10 concentric-ring rebuild: the regions
+ * were the XY plate's four quadrants plus its strip, and they are now the five VERDICT
+ * RINGS (RADAR_REGIONS === RING_ORDER). An old ?zoom=growing-open link falls back to the
+ * unzoomed board, which is the same graceful fallback any garbage value gets — see the
+ * "garbage params" test above, which pins exactly that shape.
  */
-describe("Radar — the quadrant zoom is shareable", () => {
-  it("clicking a quadrant writes ?zoom= and filters the rail to its members", async () => {
+describe("Radar — the ring zoom is shareable", () => {
+  it("clicking a ring writes ?zoom= and filters the rail to its members", async () => {
     renderRadar();
     await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder");
     expect(url()).toBe("/radar");
 
-    fireEvent.click(screen.getByTestId("radar-region-growing-flooding"));
+    fireEvent.click(screen.getByTestId("radar-region-watch"));
 
-    expect(url()).toBe("/radar?zoom=growing-flooding");
-    expect(screen.getByTestId("radar-zoom-chip").textContent).toContain("GROWING · FLOODING");
+    expect(url()).toBe("/radar?zoom=watch");
+    expect(screen.getByTestId("radar-zoom-chip").textContent).toContain("WATCH");
     expect(screen.getByTestId("radar-row-tag:Roguelike Deckbuilder")).toBeTruthy();
     expect(screen.queryByTestId("radar-row-tag:City Builder")).toBeNull();
   });
 
   it("a fresh mount on ?zoom= opens ZOOMED — the copied URL is the whole view", async () => {
-    renderRadar("/radar?zoom=shrinking-open");
-    // The zoomed slice, from the first paint: only that quadrant's member.
+    renderRadar("/radar?zoom=enter");
+    // The zoomed slice, from the first paint: only that ring's member.
     expect(await screen.findByTestId("radar-row-tag:City Builder")).toBeTruthy();
     expect(screen.queryByTestId("radar-row-tag:Roguelike Deckbuilder")).toBeNull();
     // …with every zoom affordance the click-path produces.
-    expect(screen.getByTestId("radar-zoom-chip").textContent).toContain("FLAT/SHRINKING · OPEN");
-    expect(screen.getByText("FLAT/SHRINKING · OPEN — ZOOMED")).toBeTruthy();
+    expect(screen.getByTestId("radar-zoom-chip").textContent).toContain("ENTER NOW");
+    expect(screen.getByText("ENTER NOW — ZOOMED")).toBeTruthy();
     expect(screen.getByTestId("radar-zoom-exit")).toBeTruthy();
-    expect(screen.queryByTestId("radar-region-shrinking-open")).toBeNull();
-    // The scoped search names the zoomed region, not the whole pool.
-    expect((screen.getByTestId("radar-search") as HTMLInputElement).placeholder).toContain(
-      "in FLAT/SHRINKING · OPEN",
-    );
+    expect(screen.queryByTestId("radar-region-enter")).toBeNull();
+    // The zoomed band owns the whole dial; the other four are not drawn at all.
+    expect(screen.getByTestId("ring-band-enter")).toBeTruthy();
+    expect(screen.queryByTestId("ring-band-declining")).toBeNull();
+    // The scoped search names the zoomed ring, not the whole pool.
+    expect((screen.getByTestId("radar-search") as HTMLInputElement).placeholder).toContain("in ENTER NOW");
     // The URL is left exactly as shared.
-    expect(url()).toBe("/radar?zoom=shrinking-open");
+    expect(url()).toBe("/radar?zoom=enter");
   });
 
   it("all three exits clear the param, not just the view", async () => {
     renderRadar();
     await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder");
-    const zoomIn = () => fireEvent.click(screen.getByTestId("radar-region-growing-flooding"));
+    const zoomIn = () => fireEvent.click(screen.getByTestId("radar-region-watch"));
 
     // Each leg asserts the zoom really landed in the URL first — otherwise "it's gone
     // afterwards" would also hold on a page that never wrote it.
     zoomIn();
-    expect(url()).toBe("/radar?zoom=growing-flooding");
+    expect(url()).toBe("/radar?zoom=watch");
     fireEvent.click(screen.getByTestId("radar-zoom-chip"));
     expect(url()).toBe("/radar");
 
     zoomIn();
-    expect(url()).toBe("/radar?zoom=growing-flooding");
+    expect(url()).toBe("/radar?zoom=watch");
     fireEvent.keyDown(document, { key: "Escape" });
     expect(url()).toBe("/radar");
 
     zoomIn();
-    expect(url()).toBe("/radar?zoom=growing-flooding");
+    expect(url()).toBe("/radar?zoom=watch");
     fireEvent.click(screen.getByTestId("radar-zoom-exit"));
     expect(url()).toBe("/radar");
     expect(screen.getByTestId("radar-row-tag:City Builder")).toBeTruthy();
@@ -296,34 +306,34 @@ describe("Radar — the quadrant zoom is shareable", () => {
   it("the zoom composes with its four siblings in one shareable URL", async () => {
     renderRadar("/radar?class=theme&solo=off&top=40");
     await screen.findByTestId("radar-row-tag:Fishing");
-    // Fishing (demand 80 / sat 0.05) is the themes board's GROWING · OPEN member.
-    fireEvent.click(screen.getByTestId("radar-region-growing-open"));
+    // Fishing (demand 80 / sat 0.05) is the themes board's ENTER NOW member.
+    fireEvent.click(screen.getByTestId("radar-region-enter"));
 
     const u = url();
     expect(u).toContain("class=theme");
     expect(u).toContain("solo=off");
     expect(u).toContain("top=40");
-    expect(u).toContain("zoom=growing-open");
+    expect(u).toContain("zoom=enter");
     expect(screen.getByTestId("radar-row-tag:Fishing")).toBeTruthy();
     expect(screen.queryByTestId("radar-row-tag:Horror")).toBeNull();
   });
 
   it("a dot click inside the zoom keeps BOTH params — the dossier doesn't drop the zoom", async () => {
-    renderRadar("/radar?zoom=growing-flooding");
+    renderRadar("/radar?zoom=watch");
     const dot = await screen.findByTestId("radar-blip-tag:Roguelike Deckbuilder");
-    // The board really is zoomed, not merely carrying an inert param: the other
-    // quadrant's dot is not on the plate.
+    // The board really is zoomed, not merely carrying an inert param: the other ring's
+    // dot is not on the dial.
     expect(screen.queryByTestId("radar-blip-tag:City Builder")).toBeNull();
 
     fireEvent.click(dot);
 
     const u = url();
-    expect(u).toContain("zoom=growing-flooding");
+    expect(u).toContain("zoom=watch");
     expect(u).toContain("niche=tag%3ARoguelike+Deckbuilder");
     expect(screen.getByTestId("verdict-dossier").textContent).toContain("Roguelike Deckbuilder");
     // Back out of the dossier and the zoom is still there — one URL, two live params.
     fireEvent.click(screen.getByRole("button", { name: /back to all verdicts/i }));
     expect(screen.getByTestId("radar-zoom-chip")).toBeTruthy();
-    expect(url()).toBe("/radar?zoom=growing-flooding");
+    expect(url()).toBe("/radar?zoom=watch");
   });
 });

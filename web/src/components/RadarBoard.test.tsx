@@ -4,16 +4,15 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import {
-  PLOT,
+  DEFAULT_PLATE_W,
   RadarBoard,
-  layoutXY,
-  plateGeom,
-  xToPx,
-  yToPx,
+  layoutBoard,
   type RadarBoardBlip,
   type RadarRegion,
 } from "./RadarBoard";
+import { ringGeom, sectorSpans } from "./radarRings";
 import {
+  RING_ORDER,
   SOLO_FRIENDLY_MIN,
   radarVerdictTrace,
   type RadarVerdictInput,
@@ -30,19 +29,26 @@ import {
  * 2. THE VERDICT DOSSIER + SELECTION MODEL. Selection is controlled (selectedId/onSelect);
  *    clicking a dot or its rail row opens the per-niche dossier IN THE RAIL: the
  *    verdict-trace rows from the SAME radarVerdictTrace evaluation that placed the dot,
- *    the solo row's inline member evidence, and the deep-dive link.
+ *    the solo row's inline member evidence, and the DEEP-DIVE BUTTON — a real filled
+ *    primary action since 2026-09-10 ("Button to go deeper into the niche is super small
+ *    and almost not visible"), not the 13px text link it used to be.
  *
- * 3. CLICK-TARGET HYGIENE (A4). Only blip dots are interactive inside the SVG — the
- *    axes/threshold decor and the legend's sample circles must never open a dossier.
+ * 3. CLICK-TARGET HYGIENE (A4). Only blip dots and the ring hit-areas are interactive
+ *    inside the SVG — the decor, the band captions and the legend's sample circles must
+ *    never open a dossier.
  *
  * 4. NO SILENT CAPS (A1). The rail renders EVERY entry of every ring group, and the group
  *    headers carry the full counts.
  *
- * 5. THE XY QUADRANT PLATE (2026-08-27 directive). The quadrant lines sit at the
- *    verdict's own thresholds (+40%/24m demand, +15% YoY flood), axes carry units,
- *    beyond-domain values pin at the plot edge with an explicit chevron (never dropped,
- *    never fake-positioned), and emerging / no-trend rows live in the dashed strip below
- *    the plot. layoutXY is deterministic call-to-call, coincident-dot jitter included.
+ * 5. THE CONCENTRIC-RING DIAL (2026-09-10 directive: "I think circle is a better
+ *    representation for radar. Like we do there: https://solidgate-tech.github.io/ Best -
+ *    niches are in the middle"). The band IS the verdict, inner to outer in RING_ORDER;
+ *    the sector is the tag tier; distance inside a band is the opportunity rank; each dot
+ *    carries the rail number that keys it to the list. The old plate's clamp chevrons and
+ *    its no-XY strip are gone WITH their reasons — a ring board has no axis to fall off,
+ *    and every row has a verdict, so every row has an honest place. layoutBoard is
+ *    deterministic call-to-call, collision pass included. (The placement invariants
+ *    themselves live in radarRings.test.ts, on the pure function.)
  *
  * 6. NICHE SEARCH OVER THE FULL POOL (2026-08-27 directive). The rail search filters the
  *    WHOLE population (`pool` prop), not just the plotted Top-N: a beyond-plot match
@@ -50,13 +56,11 @@ import {
  *    note, a plotted match never carries that note, zero matches get an honest empty row
  *    naming the searched population, and Esc clears back to the plotted list.
  *
- * 7. CLICK-TO-ZOOM (2026-08-28 directive). Clicking a region's EMPTY area zooms the
- *    plate into it and filters the rail to its members (chip + honest recomputed
- *    counts); a quadrant zoom re-domains the axes to the quadrant's own bounds with the
- *    clamp contract intact at the new edges; the strip zoom is a rail filter + an
- *    enlarged strip, never a fake XY. Search composes with the filter. Dot clicks keep
- *    dossier precedence. Three exits: chip ✕, Esc (search text clears first), and a
- *    plot-background click.
+ * 7. CLICK-TO-ZOOM (2026-08-28 directive, re-cut to the rings). Clicking a ring's EMPTY
+ *    area zooms the dial into that band (it expands to fill the whole dial, non-members do
+ *    not render) and filters the rail to its members (chip + honest recomputed counts).
+ *    Search composes with the filter. Dot clicks keep dossier precedence. Three exits: chip
+ *    ✕, Esc (search text clears first), and a board-background click.
  */
 
 function makeBlip(key: string, input: RadarVerdictInput, over: Partial<RadarBoardBlip> = {}): RadarBoardBlip {
@@ -94,11 +98,11 @@ const REFERENCE: RadarVerdictInput = {
   solo_viability: 0.995,
 };
 
-/** Selection AND the click-to-zoom region are controlled by the page (the zoom joined
- * the controlled set on 2026-09-01, when /radar started carrying it in ?zoom=) — the
- * harness stands in for the page for both. `pool` defaults to the plotted blips (the
- * common case in these tests); the search suite passes a strictly larger pool to pin
- * the beyond-plot behavior. */
+/** Selection AND the click-to-zoom ring are controlled by the page (the zoom joined the
+ * controlled set on 2026-09-01, when /radar started carrying it in ?zoom=) — the harness
+ * stands in for the page for both. `pool` defaults to the plotted blips (the common case in
+ * these tests); the search suite passes a strictly larger pool to pin the beyond-plot
+ * behavior. */
 function Harness({
   blips,
   soloOnly,
@@ -274,13 +278,14 @@ describe("RadarBoard — verdict dossier (rail selection mode)", () => {
 });
 
 describe("RadarBoard — click-target hygiene (A4)", () => {
-  it("clicking the axis/threshold decor never opens a dossier", () => {
+  it("clicking the ring decor or a band caption never opens a dossier", () => {
     renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
-    // The decor group (frame, zero lines, threshold bars, labels) is pointer-inert as a
-    // GROUP, so a misaimed or scripted click on a hairline can never read as a dead dot.
-    expect(screen.getByTestId("xy-decor").getAttribute("pointer-events")).toBe("none");
-    fireEvent.click(screen.getByTestId("xy-bar-demand"));
-    fireEvent.click(screen.getByTestId("xy-bar-flood"));
+    // The decor group (band washes, band circles, spokes, centre mark, captions) is
+    // pointer-inert as a GROUP, so a misaimed or scripted click on a caption can never
+    // read as a dead dot — it falls through to the band hit-area under it.
+    expect(screen.getByTestId("ring-decor").getAttribute("pointer-events")).toBe("none");
+    fireEvent.click(screen.getByTestId("ring-caption-enter"));
+    fireEvent.click(screen.getByTestId("ring-caption-declining"));
     expect(screen.queryByTestId("verdict-dossier")).toBeNull();
   });
 
@@ -295,6 +300,14 @@ describe("RadarBoard — click-target hygiene (A4)", () => {
       fireEvent.click(svg.querySelector("circle")!);
     }
     expect(screen.queryByTestId("verdict-dossier")).toBeNull();
+  });
+
+  it("the blip NUMBER is inert — the dot under it keeps its click", () => {
+    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    const num = screen.getByTestId("radar-blip-num-tag:Roguelike Deckbuilder");
+    expect(num.getAttribute("pointer-events")).toBe("none");
+    fireEvent.click(screen.getByTestId("radar-blip-tag:Roguelike Deckbuilder"));
+    expect(screen.getByTestId("verdict-dossier")).toBeTruthy();
   });
 });
 
@@ -406,163 +419,238 @@ describe("RadarBoard — niche search over the full pool", () => {
   });
 });
 
-describe("RadarBoard — XY quadrant plate", () => {
-  it("draws the quadrant lines at the verdict's own thresholds, labeled, with axis units", () => {
-    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
-    // The vertical bar IS the enter demand bar; the horizontal IS the flood bar.
-    const demandBar = screen.getByTestId("xy-bar-demand");
-    expect(Number(demandBar.getAttribute("x1"))).toBeCloseTo(xToPx(40), 4);
-    const floodBar = screen.getByTestId("xy-bar-flood");
-    expect(Number(floodBar.getAttribute("y1"))).toBeCloseTo(yToPx(15), 4);
-    expect(screen.getByText(/ENTER BAR \+40% \/ 24M/)).toBeTruthy();
-    expect(screen.getByText(/FLOOD BAR \+15% YOY/)).toBeTruthy();
-    // Quadrant micro-labels name REGIONS, never the verdict (a growing-open dot can
-    // still be Watch on a concentration veto — the dot style owns the final word).
-    for (const label of ["GROWING · OPEN", "GROWING · FLOODING", "SHRINKING · FLOODING", "FLAT/SHRINKING · OPEN"]) {
-      expect(screen.getByText(label)).toBeTruthy();
+describe("RadarBoard — the concentric-ring dial", () => {
+  /** One blip per ring, so every band has a resident. */
+  const ringBlips = () => [
+    makeBlip("Grower", { demand_trend_24m_pct: 120, saturation_yoy: 0.05, opportunity_v2: 90 }), // enter
+    makeBlip("Holder", { demand_trend_24m_pct: 10, saturation_yoy: 0.05, opportunity_v2: 70 }), // watch
+    makeBlip("Newborn", { demand_emerging: true, reviews_24m: 9_000, reviews_24m_new_share: 0.9, opportunity_v2: 60 }), // emerging
+    makeBlip("Packed", { demand_trend_24m_pct: -5, saturation_yoy: 0.9, opportunity_v2: 40 }), // crowded
+    makeBlip("Fading", { demand_trend_24m_pct: -60, saturation_yoy: 0.05, opportunity_v2: 20 }), // declining
+  ];
+
+  it("draws the five verdict bands inner-to-outer in RING_ORDER, each captioned inside itself", () => {
+    renderBoard(ringBlips(), true);
+    const geom = layoutBoard(ringBlips()).geom;
+    expect(geom.bands.map((b) => b.ring)).toEqual(RING_ORDER);
+    for (const b of geom.bands) {
+      expect(screen.getByTestId(`ring-band-${b.ring}`)).toBeTruthy();
+      const cap = screen.getByTestId(`ring-caption-${b.ring}`);
+      // The caption sits ON the 12 o'clock axis, INSIDE its own band — the reference's
+      // ADOPT / TRIAL / ASSESS / HOLD placement.
+      expect(Number(cap.getAttribute("x"))).toBeCloseTo(geom.cx, 3);
+      const up = geom.cy - Number(cap.getAttribute("y"));
+      expect(up).toBeGreaterThan(b.r0 - 12);
+      expect(up).toBeLessThan(b.r1 + 12);
     }
-    // Axis titles carry the units — and the Y title states the flipped direction.
-    expect(screen.getByText(/DEMAND TREND · % \/ 24M/)).toBeTruthy();
-    expect(screen.getByText(/RELEASES YOY · % — CALMER ↑ · FLOODING ↓/)).toBeTruthy();
+    // The band words themselves, in the verdict's own vocabulary.
+    expect(screen.getByTestId("ring-caption-enter").textContent).toBe("ENTER NOW");
+    expect(screen.getByTestId("ring-caption-declining").textContent).toBe("DECLINING");
+    // Captions run outward: each one is drawn further from the centre than the last.
+    const up = (ring: string) => geom.cy - Number(screen.getByTestId(`ring-caption-${ring}`).getAttribute("y"));
+    for (let i = 1; i < RING_ORDER.length; i++) {
+      expect(up(RING_ORDER[i])).toBeGreaterThan(up(RING_ORDER[i - 1]));
+    }
   });
 
-  it("runs calmer-up: the focus zone is the TOP-RIGHT quadrant, washed in the enter hue", () => {
-    // The scale itself: min saturation (calmest) maps to the TOP edge, max to the bottom.
-    expect(yToPx(-60)).toBeCloseTo(PLOT.t, 6);
-    expect(yToPx(120)).toBeCloseTo(PLOT.t + PLOT.h, 6);
-
-    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
-    // GROWING · OPEN sits top-right (right of the enter bar, above the flood bar)…
-    const focus = screen.getByText("GROWING · OPEN");
-    expect(Number(focus.getAttribute("x"))).toBeGreaterThan(xToPx(40));
-    expect(Number(focus.getAttribute("y"))).toBeLessThan(yToPx(15));
-    // …its counterpart GROWING · FLOODING sits below the flood bar…
-    expect(Number(screen.getByText("GROWING · FLOODING").getAttribute("y"))).toBeGreaterThan(yToPx(15));
-    // …and the low-alpha focus wash covers exactly that quadrant.
-    const wash = screen.getByTestId("xy-focus-wash");
-    expect(Number(wash.getAttribute("x"))).toBeCloseTo(xToPx(40), 4);
-    expect(Number(wash.getAttribute("y"))).toBeCloseTo(PLOT.t, 4);
-    expect(Number(wash.getAttribute("width"))).toBeCloseTo(PLOT.l + PLOT.w - xToPx(40), 4);
-    expect(Number(wash.getAttribute("height"))).toBeCloseTo(yToPx(15) - PLOT.t, 4);
+  it("puts the BEST verdict in the middle — a blip's distance from the centre IS its ring", () => {
+    renderBoard(ringBlips(), true);
+    expect(screen.getByText("BEST")).toBeTruthy(); // the centre mark says so once
+    const layout = layoutBoard(ringBlips());
+    const { cx, cy } = layout.geom;
+    for (const d of layout.dots) {
+      const band = layout.geom.band(d.verdict.ring)!;
+      const dot = screen.getByTestId(`radar-blip-tag:${d.key}`);
+      const dist = Math.hypot(Number(dot.getAttribute("cx")) - cx, Number(dot.getAttribute("cy")) - cy);
+      expect(dist).toBeGreaterThanOrEqual(band.r0);
+      expect(dist).toBeLessThanOrEqual(band.r1);
+    }
+    // And "enter" really is nearer the middle than "declining".
+    const at = (key: string) => layout.dots.find((d) => d.key === key)!.radius;
+    expect(at("Grower")).toBeLessThan(at("Holder"));
+    expect(at("Holder")).toBeLessThan(at("Fading"));
   });
 
-  it("pins a beyond-scale outlier at the plot edge with a chevron and a ≥ edge tick", () => {
+  it("numbers every dot and keys the number to the rail row, like the reference does", () => {
+    renderBoard(ringBlips(), true);
+    for (const d of layoutBoard(ringBlips()).dots) {
+      expect(screen.getByTestId(`radar-blip-num-tag:${d.key}`).textContent).toBe(String(d.n));
+      // The rail row leads with the same rank — one list, two presentations.
+      const rank = screen.getByTestId(`radar-row-tag:${d.key}`).querySelector("span")!;
+      expect(rank.textContent).toBe(String(d.n));
+    }
+  });
+
+  it("names the sector at the rim from the tag TIER, and draws no divider when there is one tier", () => {
+    renderBoard(ringBlips(), true); // every fixture row is tier "micro"
+    expect(screen.getByTestId("radar-sector-label-micro").textContent).toContain("MICRO-GENRE");
+    expect(screen.getByTestId("radar-sector-label-micro").textContent).toContain("5");
+    // A divider between a sector and itself would be a lie.
+    expect(screen.queryByTestId("radar-spoke-micro")).toBeNull();
+    // …and the tiers with no rows hold no angle at all.
+    expect(screen.queryByTestId("radar-sector-label-theme")).toBeNull();
+    expect(screen.queryByTestId("radar-sector-label-ungrouped")).toBeNull();
+  });
+
+  it("splits the dial into wedges when the board really holds more than one tier", () => {
+    const mixed = [
+      makeBlip("Micro One", { demand_trend_24m_pct: 10 }, { tier: "micro" }),
+      makeBlip("Theme One", { demand_trend_24m_pct: 10 }, { tier: "theme" }),
+      // A genre row: the API stamps tier "genre", which is no tag tier at all -> ungrouped.
+      makeBlip("Genre One", { demand_trend_24m_pct: 10 }, { tier: "genre", dimension: "genre", sector: "genre" }),
+    ];
+    renderBoard(mixed, true);
+    for (const sector of ["micro", "theme", "ungrouped"]) {
+      expect(screen.getByTestId(`radar-sector-label-${sector}`)).toBeTruthy();
+      expect(screen.getByTestId(`radar-spoke-${sector}`)).toBeTruthy();
+    }
+    // "ungrouped" is a NAMED sector, never a parking spot on the divider lines.
+    expect(screen.getByTestId("radar-sector-label-ungrouped").textContent).toContain("UNGROUPED · NO TIER");
+    // Each blip lands in the wedge its tier names.
+    const layout = layoutBoard(mixed);
+    const spans = new Map(layout.sectors.map((s) => [s.sector, s]));
+    for (const d of layout.dots) {
+      const span = spans.get(d.wedge)!;
+      let off = (d.angle - span.a0) % (Math.PI * 2);
+      if (off < 0) off += Math.PI * 2;
+      expect(off).toBeLessThanOrEqual(span.a1 - span.a0 + 1e-6);
+    }
+    expect(layout.dots.find((d) => d.key === "Genre One")!.wedge).toBe("ungrouped");
+  });
+
+  it("has no clamp chevrons and no no-position strip — the form removed the need for both", () => {
+    // The XY plate pinned a beyond-domain value at the plot edge with a chevron, and parked
+    // emerging / no-trend rows in a dashed strip. Neither can exist here: the radial channel
+    // is a within-band rank and the angular one is free, so nothing falls off the scale; and
+    // every row has a verdict, so the emerging rows sit in the emerging band.
     renderBoard(
       [
         makeBlip("Runaway", { demand_trend_24m_pct: 900, saturation_yoy: 43, opportunity_v2: 50 }),
-        makeBlip("Roguelike Deckbuilder", REFERENCE),
+        makeBlip("No Trend", { saturation_yoy: 0.1, opportunity_v2: 30 }),
+        makeBlip("Newborn", { demand_emerging: true, reviews_24m: 9_000, opportunity_v2: 60 }),
       ],
       true,
     );
-    // The outlier renders (never dropped) with the explicit beyond-scale marker…
-    expect(screen.getByTestId("radar-blip-tag:Runaway")).toBeTruthy();
-    expect(screen.getByTestId("radar-clamp-tag:Runaway")).toBeTruthy();
-    // …and the edge tick labels admit the scale ends before the data does.
-    expect(screen.getByText("≥ +300")).toBeTruthy();
-    expect(screen.getByText("≥ +120")).toBeTruthy();
-    // The in-domain dot carries no marker.
-    expect(screen.queryByTestId("radar-clamp-tag:Roguelike Deckbuilder")).toBeNull();
+    expect(screen.queryByTestId("xy-strip")).toBeNull();
+    expect(screen.queryByTestId("radar-clamp-tag:Runaway")).toBeNull();
+    for (const key of ["Runaway", "No Trend", "Newborn"]) {
+      expect(screen.getByTestId(`radar-blip-tag:${key}`)).toBeTruthy();
+    }
+    // The emerging row is in the EMERGING band, not below the board.
+    const layout = layoutBoard([makeBlip("Newborn", { demand_emerging: true, reviews_24m: 9_000, opportunity_v2: 60 })]);
+    const band = layout.geom.band("emerging")!;
+    expect(layout.dots[0].radius).toBeGreaterThanOrEqual(band.r0);
+    expect(layout.dots[0].radius).toBeLessThanOrEqual(band.r1);
   });
 
-  it("renders emerging / no-trend rows in the dashed strip with an honest label", () => {
-    renderBoard(
-      [
-        makeBlip("Organizing", { demand_emerging: true, demand_trend_24m_pct: 4850, reviews_24m: 39_600, saturation_yoy: 0.2 }),
-        makeBlip("Quiet Niche", { saturation_yoy: 0.1, opportunity_v2: 40 }),
-        makeBlip("Roguelike Deckbuilder", REFERENCE),
-      ],
-      true,
-    );
-    expect(screen.getByTestId("xy-strip")).toBeTruthy();
-    // A no-trend (non-emerging) resident means the label must not claim they are all
-    // emerging labels.
-    expect(screen.getByText(/EMERGING \/ NO TREND BASE — not plottable · sized by 24m volume/)).toBeTruthy();
-    // Strip dots stay first-class: clickable into a dossier like any other.
-    fireEvent.click(screen.getByTestId("radar-blip-tag:Quiet Niche"));
-    expect(screen.getByTestId("verdict-dossier").textContent).toContain("Quiet Niche");
-  });
-
-  it("labels the strip as EMERGING when every resident carries the mart's emerging flag", () => {
-    renderBoard(
-      [
-        makeBlip("Organizing", { demand_emerging: true, demand_trend_24m_pct: 4850, reviews_24m: 39_600, saturation_yoy: 0.2 }),
-        makeBlip("Roguelike Deckbuilder", REFERENCE),
-      ],
-      true,
-    );
-    expect(screen.getByText(/^EMERGING — no % base · sized by 24m volume$/)).toBeTruthy();
+  it("the legend states the ring reading honestly and keeps the verdict hue key", () => {
+    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    expect(screen.getByText(/ring = the verdict, best in the middle/)).toBeTruthy();
+    expect(screen.getByText(/nearer the centre = higher opportunity v2/)).toBeTruthy();
+    expect(screen.getByText(/nothing clamps here: a ring board has no axis to fall off/)).toBeTruthy();
+    // Every hue is still doubled by its word, inner ring named as such.
+    const key = screen.getByTestId("verdict-color-key");
+    expect(key.textContent).toContain("Enter now (inner ring)");
+    expect(key.textContent).toContain("Declining (outer)");
   });
 });
 
-describe("layoutXY — deterministic, honest placement", () => {
-  const at = (key: string, demand: number, sat: number, over: Partial<RadarBoardBlip> = {}) =>
-    makeBlip(key, { demand_trend_24m_pct: demand, saturation_yoy: sat, opportunity_v2: 50 }, over);
-
-  it("positions in-domain dots at their true axis coordinates", () => {
-    const { dots } = layoutXY([at("A", 100, 0.3)]);
-    expect(dots[0].strip).toBe(false);
-    expect(dots[0].clampX).toBe(0);
-    expect(dots[0].clampY).toBe(0);
-    expect(dots[0].x).toBeCloseTo(xToPx(100), 4);
-    expect(dots[0].y).toBeCloseTo(yToPx(30), 4); // fraction 0.3 -> +30% YoY
-  });
-
-  it("clamps beyond-domain values to the plot edge and flags them — never drops them", () => {
-    const { dots } = layoutXY([at("Hot", 900, 43)]);
-    const d = dots[0];
-    expect(d.strip).toBe(false);
-    expect(d.clampX).toBe(1);
-    expect(d.clampY).toBe(1);
-    expect(d.x).toBeCloseTo(PLOT.l + PLOT.w - d.r - 1, 4);
-    // Calmer-up: flooding beyond the scale pins at the BOTTOM edge.
-    expect(d.y).toBeCloseTo(PLOT.t + PLOT.h - d.r - 1, 4);
-  });
-
-  it("sends emerging and no-XY rows to the strip below the plot — no fake quadrant position", () => {
-    const layout = layoutXY([
-      makeBlip("Young", { demand_emerging: true, demand_trend_24m_pct: 4850, reviews_24m: 10_000, saturation_yoy: 0.2 }),
-      makeBlip("No Trend", { saturation_yoy: 0.1 }),
-      makeBlip("No Sat", { demand_trend_24m_pct: 50 }),
-    ]);
-    expect(layout.stripCount).toBe(3);
-    expect(layout.stripHasNonEmerging).toBe(true);
-    for (const d of layout.dots) {
-      expect(d.strip).toBe(true);
-      expect(d.y).toBeGreaterThan(PLOT.t + PLOT.h); // below the plot box, inside the strip
-    }
-    // The viewBox grows for the strip instead of overlaying the axis.
-    expect(layout.vbH).toBeGreaterThan(PLOT.t + PLOT.h + 36);
-  });
-
-  it("is exactly reproducible call-to-call, coincident-dot jitter included", () => {
-    const rows = [at("A", 50, 0.1), at("B", 50, 0.1), at("C", 50, 0.1)];
-    const one = layoutXY(rows);
-    const two = layoutXY(rows);
-    expect(one.dots.map(({ id, x, y, r }) => ({ id, x, y, r }))).toEqual(
-      two.dots.map(({ id, x, y, r }) => ({ id, x, y, r })),
+describe("layoutBoard — deterministic, honest placement", () => {
+  const watchers = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      makeBlip(`Watcher ${String(i).padStart(2, "0")}`, { demand_trend_24m_pct: 10, opportunity_v2: 70 - i }),
     );
-    // Coincident dots separate deterministically and stay inside the plot.
-    for (let i = 0; i < one.dots.length; i++) {
-      for (let j = i + 1; j < one.dots.length; j++) {
-        const a = one.dots[i];
-        const b = one.dots[j];
-        expect(Math.hypot(a.x - b.x, a.y - b.y)).toBeGreaterThan(1);
-      }
-      expect(one.dots[i].x).toBeGreaterThanOrEqual(PLOT.l);
-      expect(one.dots[i].x).toBeLessThanOrEqual(PLOT.l + PLOT.w);
-      expect(one.dots[i].y).toBeGreaterThanOrEqual(PLOT.t);
-      expect(one.dots[i].y).toBeLessThanOrEqual(PLOT.t + PLOT.h);
+
+  it("numbers the rail exactly as before: ring order, then opportunity desc, then key", () => {
+    const { dots } = layoutBoard([
+      makeBlip("Second Enter", { demand_trend_24m_pct: 120, saturation_yoy: 0, opportunity_v2: 60 }),
+      makeBlip("A Watcher", { demand_trend_24m_pct: 10, opportunity_v2: 99 }),
+      makeBlip("First Enter", { demand_trend_24m_pct: 120, saturation_yoy: 0, opportunity_v2: 85 }),
+    ]);
+    expect(dots.map((d) => [d.n, d.key])).toEqual([
+      [1, "First Enter"],
+      [2, "Second Enter"],
+      [3, "A Watcher"],
+    ]);
+  });
+
+  it("never lets a blip leave the band its verdict names, however crowded the band gets", () => {
+    const layout = layoutBoard(watchers(40));
+    const band = layout.geom.band("watch")!;
+    for (const d of layout.dots) {
+      expect(d.region).toBe("watch");
+      expect(d.radius - d.r).toBeGreaterThanOrEqual(band.r0 - 1e-6);
+      expect(d.radius + d.r).toBeLessThanOrEqual(band.r1 + 1e-6);
     }
   });
 
-  it("never jitters a pinned dot off its clamp edge", () => {
-    const { dots } = layoutXY([at("P1", 900, 0.1), at("P2", 900, 0.1)]);
-    for (const d of dots) {
-      expect(d.clampX).toBe(1);
-      expect(d.x).toBeCloseTo(PLOT.l + PLOT.w - d.r - 1, 4); // still pinned
+  it("orders a band by opportunity_v2 — the higher score sits nearer the middle", () => {
+    const layout = layoutBoard(watchers(12));
+    const sorted = [...layout.dots].sort((a, b) => (b.opportunity_v2 ?? 0) - (a.opportunity_v2 ?? 0));
+    for (let i = 1; i < sorted.length; i++) {
+      expect(sorted[i].radius).toBeGreaterThan(sorted[i - 1].radius);
     }
-    // Separated along the free (unpinned) axis instead.
-    expect(Math.abs(dots[0].y - dots[1].y)).toBeGreaterThan(1);
+  });
+
+  it("is exactly reproducible call-to-call, collision pass included", () => {
+    const rows = watchers(24);
+    const one = layoutBoard(rows);
+    const two = layoutBoard(rows);
+    expect(one.dots.map(({ id, x, y, r, n }) => ({ id, x, y, r, n }))).toEqual(
+      two.dots.map(({ id, x, y, r, n }) => ({ id, x, y, r, n })),
+    );
+    // Identical-score rows in one cell still separate — nothing coincides.
+    const same = layoutBoard(
+      Array.from({ length: 10 }, (_, i) => makeBlip(`Twin ${i}`, { demand_trend_24m_pct: 10, opportunity_v2: 50 })),
+    ).dots;
+    for (let i = 0; i < same.length; i++) {
+      for (let j = i + 1; j < same.length; j++) {
+        expect(Math.hypot(same[i].x - same[j].x, same[i].y - same[j].y)).toBeGreaterThan(1);
+      }
+    }
+  });
+
+  it("sizes the dial from the measured width and keeps every dot inside the viewBox", () => {
+    for (const plateW of [340, 620, DEFAULT_PLATE_W]) {
+      const layout = layoutBoard(watchers(20), { plateW });
+      expect(layout.geom.plateW).toBe(plateW);
+      for (const d of layout.dots) {
+        expect(d.x - d.r).toBeGreaterThanOrEqual(0);
+        expect(d.x + d.r).toBeLessThanOrEqual(plateW);
+        expect(d.y - d.r).toBeGreaterThanOrEqual(0);
+        expect(d.y + d.r).toBeLessThanOrEqual(layout.vbH);
+      }
+    }
+  });
+
+  it("shrinks every blip by ONE factor when a cell is too crowded to separate", () => {
+    // Same 46 rows, twice: once on a desktop dial with room, once on a phone dial without.
+    const rows = watchers(46);
+    const roomy = layoutBoard(rows, { plateW: DEFAULT_PLATE_W });
+    const tight = layoutBoard(rows, { plateW: 330 });
+    const rOf = (l: typeof roomy, key: string) => l.dots.find((d) => d.key === key)!.r;
+    // The phone dial is smaller AND its blips took the extra crowd-fit shrink…
+    expect(rOf(tight, "Watcher 00")).toBeLessThan(rOf(roomy, "Watcher 00"));
+    // …and it is ONE factor: every pairwise size ratio (the P90-revenue channel) survives.
+    const a = rows[0].key;
+    const b = rows[10].key;
+    expect(rOf(tight, a) / rOf(tight, b)).toBeCloseTo(rOf(roomy, a) / rOf(roomy, b), 6);
+    // The point of the shrink: nothing on the phone dial ends up touching.
+    const pts = tight.dots;
+    for (let i = 0; i < pts.length; i++) {
+      for (let j = i + 1; j < pts.length; j++) {
+        expect(Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y)).toBeGreaterThanOrEqual(
+          pts[i].r + pts[j].r,
+        );
+      }
+    }
+  });
+
+  it("keeps the geometry the renderer draws with in step with the sectors it allocated", () => {
+    const layout = layoutBoard(watchers(4));
+    expect(layout.sectors).toEqual(sectorSpans(["micro"]));
+    expect(layout.geom.R).toBeCloseTo(ringGeom(DEFAULT_PLATE_W, null, 1).R, 6);
+    expect(layout.sectorCount.get("micro")).toBe(4);
   });
 });
 
@@ -650,211 +738,187 @@ describe("RadarBoard — dossier stays in view at every width (drawer below lg)"
   });
 });
 
-describe("RadarBoard — region hover (quadrants + the strip)", () => {
-  // One resident per region, spread far from every bar so membership is unambiguous.
-  // Verdicts vary on purpose (enter / watch / declining / emerging): region membership
-  // is the AXES' side of the bars, not the ring — the two must never be conflated.
+describe("RadarBoard — ring hover (the bands are the regions)", () => {
+  // One resident per band. The region IS the verdict now, so membership and the rail's
+  // grouping are the same partition by construction — they cannot drift the way the XY
+  // plate's quadrant membership could.
   const regionBlips = () => [
-    makeBlip("Open Grower", { demand_trend_24m_pct: 120, saturation_yoy: 0.05 }), // growing-open
-    makeBlip("Flooded Grower", { demand_trend_24m_pct: 120, saturation_yoy: 0.5 }), // growing-flooding
-    makeBlip("Flooded Shrinker", { demand_trend_24m_pct: -50, saturation_yoy: 0.5 }), // shrinking-flooding
-    makeBlip("Calm Shrinker", { demand_trend_24m_pct: -50, saturation_yoy: 0.05 }), // shrinking-open
-    makeBlip("Newborn", { demand_emerging: true, reviews_24m: 9_000, reviews_24m_new_share: 0.9 }), // strip
+    makeBlip("Grower", { demand_trend_24m_pct: 120, saturation_yoy: 0.05, opportunity_v2: 90 }), // enter
+    makeBlip("Holder", { demand_trend_24m_pct: 10, saturation_yoy: 0.05, opportunity_v2: 70 }), // watch
+    makeBlip("Newborn", { demand_emerging: true, reviews_24m: 9_000, reviews_24m_new_share: 0.9, opportunity_v2: 60 }), // emerging
+    makeBlip("Packed", { demand_trend_24m_pct: -5, saturation_yoy: 0.9, opportunity_v2: 40 }), // crowded
+    makeBlip("Fading", { demand_trend_24m_pct: -60, saturation_yoy: 0.05, opportunity_v2: 20 }), // declining
   ];
-  const PLOT_KEYS = ["Open Grower", "Flooded Grower", "Flooded Shrinker", "Calm Shrinker"];
+  const OTHERS = ["Holder", "Newborn", "Packed", "Fading"];
   const dot = (key: string) => screen.getByTestId(`radar-blip-tag:${key}`);
   const opacityOf = (key: string) => dot(key).getAttribute("opacity");
   const ringOf = (key: string) => screen.queryByTestId(`radar-region-ring-tag:${key}`);
 
-  it("layoutXY precomputes each dot's region from the verdict's own bars (strip included)", () => {
-    const byKey = new Map(layoutXY(regionBlips()).dots.map((d) => [d.key, d.region]));
-    expect(byKey.get("Open Grower")).toBe("growing-open");
-    expect(byKey.get("Flooded Grower")).toBe("growing-flooding");
-    expect(byKey.get("Flooded Shrinker")).toBe("shrinking-flooding");
-    expect(byKey.get("Calm Shrinker")).toBe("shrinking-open");
-    expect(byKey.get("Newborn")).toBe("strip");
+  it("layoutBoard gives every dot the band its verdict names — region and ring are one thing", () => {
+    const byKey = new Map(layoutBoard(regionBlips()).dots.map((d) => [d.key, d.region]));
+    expect(byKey.get("Grower")).toBe("enter");
+    expect(byKey.get("Holder")).toBe("watch");
+    expect(byKey.get("Newborn")).toBe("emerging");
+    expect(byKey.get("Packed")).toBe("crowded");
+    expect(byKey.get("Fading")).toBe("declining");
+    for (const d of layoutBoard(regionBlips()).dots) expect(d.region).toBe(d.verdict.ring);
   });
 
-  it("membership uses the verdict's exact comparisons: ≥ the enter bar grows, only STRICTLY above the flood bar floods", () => {
-    const edge = layoutXY([
-      makeBlip("On The Enter Bar", { demand_trend_24m_pct: 40, saturation_yoy: 0.15 }),
-      makeBlip("Hair Under Both", { demand_trend_24m_pct: 39.9, saturation_yoy: 0.151 }),
-    ]).dots;
-    const byKey = new Map(edge.map((d) => [d.key, d.region]));
-    // demand ≥ +40 passes the enter check; saturation exactly +0.15 is NOT flooding.
-    expect(byKey.get("On The Enter Bar")).toBe("growing-open");
-    expect(byKey.get("Hair Under Both")).toBe("shrinking-flooding");
-  });
-
-  it("hovering a quadrant emphasizes exactly its member dots, dims the rest, and lifts the wash", () => {
+  it("hovering a band emphasizes exactly its member dots, dims the rest, and lifts the wash", () => {
     renderBoard(regionBlips(), true);
-    const region = screen.getByTestId("radar-region-growing-open");
-    expect(region.getAttribute("fill")).toBe("transparent"); // resting: pure hit rect
+    const region = screen.getByTestId("radar-region-enter");
+    expect(region.getAttribute("fill")).toBe("transparent"); // resting: pure hit area
 
     fireEvent.mouseEnter(region);
-    // Member pops (full opacity + the slight region ring)…
-    expect(opacityOf("Open Grower")).toBe("1");
-    expect(ringOf("Open Grower")).toBeTruthy();
-    // …every dot outside mutes, strip resident included, and none of them ring.
-    for (const key of ["Flooded Grower", "Flooded Shrinker", "Calm Shrinker", "Newborn"]) {
+    expect(opacityOf("Grower")).toBe("1");
+    expect(ringOf("Grower")).toBeTruthy();
+    for (const key of OTHERS) {
       expect(opacityOf(key)).toBe("0.35");
       expect(ringOf(key)).toBeNull();
     }
-    // The region itself lifts: wash fill on, and only on the hovered rect.
+    // The band itself lifts: wash fill on, and only on the hovered band.
     expect(region.getAttribute("fill")).toMatch(/^color-mix/);
-    expect(screen.getByTestId("radar-region-shrinking-flooding").getAttribute("fill")).toBe("transparent");
+    expect(screen.getByTestId("radar-region-crowded").getAttribute("fill")).toBe("transparent");
+    // …and its caption steps out of the wallpaper into full ink.
+    expect(Number(screen.getByTestId("ring-caption-enter").getAttribute("opacity"))).toBeGreaterThan(
+      Number(screen.getByTestId("ring-caption-crowded").getAttribute("opacity")),
+    );
   });
 
-  it("the EMERGING strip is a fifth region with the same contract", () => {
+  it("every one of the five bands is a hover region with the same contract", () => {
     renderBoard(regionBlips(), true);
-    fireEvent.mouseEnter(screen.getByTestId("radar-region-strip"));
+    for (const ring of RING_ORDER) {
+      expect(screen.getByTestId(`radar-region-${ring}`)).toBeTruthy();
+    }
+    fireEvent.mouseEnter(screen.getByTestId("radar-region-emerging"));
     expect(opacityOf("Newborn")).toBe("1");
     expect(ringOf("Newborn")).toBeTruthy();
-    for (const key of PLOT_KEYS) {
-      expect(opacityOf(key)).toBe("0.35");
-      expect(ringOf(key)).toBeNull();
-    }
-    expect(screen.getByTestId("radar-region-strip").getAttribute("fill")).toMatch(/^color-mix/);
-  });
-
-  it("a board with no strip residents renders no strip hit rect (the quadrants keep theirs)", () => {
-    renderBoard(
-      regionBlips().filter((b) => !b.demandEmerging),
-      true,
-    );
-    expect(screen.queryByTestId("radar-region-strip")).toBeNull();
-    expect(screen.getByTestId("radar-region-growing-open")).toBeTruthy();
+    for (const key of ["Grower", "Holder", "Packed", "Fading"]) expect(opacityOf(key)).toBe("0.35");
   });
 
   it("mouse leave restores every dot, ring and wash — hover-only, nothing sticks", () => {
     renderBoard(regionBlips(), true);
-    const region = screen.getByTestId("radar-region-growing-open");
+    const region = screen.getByTestId("radar-region-enter");
     fireEvent.mouseEnter(region);
     fireEvent.mouseLeave(region);
-    for (const key of [...PLOT_KEYS, "Newborn"]) {
+    for (const key of ["Grower", ...OTHERS]) {
       expect(opacityOf(key)).toBe("1");
       expect(ringOf(key)).toBeNull();
     }
     expect(region.getAttribute("fill")).toBe("transparent");
-    // A region CLICK zooms (see the click-to-zoom suite) — it must NEVER open a
-    // dossier: only dots do that.
+    // A band CLICK zooms (see the click-to-zoom suite) — it must NEVER open a dossier:
+    // only dots do that.
     fireEvent.click(region);
     expect(screen.queryByTestId("verdict-dossier")).toBeNull();
     expect(screen.getByTestId("radar-zoom-chip")).toBeTruthy();
   });
 
-  it("dot hover takes precedence: the tooltip's single-dot emphasis wins, and the wash follows the dot's own region", () => {
+  it("dot hover takes precedence: the tooltip's single-dot emphasis wins, and the wash follows the dot's own band", () => {
     renderBoard(regionBlips(), true);
-    fireEvent.mouseEnter(screen.getByTestId("radar-region-growing-open"));
-    fireEvent.mouseEnter(dot("Flooded Shrinker"));
+    fireEvent.mouseEnter(screen.getByTestId("radar-region-enter"));
+    fireEvent.mouseEnter(dot("Packed"));
     // Existing dot-hover behavior, untouched: only the hovered dot stays full, EVEN the
-    // hovered region's member dims, and no region ring draws while a dot is hovered.
-    expect(opacityOf("Flooded Shrinker")).toBe("1");
-    expect(opacityOf("Open Grower")).toBe("0.35");
-    expect(ringOf("Open Grower")).toBeNull();
-    expect(ringOf("Flooded Shrinker")).toBeNull();
+    // hovered band's member dims, and no band ring draws while a dot is hovered.
+    expect(opacityOf("Packed")).toBe("1");
+    expect(opacityOf("Grower")).toBe("0.35");
+    expect(ringOf("Grower")).toBeNull();
+    expect(ringOf("Packed")).toBeNull();
     // The tooltip is the existing one.
-    expect(screen.getByText(/Flooded Shrinker — Micro-genres/)).toBeTruthy();
-    // The wash follows the DOT's region (the pointer is physically there now).
-    expect(screen.getByTestId("radar-region-shrinking-flooding").getAttribute("fill")).toMatch(/^color-mix/);
-    expect(screen.getByTestId("radar-region-growing-open").getAttribute("fill")).toBe("transparent");
-    // Leaving the dot hands emphasis back to the still-hovered region.
-    fireEvent.mouseLeave(dot("Flooded Shrinker"));
-    expect(opacityOf("Open Grower")).toBe("1");
-    expect(ringOf("Open Grower")).toBeTruthy();
+    expect(screen.getByText(/Packed — Micro-genres/)).toBeTruthy();
+    // The wash follows the DOT's band (the pointer is physically there now).
+    expect(screen.getByTestId("radar-region-crowded").getAttribute("fill")).toMatch(/^color-mix/);
+    expect(screen.getByTestId("radar-region-enter").getAttribute("fill")).toBe("transparent");
+    // Leaving the dot hands emphasis back to the still-hovered band.
+    fireEvent.mouseLeave(dot("Packed"));
+    expect(opacityOf("Grower")).toBe("1");
+    expect(ringOf("Grower")).toBeTruthy();
   });
 
-  it("rail rows of the hovered region take the left-edge tick — never reordered or filtered", () => {
+  it("rail rows of the hovered band take the left-edge tick — never reordered or filtered", () => {
     renderBoard(regionBlips(), true);
     const rowKeys = () =>
       Array.from(screen.getByTestId("radar-rail-list").querySelectorAll("button[data-testid^='radar-row-']")).map(
         (el) => el.getAttribute("data-testid"),
       );
     const before = rowKeys();
-    fireEvent.mouseEnter(screen.getByTestId("radar-region-growing-open"));
-    expect(screen.getByTestId("radar-row-tag:Open Grower").getAttribute("data-region-tick")).toBe("growing-open");
-    for (const key of ["Flooded Grower", "Flooded Shrinker", "Calm Shrinker", "Newborn"]) {
+    fireEvent.mouseEnter(screen.getByTestId("radar-region-enter"));
+    expect(screen.getByTestId("radar-row-tag:Grower").getAttribute("data-region-tick")).toBe("enter");
+    for (const key of OTHERS) {
       expect(screen.getByTestId(`radar-row-tag:${key}`).getAttribute("data-region-tick")).toBeNull();
     }
     expect(rowKeys()).toEqual(before); // same rows, same order — a reading aid only
-    fireEvent.mouseLeave(screen.getByTestId("radar-region-growing-open"));
-    expect(screen.getByTestId("radar-row-tag:Open Grower").getAttribute("data-region-tick")).toBeNull();
+    fireEvent.mouseLeave(screen.getByTestId("radar-region-enter"));
+    expect(screen.getByTestId("radar-row-tag:Grower").getAttribute("data-region-tick")).toBeNull();
   });
 });
 
-describe("RadarBoard — click-to-zoom (quadrants + the strip)", () => {
-  // Three growing-open members (one beyond the X scale — the clamp contract must hold
-  // at the ZOOMED bounds too), one member for two other quadrants, one strip resident.
+describe("RadarBoard — click-to-zoom (the ring bands)", () => {
+  // Three watch members + one member for two other bands.
   const zoomBlips = () => [
-    makeBlip("Open Grower", { demand_trend_24m_pct: 120, saturation_yoy: 0.05 }),
-    makeBlip("Open Grower II", { demand_trend_24m_pct: 60, saturation_yoy: -0.2 }),
-    makeBlip("Runaway Grower", { demand_trend_24m_pct: 900, saturation_yoy: 0.05 }),
-    makeBlip("Flooded Grower", { demand_trend_24m_pct: 120, saturation_yoy: 0.5 }),
-    makeBlip("Calm Shrinker", { demand_trend_24m_pct: -50, saturation_yoy: 0.05 }),
-    makeBlip("Newborn", { demand_emerging: true, reviews_24m: 9_000, reviews_24m_new_share: 0.9 }),
+    makeBlip("Watcher A", { demand_trend_24m_pct: 10, opportunity_v2: 70 }),
+    makeBlip("Watcher B", { demand_trend_24m_pct: 12, opportunity_v2: 55 }),
+    makeBlip("Watcher C", { demand_trend_24m_pct: -12, opportunity_v2: 30 }),
+    makeBlip("Grower", { demand_trend_24m_pct: 120, saturation_yoy: 0.05, opportunity_v2: 90 }),
+    makeBlip("Fading", { demand_trend_24m_pct: -60, saturation_yoy: 0.05, opportunity_v2: 20 }),
   ];
-  const OPEN_GROWERS = ["Open Grower", "Open Grower II", "Runaway Grower"];
-  const OTHERS = ["Flooded Grower", "Calm Shrinker", "Newborn"];
+  const WATCHERS = ["Watcher A", "Watcher B", "Watcher C"];
+  const OTHERS = ["Grower", "Fading"];
   const dot = (key: string) => screen.queryByTestId(`radar-blip-tag:${key}`);
   const row = (key: string) => screen.queryByTestId(`radar-row-tag:${key}`);
-  const zoomInto = (region: string) => fireEvent.click(screen.getByTestId(`radar-region-${region}`));
+  const zoomInto = (ring: string) => fireEvent.click(screen.getByTestId(`radar-region-${ring}`));
   const search = () => screen.getByTestId("radar-search") as HTMLInputElement;
 
-  it("clicking a quadrant's empty area zooms: members only, re-domained axes, ONE region title", () => {
+  it("clicking a ring's empty area zooms: members only, the band fills the dial, ONE title", () => {
     renderBoard(zoomBlips(), true);
-    zoomInto("growing-open");
-    // Only the quadrant's members render (edge-pinned member included, chevron intact).
-    for (const key of OPEN_GROWERS) expect(dot(key)).toBeTruthy();
+    zoomInto("watch");
+    for (const key of WATCHERS) expect(dot(key)).toBeTruthy();
     for (const key of OTHERS) expect(dot(key)).toBeNull();
-    expect(screen.getByTestId("radar-clamp-tag:Runaway Grower")).toBeTruthy();
-    // The strip has no quadrant, so a quadrant zoom hides it entirely.
-    expect(screen.queryByTestId("xy-strip")).toBeNull();
-    // The axes re-domain to the quadrant's own bounds: the enter bar is now the left
-    // edge tick, the beyond-scale member keeps its honest ≥ edge label — and the bar
-    // hairlines vanish (each bar IS a domain edge now, carried by the plot frame).
-    expect(screen.getByText("+40")).toBeTruthy();
-    expect(screen.getByText("≥ +300")).toBeTruthy();
-    expect(screen.getByText("+15")).toBeTruthy(); // the flood bar = the calm edge's tick
-    expect(screen.queryByTestId("xy-bar-demand")).toBeNull();
-    expect(screen.queryByTestId("xy-bar-flood")).toBeNull();
-    // One region title replaces the four corner labels…
-    expect(screen.getByText("GROWING · OPEN — ZOOMED")).toBeTruthy();
-    expect(screen.queryByText("GROWING · FLOODING")).toBeNull();
-    expect(screen.queryByText("FLAT/SHRINKING · OPEN")).toBeNull();
-    // …and region hover is disabled while zoomed (single-region view — moot).
-    expect(screen.queryByTestId("radar-region-growing-open")).toBeNull();
+    // The other four bands are gone — a zoomed dial shows one band, at full radius.
+    expect(screen.getByTestId("ring-band-watch")).toBeTruthy();
+    expect(screen.queryByTestId("ring-band-enter")).toBeNull();
+    expect(screen.queryByTestId("ring-band-declining")).toBeNull();
+    // One title replaces the rim reading, with the exits spelled out…
+    expect(screen.getByText("WATCH — ZOOMED")).toBeTruthy();
+    expect(screen.getByText(/ESC · BACKGROUND CLICK/)).toBeTruthy();
+    // …and band hover is disabled while zoomed (single-band view — moot).
+    expect(screen.queryByTestId("radar-region-watch")).toBeNull();
     expect(screen.getByTestId("radar-zoom-exit")).toBeTruthy();
   });
 
-  it("layoutXY re-domains the zoomed quadrant and keeps the clamp contract at the new bounds", () => {
-    const layout = layoutXY(zoomBlips(), { zoom: "growing-open" });
-    const g = plateGeom(undefined, "growing-open");
-    expect(layout.geom.xd).toEqual([40, 300]);
-    expect(layout.geom.yd).toEqual([-60, 15]);
+  it("layoutBoard gives the zoomed band the whole dial and hides every non-member", () => {
+    const layout = layoutBoard(zoomBlips(), { zoom: "watch" });
+    expect(layout.geom.bands.map((b) => b.ring)).toEqual(["watch"]);
+    expect(layout.geom.bands[0].r1).toBeCloseTo(layout.geom.R, 6);
     const byKey = new Map(layout.dots.map((d) => [d.key, d]));
-    // A member's honest position in the ZOOMED scale…
-    const a = byKey.get("Open Grower")!;
-    expect(a.hidden).toBe(false);
-    expect(a.x).toBeCloseTo(g.xToPx(120), 4);
-    expect(a.y).toBeCloseTo(g.yToPx(5), 4);
-    // …a beyond-scale member still pins at the (zoomed) right edge with the flag…
-    const run = byKey.get("Runaway Grower")!;
-    expect(run.clampX).toBe(1);
-    expect(run.x).toBeCloseTo(g.x1 - run.r - 1, 4);
-    // …and non-members (strip resident included) are hidden, never repositioned lies.
-    expect(byKey.get("Flooded Grower")!.hidden).toBe(true);
-    expect(byKey.get("Calm Shrinker")!.hidden).toBe(true);
-    expect(byKey.get("Newborn")!.hidden).toBe(true);
-    expect(layout.stripCount).toBe(0);
+    for (const key of WATCHERS) {
+      const d = byKey.get(key)!;
+      expect(d.hidden).toBe(false);
+      // Spread across the WHOLE radius now — that is what the zoom buys.
+      expect(d.radius).toBeGreaterThanOrEqual(layout.geom.r0);
+      expect(d.radius).toBeLessThanOrEqual(layout.geom.R);
+    }
+    // Non-members are hidden, never repositioned lies — and their ring is untouched.
+    for (const key of OTHERS) {
+      expect(byKey.get(key)!.hidden).toBe(true);
+      expect(byKey.get(key)!.region).toBe(byKey.get(key)!.verdict.ring);
+    }
+    // Zooming really does spread them: the WATCH members' own radial spread grows, because
+    // the band they share now owns the whole dial instead of one fifth of it.
+    const rest = layoutBoard(zoomBlips());
+    const spread = (l: typeof layout) => {
+      const rs = l.dots.filter((d) => WATCHERS.includes(d.key)).map((d) => d.radius);
+      return Math.max(...rs) - Math.min(...rs);
+    };
+    expect(spread(layout)).toBeGreaterThan(spread(rest));
   });
 
-  it("the rail filters to the zoomed region: chip with honest count, recomputed groups, board ranks kept", () => {
+  it("the rail filters to the zoomed ring: chip with honest count, recomputed groups, board ranks kept", () => {
     renderBoard(zoomBlips(), true);
-    zoomInto("growing-open");
+    zoomInto("watch");
     const chip = screen.getByTestId("radar-zoom-chip");
-    expect(chip.textContent).toContain("GROWING · OPEN");
+    expect(chip.textContent).toContain("WATCH");
     expect(chip.textContent).toContain("3 niche");
-    for (const key of OPEN_GROWERS) expect(row(key)).toBeTruthy();
+    for (const key of WATCHERS) expect(row(key)).toBeTruthy();
     for (const key of OTHERS) expect(row(key)).toBeNull();
     // The rail header count is the filtered member count, not the plotted total.
     expect(screen.getByText("Verdicts").parentElement?.textContent).toContain("3");
@@ -862,52 +926,52 @@ describe("RadarBoard — click-to-zoom (quadrants + the strip)", () => {
 
   it("search composes with the zoom filter — scoped placeholder, honest arithmetic, honest empty state", () => {
     renderBoard(zoomBlips(), true);
-    zoomInto("growing-open");
-    expect(search().placeholder).toContain("in GROWING · OPEN");
-    fireEvent.change(search(), { target: { value: "II" } });
-    expect(row("Open Grower II")).toBeTruthy();
-    expect(row("Open Grower")).toBeNull();
+    zoomInto("watch");
+    expect(search().placeholder).toContain("in WATCH");
+    fireEvent.change(search(), { target: { value: "er b" } });
+    expect(row("Watcher B")).toBeTruthy();
+    expect(row("Watcher A")).toBeNull();
     expect(screen.getByText("1 of 3 match")).toBeTruthy();
-    // A niche OUTSIDE the zoomed region must never be smuggled in by the search.
-    fireEvent.change(search(), { target: { value: "flooded" } });
+    // A niche OUTSIDE the zoomed ring must never be smuggled in by the search.
+    fireEvent.change(search(), { target: { value: "grower" } });
     const empty = screen.getByTestId("radar-search-empty");
-    expect(empty.textContent).toContain("searched the 3 niches in GROWING · OPEN");
-    expect(row("Flooded Grower")).toBeNull();
+    expect(empty.textContent).toContain("searched the 3 niches in WATCH");
+    expect(row("Grower")).toBeNull();
   });
 
   it("dot-click precedence survives the zoom: a dot opens its dossier, and the zoom persists behind it", () => {
     renderBoard(zoomBlips(), true);
-    zoomInto("growing-open");
-    fireEvent.click(dot("Open Grower")!);
-    expect(screen.getByTestId("verdict-dossier").textContent).toContain("Open Grower");
+    zoomInto("watch");
+    fireEvent.click(dot("Watcher A")!);
+    expect(screen.getByTestId("verdict-dossier").textContent).toContain("Watcher A");
     fireEvent.click(screen.getByRole("button", { name: /back to all verdicts/i }));
     expect(screen.getByTestId("radar-zoom-chip")).toBeTruthy(); // still zoomed
-    expect(dot("Flooded Grower")).toBeNull();
+    expect(dot("Grower")).toBeNull();
   });
 
-  it("three exits — the chip's ✕, Escape, and the plot-background click — all restore the full view", () => {
+  it("three exits — the chip's ✕, Escape, and the board-background click — all restore the full view", () => {
     renderBoard(zoomBlips(), true);
     const restored = () => {
       expect(screen.queryByTestId("radar-zoom-chip")).toBeNull();
-      for (const key of [...OPEN_GROWERS, ...OTHERS]) expect(dot(key)).toBeTruthy();
-      expect(screen.getByTestId("radar-region-growing-open")).toBeTruthy();
-      expect(screen.getByTestId("xy-strip")).toBeTruthy();
+      for (const key of [...WATCHERS, ...OTHERS]) expect(dot(key)).toBeTruthy();
+      expect(screen.getByTestId("radar-region-watch")).toBeTruthy();
+      expect(screen.getByTestId("ring-band-declining")).toBeTruthy();
     };
-    zoomInto("growing-open");
+    zoomInto("watch");
     fireEvent.click(screen.getByTestId("radar-zoom-chip"));
     restored();
-    zoomInto("growing-open");
+    zoomInto("watch");
     fireEvent.keyDown(document, { key: "Escape" });
     restored();
-    zoomInto("growing-open");
+    zoomInto("watch");
     fireEvent.click(screen.getByTestId("radar-zoom-exit"));
     restored();
   });
 
   it("Esc clears the search text first; only the NEXT Esc exits the zoom", () => {
     renderBoard(zoomBlips(), true);
-    zoomInto("growing-open");
-    fireEvent.change(search(), { target: { value: "II" } });
+    zoomInto("watch");
+    fireEvent.change(search(), { target: { value: "er b" } });
     fireEvent.keyDown(search(), { key: "Escape" });
     expect(search().value).toBe("");
     expect(screen.getByTestId("radar-zoom-chip")).toBeTruthy(); // zoom survived the clear
@@ -915,71 +979,41 @@ describe("RadarBoard — click-to-zoom (quadrants + the strip)", () => {
     expect(screen.queryByTestId("radar-zoom-chip")).toBeNull();
   });
 
-  it("every quadrant zooms to its own bounds", () => {
-    const cases = [
-      { region: "growing-flooding", xd: [40, 300], yd: [15, 120] },
-      { region: "shrinking-open", xd: [-100, 40], yd: [-60, 15] },
-      { region: "shrinking-flooding", xd: [-100, 40], yd: [15, 120] },
-    ] as const;
-    for (const c of cases) {
-      const layout = layoutXY(zoomBlips(), { zoom: c.region });
-      expect(layout.geom.xd).toEqual(c.xd);
-      expect(layout.geom.yd).toEqual(c.yd);
+  it("every ring zooms to itself, and the URL vocabulary is exactly RING_ORDER", () => {
+    for (const ring of RING_ORDER) {
+      const layout = layoutBoard(zoomBlips(), { zoom: ring });
+      expect(layout.geom.bands.map((b) => b.ring)).toEqual([ring]);
+      expect(layout.dots.filter((d) => !d.hidden).every((d) => d.verdict.ring === ring)).toBe(true);
     }
-  });
-
-  it("the strip zoom filters the rail and enlarges the strip — quadrant dots recede, no fake XY", () => {
-    renderBoard(zoomBlips(), true);
-    zoomInto("strip");
-    const chip = screen.getByTestId("radar-zoom-chip");
-    expect(chip.textContent).toContain("EMERGING");
-    expect(chip.textContent).toContain("1 niche");
-    // Rail: strip residents only.
-    expect(row("Newborn")).toBeTruthy();
-    for (const key of [...OPEN_GROWERS, "Flooded Grower", "Calm Shrinker"]) expect(row(key)).toBeNull();
-    // The plot stays a full-domain view (no quadrant zoom for the strip): quadrant dots
-    // still render, receded, and the strip resident holds the emphasis in the strip.
-    expect(dot("Open Grower")!.getAttribute("opacity")).toBe("0.25");
-    expect(dot("Newborn")!.getAttribute("opacity")).toBe("1");
-    expect(screen.getByText(/RAIL FILTERED/)).toBeTruthy();
-    // Enlarged presentation, never a repositioned lie: the resident is still below the
-    // plot in the strip band.
-    const layout = layoutXY(zoomBlips(), { zoom: "strip" });
-    const restLayout = layoutXY(zoomBlips());
-    const zoomed = layout.dots.find((d) => d.key === "Newborn")!;
-    const rest = restLayout.dots.find((d) => d.key === "Newborn")!;
-    expect(zoomed.strip).toBe(true);
-    expect(zoomed.y).toBeGreaterThan(layout.geom.y1);
-    expect(layout.stripH).toBeGreaterThan(restLayout.stripH);
-    expect(zoomed.r).toBeGreaterThanOrEqual(rest.r);
-    // Esc restores everything, strip presentation included.
-    fireEvent.keyDown(document, { key: "Escape" });
-    expect(screen.queryByTestId("radar-zoom-chip")).toBeNull();
-    expect(dot("Open Grower")!.getAttribute("opacity")).toBe("1");
   });
 });
 
 /**
- * A1 — IN-PLOT ANNOTATIONS PAINT OVER THE DATA.
+ * A1 — WHICH LABELS PAINT OVER THE DATA, AND WHICH DELIBERATELY DO NOT.
  *
- * Measured on production /radar (2026-09-01): the "FLOOD BAR +15% YOY — FLOODING BELOW"
- * label's box overlapped 10 dots at 1440, 15 at 1024 and 11 at 390, every one of them
- * LATER in document order than the label — so the trailing words were painted out by the
- * dense cluster that sits on the bar. SVG paints in document order, and the label lived in
- * xy-decor, which is the first group in the plate.
+ * Measured on production /radar (2026-09-01): the XY plate's "FLOOD BAR" label was being
+ * erased by the dense cluster sitting on the very line it named, because SVG paints in
+ * document order and the label lived in the first group. The rule that came out of it —
+ * small, unique, load-bearing labels paint LAST — still holds, and it now applies to the
+ * dial's RIM LABELS and its ZOOM TITLE.
+ *
+ * The BAND CAPTIONS are the deliberate exception, and the exception is the point: they are
+ * 20-26px wallpaper at ~34% opacity, one per band, saying the same word the rail group
+ * header, the legend and the hue key already say. Painting them over 80 numbered dots would
+ * spend the data to protect a label that is redundant three times over, so they paint under.
  *
  * These assert paint ORDER rather than pixels, because document order is the whole
  * mechanism: no viewport, no font metric and no dataset can make a group that comes first
  * paint last.
  */
-describe("RadarBoard — annotation labels paint over the dots (A1)", () => {
-  /** A node's index in the plate's own document order == its paint order. */
+describe("RadarBoard — label paint order (A1)", () => {
+  /** A node's index in the dial's own document order == its paint order. */
   function paintIndex(container: HTMLElement, node: Element): number {
     const plate = container.querySelector('svg[role="img"]')!;
     return Array.from(plate.querySelectorAll("*")).indexOf(node);
   }
 
-  it("puts the flood-bar label AFTER every blip dot", () => {
+  it("puts the rim sector label AFTER every blip dot", () => {
     const { container } = renderBoard(
       [
         makeBlip("On The Bar A", { demand_trend_24m_pct: 5, saturation_yoy: 0.15, opportunity_v2: 60 }),
@@ -988,7 +1022,7 @@ describe("RadarBoard — annotation labels paint over the dots (A1)", () => {
       ],
       true,
     );
-    const label = screen.getByText(/FLOOD BAR/);
+    const label = screen.getByTestId("radar-sector-label-micro");
     const dots = Array.from(container.querySelectorAll('circle[data-testid^="radar-blip-"]'));
     expect(dots.length).toBeGreaterThan(0);
     for (const d of dots) {
@@ -996,36 +1030,39 @@ describe("RadarBoard — annotation labels paint over the dots (A1)", () => {
     }
   });
 
-  it("puts the enter-bar label and all four quadrant readings after the dots too", () => {
-    const { container } = renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+  it("puts the zoom title after the dots too — it names the only band on screen", () => {
+    const { container } = renderBoard(
+      [
+        makeBlip("Watcher A", { demand_trend_24m_pct: 10, opportunity_v2: 70 }),
+        makeBlip("Watcher B", { demand_trend_24m_pct: 12, opportunity_v2: 55 }),
+      ],
+      true,
+    );
+    fireEvent.click(screen.getByTestId("radar-region-watch"));
     const lastDot = Array.from(container.querySelectorAll('circle[data-testid^="radar-blip-"]')).pop()!;
-    const labels = [
-      screen.getByText(/ENTER BAR/),
-      screen.getByText("GROWING · OPEN"),
-      screen.getByText("GROWING · FLOODING"),
-      screen.getByText("SHRINKING · FLOODING"),
-      screen.getByText("FLAT/SHRINKING · OPEN"),
-    ];
-    for (const label of labels) {
-      expect(paintIndex(container, label)).toBeGreaterThan(paintIndex(container, lastDot));
-    }
+    expect(paintIndex(container, screen.getByText("WATCH — ZOOMED"))).toBeGreaterThan(
+      paintIndex(container, lastDot),
+    );
   });
 
-  it("leaves the bars' own HAIRLINES under the data — a gridline belongs below it", () => {
+  it("deliberately paints the BAND CAPTIONS under the dots — wallpaper must not eat the data", () => {
     const { container } = renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
     const firstDot = container.querySelector('circle[data-testid^="radar-blip-"]')!;
-    expect(paintIndex(container, screen.getByTestId("xy-bar-flood"))).toBeLessThan(
-      paintIndex(container, firstDot),
-    );
-    expect(paintIndex(container, screen.getByTestId("xy-bar-demand"))).toBeLessThan(
+    for (const ring of RING_ORDER) {
+      expect(paintIndex(container, screen.getByTestId(`ring-caption-${ring}`))).toBeLessThan(
+        paintIndex(container, firstDot),
+      );
+    }
+    // …and so are the band circles themselves: a gridline belongs under the data.
+    expect(paintIndex(container, screen.getByTestId("ring-band-enter"))).toBeLessThan(
       paintIndex(container, firstDot),
     );
   });
 
   it("keeps the annotation layer pointer-inert, so no dot loses its hover or click", () => {
     renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
-    expect(screen.getByTestId("xy-annotations").getAttribute("pointer-events")).toBe("none");
-    fireEvent.click(screen.getByText(/FLOOD BAR/));
+    expect(screen.getByTestId("ring-annotations").getAttribute("pointer-events")).toBe("none");
+    fireEvent.click(screen.getByTestId("radar-sector-label-micro"));
     expect(screen.queryByTestId("verdict-dossier")).toBeNull();
     // The dot underneath still opens its dossier.
     fireEvent.click(screen.getByTestId("radar-blip-tag:Roguelike Deckbuilder"));
@@ -1034,8 +1071,51 @@ describe("RadarBoard — annotation labels paint over the dots (A1)", () => {
 
   it("keeps a knockout halo on the label, so glyphs stay legible where they cross a dot", () => {
     renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
-    const label = screen.getByText(/FLOOD BAR/);
+    const label = screen.getByTestId("radar-sector-label-micro");
     expect(label.style.paintOrder).toBe("stroke");
     expect(Number(label.style.strokeWidth)).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * THE DEEP-DIVE AFFORDANCE (2026-09-10, user: "Button to go deeper into the niche is super
+ * small and almost not visible"). It was a 13px plain text link at the very bottom of the
+ * dossier, under the raw-context line. It is now the dossier's PRIMARY ACTION: a filled
+ * brand button in the page's own primary-action language, full width, above the context
+ * line. The route and the analytics event are unchanged — this is a presentation fix, and
+ * a regression that quietly turned it back into a text link would be invisible otherwise.
+ */
+describe("RadarBoard — the deep dive is a primary button", () => {
+  const open = () => {
+    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    fireEvent.click(screen.getByTestId("radar-blip-tag:Roguelike Deckbuilder"));
+    return screen.getByTestId("radar-deep-dive");
+  };
+
+  it("is filled with the brand colour and sized like the page's other primary actions", () => {
+    const cta = open();
+    expect(cta.className).toContain("bg-brand");
+    expect(cta.className).toContain("text-brand-fg");
+    expect(cta.className).toContain("font-semibold");
+    expect(cta.className).toContain("w-full");
+    // Not the old bare-text link: it has a filled ground and real button padding.
+    expect(cta.className).toMatch(/\bpx-\d/);
+    expect(cta.className).toMatch(/\bpy-\d/);
+    expect(cta.className).not.toContain("text-[13px] text-brand ");
+  });
+
+  it("still routes to the niche's detail page, unchanged", () => {
+    const cta = open();
+    expect(cta.getAttribute("href")).toBe("/niches/tag/Roguelike%20Deckbuilder");
+    expect(cta.textContent).toContain("Open deep dive");
+  });
+
+  it("sits ABOVE the raw-context line — the way out, not a footnote after it", () => {
+    const cta = open();
+    const dossier = screen.getByTestId("verdict-dossier");
+    const context = Array.from(dossier.querySelectorAll("span")).find((s) =>
+      (s.textContent ?? "").startsWith("reviews 24m"),
+    )!;
+    expect(cta.compareDocumentPosition(context) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
