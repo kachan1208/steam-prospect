@@ -136,6 +136,15 @@ export function GameTrendsChart({
 
   const basePoints = points ?? trendsQuery.data?.points ?? [];
 
+  // Drag a range on the plot to zoom into it (lib/useDragZoom). Called HERE, above every early
+  // return: it used to sit below them, so a render that returned "Loading…" or "No monthly
+  // trend data" ran fewer hooks than the one after the data arrived — React #310, the whole
+  // game page replaced by the error boundary (seen on /games/1867240, a fresh release whose
+  // series starts empty). Both marker layers below are narrowed to the visible months: a
+  // ReferenceLine whose category is not on the sliced axis has nowhere to stand, and Recharts
+  // draws it at the plot's left edge rather than dropping it.
+  const zoom = useDragZoom(basePoints, "period");
+
   if (selfFetch && trendsQuery.isLoading) {
     return <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading trends…</div>;
   }
@@ -197,11 +206,6 @@ export function GameTrendsChart({
 
   const hasCcu = data.some((d) => d.ccu_avg != null);
 
-  // Drag a range on the plot to zoom into it (lib/useDragZoom). Both marker layers are
-  // narrowed to the visible months: a ReferenceLine whose category is not on the sliced
-  // axis has nowhere to stand, and Recharts draws it at the plot's left edge rather than
-  // dropping it — which would plant every out-of-range patch note on top of each other.
-  const zoom = useDragZoom(data, "period");
   const visibleMonths = new Set(zoom.data.map((d) => d.period));
 
   return (
