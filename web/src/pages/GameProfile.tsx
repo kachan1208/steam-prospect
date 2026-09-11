@@ -313,6 +313,12 @@ function ReviewVelocityBars({
   eventMarker?: { period: string; label: string };
   events?: GameEvent[];
 }) {
+  // Drag a range to zoom (lib/useDragZoom). Above the early return, never below it: a render
+  // that took the "no history" branch ran one hook fewer than the next, which is React #310
+  // and the whole page swapped for the error boundary. Event markers below are narrowed to the
+  // visible months: a ReferenceLine whose category is off the sliced axis has nowhere to stand.
+  const zoom = useDragZoom(points, "period");
+
   if (points.length === 0) {
     return (
       <div className="flex h-[150px] items-center justify-center text-center text-xs text-ink-muted">
@@ -353,9 +359,6 @@ function ReviewVelocityBars({
     ),
   ].sort();
 
-  // Drag a range to zoom (lib/useDragZoom). Event markers are narrowed to the visible
-  // months: a ReferenceLine whose category is off the sliced axis has nowhere to stand.
-  const zoom = useDragZoom(points, "period");
   const visibleMonths = new Set(zoom.data.map((d) => d.period));
 
   return (
