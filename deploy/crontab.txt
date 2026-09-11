@@ -103,7 +103,21 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # watermark). Without a gap floor the keeper re-paged every game whose stored count trailed
 # Steam's total by even one review — which is most of them, since the total includes reviews
 # the API never returns — and that was 97.5% of its 3M fetches on 2026-09-10.
-0 6 * * * /root/prospect/deploy/cron-wrap.sh -x review_keeper bash -c 'cd /root/steam-scraper && timeout 25200 systemd-run --scope --quiet -p MemoryMax=2500M -p MemorySwapMax=0 nice -n 15 ionice -c2 -n7 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db deepen-reviews --target 5000 --min-reviews 1 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0 --min-gap 20 --min-gap-pct 5' >> /root/deepen_backfill.log 2>&1
+#
+# THREE PASSES, one slot (2026-09-11), each with its own time bound so the chain ends by ~11:30
+# at worst — two hours before the 13:30 light build that needs this same lock:
+#   1. deepen-reviews   — depth gaps only (--min-gap), minutes now; 1h bound.
+#   2. poll-new-reviews --stale-hours 20 — the DAILY FRESHNESS SWEEP: every game not polled in
+#      20h gets one request (page 1 = new reviews + Steam's fresh total, written to
+#      review_summary), oldest-polled first. Without it a game was re-polled only when the
+#      weekly review-summary rotation noticed growth: 34K totals were 8-30 days old on
+#      2026-09-11. Full catalog ~119K games at ~12 req/s direct ≈ 2.8h; --max-seconds 12600
+#      ends it cleanly and the rest go first tomorrow.
+#   3. deepen-english   — the ETL pool is the newest 5,000 ENGLISH reviews per game, but step 1
+#      caps ALL languages at 5,000 (~47% English): 597 games fed the ETL ~2,350. One request
+#      per already-complete game, 30-day marker.
+# The exit status is the worst of the three, so a real failure in any of them still alerts.
+0 6 * * * /root/prospect/deploy/cron-wrap.sh -x review_keeper bash -c 'cd /root/steam-scraper && S="systemd-run --scope --quiet -p MemoryMax=2500M -p MemorySwapMax=0 nice -n 15 ionice -c2 -n7 /root/steam-scraper/.venv/bin/python -m steam_scraper.scraper --db /root/steam-scraper/steam_games.db"; rc=0; timeout 3600 $S deepen-reviews --target 5000 --min-reviews 1 --activity-months 240 --refresh-days 7 --limit 15000 --workers 16 --rate 8.0 --min-gap 20 --min-gap-pct 5 || rc=$?; timeout 13500 $S poll-new-reviews --no-proxy --stale-hours 20 --workers 6 --rate 6.0 --max-seconds 12600 || rc=$?; timeout 3600 $S deepen-english --no-proxy --workers 6 --rate 6.0 --max-seconds 3000 || rc=$?; exit $rc' >> /root/deepen_backfill.log 2>&1
 
 # ── 06:15 UTC — daytime socials keeper. OWN lock, deliberately: it must run ALONGSIDE the
 # review keeper (different endpoints — store pages vs appreviews), so it must not contend for
