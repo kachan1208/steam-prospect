@@ -540,6 +540,28 @@ echo "[lane-b] background service steps complete."
 # no memory: this finishes before review_deepen's 16 workers start, exactly as designed.
 run_step "review_refresh"   3600 "python3 -m steam_scraper.scraper --db steam_games.db review-summary --workers 16 --rate 12.0 --refresh-older-than-days 7 --limit 25000"
 
+# [7a'] Review POLL — only the reviews Steam gained since we last looked (2026-09-11).
+#
+# Until this step, new review TEXT came only from deepen-reviews, which re-pages a game's whole
+# filter=all cursor and keeps what INSERT OR IGNORE lets through: 2,997,560 reviews fetched on
+# 2026-09-10 to add ~73K rows (97.5% repeats). Worse, deepen stops selecting a game once it holds
+# --target texts, so the catalog's biggest games stopped getting new reviews at all — Balatro's
+# newest stored review was 2026-08-29, Hades' and Stardew Valley's 2026-08-18, and 3,413 games
+# were frozen like that when the --target 20000 -> 5000 change of 2026-09-05 widened the net.
+#
+# poll-new-reviews selects games whose review_summary total grew past the total recorded at
+# their last poll, reads newest-first (filter=recent) and stops at the first page that reaches
+# the newest review already stored — one request for most games. Placed right after
+# review_refresh because that step is what moves the totals it compares against; behind the
+# same barrier, so no peer writers (it commits per game regardless).
+#
+# --no-proxy: Steam's appreviews answered 50 pages in 18s direct from this box with no 429s,
+# where the proxy pool spent 7 minutes validating and still exhausted 7 attempts on Stardew.
+# --max-seconds ends the step on its own (in-flight games drain, the rest wait for tomorrow —
+# the first pass over ~119K never-polled games spans several nights) so it never reads as a
+# timeout; the outer timeout is only the hang guard.
+run_step "review_poll"      3000 "python3 -m steam_scraper.scraper --db steam_games.db poll-new-reviews --no-proxy --workers 6 --rate 6.0 --max-seconds 2400"
+
 # [7b] Review DEEPEN — nightly TOP-UP only (2026-08-18): the 06:00 UTC daytime coverage keeper
 # (see crontab) owns the backlog with a 13h window and 15k/day budget, so the nightly pass just
 # catches the cheapest gaps (smallest-total-first ordering = small games in the first thousands).
@@ -552,7 +574,10 @@ run_step "review_refresh"   3600 "python3 -m steam_scraper.scraper --db steam_ga
 # --target 5000 (2026-09-05, was 20000): the same per-game text-depth cap as the 06:00 keeper —
 # see crontab.txt. The ETL scores at most 5,000 texts per game; deeper text is disk the box
 # does not have (steam_games.db: 40 GB, ~1 GB/day growth, 21 GB free on 09-05).
-run_step "review_deepen"   5400 "python3 -m steam_scraper.scraper --db steam_games.db deepen-reviews --target 5000 --min-reviews 1 --activity-months 12 --refresh-days 30 --limit 1200 --workers 16 --rate 8.0"
+# --min-gap 20 --min-gap-pct 5 (2026-09-11): deepen only fills a REAL depth gap now that
+# review_poll above carries new reviews. Steam's total counts reviews its API never returns, so
+# "stored < total" alone re-selected near-complete games forever, each re-paged end to end.
+run_step "review_deepen"   5400 "python3 -m steam_scraper.scraper --db steam_games.db deepen-reviews --target 5000 --min-reviews 1 --activity-months 12 --refresh-days 30 --limit 1200 --workers 16 --rate 8.0 --min-gap 20 --min-gap-pct 5"
 
 # [7c] Tag SYNC — rebuild game_tags (the ETL's niche-membership table) from the
 # games.steamspy_tags JSON the enrichment loops maintain. It was a one-off
