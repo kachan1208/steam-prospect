@@ -24,7 +24,7 @@ import {
   revenueEstimateBase,
   totalRevSub,
 } from "../lib/entities";
-import { fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
+import { fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd, isFreeTitle } from "../lib/format";
 import { genreTintStyle, genreTintStyles, heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { CSS_VAR, MONO} from "../lib/palette";
 import { usePageTitle } from "../lib/usePageTitle";
@@ -349,7 +349,7 @@ export default function EntityProfile() {
                       className="rounded px-1.5 py-0.5"
                       style={heatStyle(g.est_rev_reviews, ...heatDomain(tableGames, (x) => x.est_rev_reviews))}
                     >
-                      {fmtRevenue(g.est_rev_reviews, g.price_initial === 0)}
+                      {fmtRevenue(g.est_rev_reviews, isFreeTitle(g))}
                     </span>
                   </td>
                 </tr>

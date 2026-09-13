@@ -200,6 +200,7 @@ class EntityGameRow(BaseModel):
     release_year: int | None
     release_date: str | None
     price_initial: float | None
+    is_free: int | None = None
     total_reviews: int | None
     positive_ratio: float | None
     est_rev_reviews: float | None
@@ -302,7 +303,7 @@ def entity_profile(
 
     games = _q(
         """
-        SELECT m.appid, m.seq, g.name, g.release_year, g.release_date, g.price_initial,
+        SELECT m.appid, m.seq, g.name, g.release_year, g.release_date, g.price_initial, g.is_free,
             g.total_reviews, g.positive_ratio, g.est_rev_reviews, g.primary_genre,
             g.header_image
         FROM mart_entity_games m

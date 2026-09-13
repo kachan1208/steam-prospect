@@ -77,6 +77,10 @@ def _build(path: Path) -> None:
             "owners_mid DOUBLE)"
         )
         con.executemany("INSERT INTO mart_game VALUES (?, ?, ?, ?, ?, ?, ?)", GAMES)
+        # is_free rides along with the other late-added mart_game columns: the niche game list
+        # selects it so a free title can render "Free" instead of a blank revenue cell
+        # (DOGWALK, 2026-09-13). Left NULL here — the rows under test are all priced.
+        con.execute("ALTER TABLE mart_game ADD COLUMN is_free INTEGER")
         for col, typ in (("positive_ratio", "DOUBLE"), ("live_players", "INTEGER"), ("header_image", "VARCHAR")):
             con.execute(f"ALTER TABLE mart_game ADD COLUMN {col} {typ}")
         con.executemany(
@@ -198,6 +202,7 @@ def test_games_row_shape_maps_the_mart_columns_onto_the_contract(niche_games_cli
         "name": "Hotel",
         "release_year": 2026,
         "price_initial": 29.99,
+        "is_free": None,
         "est_revenue": 3_000_000.0,
         "total_reviews": 12_000,
         "owners_est": 2_000_000.0,

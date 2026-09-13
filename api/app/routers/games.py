@@ -438,7 +438,7 @@ def game_comparables(
         """
         WITH target AS (SELECT appid, primary_genre, top_tags FROM mart_game WHERE appid = ?),
         scored AS (
-            SELECT g.appid, g.name, g.release_year, g.price_initial, g.owners_mid,
+            SELECT g.appid, g.name, g.release_year, g.price_initial, g.is_free, g.owners_mid,
                 g.total_reviews, g.positive_ratio, g.est_rev_reviews, g.header_image,
                 list_intersect(g.top_tags, t.top_tags) AS shared_tags,
                 len(list_intersect(g.top_tags, t.top_tags)) AS n_shared,
@@ -449,7 +449,7 @@ def game_comparables(
               AND g.price_initial BETWEEN ? AND ?
               AND g.total_reviews >= ?
         )
-        SELECT appid, name, release_year, price_initial, owners_mid, total_reviews,
+        SELECT appid, name, release_year, price_initial, is_free, owners_mid, total_reviews,
             positive_ratio, est_rev_reviews, header_image, shared_tags,
             n_shared * 1.0 / (len_sum - n_shared) AS jaccard
         FROM scored
@@ -465,6 +465,7 @@ def game_comparables(
             name=r["name"],
             release_year=r["release_year"],
             price_initial=r["price_initial"],
+            is_free=r["is_free"],
             owners_mid=r["owners_mid"],
             total_reviews=r["total_reviews"],
             positive_ratio=r["positive_ratio"],

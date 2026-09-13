@@ -290,6 +290,7 @@ class GameComparable(BaseModel):
     name: Optional[str] = None
     release_year: Optional[int] = None
     price_initial: Optional[float] = None
+    is_free: Optional[int] = None   # 1 = Steam's free flag; with price_initial None it means free
     owners_mid: Optional[float] = None
     total_reviews: Optional[int] = None
     positive_ratio: Optional[float] = None
@@ -647,6 +648,7 @@ class NicheGame(BaseModel):
     name: Optional[str] = None
     release_year: Optional[int] = None
     price_initial: Optional[float] = None
+    is_free: Optional[int] = None   # 1 = Steam's free flag; with price_initial None it means free
     owners_mid: Optional[float] = None
     total_reviews: Optional[int] = None
     positive_ratio: Optional[float] = None
@@ -761,6 +763,7 @@ class NicheGameRow(BaseModel):
     name: Optional[str] = None
     release_year: Optional[int] = None
     price_initial: Optional[float] = None   # 0.0 = free-to-play, None = price unknown
+    is_free: Optional[int] = None   # 1 = Steam's free flag; with price_initial None it means free
     est_revenue: Optional[float] = None
     total_reviews: Optional[int] = None
     owners_est: Optional[float] = None

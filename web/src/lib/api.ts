@@ -380,6 +380,7 @@ export interface NicheGame {
   name: string | null;
   release_year: number | null;
   price_initial: number | null;
+  is_free: number | null;
   owners_mid: number | null;
   total_reviews: number | null;
   positive_ratio: number | null;
@@ -531,6 +532,7 @@ export interface NicheGameRow {
   name: string | null;
   release_year: number | null;
   price_initial: number | null;
+  is_free: number | null;
   est_revenue: number | null;
   total_reviews: number | null;
   owners_est: number | null;
@@ -1171,6 +1173,7 @@ export interface GameComparable {
   name: string | null;
   release_year: number | null;
   price_initial: number | null;
+  is_free: number | null;
   owners_mid: number | null;
   total_reviews: number | null;
   positive_ratio: number | null;
@@ -1661,6 +1664,7 @@ export interface EntityGameRow {
   release_year: number | null;
   release_date: string | null;
   price_initial: number | null;
+  is_free: number | null;
   total_reviews: number | null;
   positive_ratio: number | null;
   est_rev_reviews: number | null;
@@ -1758,6 +1762,7 @@ export interface NicheCombinedGame {
   name?: string | null;
   release_year?: number | null;
   price_initial?: number | null;
+  is_free?: number | null;
   est_revenue?: number | null;
   total_reviews?: number | null;
   owners_est?: number | null;

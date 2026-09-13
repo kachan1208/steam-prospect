@@ -10,11 +10,33 @@ export function fmtUsd(value: number | null | undefined): string {
 }
 
 /**
- * Per-game estimated revenue for display. Titles with a $0 list price read "Free" instead of a
- * misleading "$0" — box revenue is $0 at a $0 price (the Boxleiter method models box sales, not the
- * MTX / battle-pass income F2P games actually run on). Pass isFree = (price_initial === 0), NOT the
- * is_free flag: some F2P-flagged titles also sell paid editions with real box revenue (e.g. Rainbow
- * Six Siege, is_free yet $19.99 / ~$920M est.), which should keep showing their number.
+ * Is this title free, for revenue-display purposes? Pass the row; use `isFreeTitle(row)` rather
+ * than testing a price by hand.
+ *
+ * Two shapes mean free, and only ONE of them was handled until 2026-09-13:
+ *   * price_initial === 0 — the explicit $0 list price.
+ *   * price_initial == null AND is_free — Steam returns NO price_overview at all for a free game,
+ *     so the scraper stores NULL, not 0. DOGWALK (appid 3775050, Blender Studio, 2,942 reviews)
+ *     is one: every revenue cell rendered an empty "—", which reads as "we don't know" when the
+ *     answer is "there is no box revenue to know". 12,898 games in the 2026-09-11 mart are in
+ *     this state (3,395 with 50+ reviews).
+ *
+ * The is_free flag ALONE is still not enough, which is why price wins when it is known: some
+ * F2P-flagged titles sell paid editions with real box revenue (Rainbow Six Siege, is_free yet
+ * $19.99 / ~$920M est.) and must keep showing their number.
+ */
+export function isFreeTitle(row: {
+  price_initial?: number | null;
+  is_free?: number | boolean | null;
+}): boolean {
+  if (row.price_initial === 0) return true;
+  return row.price_initial == null && Boolean(row.is_free);
+}
+
+/**
+ * Per-game estimated revenue for display. Free titles read "Free" instead of a misleading "$0" or
+ * a blank — box revenue is $0 at a $0 price (the Boxleiter method models box sales, not the
+ * MTX / battle-pass income F2P games actually run on). Pass isFree = isFreeTitle(row).
  */
 export function fmtRevenue(value: number | null | undefined, isFree: boolean): string {
   if (isFree) return "Free";

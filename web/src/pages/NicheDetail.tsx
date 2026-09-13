@@ -55,7 +55,7 @@ import {
   type TrendPoint,
   type Window,
 } from "../lib/api";
-import { axisScale, fmtCompact, fmtInt, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtSigned, fmtUsd, titleCase } from "../lib/format";
+import { axisScale, fmtCompact, fmtInt, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtSigned, fmtUsd, titleCase, isFreeTitle } from "../lib/format";
 import { heatDomain, heatStyle } from "../lib/heat";
 import { CSS_VAR, MONO } from "../lib/palette";
 import { usePageTitle } from "../lib/usePageTitle";
@@ -1307,7 +1307,7 @@ export default function NicheDetail() {
                       <span className="truncate font-medium text-ink-primary">{g.name ?? `App ${g.appid}`}</span>
                       <span className="tabular text-ink-primary/70">{g.release_year ?? "—"}</span>
                       <span className="tabular text-ink-primary/70">
-                        {fmtRevenue(g.est_revenue, g.price_initial === 0)}
+                        {fmtRevenue(g.est_revenue, isFreeTitle(g))}
                       </span>
                       <span className="tabular text-ink-primary/70">
                         {fmtPct(g.positive_ratio)} · {fmtInt(g.total_reviews)}
@@ -1914,7 +1914,7 @@ export default function NicheDetail() {
                             <td className="tabular px-2 py-1.5">{fmtInt(g.total_reviews)}</td>
                             <td className="tabular px-2 py-1.5">{fmtPct(g.positive_ratio)}</td>
                             <td className="tabular px-2 py-1.5">
-                              {fmtRevenue(g.est_rev_reviews, g.price_initial === 0)}
+                              {fmtRevenue(g.est_rev_reviews, isFreeTitle(g))}
                             </td>
                           </tr>
                         ))}
@@ -2061,7 +2061,7 @@ export default function NicheDetail() {
                               className="rounded px-1.5 py-0.5"
                               style={heatStyle(g.est_revenue, ...heatDomain(all, (x) => x.est_revenue))}
                             >
-                              {fmtRevenue(g.est_revenue, g.price_initial === 0)}
+                              {fmtRevenue(g.est_revenue, isFreeTitle(g))}
                             </span>
                           </td>
                         </tr>
