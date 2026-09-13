@@ -21,7 +21,7 @@ import {
   type Window,
 } from "../lib/api";
 import { estimatedUnits } from "../lib/estimates";
-import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd } from "../lib/format";
+import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd, isFreeTitle } from "../lib/format";
 // The §4b KPI-cell primitive (condensed numeral, 1px-gap blueprint grid) is shared with the
 // deep-dive page — from components/ui, so neither page has to import the other.
 import { KpiCell } from "../components/ui/KpiCell";
@@ -599,7 +599,7 @@ export default function NicheCombined() {
                           {fmtCompact(estimatedUnits(g.est_revenue, g.price_initial, g.total_reviews))}
                         </td>
                         <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">
-                          {fmtRevenue(g.est_revenue, g.price_initial === 0)}
+                          {fmtRevenue(g.est_revenue, isFreeTitle(g))}
                         </td>
                       </tr>
                     ))}

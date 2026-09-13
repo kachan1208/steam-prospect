@@ -14,7 +14,7 @@ import { ErrorState } from "../components/ui/ErrorState";
 import { Loading } from "../components/ui/Loading";
 import { useGameSearch, useGenres, type GameSearchRow, type GameSortKey } from "../lib/api";
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
-import { fmtCompact, fmtInt, fmtPct, fmtRevenue, fmtUsd } from "../lib/format";
+import { fmtCompact, fmtInt, fmtPct, fmtRevenue, fmtUsd, isFreeTitle } from "../lib/format";
 import { useDebounced } from "../lib/useDebounced";
 import { usePageTitle } from "../lib/usePageTitle";
 
@@ -716,7 +716,7 @@ export default function GameSearch() {
                       <span className="w-[90px] shrink-0 text-[13px] text-ink-primary">
                         {fmtPct(g.positive_ratio, 0)} · {fmtCompact(g.total_reviews)}
                       </span>
-                      <RevenueCell top={isTop}>{fmtRevenue(g.est_rev_reviews, g.price_initial === 0)}</RevenueCell>
+                      <RevenueCell top={isTop}>{fmtRevenue(g.est_rev_reviews, isFreeTitle(g))}</RevenueCell>
                       {/* The 4e mock shows a "players 7d ▲/▼" verdict; the search API doesn't
                           expose a 7-day trend (only a point-in-time live count), so this shows
                           the real current count instead of fabricating a change figure. */}

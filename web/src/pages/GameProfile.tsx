@@ -55,7 +55,7 @@ import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
 import { estimatedUnits } from "../lib/estimates";
 import { DEFAULT_NICHE_CUT, findNicheVariant } from "../lib/nicheSelection";
-import { axisScale, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName } from "../lib/format";
+import { axisScale, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName, isFreeTitle } from "../lib/format";
 import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { markerMonths } from "../lib/notable";
 import { CSS_VAR, MONO} from "../lib/palette";
@@ -886,10 +886,10 @@ export default function GameProfile() {
                 // never the estimator: est_rev_reviews is the spine of /compare, comparables,
                 // mart_niche.median_rev and mart_market.
                 help="Estimated lifetime GROSS revenue: reviews × 30 owners-per-review × launch price. 30 is the Boxleiter MID applied flat to every game, not fitted per genre; the low–high range swaps in the 20 and 55 ends of the same cited band. An estimate with real error bars. Not net of Steam's cut, refunds or discounts."
-                value={fmtRevenue(estRevenue, profile.price_initial === 0)}
+                value={fmtRevenue(estRevenue, isFreeTitle(profile))}
                 sub={
-                  profile.price_initial === 0
-                    ? "Free-to-play — no box revenue at $0 price"
+                  isFreeTitle(profile)
+                    ? "Free — no box revenue to estimate (this model prices copies sold)"
                     : revenueRange
                       ? `${fmtUsd(revenueRange.low)} – ${fmtUsd(revenueRange.high)}`
                       : undefined
@@ -1090,7 +1090,7 @@ export default function GameProfile() {
           </div>
           {/* Keyed on price, not is_free — fmtRevenue's R6-Siege case: is_free can be set on
               titles with a real price and real revenue. */}
-          {profile.price_initial === 0 && (
+          {isFreeTitle(profile) && (
             <p className="mt-3 text-[11px] italic text-ink-muted">
               Revenue percentile isn't meaningful for free-to-play titles (box revenue is $0 at price $0) — read
               review-count and owners percentile instead.
@@ -1291,7 +1291,7 @@ export default function GameProfile() {
                                 className="px-1.5 py-0.5"
                                 style={heatStyle(c.est_rev_reviews, ...heatDomain(all, (x) => x.est_rev_reviews))}
                               >
-                                {fmtRevenue(c.est_rev_reviews, c.price_initial === 0)}
+                                {fmtRevenue(c.est_rev_reviews, isFreeTitle(c))}
                               </span>
                             </td>
                             <td className="px-2 py-1.5">

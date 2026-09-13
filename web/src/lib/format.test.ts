@@ -17,6 +17,8 @@ import {
   niceAxisTicks,
   titleCase,
   weekdayName,
+  isFreeTitle,
+  fmtRevenue,
 } from "./format";
 
 describe("fmtUsd", () => {
@@ -364,5 +366,33 @@ describe("niceAxisTicks / axisScale", () => {
   it("degrades to a single zero tick rather than throwing on an empty/flat series", () => {
     expect(niceAxisTicks(0)).toEqual([0]);
     expect(axisScale(0).format(0)).toBe("0");
+  });
+});
+
+describe("isFreeTitle", () => {
+  // DOGWALK (3775050, Blender Studio) shipped free: Steam returns NO price_overview, so
+  // price_initial is NULL — not 0 — and every revenue cell read "—" as if the number were
+  // merely unknown. 12,898 games in the 2026-09-11 mart are in that state.
+  it("reads a null price with the free flag as free", () => {
+    expect(isFreeTitle({ price_initial: null, is_free: 1 })).toBe(true);
+    expect(fmtRevenue(null, isFreeTitle({ price_initial: null, is_free: 1 }))).toBe("Free");
+  });
+
+  it("still reads an explicit $0 price as free, flag or not", () => {
+    expect(isFreeTitle({ price_initial: 0 })).toBe(true);
+    expect(isFreeTitle({ price_initial: 0, is_free: 0 })).toBe(true);
+  });
+
+  // Rainbow Six Siege: is_free set AND a real $19.99 price with ~$920M estimated box revenue.
+  it("keeps a priced title's number even when Steam flags it free", () => {
+    expect(isFreeTitle({ price_initial: 19.99, is_free: 1 })).toBe(false);
+    expect(fmtRevenue(920_000_000, isFreeTitle({ price_initial: 19.99, is_free: 1 }))).toBe("$920.0M");
+  });
+
+  // A paid game whose price we simply never captured must stay "unknown", not become "Free".
+  it("leaves an unpriced, unflagged title alone", () => {
+    expect(isFreeTitle({ price_initial: null })).toBe(false);
+    expect(isFreeTitle({ price_initial: null, is_free: 0 })).toBe(false);
+    expect(fmtRevenue(null, isFreeTitle({ price_initial: null }))).toBe("—");
   });
 });

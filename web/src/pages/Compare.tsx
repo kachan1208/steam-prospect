@@ -16,7 +16,7 @@ import { TableScroll } from "../components/ui/TableScroll";
 import { errorMessage, gameProfileQueryOptions, isNotFound, type GameProfile } from "../lib/api";
 import { COMPARE_CAP, removeFromCompare, useCompareList } from "../lib/compareList";
 import { estimatedUnits } from "../lib/estimates";
-import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtRevenue } from "../lib/format";
+import { fmtCompact, fmtInt, fmtMinutes, fmtPct, fmtPrice, fmtRevenue, isFreeTitle } from "../lib/format";
 import { genreTintStyles } from "../lib/heat";
 import { compareSeries } from "../lib/palette";
 import { usePageTitle } from "../lib/usePageTitle";
@@ -84,8 +84,8 @@ const STAT_ROWS: StatRowDef[] = [
   {
     key: "revenue",
     label: "Est. gross revenue",
-    fmt: (p) => fmtRevenue(p.est_rev_reviews, p.price_initial === 0),
-    best: (p) => (p.price_initial === 0 ? null : p.est_rev_reviews),
+    fmt: (p) => fmtRevenue(p.est_rev_reviews, isFreeTitle(p)),
+    best: (p) => (isFreeTitle(p) ? null : p.est_rev_reviews),
   },
   // Units come from the SAME reviews-based estimator as the revenue row above (lib/estimates.ts),
   // never from the owners-based owners_mid. Pairing the two estimators in one column pair is what

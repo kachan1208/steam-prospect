@@ -384,7 +384,7 @@ _GAME_SORT = {
 # says 3,849.
 _GAME_SELECT = (
     "g.appid AS appid, g.name AS name, g.release_year AS release_year, "
-    "g.price_initial AS price_initial, g.est_rev_reviews AS est_revenue, "
+    "g.price_initial AS price_initial, g.is_free AS is_free, g.est_rev_reviews AS est_revenue, "
     "g.total_reviews AS total_reviews, g.owners_mid AS owners_est, "
     "g.positive_ratio AS positive_ratio, g.live_players AS live_players, "
     "g.header_image AS header_image"
@@ -958,9 +958,10 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
         [dimension, key],
     )
     games = analytics_db.query(
-        "SELECT rank_in_niche, appid, name, release_year, price_initial, owners_mid, "
-        "total_reviews, positive_ratio, est_rev_reviews, self_published, header_image "
-        "FROM mart_niche_top WHERE dimension = ? AND key = ? ORDER BY rank_in_niche",
+        "SELECT t.rank_in_niche, t.appid, t.name, t.release_year, t.price_initial, g.is_free, "
+        "t.owners_mid, t.total_reviews, t.positive_ratio, t.est_rev_reviews, t.self_published, "
+        "t.header_image FROM mart_niche_top t LEFT JOIN mart_game g ON g.appid = t.appid "
+        "WHERE t.dimension = ? AND t.key = ? ORDER BY t.rank_in_niche",
         [dimension, key],
     )
 
