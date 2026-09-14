@@ -25,6 +25,7 @@ import { PriceHistoryChart } from "../components/charts/PriceHistoryChart";
 import { ReviewsTimelineChart } from "../components/charts/ReviewsTimelineChart";
 import { TooltipPanel, type TooltipRow } from "../components/charts/TooltipPanel";
 import { GameTrendsChart } from "../components/charts/GameTrendsChart";
+import { changeTooltipRow, PLUMB_LABEL_BAND, PlumbLegendTick, plumbLabelProps, usePlotWidth } from "../components/charts/plumbLabels";
 import { NotableCoverageCard } from "../components/NotableCoverageCard";
 import { Badge } from "../components/ui/Badge";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -57,7 +58,7 @@ import { estimatedUnits } from "../lib/estimates";
 import { DEFAULT_NICHE_CUT, findNicheVariant } from "../lib/nicheSelection";
 import { axisScale, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName, isFreeTitle } from "../lib/format";
 import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
-import { markerMonths } from "../lib/notable";
+import { layoutPlumbLabels, markerReasons } from "../lib/notable";
 import { CSS_VAR, MONO} from "../lib/palette";
 import { usePageTitle } from "../lib/usePageTitle";
 import { useDetailView } from "../lib/viewMode";
@@ -303,8 +304,13 @@ function EstimateRow({
  * now, passed in as `events` — the "why did THIS month spike" answer this chart's mockup
  * annotation was always sketching. The single-marker prop stays for the future price-drop
  * feed (price_snapshots started accruing 2026-08-24).
+ *
+ * Every catalog plumb line carries a label — RELEASED, the event kind, or the month's
+ * multiple of its trailing median ("▲ 3.0×") — laid out in a band above the plot by the
+ * shared helpers (lib/notable.ts, components/charts/plumbLabels.tsx). Exported for its
+ * render test.
  */
-function ReviewVelocityBars({
+export function ReviewVelocityBars({
   points,
   eventMarker,
   events,
@@ -318,6 +324,9 @@ function ReviewVelocityBars({
   // and the whole page swapped for the error boundary. Event markers below are narrowed to the
   // visible months: a ReferenceLine whose category is off the sliced axis has nowhere to stand.
   const zoom = useDragZoom(points, "period");
+  // The plot width the label layout needs — the container minus the 40px YAxis and the 8px
+  // right margin. A hook as well, so it stays above the early return with the zoom.
+  const plot = usePlotWidth(40 + 8);
 
   if (points.length === 0) {
     return (
@@ -344,28 +353,32 @@ function ReviewVelocityBars({
     if (bucket) bucket.push(e);
     else eventsByMonth.set(month, [e]);
   }
-  // One shared gate for the plumb lines (see lib/notable.ts markerMonths): adaptive
+  // One shared gate for the plumb lines (see lib/notable.ts markerReasons): adaptive
   // spike/drop detection so small/mid games mark too, a sparse-events fallback, a 14-line
   // readability cap, and the release always drawn. Spike months are marked event or not —
   // CS2's real inflections (2019 operations, the 2023-03 CS2 announcement, the 2023-09
   // release) predate our article scrape, so gating lines on having an event erased them
   // all. Every month's events stay readable in the tooltip regardless.
   const releaseMonth = (events ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
-  const eventMonths = [
-    ...markerMonths(
-      points.map((p) => ({ period: p.period, value: p.n_reviews })),
-      eventsByMonth.keys(),
-      releaseMonth,
-    ),
-  ].sort();
+  const reasons = markerReasons(
+    points.map((p) => ({ period: p.period, value: p.n_reviews })),
+    eventsByMonth.keys(),
+    releaseMonth,
+  );
+  // Each line's label, spread over two rows above the plot and degraded/hidden where the
+  // measured width cannot fit them — for the visible months only, so nothing floats off a
+  // zoomed axis.
+  const labels = layoutPlumbLabels(zoom.data.map((d) => d.period), reasons, plot.width, eventsByMonth);
 
   const visibleMonths = new Set(zoom.data.map((d) => d.period));
 
   return (
     <div>
       <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
-        <ResponsiveContainer width="100%" height={150}>
-          <BarChart data={zoom.data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
+        {/* 150px is the mockup's chart at its old 4px top margin; the label band replaces that
+            margin and the height grows by the difference, so the bars keep their size. */}
+        <ResponsiveContainer width="100%" height={150 - 4 + PLUMB_LABEL_BAND} onResize={plot.onResize}>
+          <BarChart data={zoom.data} margin={{ top: PLUMB_LABEL_BAND, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
           <CartesianGrid stroke="var(--gridline)" vertical={false} />
           <XAxis
             dataKey="period"
@@ -399,18 +412,14 @@ function ReviewVelocityBars({
               }}
             />
           )}
-          {eventMonths.filter((m) => visibleMonths.has(m)).map((month) => (
+          {[...labels].map(([month, label]) => (
             <ReferenceLine
               key={`ev-${month}`}
               x={month}
               stroke="var(--text-muted)"
               strokeDasharray="2 5"
               strokeOpacity={month === releaseMonth ? 0.9 : 0.5}
-              label={
-                month === releaseMonth
-                  ? { value: "Released", position: "top", fill: "var(--text-muted)", fontSize: 9 }
-                  : undefined
-              }
+              label={plumbLabelProps(label, month === releaseMonth)}
             />
           ))}
           <Tooltip
@@ -426,6 +435,8 @@ function ReviewVelocityBars({
                 },
                 { label: "Positive", value: fmtCompact(p.n_positive) },
               ];
+              const change = changeTooltipRow(reasons.get(String(label)));
+              if (change) rows.push(change);
               for (const e of eventsByMonth.get(String(label)) ?? []) {
                 const t = e.title.length > 60 ? `${e.title.slice(0, 57)}…` : e.title;
                 rows.push({ label: e.kind.charAt(0).toUpperCase() + e.kind.slice(1), value: t, color: "var(--text-muted)" });
@@ -444,7 +455,12 @@ function ReviewVelocityBars({
           </BarChart>
         </ResponsiveContainer>
       </ZoomFrame>
-      <p className="mt-2 text-[11px] italic text-ink-muted">
+      {reasons.size > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-ink-muted">
+          <PlumbLegendTick />
+        </div>
+      )}
+      <p className="mt-1 text-[11px] italic text-ink-muted">
         Highlighted: {monthLabel(peak.period)} — the highest-volume month of reviews since launch.
       </p>
     </div>

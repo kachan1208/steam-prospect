@@ -22,9 +22,11 @@ import {
   type MarketingEvent,
 } from "../../lib/api";
 import { fmtAxisCompact, fmtCompact } from "../../lib/format";
-import { markerMonths } from "../../lib/notable";
+import { layoutPlumbLabels, markerReasons } from "../../lib/notable";
 import { CSS_VAR } from "../../lib/palette";
 import { useDragZoom } from "../../lib/useDragZoom";
+import { LegendDot, LegendTick } from "./Legend";
+import { changeTooltipRow, PLUMB_LABEL_BAND, PLUMB_ROW_PITCH, PlumbLegendTick, plumbLabelProps, usePlotWidth } from "./plumbLabels";
 import { SELECTION_AREA_PROPS, ZoomFrame } from "./ZoomFrame";
 import { RetryButton } from "../ui/ErrorState";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
@@ -60,9 +62,9 @@ import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 // as annotations distinct from the aqua review bars and blue player line.
 const EVENT_COLOR = "var(--brand)";
 // Catalog events recede to muted ink: they are context, and a patch-heavy game can have one in
-// almost every charted month — at brand strength that would shout down the data. Only the
-// release line carries a text label; every other marker explains itself in the tooltip, which
-// is what keeps a 24-line month axis readable instead of a picket fence of labels.
+// almost every charted month — at brand strength that would shout down the data. Every line
+// carries a small label (charts/plumbLabels.tsx); the shared layout thins them where they
+// would collide, which is what keeps a dense month axis readable instead of a picket fence.
 const CATALOG_EVENT_COLOR = CSS_VAR.textMuted;
 
 const XAXIS_PROPS = {
@@ -73,27 +75,6 @@ const XAXIS_PROPS = {
   tickLine: false,
   axisLine: { stroke: "var(--baseline)" },
 };
-
-// 14x2px line-key swatch (design handoff: "Legend swatches 14×2px"), used for both the
-// bar and line series in this file's legends — a thin bar reads fine as a generic swatch
-// for either mark type, and matches every line-legend in the mockups pixel-for-pixel.
-function LegendDot({ color, label }: { color: string; label: string }) {
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className="h-0.5 w-3.5 shrink-0" style={{ backgroundColor: color }} />
-      {label}
-    </span>
-  );
-}
-
-function LegendTick({ color, label }: { color: string; label: string }) {
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className="h-3 w-0.5 shrink-0" style={{ backgroundColor: color }} />
-      {label}
-    </span>
-  );
-}
 
 function capitalize(s: string): string {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
@@ -144,6 +125,9 @@ export function GameTrendsChart({
   // ReferenceLine whose category is not on the sliced axis has nowhere to stand, and Recharts
   // draws it at the plot's left edge rather than dropping it.
   const zoom = useDragZoom(basePoints, "period");
+  // Plot width for the catalog-label layout: the container minus both 40px YAxes and the 8px
+  // right margin. A hook, so it stays up here with the zoom.
+  const plot = usePlotWidth(40 + 40 + 8);
 
   if (selfFetch && trendsQuery.isLoading) {
     return <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading trends…</div>;
@@ -191,22 +175,27 @@ export function GameTrendsChart({
     if (bucket) bucket.push(e);
     else catalogByMonth.set(month, [e]);
   }
-  // One shared gate for the catalog plumb lines (lib/notable.ts markerMonths: adaptive
+  // One shared gate for the catalog plumb lines (lib/notable.ts markerReasons: adaptive
   // spike/drop rule, sparse-events fallback, 14-line cap, release always drawn); the
   // tooltip keeps every month's events either way.
   const releaseMonth = (catalogQuery.data ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
-  const catalogMonths = [
-    ...markerMonths(
-      data.map((d) => ({ period: d.period, value: d.n_reviews })),
-      catalogByMonth.keys(),
-      releaseMonth,
-    ),
-  ].sort();
-  const hasCatalog = catalogMonths.length > 0;
+  const catalogReasons = markerReasons(
+    data.map((d) => ({ period: d.period, value: d.n_reviews })),
+    catalogByMonth.keys(),
+    releaseMonth,
+  );
+  const hasCatalog = catalogReasons.size > 0;
 
   const hasCcu = data.some((d) => d.ccu_avg != null);
 
   const visibleMonths = new Set(zoom.data.map((d) => d.period));
+  // Catalog labels over two rows above the plot, thinned where the measured width cannot fit
+  // them; visible months only, so nothing floats off a zoomed axis.
+  const catalogLabels = layoutPlumbLabels(zoom.data.map((d) => d.period), catalogReasons, plot.width, catalogByMonth);
+  // Marketing labels keep their own two alternating rows, ABOVE the catalog rows, so a month
+  // with both kinds of marker never stacks two labels on one spot; the band only grows when
+  // there are marketing events to place.
+  const band = PLUMB_LABEL_BAND + (hasEvents ? 2 * PLUMB_ROW_PITCH : 0);
 
   return (
     <div className="flex flex-col gap-4">
@@ -215,8 +204,10 @@ export function GameTrendsChart({
         <div>
           <div className="mb-1 text-xs text-ink-muted">Sampled reviews &amp; live players / month</div>
           <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
-          <ResponsiveContainer width="100%" height={168}>
-            <ComposedChart data={zoom.data} margin={{ top: 12, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
+          {/* The label band replaces the old 12px top margin and the height grows by the
+              difference, so the plot keeps its size. */}
+          <ResponsiveContainer width="100%" height={168 - 12 + band} onResize={plot.onResize}>
+            <ComposedChart data={zoom.data} margin={{ top: band, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
               <CartesianGrid stroke="var(--gridline)" vertical={false} />
               <XAxis {...XAXIS_PROPS} />
               <YAxis
@@ -254,6 +245,8 @@ export function GameTrendsChart({
                     const note = e.note ? (e.note.length > 60 ? `${e.note.slice(0, 57)}…` : e.note) : "—";
                     rows.push({ label: capitalize(e.kind), value: note, color: EVENT_COLOR });
                   }
+                  const change = changeTooltipRow(catalogReasons.get(String(label)));
+                  if (change) rows.push(change);
                   for (const e of catalogByMonth.get(String(label)) ?? []) {
                     const title = e.title.length > 60 ? `${e.title.slice(0, 57)}…` : e.title;
                     rows.push({ label: capitalize(e.kind), value: title, color: CATALOG_EVENT_COLOR });
@@ -271,11 +264,11 @@ export function GameTrendsChart({
                 dot={{ r: 3, fill: CSS_VAR.demand, strokeWidth: 0 }}
                 connectNulls
               />
-              {/* catalog events — muted, mostly-unlabelled plumb lines UNDER the marketing
-                  layer. Dash "2 5" (sparser than the marketing "3 4") so overlapping months
-                  stay tellable apart; only the release line gets a text label. Details are
-                  in the tooltip, which is what keeps a patch-heavy game readable. */}
-              {catalogMonths.filter((m) => visibleMonths.has(m)).map((month) => (
+              {/* catalog events — muted plumb lines UNDER the marketing layer, each with its
+                  small label (RELEASED / the event kind / the month's multiple of its
+                  trailing median). Dash "2 5" (sparser than the marketing "3 4") so
+                  overlapping months stay tellable apart. Details are in the tooltip. */}
+              {[...catalogLabels].map(([month, label]) => (
                 <ReferenceLine
                   key={`cat-${month}`}
                   yAxisId="reviews"
@@ -283,15 +276,12 @@ export function GameTrendsChart({
                   stroke={CATALOG_EVENT_COLOR}
                   strokeDasharray="2 5"
                   strokeOpacity={month === releaseMonth ? 0.9 : 0.55}
-                  label={
-                    month === releaseMonth
-                      ? { value: "Released", position: "top", fill: CATALOG_EVENT_COLOR, fontSize: 9 }
-                      : undefined
-                  }
+                  label={plumbLabelProps(label, month === releaseMonth)}
                 />
               ))}
               {/* my marketing events — a labelled plumb line at each event's month.
-                  Dash "3 4" per the design handoff's event-marker spec. */}
+                  Dash "3 4" per the design handoff's event-marker spec. Their two rows sit
+                  above the catalog labels' two (see `band`). */}
               {eventMonths.filter((m) => visibleMonths.has(m)).map((month, i) => (
                 <ReferenceLine
                   key={month}
@@ -305,7 +295,7 @@ export function GameTrendsChart({
                     position: "top",
                     fill: EVENT_COLOR,
                     fontSize: 9,
-                    dy: (i % 2) * 11,
+                    dy: ((i % 2) - 3) * PLUMB_ROW_PITCH,
                   }}
                 />
               ))}
@@ -324,7 +314,7 @@ export function GameTrendsChart({
             <LegendDot color={CSS_VAR.competition} label="Reviews / mo" />
             <LegendDot color={CSS_VAR.demand} label="Live players (avg)" />
             {hasEvents && <LegendTick color={EVENT_COLOR} label="Marketing event" />}
-            {hasCatalog && <LegendTick color={CATALOG_EVENT_COLOR} label="Release / notable event" />}
+            {hasCatalog && <PlumbLegendTick />}
           </div>
         </div>
 

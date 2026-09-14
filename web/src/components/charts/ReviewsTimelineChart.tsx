@@ -15,9 +15,10 @@ import {
 
 import { gameCatalogEventsQueryOptions, type GameEvent, type ReviewTimelinePoint } from "../../lib/api";
 import { fmtAxisCompact, fmtCompact, fmtPct } from "../../lib/format";
-import { markerMonths } from "../../lib/notable";
+import { layoutPlumbLabels, markerReasons } from "../../lib/notable";
 import { CSS_VAR } from "../../lib/palette";
 import { useDragZoom } from "../../lib/useDragZoom";
+import { changeTooltipRow, PLUMB_LABEL_BAND, PlumbLegendTick, plumbLabelProps, usePlotWidth } from "./plumbLabels";
 import { SELECTION_AREA_PROPS, ZoomFrame } from "./ZoomFrame";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 
@@ -65,6 +66,9 @@ export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimeline
     ...gameCatalogEventsQueryOptions(appid ?? -1),
     enabled: appid !== undefined,
   });
+  // The volume panel's plot width, for the label layout: container minus its 40px YAxis and
+  // 8px right margin. A hook, so it sits with the others above the early return.
+  const plot = usePlotWidth(40 + 8);
 
   const periodSet = new Set(points.map((d) => d.period));
   const eventsByMonth = new Map<string, GameEvent[]>();
@@ -75,17 +79,18 @@ export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimeline
     if (bucket) bucket.push(e);
     else eventsByMonth.set(month, [e]);
   }
-  // One shared gate for the plumb lines (see lib/notable.ts markerMonths: adaptive
+  // One shared gate for the plumb lines (see lib/notable.ts markerReasons: adaptive
   // spike/drop rule, sparse-events fallback, 14-line cap, release always drawn). Tooltips
   // keep every month's events; only the lines are gated.
   const releaseMonth = (eventsQuery.data ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
-  const eventMonths = [
-    ...markerMonths(
-      points.map((p) => ({ period: p.period, value: p.n_reviews })),
-      eventsByMonth.keys(),
-      releaseMonth,
-    ),
-  ].sort();
+  const reasons = markerReasons(
+    points.map((p) => ({ period: p.period, value: p.n_reviews })),
+    eventsByMonth.keys(),
+    releaseMonth,
+  );
+  // Each line's label over two rows above the plot, thinned where the measured width cannot
+  // fit them; visible months only, so nothing floats off a zoomed axis.
+  const labels = layoutPlumbLabels(zoom.data.map((d) => d.period), reasons, plot.width, eventsByMonth);
 
   if (points.length === 0) {
     return (
@@ -100,8 +105,10 @@ export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimeline
       <div>
         <div className="mb-1 text-xs text-ink-muted">Positive rating trend (trailing 3-month)</div>
         <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
-          <ResponsiveContainer width="100%" height={160}>
-            <LineChart data={zoom.data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
+          {/* No markers on this panel, but the same label band as its neighbour so the two
+              plots stay level and a zoom band lands at the same height in both. */}
+          <ResponsiveContainer width="100%" height={160 - 4 + PLUMB_LABEL_BAND}>
+            <LineChart data={zoom.data} margin={{ top: PLUMB_LABEL_BAND, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
             <CartesianGrid stroke="var(--gridline)" vertical={false} />
             <XAxis
               dataKey="period"
@@ -154,8 +161,10 @@ export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimeline
       <div>
         <div className="mb-1 text-xs text-ink-muted">Reviews per month — Steam's full history</div>
         <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
-          <ResponsiveContainer width="100%" height={160}>
-            <BarChart data={zoom.data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
+          {/* The label band replaces the old 4px top margin and the height grows by the
+              difference, so the bars keep their size. */}
+          <ResponsiveContainer width="100%" height={160 - 4 + PLUMB_LABEL_BAND} onResize={plot.onResize}>
+            <BarChart data={zoom.data} margin={{ top: PLUMB_LABEL_BAND, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
             <CartesianGrid stroke="var(--gridline)" vertical={false} />
             <XAxis
               dataKey="period"
@@ -182,6 +191,8 @@ export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimeline
                   { label: "Reviews", value: fmtCompact(p.n_reviews), color: CSS_VAR.competition },
                   { label: "Positive", value: fmtCompact(p.n_positive) },
                 ];
+                const change = changeTooltipRow(reasons.get(String(label)));
+                if (change) rows.push(change);
                 for (const e of eventsByMonth.get(String(label)) ?? []) {
                   const title = e.title.length > 60 ? `${e.title.slice(0, 57)}…` : e.title;
                   rows.push({ label: capitalize(e.kind), value: title, color: EVENT_COLOR });
@@ -190,21 +201,18 @@ export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimeline
               }}
             />
             <Bar dataKey="n_reviews" fill={CSS_VAR.competition} radius={[4, 4, 0, 0]} maxBarSize={20} />
-            {/* catalog events — muted plumb lines; only the release month carries a text
-                label (a patch-heavy game like CS2 ships updates most months, and a label
-                per line would picket-fence the whole lifetime). Titles live in the tooltip. */}
-            {eventMonths.map((month) => (
+            {/* catalog events — muted plumb lines, each labelled (RELEASED / the event kind /
+                the month's multiple of its trailing median); the layout thins the labels
+                where they would collide, so a patch-heavy lifetime cannot picket-fence.
+                Titles live in the tooltip. */}
+            {[...labels].map(([month, label]) => (
               <ReferenceLine
                 key={month}
                 x={month}
                 stroke={EVENT_COLOR}
                 strokeDasharray="2 5"
                 strokeOpacity={month === releaseMonth ? 0.9 : 0.5}
-                label={
-                  month === releaseMonth
-                    ? { value: "Released", position: "top", fill: EVENT_COLOR, fontSize: 9 }
-                    : undefined
-                }
+                label={plumbLabelProps(label, month === releaseMonth)}
               />
             ))}
             {zoom.selection && (
@@ -213,6 +221,11 @@ export function ReviewsTimelineChart({ points, appid }: { points: ReviewTimeline
             </BarChart>
           </ResponsiveContainer>
         </ZoomFrame>
+        {reasons.size > 0 && (
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-ink-muted">
+            <PlumbLegendTick />
+          </div>
+        )}
       </div>
     </div>
   );
