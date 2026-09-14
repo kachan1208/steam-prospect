@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { markerMonths, type SeriesPoint } from "./notable";
+import {
+  changeSummary,
+  LABEL_CHAR_PX,
+  LABEL_GAP_PX,
+  layoutPlumbLabels,
+  markerMonths,
+  markerReasons,
+  plumbLineLabel,
+  UNMEASURED_PLOT_PX,
+  type MarkerReason,
+  type SeriesPoint,
+} from "./notable";
 
 /** Build a monthly series from Jan 2020: values[i] -> { period: '2020-01'+i, value }. */
 function series(values: number[]): SeriesPoint[] {
@@ -199,5 +210,299 @@ describe("markerMonths — CS2 real-data regression (appid 730, prod API 2026-08
   it("stays within the cap — no picket fence on 169 charted months", () => {
     const got = markerMonths(pts, eventMonths, release);
     expect(got.size).toBeLessThanOrEqual(14);
+  });
+});
+
+/** Tiny Terraces (appid 3136330, prod API 2026-09-15; released 2025-07-31) — the report's
+ * own example: a release, one drop, two spikes, and a half-elapsed current month that used
+ * to draw a fifth, false "drop" line. */
+const TINY_TERRACES: SeriesPoint[] = (
+  "2025-07:86|2025-08:43|2025-09:21|2025-10:28|2025-11:107|2025-12:35|2026-01:49|2026-02:32|" +
+  "2026-03:55|2026-04:50|2026-05:72|2026-06:209|2026-07:86|2026-08:54|2026-09:21"
+)
+  .split("|")
+  .map((pair) => {
+    const [p, v] = pair.split(":");
+    return { period: p, value: Number(v) };
+  });
+const TT_RELEASE = "2025-07";
+
+describe("markerReasons — the why behind each line", () => {
+  it("attaches release / event / change with the ratio, value and median", () => {
+    const got = markerReasons(TINY_TERRACES, [TT_RELEASE], TT_RELEASE, { now: new Date(2026, 8, 15) });
+    expect([...got.keys()]).toEqual(["2025-07", "2025-09", "2025-11", "2026-06"]);
+    expect(got.get("2025-07")).toEqual({ release: true, eventMonth: true });
+    // 21 against the trailing median of {86, 43} = 64.5.
+    expect(got.get("2025-09")).toMatchObject({ release: false, eventMonth: false, change: "drop", value: 21, median: 64.5 });
+    expect(got.get("2025-09")!.ratio).toBeCloseTo(21 / 64.5, 6);
+    // 107 against the median of {86, 43, 21, 28} = 35.5 -> 3.0x.
+    expect(got.get("2025-11")).toMatchObject({ change: "spike", value: 107, median: 35.5 });
+    expect(got.get("2025-11")!.ratio).toBeCloseTo(107 / 35.5, 6);
+    expect(got.get("2026-06")).toMatchObject({ change: "spike", value: 209, median: 49.5 });
+  });
+
+  it("keeps markerMonths as the same selection without the why", () => {
+    const opts = { now: new Date(2026, 8, 15) };
+    expect(markerMonths(TINY_TERRACES, [TT_RELEASE], TT_RELEASE, opts)).toEqual(
+      new Set(markerReasons(TINY_TERRACES, [TT_RELEASE], TT_RELEASE, opts).keys()),
+    );
+  });
+
+  it("flags an event month that also moved as both", () => {
+    const pts = series([50, 50, 50, 50, 200, 50, 50, 50]);
+    const got = markerReasons(pts, [period(4)]);
+    expect(got.get(period(4))).toMatchObject({ eventMonth: true, change: "spike", ratio: 4 });
+  });
+});
+
+describe("markerReasons — the half-elapsed current month", () => {
+  it("never reads the current month as a drop (it is incomplete)", () => {
+    // 2026-09 is the last charted month AND today's month: 21 against a median of 63.5
+    // passes the drop rule, and would have put a wrong "▼" on the chart.
+    const got = markerReasons(TINY_TERRACES, [TT_RELEASE], TT_RELEASE, { now: new Date(2026, 8, 15) });
+    expect(got.has("2026-09")).toBe(false);
+  });
+
+  it("does read it as a drop once the calendar has moved on", () => {
+    const got = markerReasons(TINY_TERRACES, [TT_RELEASE], TT_RELEASE, { now: new Date(2026, 9, 20) });
+    expect(got.get("2026-09")).toMatchObject({ change: "drop", value: 21, median: 63.5 });
+  });
+
+  it("still flags a spike in the current month — a partial month already over the median is real", () => {
+    const pts = [...TINY_TERRACES.slice(0, 14), { period: "2026-09", value: 400 }];
+    const got = markerReasons(pts, [TT_RELEASE], TT_RELEASE, { now: new Date(2026, 8, 15) });
+    expect(got.get("2026-09")).toMatchObject({ change: "spike", value: 400 });
+  });
+
+  it("does not let the current month's apparent collapse win a capped slot", () => {
+    // The cap test's 16-spike series, extended with a collapsed current month that is also
+    // an event month (sparse mode -> candidate): a real month of 10 would tie at score 0,
+    // and the partial month must not outrank the weakest spikes on a score it did not earn.
+    const values: number[] = new Array(50).fill(10);
+    for (let k = 0; k < 16; k++) values[2 + 3 * k] = 100 + 10 * k;
+    const pts = [...series(values), { period: "2024-03", value: 1 }];
+    const now = new Date(2024, 2, 10);
+    const got = markerReasons(pts, ["2024-03"], period(0), { now });
+    expect(got.size).toBe(14);
+    expect(got.has("2024-03")).toBe(false);
+  });
+});
+
+describe("plumbLineLabel — <= ~9 characters of uppercase", () => {
+  const release: MarkerReason = { release: true, eventMonth: true, change: "spike", ratio: 5 };
+  const spike = (ratio: number): MarkerReason => ({ release: false, eventMonth: false, change: "spike", ratio });
+  const drop = (ratio: number): MarkerReason => ({ release: false, eventMonth: false, change: "drop", ratio });
+  const flat: MarkerReason = { release: false, eventMonth: true };
+
+  it("release wins over everything else", () => {
+    expect(plumbLineLabel(release, [{ kind: "release" }, { kind: "press" }])).toBe("RELEASED");
+  });
+
+  it("names a change by its multiple of the trailing median", () => {
+    expect(plumbLineLabel(spike(107 / 35.5))).toBe("▲ 3.0×");
+    expect(plumbLineLabel(spike(209 / 49.5))).toBe("▲ 4.2×");
+    expect(plumbLineLabel(drop(21 / 64.5))).toBe("▼ 0.3×");
+  });
+
+  it("drops the decimal from ten times up", () => {
+    expect(plumbLineLabel(spike(12.3))).toBe("▲ 12×");
+    expect(plumbLineLabel(spike(9.96))).toBe("▲ 10×"); // never "10.0×"
+  });
+
+  it("never prints a collapse as a multiple of nothing", () => {
+    // 2 reviews against a median of 150 would round to "▼ 0.0×".
+    expect(plumbLineLabel(drop(2 / 150))).toBe("▼ <0.1×");
+    expect(plumbLineLabel(drop(0.049))).toBe("▼ <0.1×");
+    expect(plumbLineLabel(drop(0.05))).toBe("▼ 0.1×");
+    expect(plumbLineLabel(drop(2 / 150)).length).toBeLessThanOrEqual(9);
+  });
+
+  it("names a flat event month by its kind, counted when there are several", () => {
+    expect(plumbLineLabel(flat, [{ kind: "update" }])).toBe("UPDATE");
+    expect(plumbLineLabel(flat, [{ kind: "press" }])).toBe("PRESS");
+    expect(plumbLineLabel(flat, [{ kind: "update" }, { kind: "update" }])).toBe("2 UPDATES");
+    expect(plumbLineLabel(flat, [{ kind: "press" }, { kind: "press" }])).toBe("2 PRESS");
+    expect(plumbLineLabel(flat, [{ kind: "update" }, { kind: "press" }, { kind: "press" }])).toBe("3 EVENTS");
+  });
+
+  it("puts the kind before the glyph when an event month also moved", () => {
+    expect(plumbLineLabel({ ...spike(3), eventMonth: true }, [{ kind: "update" }])).toBe("UPDATE ▲");
+    expect(plumbLineLabel({ ...drop(0.3), eventMonth: true }, [{ kind: "press" }])).toBe("PRESS ▼");
+    // Several events + a change: the count goes so the label still fits.
+    expect(plumbLineLabel({ ...spike(3), eventMonth: true }, [{ kind: "update" }, { kind: "update" }])).toBe("UPDATES ▲");
+    expect(plumbLineLabel({ ...spike(3), eventMonth: true }, [{ kind: "update" }, { kind: "press" }])).toBe("EVENTS ▲");
+  });
+
+  it("stays inside nine characters for every shape", () => {
+    const cases = [
+      plumbLineLabel(release),
+      plumbLineLabel(spike(3.04)),
+      plumbLineLabel(spike(123)),
+      plumbLineLabel(flat, [{ kind: "update" }, { kind: "update" }]),
+      plumbLineLabel(flat, [{ kind: "update" }, { kind: "press" }, { kind: "press" }]),
+      plumbLineLabel({ ...spike(3), eventMonth: true }, [{ kind: "update" }, { kind: "update" }]),
+    ];
+    for (const c of cases) expect(c.length).toBeLessThanOrEqual(9);
+  });
+});
+
+describe("changeSummary — the tooltip's sentence", () => {
+  it("quotes the multiple and both numbers", () => {
+    expect(changeSummary({ release: false, eventMonth: false, change: "spike", ratio: 107 / 35.5, value: 107, median: 35.5 })).toBe(
+      "3.0× the trailing 6-mo median (36 → 107)",
+    );
+    expect(changeSummary({ release: false, eventMonth: false, change: "drop", ratio: 21 / 64.5, value: 21, median: 64.5 })).toBe(
+      "0.3× the trailing 6-mo median (65 → 21)",
+    );
+  });
+
+  it("says <0.1× for a collapse that would round to nothing", () => {
+    expect(changeSummary({ release: false, eventMonth: false, change: "drop", ratio: 2 / 150, value: 2, median: 150 })).toBe(
+      "<0.1× the trailing 6-mo median (150 → 2)",
+    );
+  });
+
+  it("is silent for a line that is not about a change", () => {
+    expect(changeSummary({ release: true, eventMonth: true })).toBeUndefined();
+  });
+});
+
+describe("layoutPlumbLabels — two rows, degrade then hide", () => {
+  const CHAR_PX = LABEL_CHAR_PX;
+  const GAP_PX = LABEL_GAP_PX;
+  const spike = (ratio: number): MarkerReason => ({ release: false, eventMonth: false, change: "spike", ratio, value: ratio * 50, median: 50 });
+  const drop = (ratio: number): MarkerReason => ({ release: false, eventMonth: false, change: "drop", ratio, value: ratio * 50, median: 50 });
+  const flat: MarkerReason = { release: false, eventMonth: true };
+
+  /** 14 marked months on a `visible`-month axis: release first, then a mix of spikes, drops
+   * and flat event months of assorted label lengths, the least extreme sprinkled between
+   * the strongest so degrade order is meaningful. */
+  function fixture(visible: number) {
+    const periods = series(new Array(visible).fill(0)).map((p) => p.period);
+    const reasons = new Map<string, MarkerReason>();
+    const events = new Map<string, { kind: string }[]>();
+    const mark = (i: number, r: MarkerReason, evts?: { kind: string }[]) => {
+      reasons.set(periods[i], r);
+      if (evts) events.set(periods[i], evts);
+    };
+    const step = Math.max(1, Math.floor(visible / 14));
+    const slots = Array.from({ length: 14 }, (_, k) => k * step);
+    mark(slots[0], { release: true, eventMonth: true }, [{ kind: "release" }]);
+    const rest: [MarkerReason, { kind: string }[] | undefined][] = [
+      [spike(3.04), undefined],
+      [flat, [{ kind: "update" }, { kind: "update" }]],
+      [drop(0.33), undefined],
+      [spike(12), undefined],
+      [flat, [{ kind: "press" }]],
+      [{ ...spike(2.1), eventMonth: true }, [{ kind: "update" }]],
+      [flat, [{ kind: "update" }, { kind: "press" }, { kind: "press" }]],
+      [spike(4.2), undefined],
+      [drop(0.4), undefined],
+      [flat, [{ kind: "update" }]],
+      [spike(2.5), undefined],
+      [flat, [{ kind: "press" }, { kind: "press" }]],
+      [spike(1.9), undefined],
+    ];
+    rest.forEach(([r, e], k) => mark(slots[k + 1], r, e));
+    return { periods, reasons, events };
+  }
+
+  /** The same estimate the layout uses — any two SHOWN labels in one row must clear it. */
+  function overlapping(periods: string[], layout: Map<string, { text: string; row: number; show: boolean }>, width: number) {
+    const n = periods.length;
+    const shown = periods
+      .map((p, i) => ({ i, p, lab: layout.get(p) }))
+      .filter((s) => s.lab && s.lab.show)
+      .map((s) => ({ x: ((s.i + 0.5) / n) * width, row: s.lab!.row, w: s.lab!.text.length * CHAR_PX, p: s.p }));
+    const pairs: [string, string][] = [];
+    for (const a of shown) {
+      for (const b of shown) {
+        if (a.p >= b.p || a.row !== b.row) continue;
+        if (Math.abs(a.x - b.x) < (a.w + b.w) / 2 + GAP_PX) pairs.push([a.p, b.p]);
+      }
+    }
+    return pairs;
+  }
+
+  it("wide (1500px): every label shown in full, all on the plot-edge row", () => {
+    const { periods, reasons, events } = fixture(28);
+    const layout = layoutPlumbLabels(periods, reasons, 1500, events);
+    expect(layout.size).toBe(14);
+    for (const [p, lab] of layout) {
+      expect(lab.show).toBe(true);
+      expect(lab.row).toBe(1);
+      expect(lab.text).toBe(plumbLineLabel(reasons.get(p)!, events.get(p)));
+    }
+    expect(overlapping(periods, layout, 1500)).toEqual([]);
+  });
+
+  it("four far-apart labels on a wide plot all land on the plot-edge row", () => {
+    const periods = series(new Array(15).fill(0)).map((p) => p.period);
+    const reasons = new Map<string, MarkerReason>([
+      [periods[0], { release: true, eventMonth: true }],
+      [periods[2], drop(0.33)],
+      [periods[4], spike(3.0)],
+      [periods[11], spike(4.2)],
+    ]);
+    const layout = layoutPlumbLabels(periods, reasons, 852, new Map([[periods[0], [{ kind: "release" }]]]));
+    expect([...layout.values()]).toEqual([
+      { text: "RELEASED", row: 1, show: true },
+      { text: "▼ 0.3×", row: 1, show: true },
+      { text: "▲ 3.0×", row: 1, show: true },
+      { text: "▲ 4.2×", row: 1, show: true },
+    ]);
+  });
+
+  it("two adjacent labels on a narrow plot split rows, both in full", () => {
+    const periods = series(new Array(12).fill(0)).map((p) => p.period);
+    const reasons = new Map<string, MarkerReason>([
+      [periods[5], spike(3.0)],
+      [periods[6], spike(2.0)],
+    ]);
+    const layout = layoutPlumbLabels(periods, reasons, 200, undefined);
+    expect(layout.get(periods[5])).toEqual({ text: "▲ 3.0×", row: 1, show: true });
+    expect(layout.get(periods[6])).toEqual({ text: "▲ 2.0×", row: 0, show: true });
+  });
+
+  it("narrow (300px, 14 marked months): degrades the less extreme neighbour, never RELEASED, no overlaps", () => {
+    const { periods, reasons, events } = fixture(14);
+    const layout = layoutPlumbLabels(periods, reasons, 300, events);
+    expect(layout.size).toBe(14);
+    expect(layout.get(periods[0])).toEqual({ text: "RELEASED", row: 1, show: true });
+    // Both rows are in use once neighbours collide.
+    expect(new Set([...layout.values()].filter((l) => l.show).map((l) => l.row)).size).toBe(2);
+    const degraded = [...layout.entries()].filter(([p, lab]) => lab.text !== plumbLineLabel(reasons.get(p)!, events.get(p)));
+    expect(degraded.length).toBeGreaterThan(0);
+    for (const [, lab] of degraded) expect(["▲", "▼", "•"]).toContain(lab.text);
+    // The 12x spike outranks its neighbours, so it keeps its full text.
+    expect(layout.get(periods[4])!.text).toBe("▲ 12×");
+    expect(overlapping(periods, layout, 300)).toEqual([]);
+  });
+
+  it("very narrow (120px): hides what still collides as a glyph, keeps RELEASED", () => {
+    const { periods, reasons, events } = fixture(14);
+    const layout = layoutPlumbLabels(periods, reasons, 120, events);
+    const hidden = [...layout.values()].filter((lab) => !lab.show);
+    expect(hidden.length).toBeGreaterThan(0);
+    expect(layout.get(periods[0])).toEqual({ text: "RELEASED", row: 1, show: true });
+    expect(overlapping(periods, layout, 120)).toEqual([]);
+  });
+
+  it("assumes a wide plot until measured", () => {
+    const { periods, reasons, events } = fixture(14);
+    const layout = layoutPlumbLabels(periods, reasons, UNMEASURED_PLOT_PX, events);
+    for (const [p, lab] of layout) {
+      expect(lab.show).toBe(true);
+      expect(lab.text).toBe(plumbLineLabel(reasons.get(p)!, events.get(p)));
+    }
+  });
+
+  it("lays out only the visible months, in axis order (a zoomed chart)", () => {
+    const { periods, reasons, events } = fixture(28);
+    const visible = periods.slice(10, 20);
+    const layout = layoutPlumbLabels(visible, reasons, 800, events);
+    expect([...layout.keys()]).toEqual(visible.filter((p) => reasons.has(p)));
+    // 160px apart on this plot: nothing needs the upper row.
+    for (const lab of layout.values()) expect(lab).toMatchObject({ row: 1, show: true });
   });
 });

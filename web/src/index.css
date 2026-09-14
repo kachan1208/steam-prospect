@@ -295,6 +295,20 @@ h1, h2, h3, h4, h5, h6 {
 .recharts-reference-line line {
   stroke: var(--text-muted);
 }
+/* Plumb-line annotations (lib/notable.ts + charts/plumbLabels.tsx): the handoff's "condensed
+   uppercase annotation" on every event marker, mono steel. A class rather than a fill
+   attribute because the .recharts-label rule above beats any attribute — which is why the
+   old "Released" label's fill never applied. Release reads a touch stronger. */
+.plumb-label {
+  fill: var(--text-muted);
+  font-family: "Barlow Condensed", "Barlow", system-ui, sans-serif;
+  font-weight: 600;
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+}
+.plumb-label-release {
+  fill: var(--text-secondary);
+}
 
 ::selection {
   background: var(--brand);
