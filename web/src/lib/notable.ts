@@ -215,8 +215,10 @@ function changeGlyph(reason: MarkerReason): "▲" | "▼" | undefined {
 }
 
 /** "3.0×" below ten, "12×" from there: the label has ~9 characters of room and a decimal on
- * a 12x spike says nothing a reader acts on. */
+ * a 12x spike says nothing a reader acts on. A collapse that would round to "0.0×" prints
+ * "<0.1×" — a multiple of nothing is not what happened. */
 function fmtMultiple(ratio: number): string {
+  if (ratio < 0.05) return "<0.1×";
   return `${ratio < 9.95 ? ratio.toFixed(1) : Math.round(ratio)}×`;
 }
 
@@ -258,7 +260,7 @@ export function changeSummary(reason: MarkerReason): string | undefined {
 export interface PlumbLabel {
   /** Final text — the full label, or the glyph it was degraded to. */
   text: string;
-  /** 0 = the upper of the two rows above the plot, 1 = the one on the plot's edge. */
+  /** 1 = the row on the plot's edge (where every label wants to be), 0 = the row above it. */
   row: number;
   /** False when even the glyph would collide: the line is still drawn, unlabelled. */
   show: boolean;
@@ -281,10 +283,11 @@ export const UNMEASURED_PLOT_PX = 4000;
  * feeds it the visible x categories (in axis order), the reasons, the measured plot width and
  * the events per month; it gets back one entry per marked VISIBLE month, in axis order.
  *
- * Labels alternate between two rows by visible order (a marked month next to another marked
- * month lands on the other row). Within a row, left to right: when a label would overlap the
- * one before it, the less extreme of the two (release > bigger |ratio - 1| > event-only) is
- * degraded to its glyph alone (▲ / ▼ / •); if that still overlaps, it is hidden. RELEASED is
+ * Every label prefers the lower row, on the plot's edge; one is lifted to the row above only
+ * when it would overlap the label placed before it on the lower row — so a sparse chart reads
+ * as one tidy row and a dense one uses both. When it would collide on both rows, the less
+ * extreme of it and its lower-row neighbour (release > bigger |ratio - 1| > event-only) is
+ * degraded to its glyph alone (▲ / ▼ / •); if that still collides, it is hidden. RELEASED is
  * never degraded or hidden — the one line every chart must explain.
  *
  * x is the category's band centre, (i + 0.5) / n of the plot width — what a bar chart draws;
@@ -314,7 +317,7 @@ export function layoutPlumbLabels(
       period,
       x: ((i + 0.5) / n) * plotWidthPx,
       text: plumbLineLabel(reason, eventsByMonth?.get(period)),
-      row: slots.length % 2,
+      row: 1,
       show: true,
       release: reason.release,
       extremity: reason.release ? Infinity : reason.change !== undefined && reason.ratio !== undefined ? Math.abs(reason.ratio - 1) : 0,
@@ -326,26 +329,33 @@ export function layoutPlumbLabels(
   const width = (s: Slot) => s.text.length * LABEL_CHAR_PX;
   const overlaps = (a: Slot, b: Slot) => Math.abs(a.x - b.x) < (width(a) + width(b)) / 2 + LABEL_GAP_PX;
 
-  for (const row of [0, 1]) {
-    // The labels already placed in this row and still visible, left to right.
-    const placed: Slot[] = [];
-    for (const cur of slots) {
-      if (cur.row !== row) continue;
-      while (placed.length > 0) {
-        const prev = placed[placed.length - 1];
-        if (!overlaps(prev, cur)) break;
-        // Ties go against the later label; the release never yields.
-        const loser = prev.release ? cur : cur.release ? prev : prev.extremity < cur.extremity ? prev : cur;
-        if (!loser.degraded) {
-          loser.text = loser.glyph;
-          loser.degraded = true;
-          continue; // re-check the same pair with the shorter text
-        }
-        loser.show = false;
-        if (loser === cur) break;
-        placed.pop(); // prev is gone; cur now has to clear the label before it
+  // The labels placed on each row and still visible, left to right.
+  const placed: [Slot[], Slot[]] = [[], []];
+  const last = (row: number): Slot | undefined => placed[row][placed[row].length - 1];
+  for (const cur of slots) {
+    for (;;) {
+      // The plot-edge row whenever it is clear; the row above only to clear the label before it.
+      const row = [1, 0].find((r) => {
+        const prev = last(r);
+        return prev === undefined || !overlaps(prev, cur);
+      });
+      if (row !== undefined) {
+        cur.row = row;
+        placed[row].push(cur);
+        break;
       }
-      if (cur.show) placed.push(cur);
+      // Both rows collide: the less extreme of cur and its plot-edge neighbour gives way.
+      // Ties go against the later label; the release never yields.
+      const prev = last(1)!;
+      const loser = prev.release ? cur : cur.release ? prev : prev.extremity < cur.extremity ? prev : cur;
+      if (!loser.degraded) {
+        loser.text = loser.glyph;
+        loser.degraded = true;
+        continue; // try both rows again with the shorter text
+      }
+      loser.show = false;
+      if (loser === cur) break;
+      placed[1].pop(); // prev is gone; cur now has to clear the label before it
     }
   }
   return new Map(slots.map((s) => [s.period, { text: s.text, row: s.row, show: s.show }]));

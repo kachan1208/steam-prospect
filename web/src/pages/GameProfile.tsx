@@ -25,7 +25,7 @@ import { PriceHistoryChart } from "../components/charts/PriceHistoryChart";
 import { ReviewsTimelineChart } from "../components/charts/ReviewsTimelineChart";
 import { TooltipPanel, type TooltipRow } from "../components/charts/TooltipPanel";
 import { GameTrendsChart } from "../components/charts/GameTrendsChart";
-import { changeTooltipRow, PLUMB_LABEL_BAND, PlumbLegendTick, plumbLabelProps, usePlotWidth } from "../components/charts/plumbLabels";
+import { changeTooltipRow, PLUMB_LABEL_BAND, PLUMB_LEGEND_ROW_PX, PlumbLegendTick, plumbLabelProps, usePlotWidth } from "../components/charts/plumbLabels";
 import { NotableCoverageCard } from "../components/NotableCoverageCard";
 import { Badge } from "../components/ui/Badge";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -310,6 +310,14 @@ function EstimateRow({
  * shared helpers (lib/notable.ts, components/charts/plumbLabels.tsx). Exported for its
  * render test.
  */
+/** The mockup's 150px chart at its old 4px top margin; the label band replaces that margin
+ * and the height grows by the difference, so the bars keep their size. */
+const VELOCITY_CHART_HEIGHT = 150 - 4 + PLUMB_LABEL_BAND;
+/** What the drawn component occupies — chart, legend row, the "Highlighted:" caption (`mt-1`
+ * + one 11px italic line) — so its loading placeholder reserves the same and the card does
+ * not jump when the data lands. */
+const VELOCITY_BLOCK_HEIGHT = VELOCITY_CHART_HEIGHT + PLUMB_LEGEND_ROW_PX + 21;
+
 export function ReviewVelocityBars({
   points,
   eventMarker,
@@ -375,9 +383,7 @@ export function ReviewVelocityBars({
   return (
     <div>
       <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
-        {/* 150px is the mockup's chart at its old 4px top margin; the label band replaces that
-            margin and the height grows by the difference, so the bars keep their size. */}
-        <ResponsiveContainer width="100%" height={150 - 4 + PLUMB_LABEL_BAND} onResize={plot.onResize}>
+        <ResponsiveContainer width="100%" height={VELOCITY_CHART_HEIGHT} onResize={plot.onResize}>
           <BarChart data={zoom.data} margin={{ top: PLUMB_LABEL_BAND, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
           <CartesianGrid stroke="var(--gridline)" vertical={false} />
           <XAxis
@@ -828,7 +834,10 @@ export default function GameProfile() {
             action={<span className="kicker text-[11px] text-ink-muted">Monthly</span>}
           >
             {reviewsQ.isLoading && (
-              <Loading className="h-[150px] text-xs" />
+              // Reserves exactly what ReviewVelocityBars draws, so the card does not jump.
+              <div style={{ height: VELOCITY_BLOCK_HEIGHT }}>
+                <Loading className="h-full text-xs" />
+              </div>
             )}
             {reviewsQ.data && <ReviewVelocityBars points={reviewsQ.data.timeline} events={eventsQ.data} />}
           </BlueprintPanel>

@@ -26,7 +26,15 @@ import { layoutPlumbLabels, markerReasons } from "../../lib/notable";
 import { CSS_VAR } from "../../lib/palette";
 import { useDragZoom } from "../../lib/useDragZoom";
 import { LegendDot, LegendTick } from "./Legend";
-import { changeTooltipRow, PLUMB_LABEL_BAND, PLUMB_ROW_PITCH, PlumbLegendTick, plumbLabelProps, usePlotWidth } from "./plumbLabels";
+import {
+  changeTooltipRow,
+  PLUMB_LABEL_BAND,
+  PLUMB_LEGEND_ROW_PX,
+  PLUMB_ROW_PITCH,
+  PlumbLegendTick,
+  plumbLabelProps,
+  usePlotWidth,
+} from "./plumbLabels";
 import { SELECTION_AREA_PROPS, ZoomFrame } from "./ZoomFrame";
 import { RetryButton } from "../ui/ErrorState";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
@@ -66,6 +74,16 @@ const EVENT_COLOR = "var(--brand)";
 // carries a small label (charts/plumbLabels.tsx); the shared layout thins them where they
 // would collide, which is what keeps a dense month axis readable instead of a picket fence.
 const CATALOG_EVENT_COLOR = CSS_VAR.textMuted;
+
+/** The mockup's 168px chart at its old 12px top margin; the label band replaces that margin
+ * and the height grows by the difference, so the plot keeps its size. */
+const PLOT_AND_AXIS_HEIGHT = 168 - 12;
+/** The "Sampled reviews & live players / month" line above the chart: one text-xs line + mb-1. */
+const PANEL_TITLE_PX = 20;
+/** What Panel 1 occupies once drawn (before any marketing rows widen the band) — title line,
+ * chart, legend row — so the loading placeholder reserves the same and the card does not
+ * jump when the data lands. */
+const LOADING_HEIGHT = PANEL_TITLE_PX + PLOT_AND_AXIS_HEIGHT + PLUMB_LABEL_BAND + PLUMB_LEGEND_ROW_PX;
 
 const XAXIS_PROPS = {
   dataKey: "period",
@@ -130,7 +148,11 @@ export function GameTrendsChart({
   const plot = usePlotWidth(40 + 40 + 8);
 
   if (selfFetch && trendsQuery.isLoading) {
-    return <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading trends…</div>;
+    return (
+      <div className="flex items-center justify-center text-xs text-ink-muted" style={{ height: LOADING_HEIGHT }}>
+        Loading trends…
+      </div>
+    );
   }
   if (selfFetch && trendsQuery.isError) {
     // Was `error.message` — the raw exception, i.e. a bare "Failed to fetch" on any network
@@ -204,9 +226,7 @@ export function GameTrendsChart({
         <div>
           <div className="mb-1 text-xs text-ink-muted">Sampled reviews &amp; live players / month</div>
           <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
-          {/* The label band replaces the old 12px top margin and the height grows by the
-              difference, so the plot keeps its size. */}
-          <ResponsiveContainer width="100%" height={168 - 12 + band} onResize={plot.onResize}>
+          <ResponsiveContainer width="100%" height={PLOT_AND_AXIS_HEIGHT + band} onResize={plot.onResize}>
             <ComposedChart data={zoom.data} margin={{ top: band, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
               <CartesianGrid stroke="var(--gridline)" vertical={false} />
               <XAxis {...XAXIS_PROPS} />

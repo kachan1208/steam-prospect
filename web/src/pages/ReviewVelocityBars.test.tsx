@@ -84,9 +84,9 @@ describe("ReviewVelocityBars — labelled plumb lines", () => {
       expect(y).toBeGreaterThanOrEqual(9);
       expect(y).toBeLessThanOrEqual(PLUMB_LABEL_BAND);
     }
-    // Neighbouring labels alternate rows.
-    const rows = new Set(texts.map(baseline));
-    expect(rows.size).toBe(2);
+    // Nothing is close to colliding at this width, so every label sits on the plot-edge row
+    // (Recharts' "top" position is 5px above the plot).
+    expect([...new Set(texts.map(baseline))]).toEqual([PLUMB_LABEL_BAND - 5]);
   });
 
   it("says what the dotted lines are", () => {

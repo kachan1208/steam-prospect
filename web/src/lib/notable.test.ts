@@ -309,6 +309,14 @@ describe("plumbLineLabel — <= ~9 characters of uppercase", () => {
     expect(plumbLineLabel(spike(9.96))).toBe("▲ 10×"); // never "10.0×"
   });
 
+  it("never prints a collapse as a multiple of nothing", () => {
+    // 2 reviews against a median of 150 would round to "▼ 0.0×".
+    expect(plumbLineLabel(drop(2 / 150))).toBe("▼ <0.1×");
+    expect(plumbLineLabel(drop(0.049))).toBe("▼ <0.1×");
+    expect(plumbLineLabel(drop(0.05))).toBe("▼ 0.1×");
+    expect(plumbLineLabel(drop(2 / 150)).length).toBeLessThanOrEqual(9);
+  });
+
   it("names a flat event month by its kind, counted when there are several", () => {
     expect(plumbLineLabel(flat, [{ kind: "update" }])).toBe("UPDATE");
     expect(plumbLineLabel(flat, [{ kind: "press" }])).toBe("PRESS");
@@ -345,6 +353,12 @@ describe("changeSummary — the tooltip's sentence", () => {
     );
     expect(changeSummary({ release: false, eventMonth: false, change: "drop", ratio: 21 / 64.5, value: 21, median: 64.5 })).toBe(
       "0.3× the trailing 6-mo median (65 → 21)",
+    );
+  });
+
+  it("says <0.1× for a collapse that would round to nothing", () => {
+    expect(changeSummary({ release: false, eventMonth: false, change: "drop", ratio: 2 / 150, value: 2, median: 150 })).toBe(
+      "<0.1× the trailing 6-mo median (150 → 2)",
     );
   });
 
@@ -410,24 +424,53 @@ describe("layoutPlumbLabels — two rows, degrade then hide", () => {
     return pairs;
   }
 
-  it("wide (1500px): every label shown in full, rows alternating by visible order", () => {
+  it("wide (1500px): every label shown in full, all on the plot-edge row", () => {
     const { periods, reasons, events } = fixture(28);
     const layout = layoutPlumbLabels(periods, reasons, 1500, events);
     expect(layout.size).toBe(14);
-    const entries = [...layout.entries()];
-    entries.forEach(([p, lab], k) => {
+    for (const [p, lab] of layout) {
       expect(lab.show).toBe(true);
-      expect(lab.row).toBe(k % 2);
+      expect(lab.row).toBe(1);
       expect(lab.text).toBe(plumbLineLabel(reasons.get(p)!, events.get(p)));
-    });
+    }
     expect(overlapping(periods, layout, 1500)).toEqual([]);
+  });
+
+  it("four far-apart labels on a wide plot all land on the plot-edge row", () => {
+    const periods = series(new Array(15).fill(0)).map((p) => p.period);
+    const reasons = new Map<string, MarkerReason>([
+      [periods[0], { release: true, eventMonth: true }],
+      [periods[2], drop(0.33)],
+      [periods[4], spike(3.0)],
+      [periods[11], spike(4.2)],
+    ]);
+    const layout = layoutPlumbLabels(periods, reasons, 852, new Map([[periods[0], [{ kind: "release" }]]]));
+    expect([...layout.values()]).toEqual([
+      { text: "RELEASED", row: 1, show: true },
+      { text: "▼ 0.3×", row: 1, show: true },
+      { text: "▲ 3.0×", row: 1, show: true },
+      { text: "▲ 4.2×", row: 1, show: true },
+    ]);
+  });
+
+  it("two adjacent labels on a narrow plot split rows, both in full", () => {
+    const periods = series(new Array(12).fill(0)).map((p) => p.period);
+    const reasons = new Map<string, MarkerReason>([
+      [periods[5], spike(3.0)],
+      [periods[6], spike(2.0)],
+    ]);
+    const layout = layoutPlumbLabels(periods, reasons, 200, undefined);
+    expect(layout.get(periods[5])).toEqual({ text: "▲ 3.0×", row: 1, show: true });
+    expect(layout.get(periods[6])).toEqual({ text: "▲ 2.0×", row: 0, show: true });
   });
 
   it("narrow (300px, 14 marked months): degrades the less extreme neighbour, never RELEASED, no overlaps", () => {
     const { periods, reasons, events } = fixture(14);
     const layout = layoutPlumbLabels(periods, reasons, 300, events);
     expect(layout.size).toBe(14);
-    expect(layout.get(periods[0])).toEqual({ text: "RELEASED", row: 0, show: true });
+    expect(layout.get(periods[0])).toEqual({ text: "RELEASED", row: 1, show: true });
+    // Both rows are in use once neighbours collide.
+    expect(new Set([...layout.values()].filter((l) => l.show).map((l) => l.row)).size).toBe(2);
     const degraded = [...layout.entries()].filter(([p, lab]) => lab.text !== plumbLineLabel(reasons.get(p)!, events.get(p)));
     expect(degraded.length).toBeGreaterThan(0);
     for (const [, lab] of degraded) expect(["▲", "▼", "•"]).toContain(lab.text);
@@ -441,7 +484,7 @@ describe("layoutPlumbLabels — two rows, degrade then hide", () => {
     const layout = layoutPlumbLabels(periods, reasons, 120, events);
     const hidden = [...layout.values()].filter((lab) => !lab.show);
     expect(hidden.length).toBeGreaterThan(0);
-    expect(layout.get(periods[0])).toEqual({ text: "RELEASED", row: 0, show: true });
+    expect(layout.get(periods[0])).toEqual({ text: "RELEASED", row: 1, show: true });
     expect(overlapping(periods, layout, 120)).toEqual([]);
   });
 
@@ -459,6 +502,7 @@ describe("layoutPlumbLabels — two rows, degrade then hide", () => {
     const visible = periods.slice(10, 20);
     const layout = layoutPlumbLabels(visible, reasons, 800, events);
     expect([...layout.keys()]).toEqual(visible.filter((p) => reasons.has(p)));
-    expect([...layout.values()].map((l) => l.row)).toEqual([...layout.keys()].map((_, k) => k % 2));
+    // 160px apart on this plot: nothing needs the upper row.
+    for (const lab of layout.values()) expect(lab).toMatchObject({ row: 1, show: true });
   });
 });

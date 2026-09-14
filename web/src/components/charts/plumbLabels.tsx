@@ -82,3 +82,8 @@ export const PLUMB_LEGEND_LABEL = `Release · catalog events · months that move
 export function PlumbLegendTick() {
   return <LegendTick color={CSS_VAR.textMuted} dotted label={PLUMB_LEGEND_LABEL} />;
 }
+
+/** Height of the legend row the charts put under the plot (`mt-2` + one line of 10px text),
+ * measured at 23px, so a loading placeholder can reserve it and the card does not jump when
+ * the data lands. A legend that wraps to a second line is 19px taller than this. */
+export const PLUMB_LEGEND_ROW_PX = 23;
