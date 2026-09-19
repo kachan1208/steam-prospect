@@ -1419,16 +1419,31 @@ export default function GameProfile() {
                 )}
               </BlueprintPanel>
 
-        {/* One card for both marketing reads (2026-09-19, user request): this game's own press
-            footprint first, then where its GENRE gets attention as the yardstick — the same
-            "the game's story, then the genre" order the rest of the page follows. The channel
-            mix is genre-level because per-game channel data is too sparse; its half is hidden
-            (no empty section) when the genre has no channel rows or the mart predates the
-            channel-mix ETL — same pattern as NotableCoverageCard below. */}
+        {/* One card for both marketing reads (2026-09-19, user request), in the order the user
+            asked for: where the GENRE gets attention first (the channel mix — genre-level
+            because per-game channel data is too sparse), then this game's own press stats,
+            and the article links follow in NotableCoverageCard below. Attention → stats →
+            links. The genre half is hidden (no empty section) when the genre has no channel
+            rows or the mart predates the channel-mix ETL — same pattern as NotableCoverageCard. */}
         <BlueprintPanel
           title="Press & attention"
-          subtitle="This game's journalist coverage, then the marketing channels its genre's attention comes from"
+          subtitle="Where this genre's attention comes from, then this game's own journalist coverage"
         >
+            {channelMixQ.data && channelMixQ.data.channels.length > 0 && (
+              <div className="mb-5 border-b border-chartborder pb-4">
+                <div className="kicker text-[11px] text-ink-secondary">Where this genre gets attention</div>
+                <div className="mb-3 mt-0.5 text-[11px] text-ink-muted">
+                  Marketing-channel mix for {channelMixQ.data.genre} — each channel's share of tracked coverage (press
+                  articles + YouTube/Reddit/Twitch/X creator mentions), a genre-level read, not this game's own footprint
+                </div>
+                <ChannelShareBars channels={channelMixQ.data.channels} />
+                <p className="mt-3 text-[11px] italic text-ink-muted">
+                  One press article = one creator mention = one unit of volume. Hover a channel for its audience-weighted
+                  share — that read skews almost entirely toward big-subscriber channels, since a creator mention counts
+                  their whole audience while a press article counts 1.
+                </p>
+              </div>
+            )}
             <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
               <div className="kicker text-[11px] text-ink-secondary">This game's press footprint</div>
               {teardownQ.data && teardownQ.data.press.total_mentions > 0 && (
@@ -1508,22 +1523,6 @@ export default function GameProfile() {
                   </div>
                 </div>
               </>
-            )}
-
-            {channelMixQ.data && channelMixQ.data.channels.length > 0 && (
-              <div className="mt-5 border-t border-chartborder pt-4">
-                <div className="kicker text-[11px] text-ink-secondary">Where this genre gets attention</div>
-                <div className="mb-3 mt-0.5 text-[11px] text-ink-muted">
-                  Marketing-channel mix for {channelMixQ.data.genre} — each channel's share of tracked coverage (press
-                  articles + YouTube/Reddit/Twitch/X creator mentions), a genre-level read, not this game's own footprint
-                </div>
-                <ChannelShareBars channels={channelMixQ.data.channels} />
-                <p className="mt-3 text-[11px] italic text-ink-muted">
-                  One press article = one creator mention = one unit of volume. Hover a channel for its audience-weighted
-                  share — that read skews almost entirely toward big-subscriber channels, since a creator mention counts
-                  their whole audience while a press article counts 1.
-                </p>
-              </div>
             )}
           </BlueprintPanel>
 
