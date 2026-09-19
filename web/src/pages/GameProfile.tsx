@@ -1,4 +1,4 @@
-import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useId, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import clsx from "clsx";
 import {
@@ -6,6 +6,8 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
+  Line,
+  LineChart,
   ReferenceArea,
   ReferenceLine,
   ResponsiveContainer,
@@ -309,14 +311,61 @@ function EstimateRow({
  * multiple of its trailing median ("▲ 3.0×") — laid out in a band above the plot by the
  * shared helpers (lib/notable.ts, components/charts/plumbLabels.tsx). Exported for its
  * render test.
+ *
+ * RATING PANEL (2026-09-19): "combine the velocity bars with the review-rating graph so
+ * the change is easier to see." The trailing 3-month positive share (the same series
+ * ReviewsTimelineChart draws on its own further down the page) now sits directly ABOVE
+ * the bars as a second panel of the same figure: one month axis (the bars' XAxis, the
+ * rating panel's hidden — both category axes are `band`-scaled so a month is the same
+ * x in both), one drag-zoom range, the plumb lines drawn through both panels so a
+ * release / patch / spike lines up against the rating move it caused, and one synced
+ * hover (recharts `syncId`) so a month highlighted in either panel highlights in both.
+ * NOT a second y-scale on the bars: a dual-axis combo invites reading the two lines
+ * against each other where they only share a date, so the rating keeps its own padded
+ * %-axis (see ReviewsTimelineChart for why it is padded-to-data, not 0-100%) in its own
+ * plot, stacked and aligned rather than overlaid. When the timeline carries no trailing
+ * share at all the rating panel is skipped and the labels return to the bars' own band.
  */
-/** The mockup's 150px chart at its old 4px top margin; the label band replaces that margin
- * and the height grows by the difference, so the bars keep their size. */
-const VELOCITY_CHART_HEIGHT = 150 - 4 + PLUMB_LABEL_BAND;
-/** What the drawn component occupies — chart, legend row, the "Highlighted:" caption (`mt-1`
- * + one 11px italic line) — so its loading placeholder reserves the same and the card does
- * not jump when the data lands. */
-const VELOCITY_BLOCK_HEIGHT = VELOCITY_CHART_HEIGHT + PLUMB_LEGEND_ROW_PX + 21;
+/** The mockup's 150px chart at its old 4px top margin; when the rating panel is on top
+ * the labels move there and the bars keep a 4px seam instead of the band. */
+const VELOCITY_BARS_HEIGHT = 150;
+const VELOCITY_CHART_HEIGHT = VELOCITY_BARS_HEIGHT - 4 + PLUMB_LABEL_BAND;
+/** The rating panel's plot plus the label band it carries; enough for a %-axis with three
+ * ticks and a visible swing, small enough that the bars stay the figure's main mark. */
+const RATING_PLOT_HEIGHT = 84;
+/** Room under the plot for the bottom tick's descent — the panel's month axis is hidden, so
+ * nothing else reserves it and the lowest "%"-label was cut in half. */
+const RATING_FOOT = 6;
+const RATING_CHART_HEIGHT = RATING_PLOT_HEIGHT + PLUMB_LABEL_BAND + RATING_FOOT;
+/** The two 11px caption rows ("Positive rating …" / "Reviews per month") over each panel. */
+const PANEL_CAPTION_PX = 17;
+/** What the drawn component occupies in its usual (rating + bars) shape — two captions, the
+ * rating panel, the bars, legend row, the "Highlighted:" caption (`mt-1` + one 11px italic
+ * line) — so its loading placeholder reserves the same and the card does not jump when the
+ * data lands. */
+const VELOCITY_BLOCK_HEIGHT =
+  2 * PANEL_CAPTION_PX + RATING_CHART_HEIGHT + VELOCITY_BARS_HEIGHT + PLUMB_LEGEND_ROW_PX + 21;
+
+/** The rating axis, padded to the VISIBLE data and clamped to [0, 1] — a zoom rescales it,
+ * a flat run still gets a readable band rather than a 0-100% sliver. */
+function ratingAxisFor(points: ReviewTimelinePoint[]): { domain: [number, number]; ticks: number[]; decimals: number } {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const p of points) {
+    const v = p.trailing_positive_share;
+    if (v === null || !Number.isFinite(v)) continue;
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  if (lo === Infinity) return { domain: [0, 1], ticks: [0, 0.5, 1], decimals: 0 };
+  // Whole-percent bounds, so the end ticks print as the numbers they are. Recharts' own
+  // "nice" ticks on a narrow band like 0.88-1.00 collapsed to a lone "100%" — the axis
+  // has to carry its ends and a midpoint explicitly to be readable at all.
+  const min = Math.max(0, Math.floor((lo - 0.05) * 100) / 100);
+  const max = Math.min(1, Math.ceil((hi + 0.05) * 100) / 100);
+  const mid = Math.round(((min + max) / 2) * 1000) / 1000;
+  return { domain: [min, max], ticks: [min, mid, max], decimals: max - min < 0.06 ? 1 : 0 };
+}
 
 export function ReviewVelocityBars({
   points,
@@ -335,6 +384,9 @@ export function ReviewVelocityBars({
   // The plot width the label layout needs — the container minus the 40px YAxis and the 8px
   // right margin. A hook as well, so it stays above the early return with the zoom.
   const plot = usePlotWidth(40 + 8);
+  // One hover for both panels: recharts syncs charts that share a syncId, and the id has
+  // to be unique per instance (a compare view could draw two of these on one page).
+  const syncId = useId();
 
   if (points.length === 0) {
     return (
@@ -380,14 +432,107 @@ export function ReviewVelocityBars({
 
   const visibleMonths = new Set(zoom.data.map((d) => d.period));
 
+  // The rating panel only draws when the mart computed a trailing share for at least one
+  // month (it is null only while trailing_reviews is 0); without it the labels stay on the
+  // bars' own band exactly as before.
+  const hasRating = points.some((p) => p.trailing_positive_share !== null);
+  const ratingAxis = ratingAxisFor(zoom.data);
+  // Plumb lines are drawn through BOTH panels; their labels live in whichever panel is on
+  // top, so a label is laid out once and the lower panel's lines are bare.
+  const plumbLines = (labelled: boolean) =>
+    [...labels].map(([month, label]) => (
+      <ReferenceLine
+        key={`ev-${month}`}
+        x={month}
+        stroke="var(--text-muted)"
+        strokeDasharray="2 5"
+        strokeOpacity={month === releaseMonth ? 0.9 : 0.5}
+        label={labelled ? plumbLabelProps(label, month === releaseMonth) : undefined}
+      />
+    ));
+  const ratingRow = (p: ReviewTimelinePoint): TooltipRow | null => {
+    if (p.trailing_positive_share === null || p.trailing_reviews === null) return null;
+    const positive = Math.round(p.trailing_positive_share * p.trailing_reviews);
+    return {
+      label: "Positive (trailing 3mo)",
+      // The share AND the fraction it came from, so a 100% on three reviews reads as such.
+      value: `${fmtPct(p.trailing_positive_share, 0)} · ${fmtCompact(positive)} of ${fmtCompact(p.trailing_reviews)}`,
+      color: CSS_VAR.demand,
+    };
+  };
+
   return (
     <div>
       <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
-        <ResponsiveContainer width="100%" height={VELOCITY_CHART_HEIGHT} onResize={plot.onResize}>
-          <BarChart data={zoom.data} margin={{ top: PLUMB_LABEL_BAND, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
+        {hasRating && (
+          <>
+            <div className="mb-0.5 flex items-center gap-1.5 text-[11px] text-ink-muted">
+              <span aria-hidden className="inline-block h-[2px] w-3" style={{ background: CSS_VAR.demand }} />
+              Positive rating — trailing 3-month share of reviews
+            </div>
+            <ResponsiveContainer width="100%" height={RATING_CHART_HEIGHT}>
+              <LineChart
+                data={zoom.data}
+                syncId={syncId}
+                margin={{ top: PLUMB_LABEL_BAND, right: 8, left: 0, bottom: RATING_FOOT }}
+                {...zoom.handlers}
+              >
+                <CartesianGrid stroke="var(--gridline)" vertical={false} />
+                {/* Hidden, but `band`-scaled like the bars' axis below so every month sits
+                    at the same x in both panels (a LineChart's category axis is a point
+                    scale by default, which would put the first month on the left edge
+                    while the first bar sits half a band in). */}
+                <XAxis dataKey="period" scale="band" hide />
+                <YAxis
+                  domain={ratingAxis.domain}
+                  ticks={ratingAxis.ticks}
+                  interval={0}
+                  tick={{ fontSize: 10 }}
+                  tickFormatter={(v: number) => fmtPct(v, ratingAxis.decimals)}
+                  tickLine={false}
+                  axisLine={false}
+                  width={40}
+                />
+                {plumbLines(true)}
+                {/* The bars' tooltip below carries every row for the month (the sync shows
+                    it for a hover here too); this panel keeps just the cursor line. */}
+                <Tooltip cursor={{ stroke: "var(--baseline)" }} content={() => null} />
+                <Line
+                  type="linear"
+                  dataKey="trailing_positive_share"
+                  stroke={CSS_VAR.demand}
+                  strokeWidth={1.5}
+                  dot={false}
+                  activeDot={{ r: 3, stroke: "var(--surface-1)", strokeWidth: 2 }}
+                  connectNulls
+                  isAnimationActive={false}
+                />
+                {zoom.selection && (
+                  <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />
+                )}
+              </LineChart>
+            </ResponsiveContainer>
+            <div className="mb-0.5 flex items-center gap-1.5 text-[11px] text-ink-muted">
+              <span aria-hidden className="inline-block h-2 w-3 rounded-[1px]" style={{ background: BAR_MUTED }} />
+              Reviews per month
+            </div>
+          </>
+        )}
+        <ResponsiveContainer
+          width="100%"
+          height={hasRating ? VELOCITY_BARS_HEIGHT : VELOCITY_CHART_HEIGHT}
+          onResize={plot.onResize}
+        >
+          <BarChart
+            data={zoom.data}
+            syncId={syncId}
+            margin={{ top: hasRating ? 4 : PLUMB_LABEL_BAND, right: 8, left: 0, bottom: 0 }}
+            {...zoom.handlers}
+          >
           <CartesianGrid stroke="var(--gridline)" vertical={false} />
           <XAxis
             dataKey="period"
+            scale="band"
             tick={{ fontSize: 10 }}
             interval="preserveStartEnd"
             minTickGap={24}
@@ -418,16 +563,7 @@ export function ReviewVelocityBars({
               }}
             />
           )}
-          {[...labels].map(([month, label]) => (
-            <ReferenceLine
-              key={`ev-${month}`}
-              x={month}
-              stroke="var(--text-muted)"
-              strokeDasharray="2 5"
-              strokeOpacity={month === releaseMonth ? 0.9 : 0.5}
-              label={plumbLabelProps(label, month === releaseMonth)}
-            />
-          ))}
+          {plumbLines(!hasRating)}
           <Tooltip
             cursor={{ fill: "var(--gridline)", opacity: 0.5 }}
             content={({ active, payload, label }) => {
@@ -441,6 +577,8 @@ export function ReviewVelocityBars({
                 },
                 { label: "Positive", value: fmtCompact(p.n_positive) },
               ];
+              const rating = ratingRow(p);
+              if (rating) rows.push(rating);
               const change = changeTooltipRow(reasons.get(String(label)));
               if (change) rows.push(change);
               for (const e of eventsByMonth.get(String(label)) ?? []) {

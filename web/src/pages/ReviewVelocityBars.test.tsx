@@ -95,3 +95,50 @@ describe("ReviewVelocityBars — labelled plumb lines", () => {
     expect(screen.getByText(/Highlighted: Jun 2026/)).toBeTruthy();
   });
 });
+
+/** The same months with a trailing 3-month positive share, so the rating panel draws. */
+const RATED: ReviewTimelinePoint[] = TIMELINE.map((p, i, all) => {
+  const win = all.slice(Math.max(0, i - 2), i + 1);
+  const n = win.reduce((s, q) => s + q.n_reviews, 0);
+  const pos = win.reduce((s, q) => s + q.n_positive, 0);
+  return { ...p, trailing_reviews: n, trailing_positive_share: pos / n };
+});
+
+describe("ReviewVelocityBars — rating panel over the bars", () => {
+  it("draws the rating line above the bars, labels once, and lines up the months in both panels", () => {
+    const { container } = render(<ReviewVelocityBars points={RATED} events={EVENTS} />, { wrapper: Page });
+
+    const charts = container.querySelectorAll(".recharts-wrapper");
+    expect(charts.length).toBe(2);
+    const [rating, bars] = Array.from(charts);
+    expect(rating.querySelector(".recharts-line")).toBeTruthy();
+    expect(bars.querySelector(".recharts-bar")).toBeTruthy();
+
+    // Every plumb line runs through both panels; only the top panel carries the labels.
+    const lineX = (root: Element) =>
+      Array.from(root.querySelectorAll(".recharts-reference-line line")).map((l) => l.getAttribute("x1"));
+    expect(lineX(rating).length).toBe(4);
+    expect(lineX(bars)).toEqual(lineX(rating));
+    expect(rating.querySelectorAll("text.plumb-label").length).toBe(4);
+    expect(bars.querySelectorAll("text.plumb-label").length).toBe(0);
+    for (const t of Array.from(rating.querySelectorAll("text.plumb-label"))) {
+      expect(baseline(t)).toBeGreaterThanOrEqual(9);
+      expect(baseline(t)).toBeLessThanOrEqual(PLUMB_LABEL_BAND);
+    }
+
+    // Both panels are named, and the rating axis is a padded % band, not 0-100%.
+    expect(screen.getByText(/Positive rating — trailing 3-month/)).toBeTruthy();
+    expect(screen.getByText(/Reviews per month/)).toBeTruthy();
+    const ticks = Array.from(rating.querySelectorAll(".recharts-yAxis .recharts-cartesian-axis-tick-value")).map(
+      (t) => t.textContent,
+    );
+    expect(ticks.length).toBeGreaterThan(0);
+    expect(ticks).not.toContain("0%");
+  });
+
+  it("keeps the labels on the bars when no month has a trailing share", () => {
+    const { container } = render(<ReviewVelocityBars points={TIMELINE} events={EVENTS} />, { wrapper: Page });
+    expect(container.querySelectorAll(".recharts-wrapper").length).toBe(1);
+    expect(container.querySelectorAll("text.plumb-label").length).toBe(4);
+  });
+});
