@@ -12,7 +12,7 @@
 --                                otherwise the game simply has no timeline (the chart hides).
 --                                cum_* columns kept for a future "total to date" read;
 --                                cum_positive_share is NOT charted (converges to a plateau —
---                                see ReviewsTimelineChart.tsx); trailing_positive_share is
+--                                see ReviewVelocityBars in GameProfile.tsx); trailing_positive_share is
 --                                the bounded window that can rise AND fall.
 --   mart_game_reviews_lang      per-game top languages — sample-based (a COMPOSITION, not a
 --                                time series; labeled as sampled downstream)

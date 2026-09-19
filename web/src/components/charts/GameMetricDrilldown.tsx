@@ -57,7 +57,7 @@ import { TooltipPanel } from "./TooltipPanel";
  * "Positive rating" is deliberately NOT one of these: the trends endpoint carries no
  * positive-share field, and the one place a genuine %-positive-over-time series exists
  * (mart_game_reviews_timeline's trailing_positive_share, GET /reviews-summary) is already a
- * full chart on this same page (the "Review timeline" card) — a drilldown here would just
+ * full chart on this same page (the rating panel of "Review velocity since launch") — a drilldown here would just
  * reopen that exact chart under a second name, so the card stays a plain (non-clickable) tile
  * rather than manufacture a redundant click target.
  *

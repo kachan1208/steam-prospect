@@ -18,7 +18,7 @@ import { TooltipPanel } from "./TooltipPanel";
 
 /**
  * Monthly press-mention volume — a single-tone count-per-period bar chart, the same
- * shape as the "reviews per month" half of ReviewsTimelineChart / the releases-per-year
+ * shape as the "reviews per month" half of ReviewVelocityBars / the releases-per-year
  * half of SaturationTrend. Same tone (CSS_VAR.competition, mono paper) as
  * PressBySourceChart: both charts slice the identical underlying metric (press
  * mentions), just by source vs. by month, so they should read as one measure, not two.

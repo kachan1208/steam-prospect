@@ -24,7 +24,6 @@ import { LaunchShapeBars } from "../components/charts/LaunchShapeBars";
 import { PressBySourceChart } from "../components/charts/PressBySourceChart";
 import { PressTimelineChart } from "../components/charts/PressTimelineChart";
 import { PriceHistoryChart } from "../components/charts/PriceHistoryChart";
-import { ReviewsTimelineChart } from "../components/charts/ReviewsTimelineChart";
 import { TooltipPanel, type TooltipRow } from "../components/charts/TooltipPanel";
 import { GameTrendsChart } from "../components/charts/GameTrendsChart";
 import { changeTooltipRow, PLUMB_LABEL_BAND, PLUMB_LEGEND_ROW_PX, PlumbLegendTick, plumbLabelProps, usePlotWidth } from "../components/charts/plumbLabels";
@@ -287,14 +286,14 @@ function EstimateRow({
 
 /**
  * "Review velocity since launch" (§4c main chart) — the mockup draws this as bars, not the
- * line ReviewsTimelineChart already renders elsewhere on this page ("Reviews per month").
- * Rebuilt locally on raw recharts primitives (rather than restyling ReviewsTimelineChart.tsx
- * in place, or extending TimingBars.tsx — both live under components/charts/*, owned by
- * another agent for this rebuild) so it can match the mockup's two-tone bar language exactly:
- * every bar muted BAR_MUTED, one bar lifted to full accent-300.
+ * line the since-removed ReviewsTimelineChart used to render further down this page.
+ * Rebuilt locally on raw recharts primitives (rather than restyling that chart in place, or
+ * extending TimingBars.tsx — both lived under components/charts/*, owned by another agent
+ * for this rebuild) so it can match the mockup's two-tone bar language exactly: every bar
+ * muted BAR_MUTED, one bar lifted to full accent-300.
  *
  * The mockup's data is illustrative WEEKLY bars; the real timeline this page has (from
- * useGameReviewsSummary, shared with ReviewsTimelineChart) is Steam's full-history MONTHLY
+ * useGameReviewsSummary) is Steam's full-history MONTHLY
  * review count — so the axis is labeled MONTHLY rather than copying a cadence we don't have.
  * The highlighted bar is the game's own highest-volume month (data-driven), standing in for
  * the mockup's arbitrary "highlight week" — not a fabricated sale event.
@@ -313,8 +312,9 @@ function EstimateRow({
  * render test.
  *
  * RATING PANEL (2026-09-19): "combine the velocity bars with the review-rating graph so
- * the change is easier to see." The trailing 3-month positive share (the same series
- * ReviewsTimelineChart draws on its own further down the page) now sits directly ABOVE
+ * the change is easier to see." The trailing 3-month positive share (the series the old
+ * "Review timeline" card drew on its own, until that card was removed as a duplicate the
+ * same day) now sits directly ABOVE
  * the bars as a second panel of the same figure: one month axis (the bars' XAxis, the
  * rating panel's hidden — both category axes are `band`-scaled so a month is the same
  * x in both), one drag-zoom range, the plumb lines drawn through both panels so a
@@ -322,9 +322,15 @@ function EstimateRow({
  * hover (recharts `syncId`) so a month highlighted in either panel highlights in both.
  * NOT a second y-scale on the bars: a dual-axis combo invites reading the two lines
  * against each other where they only share a date, so the rating keeps its own padded
- * %-axis (see ReviewsTimelineChart for why it is padded-to-data, not 0-100%) in its own
- * plot, stacked and aligned rather than overlaid. When the timeline carries no trailing
- * share at all the rating panel is skipped and the labels return to the bars' own band.
+ * %-axis in its own plot, stacked and aligned rather than overlaid. That axis is padded
+ * to the data, not 0-100%: most titles sit in a narrow band (say 70-95% positive) and a
+ * full-range axis squashes real movement into a sliver at the top — the "shows nothing"
+ * failure by another route; padding is symmetric, clamped to [0,1], and the ticks are real.
+ * And it is the TRAILING share, not cum_positive_share: an all-time cumulative ratio
+ * converges as the count grows and flattens into a plateau, while a bounded window can
+ * rise AND fall, so a bad patch or a review-bomb is visible instead of averaged away.
+ * When the timeline carries no trailing share at all the rating panel is skipped and the
+ * labels return to the bars' own band.
  */
 /** The mockup's 150px chart at its old 4px top margin; when the rating panel is on top
  * the labels move there and the bars keep a 4px seam instead of the band. */
@@ -1265,16 +1271,9 @@ export default function GameProfile() {
             plain-language reads only. */}
         {view === "detailed" && (
           <>
-            <BlueprintPanel
-              title="Review timeline"
-              subtitle="From the sampled reviews table (not Steam's full review count) — a recency-biased sample for older/popular titles"
-            >
-              {reviewsQ.isLoading && (
-                <Loading className="h-40 text-xs" />
-              )}
-              {reviewsQ.data && <ReviewsTimelineChart points={reviewsQ.data.timeline} appid={appid} />}
-            </BlueprintPanel>
-
+            {/* "Review timeline" (ReviewsTimelineChart: rating line + reviews-per-month bars)
+                used to open this Detailed stack; removed 2026-09-19 once "Review velocity
+                since launch" above carried both series — the same data twice on one page. */}
             <BlueprintPanel
               title="Momentum over time"
               subtitle="Monthly review velocity, live players, Twitch viewers, and creator mentions — the signals Prospect tracks over time (CCU/Twitch thicken as snapshots accumulate)"

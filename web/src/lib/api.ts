@@ -1254,7 +1254,7 @@ export interface GameEvent {
 }
 
 /** Shared options for the catalog-events overlay (GET /games/{appid}/events) — useGameEvents
- * and the chart-local overlays in GameTrendsChart / ReviewsTimelineChart all read through it,
+ * and the chart-local overlay in GameTrendsChart all read through it,
  * so however many charts on a page want the markers, react-query collapses them into one
  * network request under one queryKey. The contract is ADDITIVE: a stable miss (404/503)
  * resolves to [] so a chart without markers is complete, just less explained; transient
