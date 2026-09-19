@@ -42,7 +42,7 @@ import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 /**
  * Per-game momentum over time — the monthly signals Prospect collects
  * (mart_game_trends → GET /api/games/{appid}/trends), rendered as two single-axis
- * small multiples (the same dual-axis-avoidance move as ReviewsTimelineChart /
+ * small multiples (the same dual-axis-avoidance move as ReviewVelocityBars /
  * SaturationTrend): a bar for the dominant COUNT metric plus one overlaid LINE on a
  * secondary axis for the audience/attention gauge that rides alongside it, so the two
  * very different scales never fight for one y-axis. Color is mono steel (lib/palette.ts).
