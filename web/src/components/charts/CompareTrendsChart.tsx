@@ -20,8 +20,8 @@ import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 /**
  * Compare-page trends overlay: monthly sampled-review velocity, one line per compared
  * game. Fetched as ONE request — game 1 is the primary and the rest ride the trends
- * endpoint's ?comps= overlay (GET /api/games/{appid}/trends?comps=…). GameTrendsChart
- * doesn't speak `comps` (it draws a single game's two-panel small multiples), so this is
+ * endpoint's ?comps= overlay (GET /api/games/{appid}/trends?comps=…). The single-game
+ * trends chart never spoke `comps` (and is gone since 2026-09-19), so this is
  * a purpose-built multi-series line using the house chart tokens: gridline/baseline vars,
  * TooltipPanel, neutral-ink legend labels with color only on the marks.
  *
@@ -36,7 +36,7 @@ import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
  * carry identity where luminance cannot — so the chart also survives greyscale.
  *
  * Review velocity is the only series deep enough to compare across months today (CCU/
- * player snapshots are typically a single current month — see GameTrendsChart's caveat),
+ * player snapshots are typically a single current month),
  * which is why this chart draws n_reviews only. Months before a game existed are gaps
  * (connectNulls off), not zeros.
  */

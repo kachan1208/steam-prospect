@@ -1,6 +1,6 @@
 /**
- * Legend swatches shared by the chart files (moved out of GameTrendsChart.tsx once a second
- * chart needed them). Design handoff: "Legend swatches 14×2px".
+ * Legend swatches shared by the chart files (moved out of the since-removed GameTrendsChart
+ * once a second chart needed them). Design handoff: "Legend swatches 14×2px".
  */
 
 /** 14x2px line-key swatch — a thin bar reads fine as a generic swatch for either a bar or a
