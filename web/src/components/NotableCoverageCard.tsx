@@ -12,7 +12,7 @@ function dateOnly(s: string | null): string {
 }
 
 /**
- * Card-header tone chip — the same press_pos_share/n_scored_articles the "Press footprint"
+ * Card-header tone chip — the same press_pos_share/n_scored_articles the "Press & attention"
  * card's tone bar uses, just condensed to one line. Returns null when nothing was scored (no
  * chip rendered) rather than a misleading "0% positive".
  *
