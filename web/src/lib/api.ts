@@ -1254,7 +1254,7 @@ export interface GameEvent {
 }
 
 /** Shared options for the catalog-events overlay (GET /games/{appid}/events) — useGameEvents
- * and the chart-local overlay in GameTrendsChart all read through it,
+ * and any chart-local overlay read through it,
  * so however many charts on a page want the markers, react-query collapses them into one
  * network request under one queryKey. The contract is ADDITIVE: a stable miss (404/503)
  * resolves to [] so a chart without markers is complete, just less explained; transient
@@ -1446,7 +1446,7 @@ export function useGameChannelMix(appid: number | null) {
 
 // ---- game trends (+ compare overlay) ----------------------------------------------------
 // Mirrors api/app/routers/trends.py. This is the CANONICAL response shape: the chart
-// components (GameTrendsChart, GameMetricDrilldown) all fetch through
+// components (GameMetricDrilldown; GameTrendsChart until 2026-09-19) fetch through
 // gameTrendsQueryOptions below, and the /compare page uses useGameTrendsWithComps, which
 // needs the `comps` block (each comp's own monthly series).
 export interface GameTrendPoint {
@@ -1474,10 +1474,11 @@ export interface GameTrendsResponse {
   comps: GameTrendsComps | null;
 }
 
-/** Shared query options for the base trends endpoint (no comps) — GameTrendsChart's
- * self-fetching mode and GameMetricDrilldown BOTH read through this one factory, so the
- * matching queryKeys are guaranteed by construction (they used to be rebuilt in each
- * component and match only by convention) and one cached response serves both. */
+/** Shared query options for the base trends endpoint (no comps) — every reader goes
+ * through this one factory so matching queryKeys are guaranteed by construction (they used
+ * to be rebuilt in each component and match only by convention) and one cached response
+ * serves all of them. GameMetricDrilldown is the only reader since GameTrendsChart's
+ * removal (2026-09-19). */
 export function gameTrendsQueryOptions(appid: number) {
   return {
     queryKey: ["game-trends", appid] as const,
@@ -1545,7 +1546,8 @@ export function gamePlayersQueryOptions(appid: number) {
   };
 }
 
-// ---- marketing events (the org's own marketing log — GameTrendsChart annotations) -------
+// ---- marketing events (the org's own marketing log — chart annotations; no chart reads
+// them since GameTrendsChart's removal on 2026-09-19, kept for the next overlay) ----------
 export interface MarketingEvent {
   id: number;
   appid: number;

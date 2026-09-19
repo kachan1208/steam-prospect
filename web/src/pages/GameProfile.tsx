@@ -24,7 +24,6 @@ import { PressBySourceChart } from "../components/charts/PressBySourceChart";
 import { PressTimelineChart } from "../components/charts/PressTimelineChart";
 import { PriceHistoryChart } from "../components/charts/PriceHistoryChart";
 import { TooltipPanel, type TooltipRow } from "../components/charts/TooltipPanel";
-import { GameTrendsChart } from "../components/charts/GameTrendsChart";
 import { changeTooltipRow, PLUMB_LABEL_BAND, PLUMB_LEGEND_ROW_PX, PlumbLegendTick, plumbLabelProps, usePlotWidth } from "../components/charts/plumbLabels";
 import { NotableCoverageCard } from "../components/NotableCoverageCard";
 import { Badge } from "../components/ui/Badge";
@@ -1237,17 +1236,14 @@ export default function GameProfile() {
             plain-language reads only. */}
         {view === "detailed" && (
           <>
-            {/* "Review timeline" (ReviewsTimelineChart: rating line + reviews-per-month bars)
-                used to open this Detailed stack; removed 2026-09-19 once "Review velocity
-                since launch" above carried both series — the same data twice on one page. */}
-            <BlueprintPanel
-              title="Momentum over time"
-              subtitle="Sampled reviews per month against average live players, with your own marketing events and catalog events marked — the player line thickens as nightly snapshots accumulate"
-            >
-              <GameTrendsChart appid={profile.appid} />
-            </BlueprintPanel>
+            {/* Two cards used to open this Detailed stack, both removed 2026-09-19 at the
+                user's call: "Review timeline" (ReviewsTimelineChart: rating line + reviews-
+                per-month bars) once "Review velocity since launch" above carried both series,
+                and "Momentum over time" (GameTrendsChart: sampled reviews + avg live players
+                with catalog/marketing event markers) as one lifetime chart too many. The
+                trends endpoint and its query factory stay: GameMetricDrilldown reads them. */}
 
-            {/* Genre-level benchmark card sits AFTER the game's own timeline/momentum — a game
+            {/* Genre-level benchmark card sits AFTER the game's own timeline — a game
                 profile should lead with the game's own story, then the genre yardstick. */}
             <BlueprintPanel
               title="Launch shape — front-loaded vs. slow-burn"

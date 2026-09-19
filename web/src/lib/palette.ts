@@ -49,8 +49,8 @@ import type { Theme } from "./theme";
  * This never collides: no chart plots demand AND quality_gap as two marks needing to be
  * told apart (they're always separate single-series charts, or — in OpportunityBars —
  * intentionally the same color because they share the same polarity), and every chart
- * that plots demand/qualityGap concurrently WITH competition (GameTrendsChart panel 1,
- * GameMetricDrilldown's avg/peak players, TimingBars' congestion chart) keeps its two
+ * that plots demand/qualityGap concurrently WITH competition (GameMetricDrilldown's
+ * avg/peak players, TimingBars' congestion chart) keeps its two
  * series distinguishable because paper-alpha and accent-300 are never the same value.
  *
  * MONO below is the shared vocabulary so every chart file draws the same "receded" tone

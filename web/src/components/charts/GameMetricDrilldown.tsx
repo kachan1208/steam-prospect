@@ -36,10 +36,10 @@ import { TooltipPanel } from "./TooltipPanel";
  * Click-through drilldown for the Game Profile stat row: GameProfile.tsx keeps "which card is
  * selected" as its own state and renders this underneath the grid, passing the metric key plus
  * the handful of `profile` fields each derivation needs. This self-fetches
- * GET /api/games/{appid}/trends under the SAME react-query key GameTrendsChart uses
- * (["game-trends", appid]) so the two components share one cached response instead of issuing
- * a second request — this drilldown can be opened from either profile tab (the stat row sits
- * above both), while GameTrendsChart's own "Momentum over time" card only mounts on Overview.
+ * GET /api/games/{appid}/trends through the shared query factory (["game-trends", appid]);
+ * it is the profile page's only reader of that endpoint since the "Momentum over time"
+ * card (GameTrendsChart) was removed on 2026-09-19. The drilldown can be opened from either
+ * profile tab (the stat row sits above both).
  *
  * Four of the five stat cards open here (see DrilldownMetric) — each derived client-side from
  * the trends endpoint's monthly `points`, per its docstring caveats:
@@ -147,7 +147,7 @@ function EmptyNote({ children }: { children: ReactNode }) {
 
 /** Shared "cumulative growth curve (filled area) + monthly bars" pair for reviews/owners/
  * revenue — two true single-axis small multiples (own scale each), the same
- * dual-axis-avoidance convention as GameTrendsChart/SaturationTrend, rather than one combo
+ * dual-axis-avoidance convention as SaturationTrend, rather than one combo
  * chart: a cumulative total and its own monthly delta share a unit but not a legible scale
  * (the delta flattens to a sliver next to a large running total). The flat-opacity area fill
  * (no gradient — matches BuzzSparkline's existing fill idiom, just at full chart size) reads
@@ -643,8 +643,8 @@ export function GameMetricDrilldown({
   profile: DrilldownProfile;
   ownersPerReview: OwnersPerReview | null;
 }) {
-  // Shared factories from lib/api.ts — the trends query shares its cache entry with
-  // GameTrendsChart's self-fetch by construction (one request for both components).
+  // Shared factories from lib/api.ts — one query key for the trends endpoint, so any other
+  // reader on the page shares this cache entry by construction.
   const trendsQuery = useQuery({
     ...gameTrendsQueryOptions(appid),
     enabled: Number.isFinite(appid),

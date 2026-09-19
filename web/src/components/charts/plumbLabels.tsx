@@ -1,7 +1,7 @@
 /**
  * The chart-side half of the plumb-line labels (the selection, wording and layout are pure,
- * in lib/notable.ts). Two charts draw the same dotted markers — ReviewVelocityBars,
- * GameTrendsChart — and this is what keeps their labels one treatment:
+ * in lib/notable.ts). ReviewVelocityBars draws the dotted markers (GameTrendsChart did too,
+ * until 2026-09-19) and this is what keeps the labels one treatment:
  * the band above the plot they are drawn in, the Recharts label props that put a label in
  * its row, the plot-width measurement the collision layout needs, the tooltip row and the
  * legend entry.

@@ -1,5 +1,6 @@
 /** Which months on a monthly review chart get a PLUMB LINE, WHY, and what the line says —
- * the one shared gate both review charts (ReviewVelocityBars, GameTrendsChart) run their event/anomaly markers through. Tooltips are NOT gated: every
+ * the one shared gate the review chart (ReviewVelocityBars) runs its event/anomaly markers
+ * through. Tooltips are NOT gated: every
  * hovered month still lists its events; only the drawn lines are selected here.
  *
  * Why this exists — two failure modes bracket the design:

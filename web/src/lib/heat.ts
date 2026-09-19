@@ -126,7 +126,7 @@ export function heatDomain<T>(rows: T[], pick: (row: T) => number | null | undef
  * handoff's sense (README, Interactions: "Up = accent-300, down/flat = paper 55%. Never
  * red/green — the palette is mono steel"), so it no longer reaches for the red/green
  * text-verdict-good/text-verdict-serious classes (those stay reserved for actual error
- * states — see e.g. GameTrendsChart's "failed to load" message). A standout ratio (>=80%)
+ * states — a chart's "failed to load" message, say). A standout ratio (>=80%)
  * reads accent-300; a weak one (<70%) recedes to muted ink, exactly like a down/flat
  * trend arrow; the middle band stays neutral ink, unstyled.
  *
