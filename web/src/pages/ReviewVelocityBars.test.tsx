@@ -104,41 +104,38 @@ const RATED: ReviewTimelinePoint[] = TIMELINE.map((p, i, all) => {
   return { ...p, trailing_reviews: n, trailing_positive_share: pos / n };
 });
 
-describe("ReviewVelocityBars — rating panel over the bars", () => {
-  it("draws the rating line above the bars, labels once, and lines up the months in both panels", () => {
+describe("ReviewVelocityBars — rating line on the right axis", () => {
+  it("draws the rating line over the bars against its own right-hand %-axis", () => {
     const { container } = render(<ReviewVelocityBars points={RATED} events={EVENTS} />, { wrapper: Page });
 
-    const charts = container.querySelectorAll(".recharts-wrapper");
-    expect(charts.length).toBe(2);
-    const [rating, bars] = Array.from(charts);
-    expect(rating.querySelector(".recharts-line")).toBeTruthy();
-    expect(bars.querySelector(".recharts-bar")).toBeTruthy();
+    // One plot, two marks — not a second chart.
+    expect(container.querySelectorAll(".recharts-wrapper").length).toBe(1);
+    expect(container.querySelector(".recharts-line")).toBeTruthy();
+    expect(container.querySelector(".recharts-bar")).toBeTruthy();
+    expect(container.querySelectorAll(".recharts-reference-line").length).toBe(4);
+    expect(container.querySelectorAll("text.plumb-label").length).toBe(4);
 
-    // Every plumb line runs through both panels; only the top panel carries the labels.
-    const lineX = (root: Element) =>
-      Array.from(root.querySelectorAll(".recharts-reference-line line")).map((l) => l.getAttribute("x1"));
-    expect(lineX(rating).length).toBe(4);
-    expect(lineX(bars)).toEqual(lineX(rating));
-    expect(rating.querySelectorAll("text.plumb-label").length).toBe(4);
-    expect(bars.querySelectorAll("text.plumb-label").length).toBe(0);
-    for (const t of Array.from(rating.querySelectorAll("text.plumb-label"))) {
-      expect(baseline(t)).toBeGreaterThanOrEqual(9);
-      expect(baseline(t)).toBeLessThanOrEqual(PLUMB_LABEL_BAND);
-    }
+    // Left axis counts, right axis is a padded % band (never 0-100%).
+    const axes = container.querySelectorAll(".recharts-yAxis");
+    expect(axes.length).toBe(2);
+    const ticksOf = (ax: Element) =>
+      Array.from(ax.querySelectorAll(".recharts-cartesian-axis-tick-value")).map((t) => t.textContent);
+    const [left, right] = Array.from(axes).map(ticksOf);
+    expect(left[0]).toBe("0");
+    expect(right.every((t) => t?.endsWith("%"))).toBe(true);
+    // The fixture sits at ~90% positive: the axis pads ±5% around the data (84/90/96), not 0-100.
+    expect(right).toEqual(["84%", "90%", "96%"]);
 
-    // Both panels are named, and the rating axis is a padded % band, not 0-100%.
-    expect(screen.getByText(/Positive rating — trailing 3-month/)).toBeTruthy();
-    expect(screen.getByText(/Reviews per month/)).toBeTruthy();
-    const ticks = Array.from(rating.querySelectorAll(".recharts-yAxis .recharts-cartesian-axis-tick-value")).map(
-      (t) => t.textContent,
-    );
-    expect(ticks.length).toBeGreaterThan(0);
-    expect(ticks).not.toContain("0%");
+    // Both series named, with the axis each reads against.
+    expect(screen.getByText(/Reviews per month \(left axis\)/)).toBeTruthy();
+    expect(screen.getByText(/Positive rating, trailing 3-month share \(right axis\)/)).toBeTruthy();
   });
 
-  it("keeps the labels on the bars when no month has a trailing share", () => {
+  it("draws bars only, with no right axis, when no month has a trailing share", () => {
     const { container } = render(<ReviewVelocityBars points={TIMELINE} events={EVENTS} />, { wrapper: Page });
-    expect(container.querySelectorAll(".recharts-wrapper").length).toBe(1);
+    expect(container.querySelector(".recharts-line")).toBeNull();
+    expect(container.querySelectorAll(".recharts-yAxis").length).toBe(1);
     expect(container.querySelectorAll("text.plumb-label").length).toBe(4);
+    expect(screen.queryByText(/right axis/)).toBeNull();
   });
 });
