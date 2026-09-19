@@ -1291,23 +1291,10 @@ export default function GameProfile() {
               )}
             </BlueprintPanel>
 
-            {/* Genre-level like Launch shape above: the channel mix is a property of the genre
-                (per-game channel data is too sparse), so it sits with the genre yardsticks. Hidden
-                entirely (no empty card) when the genre has no channel rows or the mart predates
-                the channel-mix ETL — same pattern as NotableCoverageCard below. */}
-            {channelMixQ.data && channelMixQ.data.channels.length > 0 && (
-              <BlueprintPanel
-                title="Where this genre gets attention"
-                subtitle={`Marketing-channel mix for ${channelMixQ.data.genre} — each channel's share of tracked coverage (press articles + YouTube/Reddit/Twitch/X creator mentions), a genre-level read, not this game's own footprint`}
-              >
-                <ChannelShareBars channels={channelMixQ.data.channels} />
-                <p className="mt-3 text-[11px] italic text-ink-muted">
-                  One press article = one creator mention = one unit of volume. Hover a channel for its audience-weighted
-                  share — that read skews almost entirely toward big-subscriber channels, since a creator mention counts
-                  their whole audience while a press article counts 1.
-                </p>
-              </BlueprintPanel>
-            )}
+            {/* "Where this genre gets attention" (the genre channel mix) used to sit here with
+                the genre yardsticks; since 2026-09-19 it is the second half of the "Press &
+                attention" card below, next to this game's own press footprint — the two
+                marketing reads belong on one screen. */}
 
             <BlueprintPanel title="Language split" subtitle="Share of sampled reviews by language — a localization reference">
               {reviewsQ.isLoading && (
@@ -1432,20 +1419,29 @@ export default function GameProfile() {
                 )}
               </BlueprintPanel>
 
+        {/* One card for both marketing reads (2026-09-19, user request): this game's own press
+            footprint first, then where its GENRE gets attention as the yardstick — the same
+            "the game's story, then the genre" order the rest of the page follows. The channel
+            mix is genre-level because per-game channel data is too sparse; its half is hidden
+            (no empty section) when the genre has no channel rows or the mart predates the
+            channel-mix ETL — same pattern as NotableCoverageCard below. */}
         <BlueprintPanel
-          title="Press footprint"
-          subtitle={
-              teardownQ.data && teardownQ.data.press.total_mentions > 0
-                ? `${fmtInt(teardownQ.data.press.total_mentions)} filtered mentions across ${teardownQ.data.press.n_sources} outlet${
-                    teardownQ.data.press.n_sources === 1 ? "" : "s"
-                  }${
-                    teardownQ.data.press.first_seen
-                      ? ` · ${dateOnly(teardownQ.data.press.first_seen)} – ${dateOnly(teardownQ.data.press.last_seen)}`
-                      : ""
-                  } · journalist coverage only (Steam News excluded)`
-                : undefined
-            }
-          >
+          title="Press & attention"
+          subtitle="This game's journalist coverage, then the marketing channels its genre's attention comes from"
+        >
+            <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+              <div className="kicker text-[11px] text-ink-secondary">This game's press footprint</div>
+              {teardownQ.data && teardownQ.data.press.total_mentions > 0 && (
+                <div className="text-[11px] text-ink-muted">
+                  {fmtInt(teardownQ.data.press.total_mentions)} filtered mentions across {teardownQ.data.press.n_sources} outlet
+                  {teardownQ.data.press.n_sources === 1 ? "" : "s"}
+                  {teardownQ.data.press.first_seen
+                    ? ` · ${dateOnly(teardownQ.data.press.first_seen)} – ${dateOnly(teardownQ.data.press.last_seen)}`
+                    : ""}
+                  {" "}· journalist coverage only (Steam News excluded)
+                </div>
+              )}
+            </div>
             {teardownQ.isLoading && (
               <Loading className="h-32 text-xs" />
             )}
@@ -1512,6 +1508,22 @@ export default function GameProfile() {
                   </div>
                 </div>
               </>
+            )}
+
+            {channelMixQ.data && channelMixQ.data.channels.length > 0 && (
+              <div className="mt-5 border-t border-chartborder pt-4">
+                <div className="kicker text-[11px] text-ink-secondary">Where this genre gets attention</div>
+                <div className="mb-3 mt-0.5 text-[11px] text-ink-muted">
+                  Marketing-channel mix for {channelMixQ.data.genre} — each channel's share of tracked coverage (press
+                  articles + YouTube/Reddit/Twitch/X creator mentions), a genre-level read, not this game's own footprint
+                </div>
+                <ChannelShareBars channels={channelMixQ.data.channels} />
+                <p className="mt-3 text-[11px] italic text-ink-muted">
+                  One press article = one creator mention = one unit of volume. Hover a channel for its audience-weighted
+                  share — that read skews almost entirely toward big-subscriber channels, since a creator mention counts
+                  their whole audience while a press article counts 1.
+                </p>
+              </div>
             )}
           </BlueprintPanel>
 
