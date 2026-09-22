@@ -83,7 +83,7 @@ def _market_benchmarks() -> MarketBenchmarks:
     meta = {r["key"]: r["value"] for r in analytics_db.query("SELECT key, value FROM mart_meta")}
     boxleiter = analytics_db.query(
         "SELECT genre, n, owners_per_review_median, owners_per_review_p25, "
-        "owners_per_review_p75, slope, intercept FROM mart_market_boxleiter ORDER BY n DESC"
+        "owners_per_review_p75, slope, intercept FROM mart_market_boxleiter ORDER BY n DESC, genre"
     )
     tiers = analytics_db.query(
         "SELECT tier, tier_order, count, pct FROM mart_market_tiers ORDER BY tier_order"

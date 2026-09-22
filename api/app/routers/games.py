@@ -5,7 +5,7 @@ from typing import Literal
 import duckdb
 from fastapi import APIRouter, HTTPException, Query
 
-from .. import analytics_db, signals_db
+from .. import analytics_db, paging, signals_db
 from ..schemas import (
     AspectReviewExcerpt,
     AspectReviewsResponse,
@@ -311,9 +311,13 @@ def search_games(
     where_sql = "WHERE " + " AND ".join(where)
 
     total = analytics_db.scalar(f"SELECT COUNT(*) FROM mart_game {where_sql}", params)
+    # appid closes the order: without it tied rows (a whole release DATE, a price point)
+    # came back in a different order per request and paging duplicated/skipped games.
+    order_sql = paging.order_by(
+        f"{sort} {order.upper()} NULLS LAST", "total_reviews DESC", unique=("appid",)
+    )
     rows = analytics_db.query(
-        f"SELECT {_search_cols()} FROM mart_game {where_sql} "
-        f"ORDER BY {sort} {order.upper()} NULLS LAST, total_reviews DESC LIMIT ? OFFSET ?",
+        f"SELECT {_search_cols()} FROM mart_game {where_sql} {order_sql} LIMIT ? OFFSET ?",
         params + [limit, offset],
     )
     return GameSearchList(
@@ -417,7 +421,7 @@ def game_comparables(
             n_shared * 1.0 / (len_sum - n_shared) AS jaccard
         FROM scored
         WHERE len_sum - n_shared > 0
-        ORDER BY jaccard DESC, total_reviews DESC
+        ORDER BY jaccard DESC, total_reviews DESC, appid ASC
         LIMIT ?
         """,
         [appid, lo, hi, min_reviews, limit],
@@ -460,7 +464,8 @@ def reviews_summary(appid: int) -> GameReviewsSummary:
         [appid],
     )
     lang = analytics_db.query(
-        "SELECT language, n, share FROM mart_game_reviews_lang WHERE appid = ? ORDER BY n DESC",
+        "SELECT language, n, share FROM mart_game_reviews_lang WHERE appid = ? "
+        "ORDER BY n DESC, language",
         [appid],
     )
     playtime = analytics_db.query(
@@ -497,7 +502,7 @@ def game_events(appid: int) -> GameEventList:
     try:
         rows = analytics_db.query(
             "SELECT CAST(event_date AS VARCHAR) AS event_date, kind, title, url "
-            "FROM mart_game_event WHERE appid = ? ORDER BY event_date",
+            "FROM mart_game_event WHERE appid = ? ORDER BY event_date, kind, title",
             [appid],
         )
     except duckdb.CatalogException:
@@ -561,7 +566,7 @@ def game_teardown(appid: int) -> GameTeardown:
         LEFT JOIN mart_genre_aspect_baseline gb ON gb.genre = ? AND gb.aspect = a.aspect
         LEFT JOIN mart_genre_aspect_baseline ab ON ab.genre = '__all__' AND ab.aspect = a.aspect
         WHERE a.appid = ?
-        ORDER BY a.total_mentions DESC
+        ORDER BY a.total_mentions DESC, a.aspect
         """,
         [game["primary_genre"], appid],
     )
@@ -575,7 +580,8 @@ def game_teardown(appid: int) -> GameTeardown:
         [appid],
     )
     by_source = analytics_db.query(
-        "SELECT source, n_mentions FROM mart_game_press_by_source WHERE appid = ? ORDER BY n_mentions DESC",
+        "SELECT source, n_mentions FROM mart_game_press_by_source WHERE appid = ? "
+        "ORDER BY n_mentions DESC, source",
         [appid],
     )
     timeline = analytics_db.query(
@@ -585,7 +591,7 @@ def game_teardown(appid: int) -> GameTeardown:
     notable = analytics_db.query(
         "SELECT source, title, author, published_at, match_confidence, is_earliest, "
         "url, sentiment_compound, sentiment "
-        "FROM mart_game_press_notable WHERE appid = ? ORDER BY published_at",
+        "FROM mart_game_press_notable WHERE appid = ? ORDER BY published_at, source, title",
         [appid],
     )
 
@@ -721,7 +727,7 @@ def game_aspect_reviews(
         SELECT excerpt, matched_keywords, votes_up, playtime_minutes, date, language{extra_cols}
         FROM mart_game_aspect_reviews
         WHERE appid = ? AND aspect = ? AND sentiment = ?
-        ORDER BY votes_up DESC NULLS LAST
+        ORDER BY votes_up DESC NULLS LAST, date DESC NULLS LAST, excerpt
         LIMIT ?
         """,
         [appid, aspect, sentiment, limit],
@@ -765,7 +771,7 @@ def game_channel_mix(appid: int) -> GameChannelMix:
             rows = analytics_db.query(
                 "SELECT channel, n_mentions, reach_weighted, share_mentions, "
                 "share_reach_weighted FROM mart_channel_mix WHERE genre = ? "
-                "ORDER BY share_reach_weighted DESC NULLS LAST",
+                "ORDER BY share_reach_weighted DESC NULLS LAST, channel",
                 [genre],
             )
         except duckdb.CatalogException:

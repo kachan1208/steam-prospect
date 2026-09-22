@@ -38,7 +38,7 @@ import io
 import duckdb
 from fastapi import APIRouter, HTTPException, Query, Response
 
-from .. import analytics_db
+from .. import analytics_db, paging
 from ..schemas import (
     HistBucket,
     NicheCombined,
@@ -404,7 +404,11 @@ def _bucket_filters(
 def _order_by(sort: str, order: str) -> str:
     # appid tiebreak keeps paging stable across requests when the sort key ties (it does a
     # lot: whole niches share one price point, and release_year is coarse).
-    return f"ORDER BY {_GAME_SORT[sort]} {order.upper()} NULLS LAST, g.appid ASC"
+    return paging.order_by(f"{_GAME_SORT[sort]} {order.upper()} NULLS LAST", unique=("g.appid",))
+
+
+# A mart_niche row is one (dimension, key, win, min_reviews) cut — the list's unique key.
+_NICHE_KEY = ("dimension", "key", "win", "min_reviews")
 
 
 def _cols() -> list[str]:
@@ -435,10 +439,12 @@ def _row_to_niche(r: dict) -> NicheRow:
 def _niche_query(
     where: str, params: list, sort: str, order: str, limit: int, offset: int | None
 ) -> list[dict]:
-    sql = (
-        f"SELECT {', '.join(_cols())} FROM mart_niche {where} "
-        f"ORDER BY {sort} {order.upper()} NULLS LAST, n_games DESC LIMIT ?"
+    # n_games DESC alone left ties (two niches of 41 games under sort=n_games paged one of
+    # them twice on the real mart); the cut's own key closes the order.
+    order_sql = paging.order_by(
+        f"{sort} {order.upper()} NULLS LAST", "n_games DESC", unique=_NICHE_KEY
     )
+    sql = f"SELECT {', '.join(_cols())} FROM mart_niche {where} {order_sql} LIMIT ?"
     params = params + [limit]
     if offset is not None:
         sql += " OFFSET ?"
@@ -1001,7 +1007,7 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
     themes = analytics_db.query(
         "SELECT aspect, n_games, total_mentions, praise_share, complaint_share, "
         "praise_delta_vs_catalog FROM mart_niche_themes "
-        "WHERE dimension = ? AND key = ? ORDER BY total_mentions DESC LIMIT 10",
+        "WHERE dimension = ? AND key = ? ORDER BY total_mentions DESC, aspect LIMIT 10",
         [dimension, key],
     )
 

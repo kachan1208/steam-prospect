@@ -22,7 +22,7 @@ import duckdb
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from .. import analytics_db
+from .. import analytics_db, paging
 
 router = APIRouter(prefix="/api/entities", tags=["entities"])
 
@@ -222,10 +222,17 @@ def search_entities(
     # ONE pass over mart_entity instead of a COUNT(*) scan followed by a second scan for the
     # rows. The window is evaluated after WHERE and before ORDER BY/LIMIT, so it counts the
     # whole match set, not the page.
+    # (role, name) is mart_entity's unique key: `name ASC` alone still tied a developer and
+    # a publisher of the same name (same revenue, same game count) when role isn't filtered.
+    order_sql = paging.order_by(
+        f"{_SORT_SQL[sort]} {_ORDER_SQL[order]} NULLS LAST",
+        "total_rev DESC NULLS LAST",
+        "n_games DESC",
+        unique=("name", "role"),
+    )
     rows = _q(
         f"SELECT {_search_cols()}, COUNT(*) OVER () AS total_n FROM mart_entity {where_sql} "
-        f"ORDER BY {_SORT_SQL[sort]} {_ORDER_SQL[order]} NULLS LAST, "
-        "total_rev DESC NULLS LAST, n_games DESC, name ASC LIMIT ? OFFSET ?",
+        f"{order_sql} LIMIT ? OFFSET ?",
         params + [limit, offset],
     )
     if rows:
@@ -255,7 +262,7 @@ def entity_profile(
         # "did you mean" links instead of a dead end.
         suggestions = _q(
             "SELECT name FROM mart_entity WHERE role = ? AND name ILIKE ? "
-            "ORDER BY total_rev DESC NULLS LAST, n_games DESC LIMIT 5",
+            "ORDER BY total_rev DESC NULLS LAST, n_games DESC, name LIMIT 5",
             [role, f"%{name}%"],
         )
         raise HTTPException(
