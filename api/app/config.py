@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # app -> api -> prospect
@@ -48,13 +48,26 @@ class Settings(BaseSettings):
 
     # Live collector signals SQLite file (api/app/signals_db.py) — read at query time, so
     # an absent file degrades per request. Env var name unchanged (PROSPECT_SIGNALS_DB).
-    signals_db: str = "/app/data/signals.db"
+    # Default: signals.db in the SAME data dir as the analytics DB (see
+    # _default_signals_db). It used to be the container-only "/app/data/signals.db" while
+    # every other default here is repo-relative, so a non-container run silently served
+    # empty price history. In the container (PROSPECT_ANALYTICS_DB_PATH=/app/data/
+    # current.duckdb) the derived path is that same /app/data/signals.db.
+    signals_db: str | None = None
 
     cors_origins: list[str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:4173",
     ]
+
+    @model_validator(mode="after")
+    def _default_signals_db(self) -> "Settings":
+        if not self.signals_db:
+            # The directory of the analytics DB path AS GIVEN (current.duckdb is a symlink
+            # into the data dir; resolving it would change nothing but can fail).
+            self.signals_db = str(Path(self.analytics_db_path).parent / "signals.db")
+        return self
 
     @field_validator("cors_origins")
     @classmethod

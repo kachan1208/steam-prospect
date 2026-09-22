@@ -102,6 +102,8 @@ npm run preview    # serve the built bundle locally
 - If the mart is missing, empty or unreadable the API still starts: data
   endpoints answer 503 and `/api/health` says `degraded`, with the reason in
   `detail`. It picks the mart up on its own once a usable one is published.
+- Price history reads `signals.db` from the same directory as the analytics DB
+  unless `PROSPECT_SIGNALS_DB` says otherwise.
 - API tests: `cd api && uv pip install -r requirements.lock -r requirements-dev.txt`,
   then `python -m pytest tests/` (a synthetic mart is built on the fly; no
   `data/` needed).
