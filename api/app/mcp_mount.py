@@ -146,8 +146,10 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
         # contract still holds now that prospect_mcp's capability probes are all lazy:
         # nothing else queries the DB before a tool is called, so a mart-less or
         # half-built current.duckdb (the failed / OOM-killed nightly ETL) would import
-        # fine, mount /mcp, advertise all 25 tools, and then raise raw CatalogException
+        # fine, mount /mcp, advertise every tool, and then raise raw CatalogException
         # inside every connected Claude client — with no startup line saying so.
+        # (Later mart swaps are prospect_mcp's own business: it re-stats DB_PATH at most
+        # every RELOAD_CHECK_S and reopens on a retarget, so this check runs once.)
         missing = module.missing_core_marts()
         if missing:
             print(
@@ -160,7 +162,9 @@ def load_prospect_mcp() -> tuple[Any | None, Any | None]:
 
         server = module.mcp
         # Stateless: each request is independent — right for many unrelated Claude clients
-        # hitting one instance. Inner route at "/" so, mounted at "/mcp", the endpoint is /mcp.
+        # hitting one instance. Inner route at "/" so, mounted at "/mcp", the SDK endpoint
+        # is "/mcp/" (Starlette's Mount matches only the prefix + "/"); a bare "/mcp" is
+        # not served by this app itself — main.py redirects it to "/mcp/".
         server.settings.stateless_http = True
         server.settings.streamable_http_path = "/"
         # The SDK's DNS-rebinding guard defaults to localhost-only Host/Origin and 421s every
