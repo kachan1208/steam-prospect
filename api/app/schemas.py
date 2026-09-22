@@ -99,7 +99,11 @@ class CitedBenchmarks(BaseModel):
     first_week_to_first_year_mult: float
     steam_revenue_share_to_dev: float
     dev_tiers: list[dict]  # {label, min_copies, max_copies|None, revenue_anchor_usd}
+    # opportunity_v2's blend weights {momentum, market_pull, revenue_spread, quality_gap} —
+    # the live score's (these were the retired v1 `opportunity` weights until 2026-09).
+    # Weights alone are not the score: read opportunity_formula.
     opportunity_weights: dict[str, float]
+    opportunity_formula: str
     revenue_benchmark_marks: list[BenchmarkMark]
 
 
@@ -115,6 +119,10 @@ class ComputedBenchmarks(BaseModel):
     n_games_total: Optional[float] = None
     n_games_scored: Optional[float] = None
     population_note: str
+    # The served mart's OWN statement of the opportunity_v2 model (mart_meta
+    # .opportunity_v2_model): authoritative for the scores actually served. None on marts
+    # that predate it.
+    opportunity_v2_model: Optional[str] = None
 
 
 class MarketBenchmarks(BaseModel):
@@ -172,12 +180,6 @@ class LaunchCurvePoint(BaseModel):
 class LaunchCurve(BaseModel):
     genre: str
     points: list[LaunchCurvePoint]
-
-
-class Range(BaseModel):
-    low: float
-    mid: float
-    high: float
 
 
 # ---- games (Phase 2) -------------------------------------------------------------------
@@ -896,6 +898,19 @@ class NicheCombined(BaseModel):
     offset: int
 
 
+class HeadlineCut(BaseModel):
+    """Which mart_niche cut NicheDetail's headline numbers (hit_rates, tier) were read from.
+
+    The headline cut is window=all x min_reviews=50. A niche too small to materialise it
+    falls back — all/100, then all/0, then whatever exists — and fallback=true says so: the
+    numbers then describe a DIFFERENT population (min_reviews=0 counts unreviewed games),
+    so they must be labelled with this cut, never passed off as the all/50 figures."""
+
+    window: str
+    min_reviews: int
+    fallback: bool
+
+
 class NicheDetail(BaseModel):
     dimension: str
     key: str
@@ -909,4 +924,7 @@ class NicheDetail(BaseModel):
     # None = mart predates mart_niche_press, or the niche has no published press rows
     # (below the covered-games floor / genuinely uncovered).
     press: Optional[NichePress] = None
+    # {hit_rate_200k, hit_rate_500k, median_rev, n_games, winner_concentration} of the
+    # headline cut — READ hit_rates_cut before labelling any of them.
     hit_rates: dict
+    hit_rates_cut: HeadlineCut

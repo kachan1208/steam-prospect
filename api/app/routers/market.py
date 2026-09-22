@@ -114,6 +114,7 @@ def _market_benchmarks() -> MarketBenchmarks:
                 "computed medians/pct are Boxleiter gross over games with >=10 reviews "
                 "(paid = price>0, >=1 review); cited $249/8.5% are first-year/net over ALL releases"
             ),
+            opportunity_v2_model=meta.get("opportunity_v2_model") or None,
         ),
         boxleiter_by_genre=[BoxleiterRow(**b) for b in boxleiter],
         tiers=[TierRow(**t) for t in tiers],

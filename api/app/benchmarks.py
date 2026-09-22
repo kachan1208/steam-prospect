@@ -37,8 +37,24 @@ DEV_TIERS = [
     {"label": "Triple-I", "min_copies": 1_000_000, "max_copies": None, "revenue_anchor_usd": 50_000_000},
 ]
 
-# --- Opportunity score weights (mirror etl/build_marts.py) -----------------------------
-OPPORTUNITY_WEIGHTS = {"demand": 0.50, "competition": 0.35, "quality_gap": 0.30}
+# --- Opportunity score composition (mirror etl/build_marts.py W2_* / SUPPLY_BRAKE_FLOOR) --
+# These are the weights of opportunity_v2 — the score every surface ranks by since the
+# 2026-08-31 rebuild. This dict used to carry the v1 `opportunity` weights (demand .50 /
+# competition .35 / quality_gap .30): a retired score's recipe served under the name of the
+# live one. The weights alone are not the score: the blend is renormalised over the terms
+# that are non-null for a niche and then multiplied by the supply brake — see the formula.
+# The mart states its own model in mart_meta.opportunity_v2_model, which /api/market/
+# benchmarks also returns (computed.opportunity_v2_model): prefer that when they differ.
+OPPORTUNITY_WEIGHTS = {"momentum": 0.40, "market_pull": 0.22, "revenue_spread": 0.20, "quality_gap": 0.18}
+SUPPLY_BRAKE_FLOOR = 0.35
+OPPORTUNITY_FORMULA = (
+    "opportunity_v2 = supply_brake x weighted mean of the NON-NULL terms among "
+    "momentum (0.40), market_pull (0.22), revenue_spread (0.20), quality_gap (0.18) — "
+    "each 0-100, weights renormalised over the terms present; "
+    f"supply_brake = {SUPPLY_BRAKE_FLOOR} + {1 - SUPPLY_BRAKE_FLOOR:.2f} x supply_room/100 "
+    "(1.0 when supply_room is unknown); the product is clamped to 0-100. decline_gate is a "
+    "separate falsification tell, not a factor."
+)
 
 # --- Chart annotation marks ------------------------------------------------------------
 REVENUE_BENCHMARK_MARKS = [
@@ -79,5 +95,6 @@ def as_dict() -> dict:
         "steam_revenue_share_to_dev": STEAM_REVENUE_SHARE_TO_DEV,
         "dev_tiers": DEV_TIERS,
         "opportunity_weights": OPPORTUNITY_WEIGHTS,
+        "opportunity_formula": OPPORTUNITY_FORMULA,
         "revenue_benchmark_marks": REVENUE_BENCHMARK_MARKS,
     }

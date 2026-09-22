@@ -40,6 +40,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 
 from .. import analytics_db, histograms, paging
 from ..schemas import (
+    HeadlineCut,
     HistBucket,
     NicheCombined,
     NicheCombinedInput,
@@ -1061,10 +1062,14 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
     except duckdb.CatalogException:
         press = None
 
-    # Headline numbers from the all/50 cut (the broadest population that always exists).
-    headline = next(
-        (v for v in variants if v["win"] == "all" and v["min_reviews"] == 50), variants[0]
-    )
+    # Headline numbers (tier + hit_rates) from the all/50 cut. It does NOT always exist: a
+    # niche with too few 50-review games never materialises it (26 of the 40 smallest tags
+    # on the real mart), and the headline used to fall back SILENTLY to whatever cut sorted
+    # first — usually all/0, a population that counts unreviewed games. The fallback order
+    # is now explicit (the closest all-time population first) and reported as
+    # hit_rates_cut, so a consumer can say "all games, no review floor" instead of passing
+    # those numbers off as the all/50 ones.
+    headline, fallback = _headline_cut(variants)
     return NicheDetail(
         dimension=dimension,
         key=key,
@@ -1085,7 +1090,25 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
             "n_games": headline["n_games"],
             "winner_concentration": headline["winner_concentration"],
         },
+        hit_rates_cut=HeadlineCut(
+            window=headline["win"], min_reviews=headline["min_reviews"], fallback=fallback
+        ),
     )
+
+
+# The headline cut, then the closest all-time populations: a stricter floor still counts
+# scored games only; the no-floor cut counts every game. A 24m cut is never preferred over
+# any all-time one (it describes a different, recent population).
+_HEADLINE_CUTS = (("all", 50), ("all", 100), ("all", 0))
+
+
+def _headline_cut(variants: list[dict]) -> tuple[dict, bool]:
+    """(the row the detail's headline numbers come from, whether it is a fallback)."""
+    by_cut = {(v["win"], int(v["min_reviews"])): v for v in variants}
+    for cut in _HEADLINE_CUTS:
+        if cut in by_cut:
+            return by_cut[cut], cut != _HEADLINE_CUTS[0]
+    return variants[0], True
 
 
 @router.get("/export.csv")

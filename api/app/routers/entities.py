@@ -259,11 +259,13 @@ def entity_profile(
     rows = _q(f"SELECT {_entity_cols()} FROM mart_entity WHERE role = ? AND name = ?", [role, name])
     if not rows:
         # Structured 404: carry up to 5 near-miss names so the client can render
-        # "did you mean" links instead of a dead end.
+        # "did you mean" links instead of a dead end. The name is a LITERAL substring:
+        # unescaped, a '%' or '_' in it acted as a wildcard ("50%" matched every name
+        # containing "50", "_" matched everything) and the suggestions were noise.
         suggestions = _q(
-            "SELECT name FROM mart_entity WHERE role = ? AND name ILIKE ? "
+            "SELECT name FROM mart_entity WHERE role = ? AND name ILIKE ? ESCAPE '\\' "
             "ORDER BY total_rev DESC NULLS LAST, n_games DESC, name LIMIT 5",
-            [role, f"%{name}%"],
+            [role, f"%{_like_escape(name)}%"],
         )
         raise HTTPException(
             status_code=404,
