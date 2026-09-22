@@ -67,6 +67,7 @@ export function DataAge({ className }: { className?: string }) {
         <InfoTip
           label="Data freshness"
           meaning="How old the numbers on every page are: when the data now being served was built, and how long ago that was. A scheduled refresh rebuilds it; if refreshes stop, this age keeps growing, and past three days every page shows a warning."
+          workedLabel="This build"
           worked={
             details.length > 0 ? (
               <span className="flex flex-col">
@@ -128,7 +129,7 @@ export function DataAgeBanner({ className }: { className?: string }) {
       <p className="min-w-0">
         <span className="kicker mr-2 text-[11px]" style={{ color: "var(--status-warning)" }}>
           Stale data
-        </span>
+        </span>{" "}
         Data hasn't refreshed in {days} days
         {age.asOfLabel ? <> — numbers are as of {age.asOfLabel}.</> : "."}
       </p>
@@ -138,7 +139,7 @@ export function DataAgeBanner({ className }: { className?: string }) {
           writeSession(DISMISS_KEY, token);
           setDismissedFor(token);
         }}
-        className="shrink-0 border border-borderstrong px-2.5 py-1 text-[11px] font-medium text-ink-primary transition-colors hover:bg-ink-primary/[0.08]"
+        className="shrink-0 border border-borderstrong px-2.5 py-1 text-[11px] font-medium text-ink-primary transition-colors hover:bg-surface2"
       >
         Dismiss
       </button>

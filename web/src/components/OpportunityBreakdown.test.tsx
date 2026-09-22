@@ -105,6 +105,16 @@ describe("OpportunityBreakdown — compact (a Finder row)", () => {
     expect(tip).toContain("× Supply brake 0.35 (full brake)");
   });
 
+  it("contains its absolutely-positioned sr-only summary (it must not widen the page from inside a table scroller)", () => {
+    // Measured in Chromium at 390px: without a positioned wrapper the sr-only span anchored to
+    // the page, not the (unpositioned) TableScroll, and scrolled the whole body sideways by 65px.
+    render(<OpportunityBreakdown row={COLONY} variant="compact" />);
+    expect(screen.getByTestId("opportunity-breakdown-compact").className.split(" ")).toContain("relative");
+    cleanup();
+    render(<OpportunityBreakdown row={COLONY} />);
+    expect(screen.getByRole("table").className.split(" ")).toContain("relative");
+  });
+
   it("marks a row without parts rather than drawing empty bars", () => {
     render(<OpportunityBreakdown row={{ opportunity_v2: 41.2 }} variant="compact" />);
     expect(screen.getByTestId("opportunity-breakdown-compact").textContent).toBe("41.2no parts");

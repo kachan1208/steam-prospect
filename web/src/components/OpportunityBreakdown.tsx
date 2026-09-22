@@ -65,7 +65,9 @@ function PartBar({ value }: { value: number | null }) {
       {known && (
         <span className="absolute inset-y-0 left-0" style={{ width: `${Math.max(0, Math.min(100, value))}%`, backgroundColor: CSS_VAR.demand }} />
       )}
-      <span className="absolute -top-[2px] h-[10px] w-px bg-ink-primary/60" style={{ left: `${PART_NEUTRAL}%` }} />
+      {/* Inline colour, not bg-ink-primary/60: Tailwind 3 cannot put an opacity modifier on a
+          var()-defined colour and silently emits no rule at all. */}
+      <span className="absolute -top-[2px] h-[10px] w-px" style={{ left: `${PART_NEUTRAL}%`, backgroundColor: "var(--text-secondary)" }} />
     </span>
   );
 }
@@ -97,7 +99,8 @@ function FullBreakdown({ m, title, className }: { m: Model; title: string; class
       </p>
       {m.available && (
         <TableScroll>
-          <table className="w-full min-w-[320px] border-collapse text-[12px]">
+          {/* relative: contains the sr-only caption (see CompactBreakdown's note). */}
+          <table className="relative w-full min-w-[320px] border-collapse text-[12px]">
             <caption className="sr-only">How this niche's Opportunity score adds up</caption>
             <thead>
               <tr className="border-b border-chartborder text-ink-muted">
@@ -179,7 +182,7 @@ function FullBreakdown({ m, title, className }: { m: Model; title: string; class
 
 function PartRow({ p }: { p: OpportunityPart }) {
   return (
-    <tr className="border-b border-chartborder/50 last:border-b-0">
+    <tr className="border-b border-chartborder last:border-b-0">
       <th scope="row" className="py-1.5 pr-3 text-left font-normal text-ink-secondary">
         <span className="inline-flex items-center gap-1">
           {p.label}
@@ -217,7 +220,11 @@ function CompactBreakdown({ m, title, className }: { m: Model; title: string; cl
     `supply brake ×${m.brake === null ? "—" : m.brake.toFixed(2)}`,
   ].join(", ");
   return (
-    <span className={clsx("inline-flex items-center gap-2", className)} data-testid="opportunity-breakdown-compact">
+    // `relative` is load-bearing: the sr-only summary is absolutely positioned, and inside a
+    // table scroller (which is not positioned) it would otherwise anchor to the page and
+    // widen the whole document — measured: a Finder-style row at 390px scrolled the body
+    // sideways by 65px.
+    <span className={clsx("relative inline-flex items-center gap-2", className)} data-testid="opportunity-breakdown-compact">
       <span className="sr-only">{summary}</span>
       <span aria-hidden className="flex h-3.5 items-end gap-[3px]">
         {m.parts.map((p) => (
