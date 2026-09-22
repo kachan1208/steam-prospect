@@ -1,6 +1,10 @@
 import clsx from "clsx";
 import type { ReactNode } from "react";
 
+import { glossary } from "../../lib/glossary";
+import { MetricTip, type MetricExplainProps } from "./InfoTip";
+import { SentinelTag, sentinelTag } from "./SentinelTag";
+
 const CONDENSED = '"Barlow Condensed", "Barlow", system-ui, sans-serif';
 
 /**
@@ -12,6 +16,11 @@ const CONDENSED = '"Barlow Condensed", "Barlow", system-ui, sans-serif';
  * it and NicheCombined imported it from there, which is a static page -> page import —
  * it pulled the whole 80K NicheDetail page, and through its charts all of recharts, into
  * the /niches/combined chunk for the sake of one 25-line presentational component.
+ *
+ * EXPLAINS ITSELF (2026-09-22): pass a glossary `term` (the label then defaults to the
+ * glossary's plain label), the row's `worked` numbers and, when the value is floored /
+ * capped / missing, a `sentinel` — the label row gets an accessible ⓘ (components/ui/
+ * InfoTip) and the sentinel a visible tag. With none of them the cell renders as before.
  */
 export function KpiCell({
   label,
@@ -19,8 +28,14 @@ export function KpiCell({
   footnote,
   footnoteWrap,
   valueClassName,
+  term,
+  info,
+  help,
+  worked,
+  sentinel,
 }: {
-  label: string;
+  /** Visible label. Optional when `term` is given (the glossary label is used). */
+  label?: string;
   value: ReactNode;
   footnote?: ReactNode;
   /** Let the footnote wrap onto more lines instead of ellipsising at one. For footnotes that
@@ -28,10 +43,15 @@ export function KpiCell({
    * the reader sees a confident half-sentence and never learns it was qualified. */
   footnoteWrap?: boolean;
   valueClassName?: string;
-}) {
+} & MetricExplainProps) {
+  const shown = label ?? (term ? glossary(term).label : "");
   return (
     <div className="bg-page px-5 py-4">
-      <div className="kicker text-[11px] text-ink-primary/55">{label}</div>
+      <div className="kicker flex min-w-0 items-center gap-1.5 text-[11px] text-ink-primary/55">
+        <span className="min-w-0">{shown}</span>
+        <MetricTip label={shown} term={term} info={info} help={help} worked={worked} sentinel={sentinel} />
+        {sentinel != null && <SentinelTag className="ml-auto">{sentinelTag(sentinel)}</SentinelTag>}
+      </div>
       {/* Only one text-color utility ever applies: two same-specificity color classes race on
           Tailwind's generated-CSS order, not className string order, so the default has to be
           the FALLBACK (via ??), not a base class the override tries to beat. */}
