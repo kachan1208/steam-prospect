@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query, Response
 
-from .. import analytics_db, benchmarks, response_cache
+from .. import analytics_db, benchmarks, histograms, response_cache
 from ..schemas import (
     BenchmarkMark,
     BoxleiterRow,
@@ -64,7 +64,14 @@ def distribution(
         genre=genre,
         window=window,
         n=n,
-        buckets=[HistBucket(**b) for b in buckets],
+        # revenue/reviews/owners are log-binned with the GREATEST(v, 1) floor — bucket 0
+        # holds e.g. every 0-review game, so it goes through the shared floor helper; price
+        # is linear $2.50 bins with no sentinel.
+        buckets=(
+            [HistBucket(**b) for b in buckets]
+            if metric == "price"
+            else histograms.log_buckets(buckets)
+        ),
         percentiles=[PercentilePoint(pctile=p["pctile"], value=p["value"]) for p in pcts],
         benchmark_marks=_marks_for(metric),
     )

@@ -609,3 +609,240 @@ def _cold_response_cache():
     response_cache.clear()
     yield
     response_cache.clear()
+
+
+# =============================================================================================
+# The MODERN fixture mart: everything the niche detail / drill-down / scope / alias paths read,
+# with the optional column families switchable. The shared fixture mart above deliberately
+# PREDATES all of this (it stands in for "the API deployed ahead of the nightly rebuild"), so
+# tests of the newest capabilities build one of these and serve it with serving().
+#
+# Membership (mart_niche_game) — hand-checkable against GAMES:
+#   tag Roguelike  all/0 + all/50: 1001, 1002, 1003, 1004   24m/50: 1001, 1003
+#                  (1004 Mecha Arena is the free, non-indie, publisher-backed member — the
+#                  one scope=indie must drop; 1003 is below the 50-review floor in reality
+#                  but membership is the mart's call, not the router's)
+#   tag Deckbuilder all/0 ONLY: 1001, 1002 — a tag with no all/50 cut (hit_rates fallback)
+#   genre Simulation all/50: 1005, 1006
+# =============================================================================================
+MODERN_MEMBERSHIP = {
+    ("tag", "Roguelike", "all", 0): [1001, 1002, 1003, 1004],
+    ("tag", "Roguelike", "all", 50): [1001, 1002, 1003, 1004],
+    ("tag", "Roguelike", "24m", 50): [1001, 1003],
+    ("tag", "Deckbuilder", "all", 0): [1001, 1002],
+    ("genre", "Simulation", "all", 50): [1005, 1006],
+}
+
+# mart_niche_hist for Roguelike (the all/50 cut): bucket 0 is the FLOORED bucket — the mart
+# stores it as [1, 3.16) but it holds the $0 free game (1004). 20K -> 8, 150K -> 10, 900K -> 11.
+MODERN_HIST = [
+    ("tag", "Roguelike", 0, 1.0, 3.1622776601683795, 1),
+    ("tag", "Roguelike", 8, 10000.0, 31622.776601683792, 1),
+    ("tag", "Roguelike", 10, 100000.0, 316227.7660168379, 1),
+    ("tag", "Roguelike", 11, 316227.7660168379, 1000000.0, 1),
+]
+
+
+def build_modern_mart(
+    path,
+    *,
+    new_niche_cols: bool = False,
+    new_game_cols: bool = False,
+    aliases: list[tuple[str, str, str]] | None = None,
+    meta: dict[str, str] | None = None,
+) -> None:
+    """Build the modern mart at `path`.
+
+    new_niche_cols  n_free / n_price_unknown / players_trend_7d_market_pct /
+                    players_trend_7d_rel_pct on mart_niche (+ the two player-trend columns on
+                    mart_game) — the ETL's in-flight additions.
+    new_game_cols   first_public_date / release_date_1_0 / is_ea_graduate on mart_game.
+    aliases         rows for mart_tag_alias(dimension, alias, canonical); None = no table.
+    meta            extra mart_meta rows (e.g. owners_as_of)."""
+    from app.routers import niches
+
+    con = duckdb.connect(str(path))
+    try:
+        _create_mart_game(con)
+        _create_mart_entity(con)
+        if new_game_cols:
+            con.execute("ALTER TABLE mart_game ADD COLUMN first_public_date DATE")
+            con.execute("ALTER TABLE mart_game ADD COLUMN release_date_1_0 DATE")
+            con.execute("ALTER TABLE mart_game ADD COLUMN is_ea_graduate BOOLEAN")
+            # 1001: early access 2023-05-10 -> 1.0 on 2024-03-01 (a graduate); others plain.
+            con.execute(
+                "UPDATE mart_game SET first_public_date = DATE '2023-05-10', "
+                "release_date_1_0 = DATE '2024-03-01', is_ea_graduate = TRUE WHERE appid = 1001"
+            )
+            con.execute(
+                "UPDATE mart_game SET first_public_date = TRY_CAST(release_date AS DATE), "
+                "release_date_1_0 = TRY_CAST(release_date AS DATE), is_ea_graduate = FALSE "
+                "WHERE appid <> 1001"
+            )
+        # The daily-CCU summary columns ship with mart_game_players_daily (built below).
+        con.execute("ALTER TABLE mart_game ADD COLUMN players_7d_avg DOUBLE")
+        con.execute("ALTER TABLE mart_game ADD COLUMN players_trend_7d_pct DOUBLE")
+        con.execute(
+            "UPDATE mart_game SET players_7d_avg = 120.0, players_trend_7d_pct = 5.0 "
+            "WHERE appid = 1001"
+        )
+        if new_niche_cols:
+            for col in ("players_trend_7d_market_pct", "players_trend_7d_rel_pct"):
+                con.execute(f"ALTER TABLE mart_game ADD COLUMN {col} DOUBLE")
+            con.execute(
+                "UPDATE mart_game SET players_trend_7d_market_pct = 2.0, "
+                "players_trend_7d_rel_pct = 2.94 WHERE appid = 1001"
+            )
+
+        # ---- mart_niche: every column the list/detail reads, modern families included ----
+        extra = [
+            ("p90_rev", "DOUBLE"),
+            ("total_players_now", "DOUBLE"), ("players_trend_7d_pct", "DOUBLE"),
+            ("players_coverage", "DOUBLE"), ("median_players_now", "DOUBLE"),
+            ("players_top5_share", "DOUBLE"),
+            ("reviews_24m", "BIGINT"), ("reviews_prev_24m", "BIGINT"),
+            ("demand_trend_24m_pct", "DOUBLE"), ("reviews_24m_new_share", "DOUBLE"),
+            ("demand_emerging", "BOOLEAN"),
+            ("self_published_share", "DOUBLE"), ("indie_share", "DOUBLE"),
+            ("med_playtime_h", "DOUBLE"),
+            ("momentum", "DOUBLE"), ("supply_room", "DOUBLE"), ("revenue_spread", "DOUBLE"),
+            ("market_pull", "DOUBLE"), ("supply_brake", "DOUBLE"), ("solo_tier", "VARCHAR"),
+        ]
+        if new_niche_cols:
+            extra += [
+                ("n_free", "INTEGER"), ("n_price_unknown", "INTEGER"),
+                ("players_trend_7d_market_pct", "DOUBLE"), ("players_trend_7d_rel_pct", "DOUBLE"),
+            ]
+        decls = []
+        for c in niches._BASE_COLS:
+            if c in ("dimension", "key", "win", "tier"):
+                decls.append(f'"{c}" VARCHAR')
+            elif c in ("min_reviews", "n_games", "n_recent", "n_recent_year", "n_prior_year"):
+                decls.append(f'"{c}" INTEGER')
+            else:
+                decls.append(f'"{c}" DOUBLE')
+        decls += [f'"{c}" {t}' for c, t in extra]
+        con.execute(f"CREATE TABLE mart_niche ({', '.join(decls)})")
+        cols = [*niches._BASE_COLS, *(c for c, _ in extra)]
+
+        def niche_row(dim, key, win, mr, n_games, **over):
+            base = {
+                "dimension": dim, "key": key, "win": win, "min_reviews": mr, "n_games": n_games,
+                "n_recent": 1, "median_rev": 150_000.0, "median_price": 14.99,
+                "hit_rate_200k": 0.25, "hit_rate_500k": 0.25, "winner_concentration": 0.6,
+                "self_pub_share": 0.5, "opportunity_v2": 55.0, "tier": "micro",
+                "solo_viability": 0.9, "total_players_now": 1000.0,
+                "players_trend_7d_pct": -3.0, "players_coverage": 0.5,
+                "self_published_share": 0.5, "indie_share": 0.75, "med_playtime_h": 6.0,
+                "supply_brake": 0.9, "momentum": 60.0,
+            }
+            if new_niche_cols:
+                base.update(n_free=1, n_price_unknown=0,
+                            players_trend_7d_market_pct=-1.0, players_trend_7d_rel_pct=-2.02)
+            base.update(over)
+            return tuple(base.get(c) for c in cols)
+
+        rows = [
+            niche_row("tag", "Roguelike", "all", 0, 4, hit_rate_200k=0.25),
+            niche_row("tag", "Roguelike", "all", 50, 4, hit_rate_200k=0.5,
+                      median_price=12.49, med_playtime_h=4.0),
+            niche_row("tag", "Roguelike", "24m", 50, 2, hit_rate_200k=0.0, median_price=12.49),
+            niche_row("tag", "Deckbuilder", "all", 0, 2, hit_rate_200k=0.5, tier="theme",
+                      indie_share=1.0, self_published_share=0.5, self_pub_share=0.5,
+                      median_price=17.49, med_playtime_h=15.0),
+            niche_row("genre", "Simulation", "all", 50, 2, tier="genre", indie_share=1.0,
+                      self_published_share=1.0, self_pub_share=1.0, median_price=14.99,
+                      med_playtime_h=25.0),
+        ]
+        con.executemany(f"INSERT INTO mart_niche VALUES ({', '.join(['?'] * len(cols))})", rows)
+
+        con.execute(
+            "CREATE TABLE mart_niche_game (dimension VARCHAR, key VARCHAR, win VARCHAR, "
+            "min_reviews INTEGER, appid INTEGER)"
+        )
+        con.executemany(
+            "INSERT INTO mart_niche_game VALUES (?, ?, ?, ?, ?)",
+            [(d, k, w, m, a) for (d, k, w, m), ids in MODERN_MEMBERSHIP.items() for a in ids],
+        )
+        con.execute(
+            "CREATE TABLE mart_niche_hist (dimension VARCHAR, key VARCHAR, bucket_index INTEGER, "
+            "x_min DOUBLE, x_max DOUBLE, count INTEGER)"
+        )
+        con.executemany("INSERT INTO mart_niche_hist VALUES (?, ?, ?, ?, ?, ?)", MODERN_HIST)
+        con.execute(
+            "CREATE TABLE mart_niche_trend (dimension VARCHAR, key VARCHAR, year INTEGER, "
+            "n_releases INTEGER, n_scored INTEGER, median_rev DOUBLE, p90_rev DOUBLE)"
+        )
+        con.execute("INSERT INTO mart_niche_trend VALUES ('tag', 'Roguelike', 2024, 2, 2, 150000.0, 800000.0)")
+        con.execute("""
+            CREATE TABLE mart_niche_top (
+                dimension VARCHAR, key VARCHAR, rank_in_niche INTEGER, appid INTEGER,
+                name VARCHAR, release_year INTEGER, price_initial DOUBLE, owners_mid DOUBLE,
+                total_reviews INTEGER, positive_ratio DOUBLE, est_rev_reviews DOUBLE,
+                self_published INTEGER, header_image VARCHAR
+            )
+        """)
+        con.execute(
+            "INSERT INTO mart_niche_top SELECT 'tag', 'Roguelike', row_number() OVER "
+            "(ORDER BY est_rev_reviews DESC, appid), appid, name, release_year, price_initial, "
+            "owners_mid, total_reviews, positive_ratio, est_rev_reviews, self_published, "
+            "header_image FROM mart_game WHERE appid IN (1001, 1002, 1003, 1004)"
+        )
+        con.execute(
+            "CREATE TABLE mart_niche_themes (dimension VARCHAR, key VARCHAR, aspect VARCHAR, "
+            "n_games INTEGER, total_mentions INTEGER, praise_share DOUBLE, "
+            "complaint_share DOUBLE, praise_delta_vs_catalog DOUBLE)"
+        )
+        con.execute(
+            "CREATE TABLE mart_niche_players (dimension VARCHAR, key VARCHAR, date DATE, "
+            "total_players BIGINT, measured_players BIGINT, n_games_measured BIGINT, "
+            "n_games_panel BIGINT)"
+        )
+        con.execute(
+            "INSERT INTO mart_niche_players VALUES ('tag', 'Roguelike', DATE '2026-09-20', "
+            "1000, 990, 3, 4)"
+        )
+        con.execute(
+            "CREATE TABLE mart_niche_players_hist (dimension VARCHAR, key VARCHAR, "
+            "bucket_index INTEGER, x_min DOUBLE, x_max DOUBLE, count INTEGER)"
+        )
+        con.executemany(
+            "INSERT INTO mart_niche_players_hist VALUES (?, ?, ?, ?, ?, ?)",
+            [("tag", "Roguelike", 0, 1.0, 3.1622776601683795, 1),
+             ("tag", "Roguelike", 5, 316.22776601683796, 1000.0, 2)],
+        )
+        con.execute(
+            "CREATE TABLE mart_niche_players_top (dimension VARCHAR, key VARCHAR, rank INTEGER, "
+            "appid INTEGER, name VARCHAR, players INTEGER, share DOUBLE)"
+        )
+        con.execute(
+            "CREATE TABLE mart_game_players_daily (appid INTEGER, date DATE, players INTEGER)"
+        )
+        con.executemany(
+            "INSERT INTO mart_game_players_daily VALUES (1001, ?, ?)",
+            [(f"2026-09-{d:02d}", 100 + d) for d in range(1, 21)]
+            + [("2026-06-01", 50)],  # far outside any window ending at the data's last day
+        )
+        if aliases is not None:
+            con.execute("CREATE TABLE mart_tag_alias (dimension VARCHAR, alias VARCHAR, canonical VARCHAR)")
+            if aliases:
+                con.executemany("INSERT INTO mart_tag_alias VALUES (?, ?, ?)", aliases)
+        con.execute("CREATE TABLE mart_meta (key VARCHAR, value VARCHAR)")
+        rows_meta = {
+            "mart_version": "20260920",
+            "built_at": "2026-09-20T22:00:00+00:00",
+            "source_db": "modern-fixture",
+            **(meta or {}),
+        }
+        con.executemany("INSERT INTO mart_meta VALUES (?, ?)", list(rows_meta.items()))
+    finally:
+        con.close()
+
+
+@pytest.fixture
+def modern_mart(client, tmp_path):
+    """Serve a default modern mart for one test (no in-flight ETL columns, no aliases)."""
+    path = tmp_path / "modern.duckdb"
+    build_modern_mart(path)
+    with serving(path):
+        yield client

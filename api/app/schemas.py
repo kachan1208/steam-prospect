@@ -36,6 +36,12 @@ class HistBucket(BaseModel):
     x_min: float
     x_max: float
     count: int
+    # True on the lowest bucket of a LOG histogram, whose lower edge is a floor SENTINEL:
+    # the marts bin with GREATEST(v, 1), so every value below 1 — $0 revenue, 0 reviews,
+    # 0 players — is clamped into it. Read/label it as "< x_max (incl. 0)", never as
+    # "x_min–x_max". x_min is reported as 0.0 so the bucket round-trips into the [min, max)
+    # cross-filters. Always false on linear (price) histograms. See app/histograms.py.
+    floored: bool = False
 
 
 # ---- market ---------------------------------------------------------------------------
@@ -824,7 +830,9 @@ class NicheDistribution(BaseModel):
       (bucket_index = floor(log10(max(v,1))*2), x_max = 10^((i+1)/2)) so the precomputed
       and the computed path are directly comparable. Bucket 0's x_min is reported as 0.0
       rather than the mart's 1.0, because the mart's GREATEST(v, 1) floor puts $0 games in
-      bucket 0 and a 1.0 lower edge would make the cross-filter silently drop them.
+      bucket 0 and a 1.0 lower edge would make the cross-filter silently drop them — and it
+      carries floored=true: label it "< $3.16 (incl. $0)", never "$0–$3.16" or "$1–$3.16".
+      (niche_detail's revenue_histogram goes through the same helper.)
 
     price: linear $2.50 bins matching mart_market_hist's price convention, EXCEPT that
       free-to-play gets its own bucket_index = -1 spanning [0.0, 0.01) instead of being

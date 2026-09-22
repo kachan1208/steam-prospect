@@ -38,7 +38,7 @@ import io
 import duckdb
 from fastapi import APIRouter, HTTPException, Query, Response
 
-from .. import analytics_db, paging
+from .. import analytics_db, histograms, paging
 from ..schemas import (
     HistBucket,
     NicheCombined,
@@ -829,15 +829,10 @@ def niche_distribution(
             except duckdb.CatalogException:  # mart older than mart_niche_hist itself
                 hist = []
             if hist:
-                buckets = []
-                for h in hist:
-                    h = dict(h)
-                    # The mart's GREATEST(v, 1) floor lands $0 games in bucket 0 but labels
-                    # its lower edge 1.0. Report 0.0 so the cross-filter that the UI builds
-                    # from (x_min, x_max) doesn't silently drop free games.
-                    if int(h["bucket_index"]) == 0:
-                        h["x_min"] = 0.0
-                    buckets.append(HistBucket(**h))
+                # The mart's GREATEST(v, 1) floor lands $0 games in bucket 0 but labels its
+                # lower edge 1.0: log_buckets() reports 0.0 (so the cross-filter the UI builds
+                # from (x_min, x_max) doesn't silently drop free games) and marks it floored.
+                buckets = histograms.log_buckets(hist)
                 return NicheDistribution(
                     metric="revenue",
                     buckets=buckets,
@@ -855,44 +850,51 @@ def niche_distribution(
     params: list = [dimension, key, win, min_reviews]
 
     if metric == "revenue":
+        # The same binning as mart_niche_hist; bucket 0 (which holds the floored $0 games)
+        # gets its 0.0 lower edge + floored flag from histograms.log_buckets() below, the
+        # one path every log histogram takes.
+        bkt = "CAST(floor(log10(GREATEST(g.est_rev_reviews, 1)) * 2) AS INTEGER)"
         sql = (
             member_cte
-            + "SELECT CAST(floor(log10(GREATEST(g.est_rev_reviews, 1)) * 2) AS INTEGER) AS bucket_index, "
-            # bucket 0's lower edge is reported as 0.0, not 10^0 — same reason as the mart
-            # path above: it is the bucket that holds the $0 games.
-            "CASE WHEN CAST(floor(log10(GREATEST(g.est_rev_reviews, 1)) * 2) AS INTEGER) = 0 "
-            "THEN 0.0 ELSE pow(10, CAST(floor(log10(GREATEST(g.est_rev_reviews, 1)) * 2) AS INTEGER) / 2.0) END AS x_min, "
-            "pow(10, (CAST(floor(log10(GREATEST(g.est_rev_reviews, 1)) * 2) AS INTEGER) + 1) / 2.0) AS x_max, "
+            + f"SELECT {bkt} AS bucket_index, "
+            f"pow(10, {bkt} / 2.0) AS x_min, "
+            f"pow(10, ({bkt} + 1) / 2.0) AS x_max, "
             "COUNT(*) AS count "
             "FROM m JOIN mart_game g ON g.appid = m.appid "
             "WHERE g.est_rev_reviews IS NOT NULL "
             "GROUP BY 1, 2, 3 ORDER BY 1"
         )
-    else:
-        # Price: linear $2.50 bins (mart_market_hist's convention — price is bounded and
-        # clusters at price points, so log bins would be unreadable), with free-to-play
-        # pulled OUT into its own bucket_index = -1 spanning [0.0, 0.01). F2P is a large,
-        # genuinely different product category; folding $0 into a "$0-$2.50" bar would
-        # read as a pricing floor that nobody chose. Paid bucket 0 therefore starts at
-        # 0.01 (the first paid cent) so every bucket still round-trips exactly.
-        bkt = "CASE WHEN g.price_initial <= 0 THEN -1 ELSE CAST(floor(g.price_initial / 2.5) AS INTEGER) END"
-        # The edges are CAST to DOUBLE explicitly: mart_game.price_initial is DECIMAL in the
-        # real marts (DOUBLE only in the test fixture), and DuckDB would otherwise hand back
-        # Decimal edges here but plain floats on the revenue axis.
-        sql = (
-            member_cte
-            + f"SELECT {bkt} AS bucket_index, "
-            f"CAST(CASE WHEN {bkt} = -1 THEN 0.0 WHEN {bkt} = 0 THEN 0.01 ELSE {bkt} * 2.5 END AS DOUBLE) AS x_min, "
-            f"CAST(CASE WHEN {bkt} = -1 THEN 0.01 ELSE ({bkt} + 1) * 2.5 END AS DOUBLE) AS x_max, "
-            "COUNT(*) AS count "
-            "FROM m JOIN mart_game g ON g.appid = m.appid "
-            "WHERE g.price_initial IS NOT NULL "
-            "GROUP BY 1, 2, 3 ORDER BY 1"
+        buckets = histograms.log_buckets(_mq(sql, params))
+        return NicheDistribution(
+            metric="revenue",
+            buckets=buckets,
+            n_games=sum(b.count for b in buckets),
+            source="computed",
         )
 
+    # Price: linear $2.50 bins (mart_market_hist's convention — price is bounded and
+    # clusters at price points, so log bins would be unreadable), with free-to-play pulled
+    # OUT into its own bucket_index = -1 spanning [0.0, 0.01). F2P is a large, genuinely
+    # different product category; folding $0 into a "$0-$2.50" bar would read as a pricing
+    # floor that nobody chose. Paid bucket 0 therefore starts at 0.01 (the first paid cent)
+    # so every bucket still round-trips exactly. No bucket here is a floor sentinel.
+    bkt = "CASE WHEN g.price_initial <= 0 THEN -1 ELSE CAST(floor(g.price_initial / 2.5) AS INTEGER) END"
+    # The edges are CAST to DOUBLE explicitly: mart_game.price_initial is DECIMAL in the
+    # real marts (DOUBLE only in the test fixture), and DuckDB would otherwise hand back
+    # Decimal edges here but plain floats on the revenue axis.
+    sql = (
+        member_cte
+        + f"SELECT {bkt} AS bucket_index, "
+        f"CAST(CASE WHEN {bkt} = -1 THEN 0.0 WHEN {bkt} = 0 THEN 0.01 ELSE {bkt} * 2.5 END AS DOUBLE) AS x_min, "
+        f"CAST(CASE WHEN {bkt} = -1 THEN 0.01 ELSE ({bkt} + 1) * 2.5 END AS DOUBLE) AS x_max, "
+        "COUNT(*) AS count "
+        "FROM m JOIN mart_game g ON g.appid = m.appid "
+        "WHERE g.price_initial IS NOT NULL "
+        "GROUP BY 1, 2, 3 ORDER BY 1"
+    )
     buckets = [HistBucket(**b) for b in _mq(sql, params)]
     return NicheDistribution(
-        metric=metric,  # type: ignore[arg-type]
+        metric="price",
         buckets=buckets,
         n_games=sum(b.count for b in buckets),
         source="computed",
@@ -984,7 +986,8 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
                     median_players_now=head0.get("median_players_now"),
                     players_top5_share=head0.get("players_top5_share"),
                     n_games_now=sum(int(h["count"]) for h in players_hist),
-                    histogram=[HistBucket(**h) for h in players_hist],
+                    # Same GREATEST(players, 1) floor: bucket 0 holds the 0-player games.
+                    histogram=histograms.log_buckets(players_hist),
                     top_games=[NichePlayersTopGame(**t) for t in top_games],
                 )
         except duckdb.CatalogException:
@@ -1048,7 +1051,9 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
         tier=headline.get("tier"),
         variants=[_row_to_niche(v) for v in variants],
         saturation_trend=[TrendPoint(**t) for t in trend],
-        revenue_histogram=[HistBucket(**h) for h in hist],
+        # Through the SAME helper as /distribution: served raw, bucket 0 read "$1–$3.16"
+        # over what is mostly $0 (free) games.
+        revenue_histogram=histograms.log_buckets(hist),
         representative_games=[NicheGame(**g) for g in games],
         players=players,
         themes=[NicheTheme(**t) for t in themes],
