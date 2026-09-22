@@ -544,8 +544,11 @@ def game_events(appid: int) -> GameEventList:
 
 @router.get("/{appid}/price-history", response_model=GamePriceHistory)
 def game_price_history(appid: int) -> GamePriceHistory:
-    """Live daily price snapshots from signals.db; depth accrues from 2026-08-24."""
-    rows = signals_db.query(
+    """Live daily price snapshots from signals.db; depth accrues from 2026-08-24.
+
+    Every failure degrades to an empty series (a page section over an optional enrichment
+    must never 500), but `status` says which empty it is — see signals_db.fetch()."""
+    rows, status = signals_db.fetch(
         "SELECT captured_on, final_cents, original_cents, COALESCE(discount_pct, 0) AS discount_pct,"
         " is_free, country FROM price_snapshots WHERE appid = ? ORDER BY captured_on",
         (appid,),
@@ -553,6 +556,7 @@ def game_price_history(appid: int) -> GamePriceHistory:
     return GamePriceHistory(
         appid=appid,
         items=[PricePoint(**{**r, "is_free": bool(r["is_free"])}) for r in rows],
+        status=status,
     )
 
 

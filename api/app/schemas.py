@@ -382,6 +382,13 @@ class GamePriceHistory(BaseModel):
 
     appid: int
     items: list[PricePoint]
+    # Which empty an empty `items` is (never a 500 either way):
+    #   ok          the store was read — empty just means the collector hasn't reached
+    #               this game yet
+    #   missing     no signals.db / no price table yet (the collector never ran)
+    #   unavailable signals.db exists but is unreadable (corrupt or locked) — say
+    #               "price history unavailable", NOT "no price history yet"
+    status: Literal["ok", "missing", "unavailable"] = "ok"
 
 
 class GameEventList(BaseModel):
