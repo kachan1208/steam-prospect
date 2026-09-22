@@ -2,7 +2,9 @@ import { useState } from "react";
 import clsx from "clsx";
 
 import { useDataAge, STALE_AFTER_HOURS, type DataAgeInfo } from "../lib/dataAge";
-import { InfoTip } from "./ui/InfoTip";
+// The glossary-free core: this component lives in the app shell (the entry chunk), and the
+// glossary it doesn't use would otherwise ride along on every first paint.
+import { InfoTipBase as InfoTip } from "./ui/InfoTipBase";
 import { SentinelTag } from "./ui/SentinelTag";
 
 /**
