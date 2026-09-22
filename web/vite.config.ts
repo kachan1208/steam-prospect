@@ -3,11 +3,13 @@ import react from "@vitejs/plugin-react";
 
 // Dev/preview both proxy /api -> the FastAPI server so the browser fetch stays
 // same-origin (no CORS dance) and src/lib/api.ts can default to a relative "/api".
-// Target defaults to the :8001 dev instance; override with VITE_API_PROXY_TARGET
-// (shell env or web/.env) to point at a different instance, e.g. a long-running :8000.
+// Target defaults to :8000 — where `task api` (Taskfile.yml) serves the API; the old :8001
+// default pointed at an instance nothing starts, so a bare `npm run dev` proxied into a
+// wall of connection errors. Override with VITE_API_PROXY_TARGET (shell env or web/.env)
+// to point at a different instance.
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const target = env.VITE_API_PROXY_TARGET || "http://127.0.0.1:8001";
+  const target = env.VITE_API_PROXY_TARGET || "http://127.0.0.1:8000";
   const apiProxy = {
     "/api": {
       target,

@@ -1,15 +1,17 @@
 // UI-audit screenshot harness. Loads every app route against a target origin (default:
-// production) at desktop + phone widths, saves full-page PNGs, and records whether the
-// PAGE scrolls horizontally at 390px (wide tables must scroll inside their own container,
-// never the body). Console errors per page are logged too.
+// the local Vite dev server) at desktop + phone widths, saves full-page PNGs, and records
+// whether the PAGE scrolls horizontally at 390px (wide tables must scroll inside their own
+// container, never the body). Console errors per page are logged too.
 //
 // Usage: node scripts/ui-audit-screenshots.mjs [outDir] [origin]
+//   origin: argv, else $BASE_URL, else http://127.0.0.1:5173 (`npm run dev`). The old
+//   default was the retired droplet's public host, which no longer exists.
 // Output PNGs are throwaway audit artifacts — do not commit them.
 import { chromium } from "playwright";
 import { mkdirSync } from "node:fs";
 
 const OUT = process.argv[2] ?? "/tmp/prospect-ui-audit";
-const ORIGIN = process.argv[3] ?? "https://142-93-49-69.nip.io";
+const ORIGIN = process.argv[3] ?? process.env.BASE_URL ?? "http://127.0.0.1:5173";
 
 const ROUTES = [
   ["radar", "/radar"],

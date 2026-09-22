@@ -1,8 +1,9 @@
 // A4: are any two genre chips in ONE row rendered in the same colour?
-// Usage: node scripts/audit/measure-chips.mjs <baseUrl> <outPrefix>
+// Usage: node scripts/audit/measure-chips.mjs [baseUrl] [outPrefix]
+//   baseUrl: argv, else $BASE_URL, else the local dev server (http://127.0.0.1:5173).
 import { chromium } from "playwright";
 
-const BASE = process.argv[2] || "https://142-93-49-69.nip.io";
+const BASE = process.argv[2] || process.env.BASE_URL || "http://127.0.0.1:5173";
 const PREFIX = process.argv[3] || "/tmp/pw/chips";
 
 const browser = await chromium.launch();

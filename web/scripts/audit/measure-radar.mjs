@@ -1,10 +1,11 @@
 // A1: does the radar's FLOOD BAR annotation get painted UNDER the dot cluster?
 // Reports the label's bbox, how many dots overlap it, and whether the label's <text>
 // precedes those dots in SVG paint order (document order == paint order in SVG 1.1).
-// Usage: node scripts/audit/measure-radar.mjs <baseUrl> <outPrefix>
+// Usage: node scripts/audit/measure-radar.mjs [baseUrl] [outPrefix]
+//   baseUrl: argv, else $BASE_URL, else the local dev server (http://127.0.0.1:5173).
 import { chromium } from "playwright";
 
-const BASE = process.argv[2] || "https://142-93-49-69.nip.io";
+const BASE = process.argv[2] || process.env.BASE_URL || "http://127.0.0.1:5173";
 const PREFIX = process.argv[3] || "/tmp/pw/radar";
 const VIEWPORTS = [1440, 1024, 390];
 
