@@ -7,11 +7,13 @@ import { BrowserRouter } from "react-router-dom";
 // @import in index.css that sat AFTER the @tailwind directives — an @import must precede
 // every other statement, so the build dropped it ("@import must precede all other
 // statements") and the whole app rendered in the system font, while an unused Inter
-// variable font shipped ~218KB of woff2 beside it. Only the weights the design uses
-// (design_handoff README: body Barlow 400/500/700, headings Barlow Condensed 600, 400 for
-// condensed body text); each file carries latin / latin-ext / vietnamese subsets behind
-// unicode-range, so a browser fetches only the subset a page's text needs, from our own
-// origin — no third-party font request.
+// variable font shipped ~218KB of woff2 beside it. Only the weights the design loads
+// (design_handoff_prospect_dark_ui/industry-styles.css: Barlow 400/500/700, Barlow
+// Condensed 400/600). Tailwind's `font-semibold` (600) on body text therefore renders in
+// Barlow 700, the nearest heavier face — what the design's own stylesheet does too. Each
+// file carries latin / latin-ext / vietnamese subsets behind unicode-range, so a browser
+// fetches only the subset a page's text needs, from our own origin — no third-party font
+// request.
 import "@fontsource/barlow/400.css";
 import "@fontsource/barlow/500.css";
 import "@fontsource/barlow/700.css";
