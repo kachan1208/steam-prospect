@@ -6,9 +6,9 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -148,9 +148,31 @@ app.include_router(trends.router)
 app.include_router(analytics.router)
 
 
+_MCP_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+
+
+def _register_mcp_slash_redirect(target_app: FastAPI) -> None:
+    """`/mcp` (no trailing slash) -> 307 `/mcp/`, query string kept.
+
+    The MCP is mounted at /mcp with its endpoint at the mount ROOT, i.e. /mcp/. A Starlette
+    Mount only matches "/mcp/..." — so a client configured with the bare ".../mcp" URL fell
+    through to the SPA catch-all, which answers any "mcp" segment with 404 (so the SPA
+    shell is never served as JSON-RPC), and Starlette's own slash redirect never ran
+    because the catch-all DID match. 307, not 301/302: it preserves the method AND body, so
+    a JSON-RPC POST is re-sent as a POST. The Location is relative, so it stays correct
+    behind whatever proxy/host the app is served from. Routing only — nothing about the
+    transport is touched."""
+
+    @target_app.api_route("/mcp", methods=_MCP_METHODS, include_in_schema=False)
+    def mcp_slash_redirect(request: Request) -> RedirectResponse:
+        query = request.url.query
+        return RedirectResponse("/mcp/" + (f"?{query}" if query else ""), status_code=307)
+
+
 # Mount the Prospect MCP (Streamable HTTP) at /mcp so users can add it to their own Claude.
 # Registered before the SPA catch-all below so /mcp routes to the MCP, not to index.html.
 if _mcp_asgi is not None:
+    _register_mcp_slash_redirect(app)
     app.mount("/mcp", _mcp_asgi)
 
 
