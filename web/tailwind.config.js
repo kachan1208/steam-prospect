@@ -49,7 +49,9 @@ export default {
         },
       },
       fontFamily: {
-        sans: ['"Inter Variable"', "Inter", "system-ui", "-apple-system", "Segoe UI", "sans-serif"],
+        // Barlow is the body face (self-hosted via @fontsource, see main.tsx). This stack is
+        // what Tailwind's preflight puts on <html>; index.css sets the same face on <body>.
+        sans: ['"Barlow"', "system-ui", "-apple-system", "Segoe UI", "sans-serif"],
       },
       borderRadius: {
         card: "var(--radius-card)",

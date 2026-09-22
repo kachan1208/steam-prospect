@@ -3,7 +3,20 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 
-import "@fontsource-variable/inter";
+// Self-hosted type (2026-09-22). The design's faces used to come from a Google Fonts
+// @import in index.css that sat AFTER the @tailwind directives — an @import must precede
+// every other statement, so the build dropped it ("@import must precede all other
+// statements") and the whole app rendered in the system font, while an unused Inter
+// variable font shipped ~218KB of woff2 beside it. Only the weights the design uses
+// (design_handoff README: body Barlow 400/500/700, headings Barlow Condensed 600, 400 for
+// condensed body text); each file carries latin / latin-ext / vietnamese subsets behind
+// unicode-range, so a browser fetches only the subset a page's text needs, from our own
+// origin — no third-party font request.
+import "@fontsource/barlow/400.css";
+import "@fontsource/barlow/500.css";
+import "@fontsource/barlow/700.css";
+import "@fontsource/barlow-condensed/400.css";
+import "@fontsource/barlow-condensed/600.css";
 import { ThemeProvider } from "./lib/theme";
 import { DEFAULT_QUERY_OPTIONS } from "./lib/api";
 import App from "./App";
