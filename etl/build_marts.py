@@ -2711,11 +2711,11 @@ def _aspect_window_sql(pool: str) -> str:
     mart_game_aspect_reviews.sql can join each excerpt to its sentiment) rather than a boolean
     column.
 
-    PERFORMANCE (see the ASPECT_WINDOW_SLICE_BEFORE/CHARS comment above): the sentence regex runs
-    on a small substr slice around the first keyword match's position (an inner subquery computes
+    PERFORMANCE (see the ASPECT_WINDOW_SLICE_BEFORE/CHARS comment above): the window is cut from
+    a small substr slice around the first keyword match's position (an inner subquery computes
     that position once via _aspect_keyword_position_regex), not the whole review_text -- output is
-    byte-identical, but the expensive pattern scans ~ASPECT_WINDOW_SLICE_CHARS characters instead
-    of the full review body. One extra wrinkle beyond a plain substr: when the slice doesn't start
+    byte-identical, but the windowing scans ~ASPECT_WINDOW_SLICE_CHARS characters instead of the
+    full review body. One extra wrinkle beyond a plain substr: when the slice doesn't start
     at the review's true beginning, its first few characters can be the TAIL of a word that was
     truncated mid-word by the cut (e.g. slicing into "...for the most p|art you're..." at the `|`
     leaves "art you're..." at the slice's start) -- and because a \\b boundary is satisfied at the
@@ -2724,30 +2724,80 @@ def _aspect_window_sql(pool: str) -> str:
     with a `^\\S+` regexp_replace (only when the slice doesn't start at position 1, where there's
     nothing to truncate) before the sentence regex ever sees it -- found and fixed via the
     byte-identical-output check against real review text (see the ETL run report), not by
-    inspection."""
+    inspection.
+
+    THE WINDOW IS CUT WITHOUT THE SENTENCE REGEX (2026-09-22). _aspect_sentence_regex is still
+    the DEFINITION of the window, but running it — `regexp_extract(slice, sent, 0, 'i')` — is the
+    one expensive thing left in scoring: RE2 unrolls the two {0,ASPECT_SENTENCE_CHARS} negated
+    classes into ~320 multi-range states, its lazy DFA thrashes, and an extract that needs match
+    boundaries falls back to the NFA (~1ms per window single-threaded, against ~70us for VADER +
+    the classifier on the same window). mart_game_aspect_reviews.sql hit the identical wall on its
+    excerpts and replaced the regex with an anchored-run cut (see its PERFORMANCE (2026-08-28)
+    note): the match is boundary-free, so it lies inside the maximal boundary-free run of the
+    slice that holds the FIRST keyword; inside that run [^.!?;\\n] and [\\s\\S] are the same class;
+    so two anchored, alternation-free extractions find the run, and one anchored [\\s\\S] pattern
+    with a one-character sentinel cuts the window out of it. This function now uses that SAME
+    algebra over the same slice — so scoring and excerpts cut their windows the same way again —
+    and its output is byte-identical to the regex it replaces, which is what keeps every cached
+    score valid with no wipe: pinned by a differential fuzz over adversarial reviews in
+    tests/test_aspect_window_sql_rewrite.py, and checked against 34K real pool reviews from the
+    live source before it shipped (0 differences; ~900us -> ~40us per window).
+
+    ONE DEVIATION from the excerpt arm's spelling, and it is a correctness fix, not a style
+    choice: the left half of the run is found with an END-anchored extraction ('[^.!?;\\n]*$' over
+    the prefix), NOT reverse() / '^[^.!?;\\n]*' / reverse(). DuckDB's reverse() reverses GRAPHEME
+    CLUSTERS whenever the string has any non-ASCII character, and a CR LF pair is one cluster —
+    so "…\\r\\nI've…" reverses with its "\\r\\n" intact, the anchored scan eats the '\\r' before
+    stopping at the '\\n', and the window gains a stray leading '\\r' the regex never produced.
+    Measured on the real sample: 214 of 29,676 windows (0.7%, every Windows-line-ending review
+    with a non-ASCII character in it) — the sequence the excerpt fuzz never generates. A boundary
+    character followed by a combining mark is the same bug from the other side.
+
+    Each step is its own nested SELECT so every value is computed once, and a caller that
+    selects only the key columns (repair_sentiment_arms' raw-arm scan) still has all of it
+    pruned away."""
+    sc = ASPECT_SENTENCE_CHARS
     arms = []
     for label, _placeholder, rx in ASPECT_LEXICON:
         rxe = rx.replace("'", "''")  # SQL single-quote escape (none today, but be safe)
-        sent_e = _aspect_sentence_regex(rx).replace("'", "''")
         pos_e = _aspect_keyword_position_regex(rx).replace("'", "''")
         label_e = label.replace("'", "''")
         arms.append(
             f"""
         SELECT appid, recommendationid, '{label_e}' AS aspect,
-            regexp_extract(
-                CASE WHEN kw_pos - {ASPECT_WINDOW_SLICE_BEFORE} > 1
-                     THEN regexp_replace(
-                              substr(review_text, kw_pos - {ASPECT_WINDOW_SLICE_BEFORE}, {ASPECT_WINDOW_SLICE_CHARS}),
-                              '^\\S+', '')
-                     ELSE substr(review_text, 1, {ASPECT_WINDOW_SLICE_CHARS})
-                END,
-                '{sent_e}', 0, 'i'
-            ) AS window_text
+            CASE WHEN regexp_matches(slice, '{rxe}', 'i')
+                 THEN substr(regexp_extract(
+                          CASE WHEN length(clause_l) > {sc}
+                               THEN substr(clause_l || clause_r, length(clause_l) - {sc})
+                               ELSE ' ' || clause_l || clause_r
+                          END,
+                          '^[\\s\\S][\\s\\S]{{0,{sc}}}(?:{rxe})[\\s\\S]{{0,{sc}}}', 0, 'i'
+                      ), 2)
+                 ELSE ''
+            END AS window_text
         FROM (
-            SELECT appid, recommendationid, review_text,
-                length(regexp_extract(review_text, '{pos_e}', 1, 'i')) + 1 AS kw_pos
-            FROM {pool}
-            WHERE regexp_matches(review_text, '{rxe}', 'i')
+            SELECT appid, recommendationid, slice,
+                regexp_extract(substr(slice, 1, kw_off - 1), '[^.!?;\\n]*$', 0) AS clause_l,
+                regexp_extract(substr(slice, kw_off), '^[^.!?;\\n]*', 0) AS clause_r
+            FROM (
+                SELECT appid, recommendationid, slice,
+                    length(regexp_extract(slice, '^([\\s\\S]*?)(?:{rxe})', 1, 'i')) + 1 AS kw_off
+                FROM (
+                    SELECT appid, recommendationid,
+                        CASE WHEN kw_pos - {ASPECT_WINDOW_SLICE_BEFORE} > 1
+                             THEN regexp_replace(
+                                      substr(review_text, kw_pos - {ASPECT_WINDOW_SLICE_BEFORE}, {ASPECT_WINDOW_SLICE_CHARS}),
+                                      '^\\S+', '')
+                             ELSE substr(review_text, 1, {ASPECT_WINDOW_SLICE_CHARS})
+                        END AS slice
+                    FROM (
+                        SELECT appid, recommendationid, review_text,
+                            length(regexp_extract(review_text, '{pos_e}', 1, 'i')) + 1 AS kw_pos
+                        FROM {pool}
+                        WHERE regexp_matches(review_text, '{rxe}', 'i')
+                    )
+                )
+            )
         )"""
         )
     return "\nUNION ALL\n".join(arms)
