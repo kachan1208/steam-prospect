@@ -240,6 +240,18 @@ export interface Health {
   mart_version: string | null;
   built_at: string | null;
   source_db: string | null;
+  // Data-age fields (2026-09-22) — optional: an API that predates them sends only the four
+  // above, and lib/dataAge.ts falls back to built_at / mart_version. Read, never required.
+  /** Hours since the served data was produced, computed server-side. */
+  age_hours?: number | null;
+  /** ISO date or timestamp the served data is "as of" — preferred over built_at. */
+  data_as_of?: string | null;
+  /** Mart version the API process has LOADED (mart_version is its older alias). */
+  loaded_mart_version?: string | null;
+  /** Newest mart version built on disk; differs from the loaded one while a reload is pending. */
+  target_mart_version?: string | null;
+  /** ISO date of the SteamSpy owners snapshot every Owners figure comes from. */
+  owners_as_of?: string | null;
 }
 
 export function useHealth() {
