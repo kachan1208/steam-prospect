@@ -50,7 +50,7 @@ import tempfile
 import threading
 import time
 import warnings
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -768,9 +768,12 @@ SCORE_CHUNK_WINDOWS = 2000       # windows per task handed to one worker (see _S
 # overshoot its deadline (it only stops BETWEEN buckets) is one bucket. Contrast the old fixed
 # 8: on a wipe that is 6.5h PER BUCKET, larger than the entire nightly budget, so not one
 # bucket would ever complete and a resumable rescore would never advance a single step.
-# Bigger is not free either — every bucket re-streams the 24.8M-row sqlite reviews table
-# (~50s on the droplet), so the overhead is N x 50s: 2.7h across a 196-bucket rescore (+5% on
-# 52h of scoring), where N=1000 would be 13.9h (+27%).
+# Bigger is not free either — every bucket re-streamed the 24.8M-row sqlite reviews table
+# (~50s on the droplet), so the overhead was N x 50s: 2.7h across a 196-bucket rescore (+5% on
+# 52h of scoring), where N=1000 would be 13.9h (+27%). SINCE 2026-09-22 a bucket fetches its
+# text by primary key instead (_fetch_review_text: ~2s for 33K reviews where the stream took
+# 33-213s), so the per-bucket overhead is now proportional to the bucket, and this sizing is
+# about the deadline arithmetic above only.
 RESCORE_BUCKET_REVIEWS = 125_000
 
 # THE UNIT OF WORK for repair_sentiment_arms (--repair-arms), in reviews per hash bucket.
@@ -2858,6 +2861,125 @@ def _aspect_excerpt_arms_sql() -> str:
     return "\n\n    UNION ALL\n".join(arms)
 
 
+# --------------------------------------------------------------------------------------
+# REVIEW TEXT BY PRIMARY KEY (2026-09-22). DuckDB's sqlite scanner has NO filter pushdown —
+# checked with SET sqlite_debug_show_queries: `WHERE recommendationid = 'x'`, an IN-list and a
+# JOIN all reach SQLite as `SELECT ... FROM "reviews" WHERE ROWID BETWEEN ? AND ?`, i.e. the
+# whole table. So every `JOIN src.reviews r ON r.recommendationid = ...` streamed all ~63M rows
+# (44.7GB) to pick out the few thousand it needed — 213s for one 33,719-review scoring bucket on
+# 2026-09-21, and the scoring loop pays it once PER BUCKET (~9 a night, ~196 on a wipe).
+# recommendationid is the table's TEXT PRIMARY KEY, so SQLite can answer the same question from
+# its index; sqlite_query() hands it the lookup verbatim. Measured against a read-only clone of
+# the live source (Mac, 2026-09-22), the text of 33,586 pool reviews:
+#     JOIN src.reviews (stream)               32.6s
+#     sqlite_query IN-lists, 1 thread          7.6s   cold page cache
+#     sqlite_query IN-lists, 8 threads         2.0s   cold            (16x the stream)
+# with a byte-identical result (same sha256 over every (id, text)). The lookups are random reads,
+# latency-bound, which is why threads help: each runs its own SQLite read transaction on its own
+# DuckDB cursor.
+#
+# IDENTICAL BY CONSTRUCTION: the text is still read by the same DuckDB sqlite extension (a Python
+# sqlite3 fetch would decode differently at the edges); SQLite compares the TEXT key with its
+# default BINARY collation, i.e. byte equality, exactly like the DuckDB join; and the fetched rows
+# are joined back to the keys in DuckDB, so nothing the join would not have produced can get
+# through. Streaming still wins for LARGE id sets: the per-id random reads overtake one sequential
+# pass at ~550K ids on the measurement above, so past REVIEW_TEXT_PK_FETCH_MAX ids (the uncached
+# full-pool path, a 1M-review --repair-arms bucket) _fetch_review_text streams as before. It also
+# streams whenever `src` is not an ATTACHed SQLite file whose reviews table has an index led by
+# recommendationid — the tests' in-memory `src` schema, or a source without the key — because
+# there an IN-list would be a full scan per chunk.
+# --------------------------------------------------------------------------------------
+REVIEW_TEXT_PK_FETCH_MAX = 500_000   # ids; above this one sequential stream is cheaper
+REVIEW_TEXT_FETCH_CHUNK = 1_000      # ids per SQLite IN-list (~12KB of SQL per lookup)
+REVIEW_TEXT_FETCH_THREADS = 8        # concurrent lookups — IO-bound, so not tied to the core count
+
+
+def _src_reviews_keyed(con: duckdb.DuckDBPyConnection) -> bool:
+    """True when `src` is an ATTACHed SQLite database whose `reviews` table has an index led by
+    recommendationid (the TEXT PRIMARY KEY's autoindex on the real source) — the precondition
+    for fetching review text by key instead of streaming the table."""
+    try:
+        if not con.execute(
+            "SELECT count(*) FROM duckdb_databases() WHERE database_name = 'src' AND type = 'sqlite'"
+        ).fetchone()[0]:
+            return False
+        return con.execute(
+            "SELECT count(*) FROM sqlite_query('src', ?)",
+            ["SELECT 1 FROM pragma_index_list('reviews') il, pragma_index_info(il.name) ii "
+             "WHERE ii.seqno = 0 AND ii.name = 'recommendationid'"],
+        ).fetchone()[0] > 0
+    except duckdb.Error:
+        return False
+
+
+def _fetch_review_text(con: duckdb.DuckDBPyConnection, keys_sql: str, out_table: str) -> str:
+    """CREATE TEMP TABLE out_table(appid, recommendationid, review_text): the rows
+
+        SELECT k.appid, k.recommendationid, r.review_text
+        FROM (keys_sql) k JOIN src.reviews r ON r.recommendationid = k.recommendationid
+
+    which is exactly what it builds when streaming, and what it builds from primary-key lookups
+    when the key set is small enough to make that cheaper (see REVIEW TEXT BY PRIMARY KEY).
+    `keys_sql` must return (appid, recommendationid). Returns which path it took, "by key" or
+    "streamed", for the caller's timing line."""
+    con.execute(f"DROP TABLE IF EXISTS {out_table}")
+    ids = None
+    if _src_reviews_keyed(con):
+        n = con.execute(f"SELECT count(*) FROM ({keys_sql})").fetchone()[0]
+        if n <= REVIEW_TEXT_PK_FETCH_MAX:
+            ids = [r[0] for r in con.execute(
+                f"SELECT DISTINCT recommendationid FROM ({keys_sql}) "
+                "WHERE recommendationid IS NOT NULL ORDER BY 1").fetchall()]
+    if ids is None:
+        con.execute(
+            f"""
+            CREATE TEMP TABLE {out_table} AS
+            SELECT k.appid, k.recommendationid, r.review_text
+            FROM ({keys_sql}) k
+            JOIN src.reviews r ON r.recommendationid = k.recommendationid
+            """
+        )
+        return "streamed"
+    # A REGULAR landing table, not TEMP: the lookup threads run on their own cursors, which are
+    # separate connections and cannot see this connection's TEMP tables. Dropped in the finally,
+    # so it never outlives the call (nor ships in a mart).
+    landing = f"{out_table}__by_key"
+    con.execute(f"DROP TABLE IF EXISTS {landing}")
+    con.execute(f"CREATE TABLE {landing}(recommendationid VARCHAR, review_text VARCHAR)")
+    try:
+        chunks = [ids[i:i + REVIEW_TEXT_FETCH_CHUNK]
+                  for i in range(0, len(ids), REVIEW_TEXT_FETCH_CHUNK)]
+
+        def lookup(my_chunks: list[list[str]]) -> None:
+            cur = _cursor(con)
+            try:
+                for chunk in my_chunks:
+                    keys = ", ".join("'" + k.replace("'", "''") + "'" for k in chunk)
+                    cur.execute(
+                        f"INSERT INTO {landing} "
+                        "SELECT recommendationid, review_text FROM sqlite_query('src', ?)",
+                        [f"SELECT recommendationid, review_text FROM reviews "
+                         f"WHERE recommendationid IN ({keys})"])
+            finally:
+                cur.close()
+
+        n_threads = max(1, min(REVIEW_TEXT_FETCH_THREADS, len(chunks)))
+        with ThreadPoolExecutor(max_workers=n_threads, thread_name_prefix="text-by-key") as ex:
+            for fut in [ex.submit(lookup, chunks[i::n_threads]) for i in range(n_threads)]:
+                fut.result()
+        con.execute(
+            f"""
+            CREATE TEMP TABLE {out_table} AS
+            SELECT k.appid, k.recommendationid, t.review_text
+            FROM ({keys_sql}) k
+            JOIN {landing} t ON t.recommendationid = k.recommendationid
+            """
+        )
+    finally:
+        con.execute(f"DROP TABLE IF EXISTS {landing}")
+    return "by key"
+
+
 def _rescore_bucket_count(n_new_reviews: int) -> int:
     """How many hash buckets to slice this run's delta into — derived from the delta's SIZE, not
     fixed. See RESCORE_BUCKET_REVIEWS for the sizing arithmetic and why a fixed count cannot
@@ -3716,9 +3838,10 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
             _score_buckets = _rescore_bucket_count(n_new_reviews)
             # Which buckets have work, from one lean pass over the ids (no text). This is not
             # an optimisation for the wipe — there every bucket is full — it is what keeps the
-            # ORDINARY night honest: each bucket's text query streams the whole sqlite reviews
-            # table past a hash join, so an unguarded loop would run _score_buckets full scans
-            # of 24.8M rows on a night with nothing (or three things) to score.
+            # ORDINARY night honest: a bucket's text fetch, its window build and its cache
+            # commit each have a fixed cost (and a text fetch the key lookup does not cover
+            # streams the whole sqlite reviews table), so an unguarded loop would pay
+            # _score_buckets of them on a night with nothing (or three things) to score.
             _todo = sorted(int(b) for (b,) in con.execute(
                 f"SELECT DISTINCT hash(recommendationid) % {_score_buckets} FROM _sent_new_ids"
             ).fetchall())
@@ -3779,28 +3902,24 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
                 # budget.
                 #
                 # Text is read straight from src.reviews (sqlite) rather than from a staging
-                # copy: there is no corpus-wide text table any more, and streaming the source
-                # to pick out the bucket's rows never materialises the rows it discards. The
-                # cost of bucketing is one such stream per bucket instead of one in total —
-                # paid deliberately, because the alternative (one full-pool copy, sliced
-                # afterwards) is the 8.45GB TEMP table that just killed the build.
+                # copy: there is no corpus-wide text table any more. It used to be read by
+                # STREAMING the whole source past a join — one full pass of the 44.7GB table
+                # per bucket, 213s for a 33,719-review bucket on 2026-09-21 — and is now fetched
+                # by primary key (see REVIEW TEXT BY PRIMARY KEY at _fetch_review_text), so a
+                # bucket's text costs what the bucket holds, not what the table holds. The
+                # rows are identical either way; the helper still streams when the bucket is
+                # too big for key lookups to win.
                 #
                 # A TABLE, not a VIEW, so the 10-arm window scan below reads it without
-                # re-running the join per arm (a view here cost a 9.7h phase and a 22.7GiB
+                # re-running the fetch per arm (a view here cost a 9.7h phase and a 22.7GiB
                 # spill in 2026-08).
                 #
-                # The bucket filter is applied inside the subquery rather than as an aliased
-                # WHERE on the join, so the predicate text is the SAME _sent_pred the DELETE
-                # above and the INSERT below use. It also shrinks the join's build side to the
-                # bucket instead of hashing the whole delta once per bucket.
-                con.execute(
-                    f"""
-                    CREATE TEMP TABLE _sent_new AS
-                    SELECT n.appid, n.recommendationid, r.review_text
-                    FROM (SELECT appid, recommendationid FROM _sent_new_ids
-                          WHERE {_sent_pred}) n
-                    JOIN src.reviews r ON r.recommendationid = n.recommendationid
-                    """
+                # The keys are selected with the SAME _sent_pred string the DELETE above and the
+                # INSERT below use — the invariant is those three agreeing.
+                _text_path = _fetch_review_text(
+                    con,
+                    f"SELECT appid, recommendationid FROM _sent_new_ids WHERE {_sent_pred}",
+                    "_sent_new",
                 )
                 # The expensive regex runs ONLY over this bucket of the delta, never the full
                 # pool. REGULAR (not TEMP) so the INDEPENDENT read cursor in
@@ -3886,7 +4005,8 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
                 # pool, or the main thread inline), and the cache commit.
                 _t_stream = _t_scored - _t_windows
                 print(f"[etl] aspect sentiment bucket {n_done}/{len(_todo)} (hash bucket {_b}): "
-                      f"text+windows {_t_windows - _t_bucket:,.0f}s, {n_bucket_mentions:,} "
+                      f"text ({_text_path}) + windows {_t_windows - _t_bucket:,.0f}s, "
+                      f"{n_bucket_mentions:,} "
                       f"mention(s) scored in {_t_stream:,.0f}s "
                       f"({(n_bucket_mentions / _t_stream) if _t_stream > 0 else 0.0:,.0f}/s), "
                       f"commit {_elapsed - (_t_scored - _t_bucket):,.1f}s")
@@ -4303,14 +4423,13 @@ def repair_sentiment_arms(con: duckdb.DuckDBPyConnection, data_dir: Path) -> dic
             con.execute("CREATE TEMP TABLE _repair_mismatch(recommendationid VARCHAR)")
             if checked:
                 # THE ONLY REVIEW TEXT THIS RUN MATERIALISES: one bucket of the candidates, read
-                # straight from src.reviews — the same shape as the scoring loop's _sent_new.
-                con.execute(
-                    f"""
-                    CREATE TEMP TABLE _repair_text AS
-                    SELECT n.appid, n.recommendationid, r.review_text
-                    FROM (SELECT appid, recommendationid FROM _repair_ids WHERE {_pred}) n
-                    JOIN src.reviews r ON r.recommendationid = n.recommendationid
-                    """
+                # from src.reviews by the same helper as the scoring loop's _sent_new (by key
+                # when the bucket is small enough for that to win, streamed otherwise — a
+                # default 1M-review repair bucket streams).
+                _fetch_review_text(
+                    con,
+                    f"SELECT appid, recommendationid FROM _repair_ids WHERE {_pred}",
+                    "_repair_text",
                 )
                 # RAW ARMS: the (review, arm) pairs the text matches TODAY, from the one generator
                 # that defines an arm. Only the two key columns are selected, so the window and
