@@ -215,6 +215,12 @@ class GameSearchRow(BaseModel):
     # Metacritic critic score, where Steam links a Metacritic page (~2.6% of the catalog).
     # None = no linked page, NOT a poor score.
     metacritic_score: Optional[int] = None
+    # Early-access lifecycle — None until the mart carries the columns (games.py::_ea_cols):
+    # first_public_date = first day buyable (EA start, or release if never EA), 'YYYY-MM-DD';
+    # release_date_1_0 = the full release; is_ea_graduate = went Early Access -> 1.0.
+    first_public_date: Optional[str] = None
+    release_date_1_0: Optional[str] = None
+    is_ea_graduate: Optional[bool] = None
 
 
 class GameSearchList(BaseModel):
@@ -226,6 +232,9 @@ class GameSearchList(BaseModel):
     # (mart_meta.built_at), NOT today: caption it "released in the N days to <data_as_of>".
     # None when no date window was applied.
     data_as_of: Optional[str] = None
+    # When the owners estimates (owners_mid) were taken — a frozen SteamSpy-era snapshot,
+    # far older than the mart. None until the mart stamps mart_meta.owners_as_of.
+    owners_as_of: Optional[str] = None
 
 
 class TagSuggestion(BaseModel):
@@ -281,6 +290,11 @@ class GameProfile(BaseModel):
     # the router omits the columns there (see games.py::_has_players_summary).
     players_7d_avg: Optional[float] = None
     players_trend_7d_pct: Optional[float] = None
+    # The same 7 days for the WHOLE Steam panel, and this game's trend relative to it —
+    # never read players_trend_7d_pct without them once present (a +5% week in a +6% market
+    # is an underperformance). None until the mart carries the columns.
+    players_trend_7d_market_pct: Optional[float] = None
+    players_trend_7d_rel_pct: Optional[float] = None
     first_seen: Optional[str] = None   # when this game first entered our catalog (not Steam's release date)
     # Lifetime (steamcharts monthly, top-8k coverage): t0 = first month averaging 100+
     # concurrent players, death = first full month under 10. None = unknown, never zero
@@ -309,6 +323,12 @@ class GameProfile(BaseModel):
     dev_youtube_url: Optional[str] = None
     dev_bluesky_handle: Optional[str] = None
     dev_bluesky_url: Optional[str] = None
+    # Early-access lifecycle — see GameSearchRow. None until the mart carries the columns.
+    first_public_date: Optional[str] = None
+    release_date_1_0: Optional[str] = None
+    is_ea_graduate: Optional[bool] = None
+    # When owners_mid / est_rev_owners' owners estimate was taken (mart_meta.owners_as_of).
+    owners_as_of: Optional[str] = None
 
 
 class PriceBand(BaseModel):
@@ -671,6 +691,16 @@ class NicheRow(BaseModel):
     # and served either way — suppression is a presentation/verdict concern.
     reviews_24m_new_share: Optional[float] = None  # share of reviews_24m from games released in the last 24 months
     demand_emerging: Optional[bool] = None         # prev base < threshold OR new-game mass >= threshold
+    # The ETL's in-flight columns (None until the mart carries each one):
+    # n_free / n_price_unknown — how many of the cut's n_games are free-to-play / have no
+    # known price. Since free and unknown-price revenue became NULL (not $0), median_rev and
+    # median_price describe the PRICED games only; these say how many were left out.
+    n_free: Optional[int] = None
+    n_price_unknown: Optional[int] = None
+    # The whole Steam panel's 7d player change over the same days, and this niche's
+    # players_trend_7d_pct RELATIVE to it — read the trend against the market, never alone.
+    players_trend_7d_market_pct: Optional[float] = None
+    players_trend_7d_rel_pct: Optional[float] = None
 
 
 class NicheList(BaseModel):
@@ -678,6 +708,9 @@ class NicheList(BaseModel):
     total: int
     limit: int
     offset: int
+    # When the owners estimates (total_owners / median_owners) were taken — a frozen
+    # SteamSpy-era snapshot. None until the mart stamps mart_meta.owners_as_of.
+    owners_as_of: Optional[str] = None
 
 
 class NicheGame(BaseModel):
@@ -744,6 +777,9 @@ class NichePlayers(BaseModel):
 
     total_players_now: Optional[float] = None
     players_trend_7d_pct: Optional[float] = None
+    # Market-relative reading of players_trend_7d_pct (see NicheRow). None until present.
+    players_trend_7d_market_pct: Optional[float] = None
+    players_trend_7d_rel_pct: Optional[float] = None
     players_coverage: Optional[float] = None
     n_games_panel: Optional[int] = None
     series: list[NichePlayersPoint] = Field(default_factory=list)
@@ -824,6 +860,7 @@ class NicheGameList(BaseModel):
     items: list[NicheGameRow] = Field(default_factory=list)
     limit: int
     offset: int
+    owners_as_of: Optional[str] = None  # when owners_est was taken (mart_meta.owners_as_of)
 
 
 class NicheDistribution(BaseModel):
@@ -928,3 +965,4 @@ class NicheDetail(BaseModel):
     # headline cut — READ hit_rates_cut before labelling any of them.
     hit_rates: dict
     hit_rates_cut: HeadlineCut
+    owners_as_of: Optional[str] = None  # when the owners figures were taken (mart_meta)

@@ -183,6 +183,10 @@ class GamePlayersSummary(BaseModel):
     live_players: int | None = None  # latest capture (mart_game.live_players)
     players_7d_avg: float | None = None  # trailing-7d average of the point samples
     players_trend_7d_pct: float | None = None  # vs the prior 7d (measured days only)
+    # The whole Steam panel's 7d change over the same days, and this game's trend relative
+    # to it. None until the mart carries the columns.
+    players_trend_7d_market_pct: float | None = None
+    players_trend_7d_rel_pct: float | None = None
     n_days_measured: int = 0  # measured days in the FULL retained history
     first_date: str | None = None  # bounds of that history
     last_date: str | None = None
@@ -235,8 +239,16 @@ def game_players(
         f"AND date <= CAST(? AS DATE) ORDER BY date ASC",
         [appid, anchor, anchor],
     )
+    # The market-relative trend columns ride along once the mart carries them (gated per
+    # column, same as the game profile — see games.py::_MARKET_TREND_COLS).
+    market_cols = "".join(
+        f", {c}"
+        for c in ("players_trend_7d_market_pct", "players_trend_7d_rel_pct")
+        if analytics_db.has_column("mart_game", c)
+    )
     game = analytics_db.query_one(
-        "SELECT live_players, players_7d_avg, players_trend_7d_pct FROM mart_game WHERE appid = ?",
+        "SELECT live_players, players_7d_avg, players_trend_7d_pct"
+        f"{market_cols} FROM mart_game WHERE appid = ?",
         [appid],
     )
     bounds = analytics_db.query_one(

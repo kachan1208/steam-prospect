@@ -136,11 +136,40 @@ _LIFETIME_PROFILE_COLS = (
     ", lifetime_first_100_month, lifetime_died_month, lifetime_months, lifetime_alive"
 )
 
+# Early-access lifecycle (the ETL's in-flight mart_game columns): first_public_date = the
+# first day the game was buyable (Early Access start, or release when it never was EA),
+# release_date_1_0 = the full release, is_ea_graduate = it went EA -> 1.0. Each is gated on
+# its own column so a partially-landed build still serves what it has; dates are CAST to
+# VARCHAR so the contract is 'YYYY-MM-DD' whether the mart stores DATE or text.
+_EA_DATE_COLS = ("first_public_date", "release_date_1_0")
+
+# Market-relative 7-day player trends next to players_trend_7d_pct (the ETL's in-flight
+# mart_game/mart_niche columns): the whole Steam panel's own 7d change over the same days,
+# and the row's trend relative to it — so "+5%" in a week where Steam as a whole did +6%
+# reads as the slight UNDERperformance it is. Gated per column.
+_MARKET_TREND_COLS = ("players_trend_7d_market_pct", "players_trend_7d_rel_pct")
+
+
+def _ea_cols() -> str:
+    cols = ""
+    for c in _EA_DATE_COLS:
+        if analytics_db.has_column("mart_game", c):
+            cols += f", CAST({c} AS VARCHAR) AS {c}"
+    if analytics_db.has_column("mart_game", "is_ea_graduate"):
+        cols += ", is_ea_graduate"
+    return cols
+
+
+def _market_trend_cols() -> str:
+    return "".join(
+        f", {c}" for c in _MARKET_TREND_COLS if analytics_db.has_column("mart_game", c)
+    )
+
 
 def _profile_cols() -> str:
-    cols = _PROFILE_COLS
+    cols = _PROFILE_COLS + _ea_cols()
     if _has_players_summary():
-        cols += ", players_7d_avg, players_trend_7d_pct"
+        cols += ", players_7d_avg, players_trend_7d_pct" + _market_trend_cols()
     if _has_lifetime_game():
         cols += _LIFETIME_PROFILE_COLS
     if _has_dev_socials():
@@ -157,7 +186,7 @@ def _profile_cols() -> str:
 
 
 def _search_cols() -> str:
-    cols = _SEARCH_COLS
+    cols = _SEARCH_COLS + _ea_cols()
     if _has_lifetime_game():
         cols += ", lifetime_months, lifetime_alive"
     if _has_dev_socials():
@@ -334,6 +363,7 @@ def search_games(
         limit=limit,
         offset=offset,
         data_as_of=data_as_of,
+        owners_as_of=analytics_db.mart_meta().get("owners_as_of"),
     )
 
 
@@ -380,7 +410,7 @@ def game_profile(
     row = analytics_db.query_one(f"SELECT {_profile_cols()} FROM mart_game WHERE appid = ?", [appid])
     if row is None:
         raise HTTPException(status_code=404, detail=f"game not found: {appid}")
-    return GameProfile(**row)
+    return GameProfile(**row, owners_as_of=analytics_db.mart_meta().get("owners_as_of"))
 
 
 @router.get("/{appid}/comparables", response_model=GameComparablesResponse)

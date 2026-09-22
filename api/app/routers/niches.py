@@ -116,6 +116,7 @@ SORTABLE = {
     "lifetime_survival_12m", "lifetime_median_dead_months",
     "p90_rev",
     "reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct",
+    "n_free", "n_price_unknown", "players_trend_7d_market_pct", "players_trend_7d_rel_pct",
 }
 _PLAYERS_COLS = ["total_players_now", "players_trend_7d_pct", "players_coverage"]
 _LIFETIME_COLS = ["lifetime_n_games", "lifetime_survival_12m", "lifetime_median_dead_months"]
@@ -144,6 +145,19 @@ _SOLO_EVIDENCE_COLS = ["self_published_share", "indie_share", "med_playtime_h"]
 # ships in the same ETL build (the same commit added both), so one probe covers the family.
 _V2_PARTS_COLS = [
     "momentum", "supply_room", "revenue_spread", "market_pull", "supply_brake", "solo_tier",
+]
+# The ETL's in-flight additions (2026-09), each gated on ITS OWN column so a partially
+# landed build serves what it has and a pre-rebuild mart simply leaves them null:
+#   n_free / n_price_unknown  how many of the cut's games are free-to-play vs have no known
+#       price — the denominators behind median_price/median_rev once free and unknown-price
+#       revenue became NULL instead of 0 (a median over "the priced games" must say how
+#       many it left out).
+#   players_trend_7d_market_pct / players_trend_7d_rel_pct  the whole Steam panel's 7d
+#       player change over the same days, and the niche's trend RELATIVE to it — a +5%
+#       week in a +6% market is an underperformance, and players_trend_7d_pct alone can't
+#       say so.
+_NEW_OPTIONAL_COLS = [
+    "n_free", "n_price_unknown", "players_trend_7d_market_pct", "players_trend_7d_rel_pct",
 ]
 
 # Ordered base column list (single source of truth for SELECT + CSV header); the players
@@ -447,6 +461,7 @@ def _cols() -> list[str]:
         cols.extend(_SOLO_EVIDENCE_COLS)
     if _has_v2_parts():
         cols.extend(_V2_PARTS_COLS)
+    cols.extend(c for c in _NEW_OPTIONAL_COLS if analytics_db.has_column("mart_niche", c))
     return cols
 
 
@@ -519,6 +534,11 @@ def _require_list_capabilities(sort: str, min_reviews: int) -> None:
                 "mart_niche predates the opportunity_v2 sub-scores — rebuild the marts "
                 "(task etl). opportunity_v2 itself is still sortable."
             ),
+        )
+    if sort in _NEW_OPTIONAL_COLS and not analytics_db.has_column("mart_niche", sort):
+        raise HTTPException(
+            status_code=503,
+            detail=f"mart_niche predates the {sort} column — rebuild the marts (task etl).",
         )
     if min_reviews == 0 and not _has_no_floor_cut():
         raise HTTPException(
@@ -606,6 +626,7 @@ def list_niches(
         total=int(total or 0),
         limit=limit,
         offset=offset,
+        owners_as_of=analytics_db.mart_meta().get("owners_as_of"),
     )
 
 
@@ -811,6 +832,7 @@ def niche_games(
         items=[NicheGameRow(**r) for r in rows],
         limit=limit,
         offset=offset,
+        owners_as_of=analytics_db.mart_meta().get("owners_as_of"),
     )
 
 
@@ -1018,6 +1040,9 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
         players = NichePlayers(
             total_players_now=head.get("total_players_now"),
             players_trend_7d_pct=head.get("players_trend_7d_pct"),
+            # .get(): None until the mart carries the market-relative columns.
+            players_trend_7d_market_pct=head.get("players_trend_7d_market_pct"),
+            players_trend_7d_rel_pct=head.get("players_trend_7d_rel_pct"),
             players_coverage=head.get("players_coverage"),
             n_games_panel=panel,
             series=[NichePlayersPoint(**s) for s in series],
@@ -1093,6 +1118,7 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
         hit_rates_cut=HeadlineCut(
             window=headline["win"], min_reviews=headline["min_reviews"], fallback=fallback
         ),
+        owners_as_of=analytics_db.mart_meta().get("owners_as_of"),
     )
 
 
