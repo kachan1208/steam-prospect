@@ -53,6 +53,18 @@ def test_recommendation_scores_match_the_documented_formula(client):
     assert "demand_share" in rec["method"]  # formula is spelled out, not a black box
 
 
+def test_rationale_states_the_release_count_in_its_real_unit(client):
+    """avg_releases is releases landing in ONE calendar month per year. The rationale used
+    to print it as "releases/yr" — for January on the real mart "(1092 releases/yr ...)",
+    while the twelve monthly figures sum to ~16K a year. Dec in the fixture: 100 releases in
+    an average year's December, 5 of them $200K+, over n_years=3."""
+    rationale = client.get("/api/timing/overview").json()["window_recommendation"]["rationale"]
+    assert "releases/yr" not in rationale
+    assert "~100 December releases per year" in rationale
+    assert "~5 of them $200K+" in rationale
+    assert "3-yr avg" in rationale
+
+
 def test_recommendation_components_are_returned(client):
     r = client.get("/api/timing/overview", params={"genre": "__all__"})
     w = r.json()["window_recommendation"]["months"][10]  # November
