@@ -1,21 +1,58 @@
 """Smoke test for prospect_mcp.py — instantiates the server module (which opens the
-real read-only DuckDB connection to data/current.duckdb) and calls a handful of tools
-directly as plain Python functions (the @mcp.tool() decorator registers but does not
-wrap/replace the function — see mcp.server.fastmcp.server.FastMCP.tool()), printing real
-returned data for manual/CI verification.
+real read-only DuckDB connection to data/current.duckdb) and calls every tool directly as
+a plain Python function (prospect_mcp's `_tool` decorator registers an MCP entry point and
+binds the module name to a direct-call wrapper that returns exactly what the wire carries,
+envelope included), printing real returned data for manual/CI verification. It also
+checks the wire contract itself: description budgets, compact JSON, the envelope.
 
 Run: mcp/.venv/bin/python mcp/smoke_test.py
 """
 from __future__ import annotations
 
+import asyncio
 import json
 
 import prospect_mcp as srv
+
+ENVELOPE_KEYS = ("data_as_of", "mart_version", "score_version", "warnings")
 
 
 def show(title: str, obj) -> None:
     print(f"\n=== {title} ===")
     print(json.dumps(obj, indent=2, default=str))
+    # Every tool response (errors included) must lead with the envelope, so a stale or
+    # pre-v2 mart can never answer silently.
+    if isinstance(obj, dict):
+        assert list(obj)[:4] == list(ENVELOPE_KEYS), f"{title}: envelope missing/out of order: {list(obj)[:5]}"
+        assert obj["score_version"] in ("v2", "v1-legacy")
+        assert isinstance(obj["warnings"], list)
+
+
+def check_wire_contract() -> None:
+    """What Claude Code actually receives: every description and the instructions under the
+    ~2,048-char client cut (budgeted at srv.DESCRIPTION_BUDGET), read-only annotations, and
+    compact (unindented) JSON text that parses back to an envelope-led dict."""
+
+    async def run():
+        tools = await srv.mcp.list_tools()
+        over = {t.name: len(t.description or "") for t in tools if len(t.description or "") > srv.DESCRIPTION_BUDGET}
+        assert not over, f"tool descriptions over the {srv.DESCRIPTION_BUDGET}-char budget: {over}"
+        assert len(srv.mcp.instructions or "") <= srv.DESCRIPTION_BUDGET, "server instructions over budget"
+        for t in tools:
+            ann = t.annotations
+            assert ann and ann.readOnlyHint and ann.idempotentHint and ann.openWorldHint is False, t.name
+        res = await srv.mcp.call_tool("tag_suggest", {"q": "", "limit": 3})
+        content = res[0] if isinstance(res, tuple) else res
+        text = content[0].text
+        parsed = json.loads(text)
+        assert text == json.dumps(parsed, ensure_ascii=False, separators=(",", ":")), \
+            "wire JSON must be compact (no indent, no spaces after separators)"
+        assert list(parsed)[:4] == list(ENVELOPE_KEYS)
+        return {t.name: len(t.description or "") for t in tools}
+
+    lengths = asyncio.run(run())
+    print(f"\n[OK] {len(lengths)} tools, longest description {max(lengths.values())} chars "
+          f"(budget {srv.DESCRIPTION_BUDGET}), instructions {len(srv.mcp.instructions)} chars, compact JSON")
 
 
 def _blend_weights() -> dict[str, float]:
@@ -38,13 +75,15 @@ def _blend_weights() -> dict[str, float]:
 
 
 def main() -> None:
-    # 1. find_niches — defaults are now the niche-score v2 cut (window=24m,
-    # sort=opportunity_v2, include_tiers=[micro, theme]). Tolerant on purpose: the v2
-    # columns only exist once the ETL that added them has rebuilt current.duckdb, and
-    # their absence must yield the tool's clear "re-run ETL" error dict, never a crash
-    # (post-ETL the assertions are real).
+    check_wire_contract()
+
+    # 1. find_niches — defaults encode the owner's rules (window=24m, sort=opportunity_v2,
+    # include_tiers=[micro] — themes are modifiers, never headline picks). Tolerant on
+    # purpose: the v2 niche columns only exist once the ETL that added them has rebuilt
+    # current.duckdb, and their absence must yield the tool's clear "re-run ETL" error
+    # dict, never a crash (post-ETL the assertions are real).
     niches = srv.find_niches()
-    show("find_niches() [defaults: tag/24m/min_reviews=50/opportunity_v2/micro+theme]", niches)
+    show("find_niches() [defaults: tag/24m/min_reviews=50/opportunity_v2/micro]", niches)
     has_v2 = "error" not in niches
     if not has_v2:
         assert "opportunity_v2" in niches["error"], f"unexpected find_niches error: {niches['error']!r}"
@@ -52,11 +91,25 @@ def main() -> None:
     else:
         assert niches["niches"], "expected at least one niche row under default filters"
         top = niches["niches"][0]
-        for field in ("opportunity_v2", "opportunity", "decline_gate", "entrant_ratio",
-                      "solo_viability", "tier"):
-            assert field in top, f"missing v2 field {field!r} in find_niches rows"
-        bad_tiers = {n["tier"] for n in niches["niches"]} - {"micro", "theme"}
+        # Core rows: the score WITH its parts (never a lone number) + the rule inputs.
+        parts = (("momentum", "market_pull", "revenue_spread", "quality_gap", "supply_brake")
+                 if srv._has_v2_parts() else ("opportunity", "decline_gate", "demand"))
+        for field in ("opportunity_v2", *parts, "entrant_ratio", "saturation_yoy", "competition",
+                      "winner_concentration", "n_recent_year", "n_prior_year", "tier", "flags"):
+            assert field in top, f"missing core field {field!r} in find_niches rows"
+        assert niches["score_version"] == ("v2" if srv._has_v2_parts() else "v1-legacy")
+        bad_tiers = {n["tier"] for n in niches["niches"]} - {"micro"}
         assert not bad_tiers, f"default include_tiers leaked tiers: {bad_tiers}"
+        # Server-computed flags + a legend for exactly the flags that fired.
+        known = set(srv._FLAG_RULES)
+        fired = {f for n in niches["niches"] for f in n["flags"]}
+        assert fired <= known, f"unknown flag codes: {fired - known}"
+        legend = {r.split(":", 1)[0] for r in niches["rules"]}
+        assert fired <= legend, f"flags without a rules entry: {fired - legend}"
+        for n in niches["niches"]:
+            assert n["flags"] == srv._niche_flags({**n, "demand_emerging": None}) or \
+                "emerging_unquotable" in n["flags"], f"{n['key']}: flags not reproducible from the row"
+        print(f"[OK] flags on default rows: {sorted(fired) or 'none'}")
         # NOTE the old assertion here — "opportunity_v2 <= opportunity, the gate is <= 1" —
         # was removed with the 2026-08-31 score rebuild. opportunity_v2 is no longer
         # `opportunity x decline_gate`; it is an independent blend (see
@@ -82,19 +135,26 @@ def main() -> None:
                     f"sub-scores ({want:.2f})"
                 )
             print("[OK] opportunity_v2 reproduces from its published sub-scores")
-        # Live-player columns ride along exactly when the mart carries them (values may
-        # be None — e.g. a fixture whose one capture day is > 7d stale).
+        # Live-player columns ride along exactly when the mart carries them AND the call
+        # asks for the players lens (core rows stay lean otherwise; values may be None —
+        # e.g. a fixture whose one capture day is > 7d stale).
         if srv._has_players():
+            hot = srv.find_niches(sort="total_players_now", limit=3)
+            assert "error" not in hot, hot
             for field in ("total_players_now", "players_trend_7d_pct", "players_coverage"):
-                assert field in top, f"missing players field {field!r} in find_niches rows"
-        # Lifetime columns ride along exactly when the mart carries them (values may be
-        # None pre-mart — e.g. fewer than 5 steamcharts-covered games in the niche).
+                assert all(field in n for n in hot["niches"]), f"missing players field {field!r}"
+        # Lifetime columns likewise, on a lifetime sort.
         if srv._has_lifetime():
-            assert "lifetime_survival_12m" in top, "missing lifetime field in find_niches rows"
-        print(f"\n[OK] top niche is {top['key']!r} (tier={top['tier']}, "
+            lt = srv.find_niches(sort="lifetime_survival_12m", limit=3)
+            assert all("lifetime_survival_12m" in n for n in lt["niches"]), "missing lifetime field"
+        # fields="all" is every mart column.
+        wide = srv.find_niches(fields="all", limit=1)
+        assert set(srv._cols("mart_niche")) - {"dimension", "key", "win", "min_reviews"} <= set(wide["niches"][0]), \
+            "fields='all' must return every mart_niche column"
+        print(f"\n[OK] top niche is {top['key']!r} (tier={top['tier']}, flags={top['flags']}, "
               f"opportunity_v2={top['opportunity_v2']}, "
               f"momentum={top.get('momentum')}, supply_brake={top.get('supply_brake')}, "
-              f"decline_gate={top['decline_gate']})")
+              f"decline_gate={top.get('decline_gate')})")
 
     # 2. niche_detail — same tolerance: v2 columns are in its variants query too.
     detail_key = niches["niches"][0]["key"] if has_v2 else "Open World Survival Craft"
@@ -107,11 +167,34 @@ def main() -> None:
     else:
         assert "error" not in detail
         assert detail["tier"] in ("micro", "umbrella", "theme", "meta", "genre")
+        # The headline is the 24m x 50 cut by default (the market a new entrant faces), and
+        # hit_rates are labelled with — and computed from — that same cut.
+        assert detail["cut"] == {"window": "24m", "min_reviews": 50}, detail["cut"]
+        assert detail["hit_rates"]["cut"] == detail["cut"]
+        assert detail["hit_rates"]["n_games"] == detail["headline"]["n_games"]
+        assert detail["flags"] == srv._niche_flags(detail["headline"]), "flags must match the headline cut"
+        assert detail["rules"] and detail["representative_games_cut"]
         assert all("entrant_ratio" in v and "solo_viability" in v for v in detail["variants"])
         assert "players" in detail, "niche_detail must always carry the players key (may be None)"
-        print(f"\n[OK] niche_detail returned {len(detail['representative_games'])} representative games, "
+        # A case-insensitive key resolves (and says so) instead of erroring.
+        ci = srv.niche_detail("tag", detail_key.lower())
+        assert "error" not in ci and ci["key"] == detail_key and ci.get("key_note"), ci
+        print(f"\n[OK] niche_detail returned {len(detail['representative_games'])} representative games "
+              f"(cut {detail['representative_games_cut']}), "
               f"{len(detail['saturation_trend'])} trend years, {len(detail['revenue_histogram'])} hist buckets, "
-              f"players={'yes' if detail['players'] else 'None'}")
+              f"players={'yes' if detail['players'] else 'None'}, flags={detail['flags']}")
+
+    # 2a. niche_games — needs mart_niche_game (absent from older marts / the CI fixture):
+    # a clear rebuild error there, real rows + whole-cut stats otherwise.
+    ng = srv.niche_games("tag", detail_key, limit=3)
+    show(f"niche_games('tag', {detail_key!r}, limit=3)", ng)
+    if "error" in ng:
+        assert "mart_niche_game" in ng["error"], f"unexpected niche_games error: {ng['error']!r}"
+        print("\n[OK] niche_games degraded cleanly (mart_niche_game not built yet — run `task etl`)")
+    else:
+        assert ng["stats"]["n_games"] >= ng["n_returned"] and ng["n_returned"] <= 3
+        print(f"\n[OK] niche_games: {ng['stats']['n_games']} games in the cut, "
+              f"median {ng['stats']['median_rev']}")
 
     # 2b. tag_combos — tolerant: mart_tag_lift only exists once the ETL that added it has
     # run, and its absence must yield the tool's clear error dict, never a crash.
@@ -155,6 +238,12 @@ def main() -> None:
     search = srv.game_search(q="Hollow Knight", limit=5)
     show('game_search(q="Hollow Knight")', search)
     assert any(g["appid"] == 367520 for g in search["games"])
+    assert search["filters"] == {"q": "Hollow Knight"}, "only the filters actually set are echoed"
+    assert "header_image" not in search["games"][0], "core rows stay lean (fields='all' has the rest)"
+    # min_positive is a 0-1 FRACTION: 80 must be a helpful error, not a silent 0 rows.
+    bad = srv.game_search(min_positive=80)
+    assert "error" in bad and "0.8" in bad["error"], bad
+    print("\n[OK] game_search: lean rows, echoed filters, min_positive=80 -> helpful error")
 
     # dev_x_handle rides along exactly when the mart carries the socials columns (value
     # may be None — official links are harvested from store pages / dev websites, and
@@ -179,6 +268,13 @@ def main() -> None:
         assert "summary" in gph and "series" in gph and isinstance(gph["series"], list)
         assert "monthly" in gph and isinstance(gph["monthly"], list)  # may be empty pre-backfill
         assert gph["caveats"], "player tools must always state the point-sample caveats"
+        # Windows are anchored to the mart's last capture, not the wall clock: a game with
+        # measured history always has series rows on its own mart, and dates are real
+        # ISO strings or null — never the string "None".
+        s = gph["summary"]
+        if s.get("n_days_measured"):
+            assert s["as_of"] and gph["series"], "anchored window returned no rows"
+            assert s["window_peak"]["date"] != "None"
         print(f"\n[OK] game_player_history: {gph['summary'].get('n_days_measured', 0)} measured days, "
               f"{len(gph['series'])} series rows")
 
@@ -234,8 +330,11 @@ def main() -> None:
         assert "game-lifetime" in lc["error"], f"unexpected lifetime_curve error: {lc['error']!r}"
         print("\n[OK] lifetime_curve degraded cleanly (mart_market_lifetime not built yet — run `task etl`)")
     else:
-        assert isinstance(lc["curve"], list) and isinstance(lc["milestones"], dict)
-        print(f"\n[OK] lifetime_curve: {len(lc['curve'])} points, m12={lc['milestones'].get('m12')}, "
+        # The raw curve is opt-in (the milestones are what to quote).
+        assert "curve" not in lc and isinstance(lc["milestones"], dict)
+        full = srv.lifetime_curve(include_curve=True)
+        assert isinstance(full["curve"], list) and full["curve"]
+        print(f"\n[OK] lifetime_curve: {len(full['curve'])} points (opt-in), m12={lc['milestones'].get('m12')}, "
               f"median_months={lc['median_months']}")
 
     # 9. press_pitch_list + buzz_trends.
@@ -289,6 +388,13 @@ def main() -> None:
     dd = srv.data_dictionary()
     print(f"\n=== data_dictionary() resource ===\n{dd[:400]}\n... [{len(dd)} chars total]")
 
+    # 10b. methodology — the long-form docs moved out of the (truncated) descriptions.
+    rules = srv.methodology("rules")
+    show("methodology('rules')", {**rules, "text": rules["text"][:300] + " ..."})
+    assert all(code in rules["text"] for code in srv._FLAG_RULES), "every flag code must be documented"
+    assert srv.methodology("all")["text"] == dd
+    print(f"\n[OK] methodology: {len(srv._DOC_TOPICS)} topics, rules text documents every flag")
+
     # 11. niche_review_themes — tolerant: mart_niche_themes only exists on marts built by
     # the ETL that added it; absence must yield the tool's clear error dict, never a crash.
     themes = srv.niche_review_themes("tag", detail_key)
@@ -330,9 +436,11 @@ def main() -> None:
         print("\n[OK] game_reviews_summary degraded cleanly (marts not built yet — run `task etl`)")
     else:
         assert "eligible" in grs and isinstance(grs["timeline"], list)
-        assert isinstance(grs["language_split"], list) and isinstance(grs["launch_curve"], list)
-        print(f"\n[OK] game_reviews_summary: {len(grs['timeline'])} timeline rows, "
-              f"eligible={grs['eligible']}")
+        assert len(grs["timeline"]) <= 24, "timeline is bounded by months (default 24)"
+        assert isinstance(grs["language_split"], list) and isinstance(grs["launch_shape_windows"], list)
+        assert "launch_curve" not in grs, "the raw launch curve is opt-in"
+        print(f"\n[OK] game_reviews_summary: {len(grs['timeline'])} timeline rows "
+              f"(of {grs['timeline_summary'].get('n_months')}), eligible={grs['eligible']}")
 
     # 14. aspect_reviews — tolerant: mart_game_aspect_reviews is additive. An eligible
     # game with nothing said about an aspect returns an empty list (absence of evidence).

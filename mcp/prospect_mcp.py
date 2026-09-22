@@ -19,8 +19,12 @@ Every tool goes through `_tool` (see "Tool plumbing" below), which gives it:
   - A friendly "this mart predates <column>; rebuild" error instead of a raw DuckDB
     Binder/Catalog exception when an older mart lacks something.
 
-Read the `prospect-data-dictionary` resource first for what opportunity/demand/
-competition/quality_gap mean and what each mart covers.
+Claude Code truncates every tool description and the server instructions at ~2,048 chars,
+so each stays under DESCRIPTION_BUDGET with the analysis RULES FIRST; parameter docs live
+in the JSON schema (Annotated[..., Field(description=...)]); the long methodology lives in
+the `methodology` tool and the prospect-data-dictionary resource. The rules are also
+enforced in the OUTPUT: find_niches / niche_detail rows carry server-computed `flags` and a
+`rules` legend, so they reach the model even if every description were truncated.
 """
 from __future__ import annotations
 
@@ -39,12 +43,13 @@ from datetime import time as dt_time
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Iterable, Literal
 from uuid import UUID
 
 import duckdb
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from pydantic import AfterValidator, Field
 
 # ----------------------------------------------------------------------------------------
 # DB connection — one read-only connection + lock (same idiom as api/app/analytics_db.py;
@@ -556,10 +561,145 @@ def _genre_owners_per_review(genre: str | None) -> tuple[str, float]:
     return ("__all__", default)
 
 
-_V2_PARTS_SELECT = (
-    ",\n                   momentum, supply_room, revenue_spread, market_pull,"
-    " supply_brake, solo_tier"
-)
+# ----------------------------------------------------------------------------------------
+# The analysis rules + the flags that enforce them. ONE source for the server instructions,
+# the find_niches/niche_detail `rules` legend, and methodology('rules'). Thresholds mirror
+# web/src/lib/radarVerdict.ts (WC_WINNER_TAKE_MOST, SAT_FLOOD_YOY, DEMAND_HOLD_PCT,
+# ENTRANT_RATIO_PAR, SOLO_FRIENDLY_MIN / SOLO_MIXED_MIN) and api/app/routers/niches.py
+# (RADAR_SOLO_FRIENDLY_MIN) — keep them in lockstep.
+# ----------------------------------------------------------------------------------------
+WINNER_TAKE_MOST = 0.85
+SAT_FLOOD_YOY = 0.15
+DEMAND_FALLING_PCT = -10.0  # the Radar's "holding" bar; <= -30 is its "declining" ring
+ENTRANT_RATIO_PAR = 1.0
+SOLO_FRIENDLY_MIN = 0.8  # singleplayer share; below = solo_tier 'team'
+SOLO_MIXED_MAX = 0.9  # 0.80-0.90 = solo_tier 'mixed'
+LOW_COMPETITION = 50.0  # competition is a 0-100 percentile; below the median = "low"
+THIN_SAMPLE_GAMES = 50
+PLAYERS_TOP5_HITS = 0.6  # the players-lens falsification bar (methodology 'falsification')
+
+# Severity order — bearish-first: a disqualifier before a warning before a caveat.
+_FLAG_RULES: dict[str, str] = {
+    "multiplayer_dependent": "solo_tier 'team' (singleplayer share < 0.80) — needs netcode, "
+    "servers and a live player base: disqualify for a solo dev.",
+    "umbrella_or_meta_tag": "a genre container or reception tag (Open World, Great "
+    "Soundtrack) — not buildable, never a pick.",
+    "decline_signature": "saturation_yoy < 0 with competition < 50 — releases shrinking in an "
+    "uncrowded niche: everyone stopped entering. Read as DECLINE, not an open market.",
+    "demand_falling": "24-month demand trend below -10% (<= -30% is the Radar's 'declining' "
+    "ring).",
+    "winner_take_most": "winner_concentration > 0.85 — revenue sits in a few hits: red flag, "
+    "expect the median outcome, not the winners. The Radar never rings it 'enter' (it rings "
+    "'watch': demand surging, but winner-take-most revenue).",
+    "low_newcomer_economics": "entrant_ratio < 1.0 — games from the last 24 months earn less "
+    "than the niche's back catalog (catalog norm ~1.08); require >= 1.0.",
+    "newcomer_economics_unverified": "entrant_ratio unknown — recent-entrant pay is "
+    "unverified; do not assume it passes.",
+    "supply_flooding": "releases up > 15% YoY (the Radar's crowding bar) — entrants arriving "
+    "faster than the niche grows.",
+    "theme_tag": "a setting/aesthetic — attach it as a MODIFIER to a micro-genre pick "
+    "(tag_combos), never the headline.",
+    "emerging_unquotable": "young / low-base tag: its prior 24-month window is near zero by "
+    "construction, so demand_trend_24m_pct is withheld — judge absolute reviews_24m.",
+    "thin_sample": "fewer than 50 games in this cut — a median over few games is weak "
+    "evidence.",
+    "multiplayer_minority": "solo_tier 'mixed' (0.80-0.90) — a real multiplayer minority; "
+    "check the top games before a solo pick.",
+    "players_in_hits": "players_top5_share > 0.6 — the niche's live players are its top 5 "
+    "games' audience, not demand a new entrant gets (check median_players_now).",
+}
+_FLAG_ORDER = tuple(_FLAG_RULES)
+
+_GENERAL_RULES = [
+    "Bearish reading first: state each flag before any score.",
+    "Never quote opportunity_v2 alone: give momentum, market_pull, revenue_spread, "
+    "quality_gap and supply_brake, and say which one carried it.",
+    "Build decisions use window=24m; window=all is history, not the market you would enter.",
+]
+_GENERAL_RULES_V1 = [
+    _GENERAL_RULES[0],
+    "score_version is v1-legacy: opportunity_v2 here is opportunity x decline_gate (the old "
+    "formula, which ranked shrinking niches on top). Quote opportunity with demand / "
+    "competition / quality_gap and recommend rebuilding the mart before trusting a ranking.",
+    _GENERAL_RULES[2],
+]
+
+_OWNER_RULES = [
+    "Use the 24-month window (window='24m', the default) — the market a new entrant faces; "
+    "window='all' is history.",
+    "Negative saturation_yoy + low competition = DECLINE (everyone stopped entering), not "
+    "an opportunity.",
+    "Verify recent-entrant economics: entrant_ratio >= 1.0 (catalog norm ~1.08).",
+    "Headline picks are micro-genres. Themes are modifiers to attach to a pick (tag_combos "
+    "finds pairings); umbrella and meta tags are never picks.",
+    "Multiplayer-dependent niches (solo_tier 'team', singleplayer share < 0.80) are out "
+    "for solo devs.",
+    "winner_concentration > 0.85 (winner-take-most) is a red flag: expect the median, not "
+    "the hits.",
+    "Present the bearish reading of any ambiguous metric first.",
+    "Always show opportunity_v2's components (momentum, market_pull, revenue_spread, "
+    "quality_gap, supply_room -> supply_brake) — never a lone number.",
+    "demand_emerging niches: never quote demand_trend_24m_pct; judge absolute reviews_24m.",
+]
+
+
+def _niche_flags(r: dict) -> list[str]:
+    """The rules above, evaluated on one mart_niche row (any cut). A flag only fires on
+    evidence the row carries — a column an older mart lacks simply cannot raise its flag
+    (except entrant_ratio, whose NULL is itself a finding)."""
+    fired: set[str] = set()
+    emerging = r.get("demand_emerging") is True
+    solo = r.get("solo_tier")
+    if solo is None and isinstance(r.get("solo_viability"), (int, float)):
+        sv = r["solo_viability"]
+        solo = "team" if sv < SOLO_FRIENDLY_MIN else "mixed" if sv < SOLO_MIXED_MAX else "solo"
+    if solo == "team":
+        fired.add("multiplayer_dependent")
+    elif solo == "mixed":
+        fired.add("multiplayer_minority")
+    tier = r.get("tier")
+    if tier in ("umbrella", "meta"):
+        fired.add("umbrella_or_meta_tag")
+    elif tier == "theme":
+        fired.add("theme_tag")
+    sat, comp = r.get("saturation_yoy"), r.get("competition")
+    if sat is not None and comp is not None and sat < 0 and comp < LOW_COMPETITION:
+        fired.add("decline_signature")
+    trend = r.get("demand_trend_24m_pct")
+    if not emerging and trend is not None and trend < DEMAND_FALLING_PCT:
+        fired.add("demand_falling")
+    # The Radar pre-empts its crowding arms for emerging niches (youth distorts the
+    # release counts too), so this flag does the same.
+    if not emerging and sat is not None and sat > SAT_FLOOD_YOY:
+        fired.add("supply_flooding")
+    wc = r.get("winner_concentration")
+    if wc is not None and wc > WINNER_TAKE_MOST:
+        fired.add("winner_take_most")
+    if "entrant_ratio" in r:
+        er = r["entrant_ratio"]
+        if er is None:
+            fired.add("newcomer_economics_unverified")
+        elif er < ENTRANT_RATIO_PAR:
+            fired.add("low_newcomer_economics")
+    if emerging:
+        fired.add("emerging_unquotable")
+    n = r.get("n_games")
+    if n is not None and n < THIN_SAMPLE_GAMES:
+        fired.add("thin_sample")
+    # Only where the row shows the players lens (niche_detail, or a players sort/filter in
+    # find_niches) — the column is simply absent from other core rows.
+    top5 = r.get("players_top5_share")
+    if top5 is not None and top5 > PLAYERS_TOP5_HITS:
+        fired.add("players_in_hits")
+    return [c for c in _FLAG_ORDER if c in fired]
+
+
+def _rules_for(flags: Iterable[str]) -> list[str]:
+    """The general rules + a one-line definition of every flag that actually fired —
+    short enough to ride every response, specific enough that the model can't miss it."""
+    seen = set(flags)
+    general = _GENERAL_RULES if _has_v2_parts() else _GENERAL_RULES_V1
+    return general + [f"{c}: {_FLAG_RULES[c]}" for c in _FLAG_ORDER if c in seen]
 
 
 # ----------------------------------------------------------------------------------------
@@ -674,41 +814,31 @@ def _predates_error(exc: Exception) -> str:
 # ==========================================================================================
 # Server + tool plumbing
 # ==========================================================================================
-mcp = FastMCP(
-    "prospect-market-intel",
-    instructions=(
-        "Steam market-intelligence tools over Prospect's curated DuckDB marts: find "
-        "under-served niches, benchmark the market, estimate revenue, check launch "
-        "timing, look up games and rank a game's closest competitors (find_comparables), "
-        "profile developers/publishers and scout publishers active in a genre "
-        "(entity_profile, publisher_pitch_list), and find press pitch targets "
-        "(press_pitch_list). Read the "
-        "prospect-data-dictionary resource first. "
-        "For 'what should I build' questions, keep find_niches' defaults (24m window, "
-        "opportunity_v2 sort, micro+theme tags only) and apply its falsification rules: "
-        "low competition with negative saturation_yoy is usually a market in DECLINE "
-        "(everyone stopped entering), not an opportunity — check entrant_ratio "
-        "(catalog-median tag ~1.08; <1 = recent entrants underearn) before recommending; "
-        "winner_concentration > 0.85 means winner-take-most (judge by the median, not "
-        "the hits); and for solo devs check solo_viability, which is a FLAG, NOT A SCALE "
-        "— the catalog MEDIAN is 0.975 and 75% of niches sit between 0.95 and 1.00, so "
-        "the number ranks nothing; only the ~3% below 0.80 mean anything (Social "
-        "Deduction 0.35, MMORPG 0.45, Party Game 0.50, Battle Royale 0.70, Extraction "
-        "Shooter 0.71, eSports 0.79 — multiplayer-dependent, not solo-buildable without "
-        "flagging it). Use solo_tier ('team' | 'mixed' | 'solo') when the mart serves it. "
-        "opportunity_v2 itself (rebuilt 2026-08-31) now reads the same axes as the Radar "
-        "board's rings: high = demand growing faster than supply, revenue spread across "
-        "the field, newcomers getting paid. Its four blended terms ride every row — "
-        "momentum, market_pull, revenue_spread, quality_gap — plus supply_room, which "
-        "feeds the multiplier rather than the blend. Say WHICH one carried a "
-        "recommendation rather than quoting the total. "
-        "For 'is this niche HOT right now' questions use the live-player lens: "
-        "find_niches sort=total_players_now (where the players are) or "
-        "players_trend_7d_pct (what's heating up), then niche_player_history / "
-        "game_player_history for the daily series — nightly point samples, not daily "
-        "peaks, and totals are dominated by each niche's biggest games."
-    ),
-)
+# Claude Code cuts tool descriptions and server instructions at ~2,048 chars
+# (CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH) and appends "… [truncated]". Everything past the
+# cut never reaches the model — which is how find_niches' falsification rules (10.8K chars
+# in, starting at char ~2,773) went unseen. Budgeted with headroom; enforced by tests.
+DESCRIPTION_BUDGET = 1900
+
+INSTRUCTIONS = """\
+Prospect: Steam market intelligence for solo/indie devs, read from curated DuckDB marts.
+Every response opens with data_as_of, mart_version, score_version and warnings — read the warnings first: a stale or v1-legacy mart ranks niches differently.
+
+"What should I build" -> find_niches (its defaults encode the rules), then niche_detail and niche_games on a shortlist. The owner's analysis rules — apply every time; find_niches/niche_detail rows carry server-computed `flags` for them:
+1. Use the 24-month window — the market a new entrant faces.
+2. Negative saturation_yoy + low competition = decline (everyone stopped entering), not opportunity.
+3. Verify recent-entrant economics: entrant_ratio >= 1.0.
+4. Umbrella/meta/theme tags are never headline picks; attach themes as modifiers (tag_combos).
+5. Multiplayer-dependent niches (solo_tier 'team') are out for solo devs.
+6. winner_concentration > 0.85 is a red flag (winner-take-most).
+7. Present the bearish reading of any ambiguous metric first.
+8. Show opportunity_v2's components, never the lone number.
+9. demand_emerging niches: never quote the demand trend %.
+
+Games: game_search -> game_profile, find_comparables, game_teardown, game_reviews_summary. Money: market_benchmarks, revenue_distribution, estimate_revenue (Boxleiter-style ESTIMATES — give ranges). Timing: best_launch_timing, launch_shape. Live players: find_niches sort=total_players_now, niche_player_history, game_player_history (nightly point samples, not peaks). Partners/press: entity_profile, publisher_pitch_list, press_pitch_list, buzz_trends.
+Formulas, thresholds and caveats: methodology(topic) or the prospect-data-dictionary resource."""
+
+mcp = FastMCP("prospect-market-intel", instructions=INSTRUCTIONS)
 
 _TOOL_ANNOTATIONS = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
 
@@ -746,11 +876,407 @@ def _tool(fn):
     mcp.add_tool(
         mcp_entry,
         name=fn.__name__,
-        description=inspect.cleandoc(fn.__doc__ or ""),
+        description=inspect.cleandoc(fn.__doc__ or "").strip(),
         annotations=_TOOL_ANNOTATIONS,
         structured_output=False,
     )
     return call
+
+
+# Shared schema pieces (parameter docs live in the schema, not the description).
+Dimension = Annotated[
+    Literal["tag", "genre"],
+    Field(description="tag = Steam community tags (niche-level, preferred); genre = Steam's ~15 broad genres."),
+]
+NicheKey = Annotated[
+    str,
+    Field(description="Exact niche key from find_niches / tag_suggest (e.g. 'Roguelike Deckbuilder'). A unique case-insensitive match or a known alias is resolved automatically."),
+]
+Window = Annotated[
+    Literal["24m", "all"],
+    Field(description="24m = games released in the last 24 months: the market a new entrant faces (use for build decisions). all = full history, context only."),
+]
+MinReviews = Annotated[
+    Literal[0, 50, 100],
+    Field(description="Per-game review floor of the precomputed cut: 50 (default) or 100 (stricter). 0 = no floor — honest tag SIZE, not for revenue conclusions."),
+]
+Fields = Annotated[
+    Literal["core", "all"],
+    Field(description="core = lean rows (score components, rule inputs, flags); all = every mart column."),
+]
+Order = Annotated[Literal["desc", "asc"], Field(description="desc = highest first; asc = lowest first.")]
+
+
+def _limit(default_max: int, what: str = "rows") -> Any:
+    return Field(ge=1, le=default_max, description=f"Max {what} returned (1-{default_max}).")
+
+
+def _fraction_0_1(v: float | None) -> float | None:
+    if v is not None and not 0 <= v <= 1:
+        hint = f" — did you mean {v / 100:g}?" if 1 < v <= 100 else ""
+        raise ValueError(
+            f"min_positive is a 0-1 FRACTION of positive reviews (0.8 = 80% positive), got {v:g}{hint}"
+        )
+    return v
+
+
+# ==========================================================================================
+# Methodology — the long-form docs that used to live in (and overflow) the descriptions.
+# One source for the prospect-data-dictionary resource and the `methodology` tool.
+# ==========================================================================================
+_DOCS: dict[str, str] = {}
+
+_DOCS["rules"] = (
+    "## Analysis rules (the owner's — apply every time)\n\n"
+    + "\n".join(f"{i}. {r}" for i, r in enumerate(_OWNER_RULES, 1))
+    + "\n\n## Flags (server-computed on every find_niches / niche_detail row)\n\n"
+    + "\n".join(f"- **{c}**: {t}" for c, t in _FLAG_RULES.items())
+    + """
+
+## The envelope (leads every tool response)
+
+- **data_as_of** = mart_meta.built_at (when the mart was built); **mart_version** = its
+  build date; **owners_as_of** (newer marts) = when the SteamSpy owner estimates were taken.
+- **score_version** = `v2` (the 2026-08-31 opportunity rebuild, components present) or
+  `v1-legacy` (an older mart: opportunity_v2 = opportunity x decline_gate, which ranked
+  shrinking niches on top — rebuild before trusting a ranking).
+- **warnings** — stale data (> 3 days old), legacy score, lagging owner estimates, a cut
+  that fell back to another. Read them before the numbers.
+"""
+)
+
+_DOCS["scores"] = """## The opportunity score (mart_niche)
+
+For each niche (a Steam community `tag` or a Steam `genre`), computed at 6 cuts —
+`window` in {`all`, `24m`} x `min_reviews` in {`0`, `50`, `100`} — as percentile ranks
+(0-100) against every other niche in the SAME cut:
+
+- **demand** = 0.4 x percentile(median revenue) + 0.3 x percentile(median owners) +
+  0.3 x percentile(recent 24m review velocity). Higher = bigger, hotter market.
+- **competition** = 0.6 x percentile(n_recent, count of recently-released games) +
+  0.4 x percentile(winner_concentration, share of niche revenue held by the top ~10% of
+  games). Higher = more crowded / more winner-take-most — BAD for a new entrant. On the
+  24m cut its n_recent term is mostly niche SIZE, so read it with n_games.
+- **quality_gap** (aka `beatable_share`) = percentile(share of incumbents that are weak:
+  low rating OR thin review count). Higher = easier to out-execute the field.
+- **opportunity** = clamp(0.5 x demand - 0.35 x competition + 0.3 x quality_gap, 0, 100).
+  The ORIGINAL score, kept for continuity. KNOWN FAILURE MODES: it rewards low competition
+  without asking WHY it's low (a niche everyone abandoned scores like an open market), and
+  its competition term punishes big growing markets. Do not sort by it.
+- **opportunity_v2** = `find_niches`' default ranking metric. REBUILT 2026-08-31 (it is
+  no longer `opportunity x decline_gate`; the old form ranked BACKWARDS against the Radar
+  board's ring verdicts — median score by ring ran enter 17.6 < watch 17.8 < crowded 20.9 <
+  declining 23.4 on 219 live niches):
+
+      opportunity_v2 = opp_core x supply_brake
+
+  where opp_core is the weighted mean of four 0-100 sub-scores (returned on every row) —
+  renormalised over whichever ones exist, so a missing input never counts as 0:
+
+  - **momentum** (weight 0.40) — DEMAND FLOW, the headline term. 50 at flat demand, 88.1
+    at +40%/24m (the Radar's "enter" bar), 10.7 at -30%/24m (its "declining" bar). NULL
+    for emerging niches: their prior window is near zero by construction, so no honest
+    trend claim exists in either direction.
+  - **market_pull** (0.22) — 0.6 x demand + 0.4 x market_size. The money LEVEL, kept as a
+    supporting term rather than the headline.
+  - **revenue_spread** (0.20) — from winner_concentration; exactly 50 at the 0.85
+    winner-take-most bar, 100 at 0.70, 0 at 1.00.
+  - **quality_gap** (0.18) — unchanged.
+
+  and **supply_brake** = 0.35 + 0.65 x supply_room/100 (1.0 when unknown — missing data is
+  never a penalty). **supply_room** is the WORSE of two supply reads, so either alone can
+  sink a score: the release pipeline's growth measured AGAINST demand growth (50 when
+  supply outgrows demand by the Radar's +15%/yr flooding bar), and entrant_room (0 at
+  entrant_ratio 0.5, 100 at the catalog norm 1.08, capped there).
+
+  READ THE PARTS, NOT JUST THE TOTAL: "Deckbuilding 71.9" is momentum 99 + supply_room 100
+  (demand +119%/24m outrunning a +36% release pipeline), while "Hunting 77.2" is momentum
+  92 + market_pull 86 but revenue_spread 17 (winner-take-most: expect the median outcome,
+  not the hits). Those are different recommendations.
+
+  saturation_yoy is read AGAINST demand inside the score: a shrinking pipeline earns no
+  credit by itself (the Naval/Transportation failure mode); it only shows up as room when
+  demand is holding while supply leaves.
+- **decline_gate** = 1 - 0.5 x max(sat_severity, entrant_severity), where
+  sat_severity = clamp(-saturation_yoy / 0.30, 0, 1) and
+  entrant_severity = clamp((1 - entrant_ratio) / 0.5, 0, 1). A FALSIFICATION TELL, NOT A
+  SCORE FACTOR since 2026-08-31 (it used to multiply opportunity_v2). Near 1.0 = neither
+  decline signal fired.
+
+### Score vs the Radar board's rings
+
+Since 2026-08-31 the score reads the same demand and concentration bars as the Radar's
+rings: at the rebuild the score's median by ring was enter 67.6 > watch 50.2 > crowded 39.1
+> declining 19.5, and >= 65 is the "scores like an enter" bar (~16% of the default cut).
+They are not interchangeable: the rings encode distinct failure MODES (crowded vs
+declining), the score also weighs the money, and they read supply differently (the ring:
+releases > +15% YoY, absolute; the score's brake: supply growth net of demand growth, plus
+entrant_ratio). A winner-take-most niche (winner_concentration > 0.85) NEVER rings "enter":
+with surging demand it rings "watch" ("demand surging, but winner-take-most revenue"),
+with sustained demand decline "declining", otherwise "crowded" — yet it can still score
+well. When they disagree, say which one you are quoting.
+
+### Interpretation playbook for "what should I build"
+
+Keep the 24m default window (that IS the market a new entrant faces), read WHICH sub-score
+carried the score (momentum vs market_pull is the difference between "this is growing" and
+"this is already big"), require the decline gate near 1.0 or understand exactly why it
+isn't, verify recent entrants get paid (entrant_ratio >= 1.0, 24m median_rev,
+hit_rate_200k, n_games), check winner_concentration (> 0.85 = winner-take-most: expect the
+median outcome, not the hits), and check solo_tier when the asker builds solo.
+"""
+
+_DOCS["fields"] = """## Niche fields (mart_niche)
+
+- **p25_rev / p75_rev / p90_rev** = revenue percentiles of the niche's own games. Prefer
+  **p90_rev** over median_rev when the question is "what can this niche pay": the median is
+  dragged down by asset flips and abandoned projects, and a competent solo dev is not the
+  median entrant. Sortable.
+- **entrant_ratio** = (24m median_rev) / (all-time median_rev) for the same (dimension,
+  key, min_reviews) — same value on both window rows. INTERPRET AGAINST THE NORM: the
+  catalog-median tag sits at ~1.08 (price inflation + the review floor filters recent
+  releases harder), so ~1.0-1.3 is unremarkable; < 1 is a real warning that newcomers earn
+  less than the back catalog did; a high ratio over a SHRINKING pipeline (few self-selected
+  survivors) is not health. NULL = no 24m cut or a zero/missing all-time median.
+- **solo_viability** = share of the cut's scored games playable single-player (Steam's own
+  `categories` field, community-tag fallback), per cut. **A FLAG, NOT A SCALE.** Measured
+  over 219 live niches (tag / 24m / min50):
+
+      min 0.353 | p05 0.853 | p10 0.913 | p25 0.953 | MEDIAN 0.975 | p75 0.990 | max 1.000
+      below 0.90: 7.8%     below 0.80: 3.2%
+
+  Three quarters of the catalog sits inside a 0.047-wide band, so the number CANNOT rank
+  the options a solo dev is choosing between. What it does perfectly is spot the ~3% that
+  are inherently multiplayer: Social Deduction 0.35, MMORPG 0.45, Party Game 0.50, Party
+  0.64, Battle Royale 0.70, Extraction Shooter 0.71, eSports 0.79 — not solo-buildable
+  without netcode/servers/a live player base. (0.9 is the 10th PERCENTILE, not the norm.)
+  It is a no-netcode proxy, not a production-scope measure. find_niches' `solo_only`
+  keeps singleplayer share >= 0.80 (NULL = unknown = excluded), mirroring the API.
+- **solo_tier** = the same signal as a flag: `'team'` (< 0.80, multiplayer-dependent,
+  ~3%), `'mixed'` (0.80-0.90 — clears the bar but has a real multiplayer minority),
+  `'solo'` (>= 0.90, ~92%). NULL on marts built before 2026-08-31.
+- **tier** (tags; genre rows get 'genre') = 'micro' (buildable game concept: Colony Sim,
+  Souls-like), 'theme' (setting/aesthetic you attach TO a game: Vikings, Pixel Graphics),
+  'umbrella' (genre/mechanic/mode container: Open World, Sandbox — NOT buildable), 'meta'
+  (reception/store tags: Great Soundtrack — never buildable). `find_niches` defaults to
+  micro only; pass include_tiers to see themes (as modifiers) or the rest.
+- **saturation_yoy** = (n_recent_year - n_prior_year) / n_prior_year — the release
+  pipeline's year-over-year change over every game carrying the key (no review floor).
+  n_recent_year / n_prior_year are the counts behind it (tiny counts = noisy ratio).
+- **n_free / n_price_unknown** (newer marts) = games whose revenue estimate is NULL (free,
+  or no known price) and therefore excluded from the revenue stats.
+
+### Absolute market size (the "pie") — separate from `demand`
+
+`demand` is a percentile of PER-GAME MEDIANS, so a narrow niche of strong titles scores
+high `demand` yet has a tiny total audience. These give the ABSOLUTE size, summed over the
+niche's scored population (min_reviews floor applies):
+
+- **total_owners** = SUM(owners_mid); **total_rev** = SUM(est_rev_reviews);
+  **total_reviews** = SUM(total_reviews).
+- **market_size** = total_owners as a 0-100 percentile vs other niches in the same cut.
+  Use it (or min_total_owners) to prefer a small slice of a big pie over a big slice of a
+  small one — the solo-dev sizing lens.
+"""
+
+_DOCS["falsification"] = """## Falsification rules — how each metric lies
+
+1. Low competition + negative saturation_yoy usually means a market in DECLINE — everyone
+   STOPPED entering — not a cracked-open opportunity (this exact failure put
+   Naval/Transportation/Diplomacy at the top of the old ranking). Still your job under v2:
+   a niche whose demand AND supply are both falling nets out neutral on supply_room, and
+   only momentum catches it — read momentum, not just the total.
+2. entrant_ratio reads AGAINST THE NORM (~1.08), not against 1.0 alone; a high ratio over
+   a shrinking pipeline (few, self-selected survivors) is NOT health.
+3. Verify recent entrants actually get paid: with window="24m", median_rev IS the
+   recent-entrant median. Cross-check hit_rate_200k and n_games (a great median over 30
+   games is thinner evidence than a good median over 300).
+4. winner_concentration > 0.85 = winner-take-most: the MEDIAN outcome (not the visible
+   winners) is what a new entrant should expect. Check niche_detail's revenue_histogram.
+5. Solo devs: solo_viability is a flag, not a scale (see fields) — only 'team'/'mixed'
+   carry information.
+6. tier: umbrella and meta keys are not buildable ("build an Open World game" is not a
+   plan); a theme means "make a game ABOUT this" and needs a micro-genre attached.
+7. Players lens: big total_players_now + players_top5_share above ~0.6 + a tiny median
+   means the audience belongs to the HITS — not demand available to a new entrant.
+8. Lifetime: lifetime_survival_12m below ~0.5 marks a hit-churn niche — a short revenue
+   window (front-load the launch, don't plan year-two updates).
+9. demand_emerging: young Steam tags crystallize around new games only, so their prior
+   window is near zero BY CONSTRUCTION and a huge trend % is the label's age, not demand
+   growth. Never quote it; judge absolute reviews_24m.
+"""
+
+_DOCS["players"] = """## Live players (CCU) — current traction, not an estimate
+
+Unlike owners/revenue (lifetime ESTIMATES), live players are direct measurements: Steam's
+keyless GetNumberOfCurrentPlayers, captured by a nightly ~21-22:00 UTC sweep since
+2026-07-18.
+
+- **Point sample, not peak**: one capture per game per day (the LAST of the UTC date) —
+  typically ~60-90% of a SteamDB-style daily peak. Compare values to each other only.
+- **Coverage model**: the top-8k games by reviews are captured EVERY night (~99% of all
+  Steam CCU); the rest of the >=50-review universe rotates every ~3-8 nights. A missing day
+  = unmeasured, never zero. Tail games are sparse before ~2026-08-14.
+- **Windows are anchored to the mart's last capture date** (MAX(date)), not the wall
+  clock, so an older mart still returns its own last N days.
+- **Niche rollup (mart_niche_players)**: total_players sums scored member games' values
+  with each game's last capture carried forward up to 7 days (LOCF); games staler than 7d
+  drop out. measured_players / n_games_measured are the no-carry reality check.
+- **mart_niche columns** (one value per key, identical on all cut rows): total_players_now,
+  players_trend_7d_pct (last-7d vs prior-7d, SAME-PANEL — only games measured in both
+  windows count), players_coverage (share measured <= 2d fresh), median_players_now,
+  players_top5_share. Newer marts add players_trend_7d_market_pct (the whole market's
+  same-panel trend) and players_trend_7d_rel_pct (this niche vs the market) — prefer the
+  relative one: the raw trend moves with Steam-wide seasonality.
+- **mart_game columns**: live_players (latest capture), players_7d_avg,
+  players_trend_7d_pct (+ the market/rel pair on newer marts).
+- **Interpretation trap**: a niche's total is its HITS — top-heavy by construction.
+- **Deep history** (mart_game_players_history / mart_niche_players_monthly): steamcharts
+  monthly averages + true peaks back to 2012, top-8k games only — a different MEASURE,
+  returned as a separate `monthly` block; never blend it with the daily series.
+"""
+
+_DOCS["lifetime"] = """## Game lifetime — how long a game keeps an audience once it has one
+
+From steamcharts MONTHLY averages (top-8k-by-reviews coverage only, not our nightly
+samples):
+
+- **mart_game**: lifetime_first_100_month (t0 = first calendar month averaging >= 100
+  concurrent players), lifetime_died_month (first FULL month after t0 averaging < 10; NULL
+  while alive), lifetime_months (death - t0, or months-so-far while alive),
+  lifetime_alive. NULL on all = UNKNOWN (no coverage or never reached 100+) — never zero.
+- **mart_niche** (one value per key): lifetime_n_games (covered 100+-reaching games),
+  lifetime_survival_12m (fixed-horizon share still averaging 10+ twelve months after t0,
+  among games observable >= 12 months — censoring-safe), lifetime_median_dead_months
+  (median lifetime of the ALREADY-DEAD games — biased LOW; never read it without
+  lifetime_survival_12m). NULL = fewer than 5 covered games.
+- **mart_market_lifetime** -> `lifetime_curve`: the catalog-wide fixed-horizon survival
+  curve. SURVIVORSHIP: the cohort is games that DID reach 100+ concurrent players — most
+  Steam releases never do — so it answers "once a game has an audience, how long does it
+  keep it", never "will my game find one".
+"""
+
+_DOCS["demand"] = """## 24-month demand trend (mart_niche; one value per key, identical on every cut)
+
+- **reviews_24m / reviews_prev_24m**: the niche's review inflow (Steam's own monthly
+  review histogram — true counts, games with 50+ reviews) over the last 24 complete months
+  and the 24 before them.
+- **demand_trend_24m_pct**: the percent change between them — the Radar's primary axis
+  (enter >= +40%, declining <= -30%, holding >= -10%). A launch spike or sale week cannot
+  move it the way it moved the old 90-day trend. NULL = no prior-window baseline (a
+  genuinely new niche), never "flat". When sorting by it, emerging niches rank last (their
+  % is not comparable).
+- **demand_emerging** (+ reviews_24m_new_share): the prior base is below 1,000 reviews, OR
+  >= 80% of reviews_24m comes from games released in the last 24 months. Young tags
+  crystallize around new games only, so their prior window is near zero BY CONSTRUCTION —
+  do NOT quote the trend % (find_niches/niche_detail withhold it in core rows); judge the
+  niche by its absolute reviews_24m.
+"""
+
+_DOCS["cuts"] = """## Cuts (window x min_reviews)
+
+Only the precomputed cuts exist: window in {"24m", "all"} x min_reviews in {0, 50, 100}
+(the 0 cut only on marts built after the no-floor cut landed — older marts return a
+rebuild error for it).
+
+- window="24m" restricts to games released in the last 24 months — the market a new
+  entrant faces. Use it for build decisions. window="all" scores full history: context.
+- min_reviews is the per-game review floor before a title counts: 50 = the default, 100 =
+  stricter/cleaner, 0 = NO floor — n_games there is the honest full tag size (unreviewed
+  releases included) while revenue medians still skip games with no estimable revenue;
+  use it for "how big is this tag really", not for revenue conclusions.
+- Niche rows need >= 30 qualifying games (MIN_NICHE_GAMES), so a small niche can be
+  missing from a strict cut; niche_detail then falls back and says so.
+- mart_niche_game (niche_games, niche_detail's representative games) materialises
+  membership for exactly the same cuts.
+"""
+
+_DOCS["revenue"] = """## Revenue & owners estimates
+
+`est_rev_reviews` (the primary revenue figure) = owners_mid x price_initial, where
+owners_mid comes from SteamSpy's owner-range midpoint (itself modeled from review counts
+via the "Boxleiter method": ~20-55 owners per review, genre-dependent). This is GROSS
+lifetime box revenue — not net of Steam's cut, not first-year-only. Free games carry no
+revenue estimate (NULL on newer marts), so revenue medians describe the paid population.
+See `market_benchmarks` for cited vs computed figures and why they differ (cited =
+first-year/net over ALL releases; computed = gross-lifetime over games clearing the review
+floor). estimate_revenue returns {low, mid, high} ranges — always report the range.
+"""
+
+_DOCS["marts"] = """## The marts (grouped by tool)
+
+- **mart_niche / mart_niche_top / mart_niche_hist / mart_niche_trend / mart_niche_game** —
+  niche scores per cut, the all-time top games, a revenue histogram (all/50 cut only), a
+  yearly release/saturation trend, and per-cut game membership. -> `find_niches`,
+  `niche_detail`, `niche_games`.
+- **mart_tag_alias** (newer marts) — alias -> canonical tag keys; niche tools resolve
+  aliases through it.
+- **mart_tag_lift** — pairwise tag-combination performance: one row per unordered pair of
+  community tags (each game's top-10 tags; games with >= 50 reviews; pairs with >= 15
+  games), with the pair's median est. revenue, hit_rate_200k, both tags' solo medians
+  (mart_niche all/50 baselines) and lift = pair median / better solo median. -> `tag_combos`.
+- **mart_niche_themes** — per (niche, aspect): review-aspect praise/complaint shares pooled
+  to niche level, with deltas vs the all-catalog baseline. -> `niche_review_themes`.
+- **mart_market_pct / mart_market_hist / mart_market_boxleiter / mart_market_tiers /
+  mart_meta** — catalog-wide (or per-genre) distributions, the fitted owners-per-review
+  slope per genre, dev-tier counts, global stats. -> `market_benchmarks`,
+  `revenue_distribution`, `estimate_revenue`.
+- **mart_launch_curve / mart_game_launch_curve** — cumulative share of first-year reviews
+  by day-since-release, per genre / per game. -> `launch_shape`, `game_reviews_summary`.
+- **mart_timing_demand / mart_timing_congestion / mart_timing_decay** — launch-window
+  intelligence over the TRUE uncapped monthly review histograms. -> `best_launch_timing`.
+- **mart_game** — one row per game: metadata, revenue/owners, percentile-vs-genre, top
+  tags, review velocity, live players, lifetime, official socials (harvested from
+  developer-CONTROLLED pages, never the platforms), demo flag. -> `game_search`,
+  `game_profile`, `find_comparables` (tag-Jaccard within the same primary genre + a price
+  band, computed on demand).
+- **mart_game_players_daily / mart_niche_players / mart_game_players_history /
+  mart_niche_players_monthly** — daily CCU point samples + steamcharts deep history.
+  -> `game_player_history`, `niche_player_history`.
+- **mart_market_lifetime** — the catalog-wide survival curve. -> `lifetime_curve`.
+- **mart_entity / mart_entity_games** — developers/publishers normalized out of mart_game's
+  comma-joined strings (no fuzzy identity resolution). -> `entity_profile`,
+  `publisher_pitch_list`.
+- **mart_game_review_aspects / mart_genre_aspect_baseline / mart_game_press_*** —
+  per-game praise/complaint aspect mining + press footprint. -> `game_teardown`,
+  `aspect_reviews`.
+- **mart_press_outlet_genre / mart_press_author** — outlet x genre and journalist x genre
+  coverage. -> `press_pitch_list`.
+- **mart_buzz_trends(_summary)** — rising/cooling concept bigrams from article titles.
+  -> `buzz_trends`.
+- **mart_channel_mix / mart_channel_buzz(_summary)** — PRESS-ONLY since 2026-08-25 (the
+  creator platforms were decommissioned): channel_mix's shares are 1.0 by construction and
+  channel_buzz carries the same terms as buzz_trends at 1 weight per mention. Kept for shape
+  stability, not as a multi-channel read. -> `channel_mix`, `channel_buzz`.
+"""
+
+_DOCS["caveats"] = """## Caveats that apply broadly
+
+- **Sampling**: reviews/press are SAMPLES of the true Steam data, recency-biased toward
+  older/popular titles (reviews) or the last ~365 days (press backfill).
+- **Selection bias**: press coverage and "top games" lists reflect games that were
+  already notable — descriptive of what happened, not predictive/causal.
+- **Correlational, not causal**: `game_teardown`'s "why it works" framing, and any
+  press-coverage-vs-outcome read, is evidence toward an explanation, never proof.
+- **English-outlet skew**: review-text mining and press analysis both skew English-
+  language / Western-outlet.
+- Genre = Steam's own small, fixed, EXACT-match genre field (marts use the PRIMARY genre
+  unless noted). Tag = SteamSpy's much larger community-tag vocabulary — more specific,
+  better for niche-finding.
+"""
+
+_DOC_TOPICS = tuple(_DOCS)
+
+
+def _data_dictionary_text() -> str:
+    return (
+        "# Prospect data dictionary\n\n"
+        "Prospect's marts are built from a Steam catalog snapshot + SteamSpy owner estimates +\n"
+        "sampled reviews + press/news articles, via DuckDB ETL (`etl/marts/*.sql`). All figures\n"
+        "are ESTIMATES, several with real biases — read the caveats before treating any number\n"
+        "as ground truth.\n\n"
+        + "\n".join(_DOCS[t] for t in _DOC_TOPICS)
+    )
 
 
 # ==========================================================================================
@@ -760,356 +1286,44 @@ def _tool(fn):
     "data://prospect/data-dictionary",
     name="prospect-data-dictionary",
     title="Prospect data dictionary",
-    description="Definitions of opportunity/demand/competition/quality_gap + what each mart covers. Read before interpreting tool output.",
+    description="Analysis rules, flags, score formulas, field definitions, cuts and caveats. The same text the methodology tool serves by topic.",
     mime_type="text/markdown",
 )
 def data_dictionary() -> str:
-    return """# Prospect data dictionary
-
-Prospect's marts are built from a Steam catalog snapshot (~142K apps) + SteamSpy owner
-estimates + ~3.1M sampled reviews + ~1.12M press/news articles, via DuckDB ETL
-(`etl/marts/*.sql`). All figures are ESTIMATES, several with real biases — read the
-caveats at the bottom before treating any number as ground truth.
-
-## The opportunity score (mart_niche)
-
-For each niche (a Steam community `tag` or a Steam `genre`), computed at 6 cuts —
-`window` in {`all`, `24m`} x `min_reviews` in {`0`, `50`, `100`} — as percentile ranks
-(0-100) against every other niche in the SAME cut. min_reviews=0 is the NO-FLOOR cut:
-n_games there is the honest full tag size (unreviewed releases included), while revenue
-medians still skip games with no estimable revenue — use it for "how big is this tag
-really", not for revenue conclusions:
-
-- **demand** = 0.4 x percentile(median revenue) + 0.3 x percentile(median owners) +
-  0.3 x percentile(recent 24m review velocity). Higher = bigger, hotter market.
-- **competition** = 0.6 x percentile(n_recent, count of recently-released games) +
-  0.4 x percentile(winner_concentration, share of niche revenue held by the top ~10% of
-  games). Higher = more crowded / more winner-take-most — BAD for a new entrant.
-- **quality_gap** (aka `beatable_share`) = percentile(share of incumbents that are weak:
-  low rating OR thin review count). Higher = easier to out-execute the field.
-- **opportunity** = clamp(0.5 x demand − 0.35 x competition + 0.3 x quality_gap, 0, 100).
-  The ORIGINAL score, kept for continuity. KNOWN FAILURE MODE: it rewards low
-  competition without asking WHY it's low — a niche everyone abandoned scores like an
-  open market.
-- **opportunity_v2** = `find_niches`' default ranking metric. REBUILT 2026-08-31 — it is
-  NO LONGER `opportunity x decline_gate`. The old form ranked BACKWARDS against the
-  Radar board's ring verdicts (measured on 219 live niches: median score by ring ran
-  enter 17.6 < hold 17.8 < crowded 20.9 < declining 23.4) because its `competition` term
-  was 60% percentile(n_recent) — on the 24m cut that is a pure niche-SIZE penalty, so
-  big growing niches scored 0 and small shrinking ones ranked #1. It now reads the SAME
-  axes, against the SAME thresholds, as the Radar's rings:
-
-      opportunity_v2 = opp_core x supply_brake
-
-  where opp_core is the weighted mean of four 0-100 sub-scores (returned on every row) —
-  renormalised over whichever ones exist, so a missing input never counts as 0:
-
-  - **momentum** (weight 0.40) — DEMAND FLOW, the headline term. 50 at flat demand, 88.1
-    at +40%/24m (the Radar's "enter" bar), 10.7 at −30%/24m (its "declining" bar). NULL
-    for emerging niches: their prior window is near zero by construction, so no honest
-    trend claim exists in either direction.
-  - **market_pull** (0.22) — 0.6 x demand + 0.4 x market_size. The money LEVEL, kept as a
-    supporting term rather than the headline.
-  - **revenue_spread** (0.20) — from winner_concentration; exactly 50 at the 0.85
-    winner-take-most bar, 100 at 0.70, 0 at 1.00.
-  - **quality_gap** (0.18) — unchanged.
-
-  and **supply_brake** = 0.35 + 0.65 x supply_room/100 (1.0 when unknown — missing data
-  is never a penalty). **supply_room** is the WORSE of two supply reads, so either alone
-  can sink a score: the release pipeline's growth measured AGAINST demand growth (50 when
-  supply outgrows demand by the Radar's +15%/yr flooding bar), and entrant_room (0 at
-  entrant_ratio 0.5, 100 at the catalog norm 1.08, capped there).
-
-  READ THE PARTS, NOT JUST THE TOTAL: "Deckbuilding 71.9" is momentum 99 + supply_room
-  100 (demand +119%/24m outrunning a +36% release pipeline), while "Hunting 77.2" is
-  momentum 92 + market_pull 86 but revenue_spread 17 (winner-take-most: expect the
-  median outcome, not the hits). Those are different recommendations.
-
-  NOTE saturation_yoy is now read AGAINST demand rather than on its own. A shrinking
-  pipeline earns no credit by itself (that was the Naval/Transportation failure mode);
-  it only shows up as room when demand is holding while supply leaves.
-- **decline_gate** = 1 − 0.5 x max(sat_severity, entrant_severity), where
-  sat_severity = clamp(−saturation_yoy / 0.30, 0, 1) and
-  entrant_severity = clamp((1 − entrant_ratio) / 0.5, 0, 1). A FALSIFICATION TELL, NOT A
-  SCORE FACTOR since 2026-08-31 (it used to multiply opportunity_v2). Still the cleanest
-  single answer to "did everyone STOP entering this niche?" — near 1.0 means neither
-  decline signal fired. MAX (either-signal) semantics on purpose: entrant_ratio >= 1 is
-  the catalog NORM (see below), so it must not excuse a collapsing release pipeline.
-
-### Niche-score v2 fields (mart_niche, additive)
-
-- **p25_rev / p75_rev / p90_rev** = revenue percentiles of the niche's own games. Prefer
-  **p90_rev** over median_rev when the question is "what can this niche pay": the median is
-  dragged down by asset flips and abandoned projects, and a competent solo dev is not the
-  median entrant. Sortable — `sort="p90_rev"` ranks niches by upside instead of by typical.
-- **entrant_ratio** = (24m median_rev) / (all-time median_rev) for the same (dimension,
-  key, min_reviews) — same value on both window rows. INTERPRET AGAINST THE NORM: the
-  catalog-median tag sits at ~1.08 (price inflation + the review floor filters recent
-  releases harder), so ~1.0-1.3 is unremarkable; <1 is a real warning that newcomers
-  earn less than the back catalog did; a high ratio over a SHRINKING pipeline (few
-  self-selected survivors) is not health. NULL = no 24m cut or a zero/missing all-time
-  median (treated as no evidence, not as decline).
-- **solo_viability** = share of the cut's scored games playable single-player (Steam's
-  own `categories` field, community-tag fallback), computed per cut. **A FLAG, NOT A
-  SCALE.** MEASURED over 219 live niches (tag / 24m / min50):
-
-      min 0.353 | p05 0.853 | p10 0.913 | p25 0.953 | MEDIAN 0.975 | p75 0.990 | max 1.000
-      below 0.90: 7.8%     below 0.80: 3.2%
-
-  Three quarters of the catalog sits inside a 0.047-wide band, so this number CANNOT
-  rank the options a solo dev is choosing between — comparing 0.98 with 0.96 is noise.
-  What it does perfectly is spot the ~3% that are inherently multiplayer: Social
-  Deduction 0.35, MMORPG 0.45, Party Game 0.50, Party 0.64, Battle Royale 0.70,
-  Extraction Shooter 0.71, eSports 0.79. Those are NOT solo-buildable without
-  netcode/servers/live player-base plans — flag them. That compression is a true fact
-  about the world (most genres really are solo-buildable), not a scale to be normalised.
-  (CORRECTION: this dictionary previously said "catalog norm ~0.9". 0.9 is the 10th
-  PERCENTILE, not the norm — anyone calibrating on it was reading a bottom-decile value
-  as typical.)
-- **solo_tier** = the same signal as a flag: `'team'` (< 0.80, multiplayer-dependent,
-  ~3%), `'mixed'` (0.80-0.90 — clears the bar but has a real multiplayer minority: Hero
-  Shooter 0.800, Minigames 0.805, Escape Room 0.836, Class-Based 0.851, ~5%), `'solo'`
-  (>= 0.90, ~92%). Prefer this over the raw share when answering a solo dev. NULL on
-  marts built before 2026-08-31.
-- **tier** (tags; genre rows get 'genre') = 'micro' (buildable game concept: Colony Sim,
-  Souls-like), 'theme' (setting/aesthetic you attach TO a game: Vikings, Pixel
-  Graphics), 'umbrella' (genre/mechanic/mode container: Open World, Sandbox, Turn-Based
-  — NOT buildable), 'meta' (reception/store tags: Great Soundtrack, Nostalgia — never
-  buildable). Curated map + size heuristic (all-time n_games >= 400 -> umbrella) in
-  etl/build_marts.py. `find_niches` EXCLUDES umbrella/meta by default because
-  recommending them was a real, user-rejected failure mode; a 'theme' answer still needs
-  a micro-genre attached to be an actionable recommendation.
-Interpretation playbook for "what should I build": keep the 24m default window (that IS
-the market a new entrant faces), read WHICH sub-score carried the score (momentum vs
-market_pull is the difference between "this is growing" and "this is already big"),
-require the decline gate near 1.0 or understand exactly why it isn't, verify recent
-entrants get paid (24m median_rev, hit_rate_200k, n_recent), check winner_concentration
-(> 0.85 = winner-take-most: expect the median outcome, not the hits), and check
-solo_tier when the asker builds solo.
-
-NOTE the score and the Radar board's rings are ONE model since 2026-08-31 — a high
-opportunity_v2 means "the board would ring this enter". On the live catalog the score's
-median by ring is enter 67.6 > hold 50.2 > crowded 39.1 > declining 19.5, and >= 65 is
-the "scores like an enter" bar (~16% of the catalog on the default cut). They are still
-not interchangeable: the rings encode distinct failure MODES (crowded and declining are
-different problems), while the score also weighs how much money is in the niche — so a
-winner-take-most niche with surging demand can score well AND ring "crowded". When they
-disagree, say which one you are quoting.
-
-### Absolute market size (the "pie") — separate from `demand`
-
-`demand` is a percentile of PER-GAME MEDIANS (typical-game quality), so a narrow niche of
-strong titles scores high `demand` yet has a tiny total audience. These fields give the
-ABSOLUTE size instead, summed over the niche's scored population (min_reviews floor applies,
-so they describe the reviewed market, not every shovelware release):
-
-- **total_owners** = SUM(owners_mid) — total consumer base across the niche.
-- **total_rev** = SUM(est_rev_reviews) — total est. gross revenue in the niche.
-- **total_reviews** = SUM(total_reviews) — total reviews (engaged-player proxy).
-- **market_size** = total_owners as a 0-100 percentile vs other niches in the same cut,
-  comparable to demand/competition. Use it (or sort/filter by total_owners) to prefer a
-  small slice of a big pie over a big slice of a small one — the solo-dev sizing lens.
-
-`window="all"` scores a niche's full history; `"24m"` restricts to games released in the
-last 24 months (current-market read, smaller sample). `min_reviews` is the per-game
-review floor before a title counts toward niche stats (10 = broad/noisy, 50 =
-stricter/cleaner).
-
-### Live players (CCU) — current traction, not an estimate
-
-Unlike owners/revenue (lifetime ESTIMATES), live players are direct measurements: Steam's
-keyless GetNumberOfCurrentPlayers, captured by a nightly ~21-22:00 UTC sweep since
-2026-07-18. Semantics that matter for interpretation:
-
-- **Point sample, not peak**: one capture per game per day (the LAST of the UTC date) at
-  a consistent evening hour — typically ~60-90% of a SteamDB-style daily peak. Compare
-  values to each other, never to peak charts.
-- **Coverage model**: the top-8k games by reviews are captured EVERY night (they hold
-  ~99% of all Steam CCU); the rest of the >=50-review universe rotates every ~3-8
-  nights. A missing day = unmeasured, never zero. Tail games are sparse before
-  ~2026-08-14 (pre-rotation collector).
-- **Niche rollup (mart_niche_players)**: per (dimension, key, date), total_players sums
-  scored member games' values with each game's last capture carried forward up to 7 days
-  (LOCF) so rotation gaps don't read as dips; games staler than 7d drop out.
-  measured_players / n_games_measured sit alongside as the no-carry reality check.
-- **mart_niche columns** (one value per key, identical on all 4 cut rows, like
-  entrant_ratio): total_players_now (summed latest captures <= 7d old),
-  players_trend_7d_pct (last-7d vs prior-7d, SAME-PANEL — only games measured in both
-  windows count, so coverage growth can't fake a trend), players_coverage (share of the
-  total measured <= 2d fresh; low = leaning on carried tail values).
-- **mart_game columns**: live_players (latest capture), players_7d_avg,
-  players_trend_7d_pct (same window semantics, measured days only, no LOCF).
-- **Interpretation trap**: a niche's total is its HITS — top-heavy by construction. A
-  huge total_players_now says people play the niche's biggest games, not that a new
-  entrant will get players; read it with winner_concentration and the median columns.
-- **Game lifetime (mart_game columns)** — how long a game keeps an audience once it has
-  one, from steamcharts MONTHLY averages (top-8k-by-reviews coverage only, not our
-  nightly point samples): lifetime_first_100_month (t0 = the first calendar month
-  averaging >= 100 concurrent players, 'YYYY-MM-DD'), lifetime_died_month (the first
-  FULL month after t0 averaging < 10; NULL while alive), lifetime_months (death − t0,
-  or months-so-far while alive), lifetime_alive. NULL on all = UNKNOWN (no coverage or
-  never reached 100+) — never zero.
-- **Niche lifetime (mart_niche columns)** (one value per key, identical on all 4 cut
-  rows, like entrant_ratio): lifetime_n_games (covered 100+-reaching games),
-  lifetime_survival_12m (fixed-horizon share still averaging 10+ twelve months after
-  t0, among games observable >= 12 months — censoring-safe), lifetime_median_dead_months
-  (median lifetime of the ALREADY-DEAD games — biased LOW, it ignores every still-alive
-  game; read it with lifetime_survival_12m, never alone). NULL = fewer than 5 covered
-  games. The catalog-wide survival curve lives in mart_market_lifetime ->
-  `lifetime_curve`.
-
-## Revenue & owners estimates
-
-`est_rev_reviews` (the primary revenue figure used throughout) = owners_mid x
-price_initial, where owners_mid comes from SteamSpy's owner-range midpoint (itself modeled
-from review counts via the "Boxleiter method": ~20-55 owners per review, genre-dependent).
-This is GROSS lifetime box revenue, not net-of-Steam's-cut, not first-year-only. See
-`market_benchmarks` for cited vs. computed figures and why they differ (population
-differences: cited = first-year/net over ALL releases; computed = gross-lifetime over
-games clearing the review floor).
-
-## The marts (grouped by tool)
-
-- **mart_niche / mart_niche_top / mart_niche_hist / mart_niche_trend** — niche
-  opportunity scores, representative top games per niche, a revenue histogram, and a
-  yearly release/saturation trend. -> `find_niches`, `niche_detail`.
-- **mart_tag_lift** — pairwise tag-combination performance: one row per unordered pair
-  of community tags (from each game's top-10 tags; games with >=50 reviews; pairs with
-  >=15 games), with the pair's median est. revenue, hit_rate_200k, both tags' solo
-  medians (mart_niche all/50 baselines), and lift = pair median / better solo median.
-  Lift is null for pairs of free-to-play-dominated tags (both solo medians $0).
-  -> `tag_combos`.
-- **mart_niche_themes** — per (tag|genre niche, aspect): the per-game review-aspect
-  signal POOLED to niche level — praise/complaint shares in both signal families
-  (vote-based and VADER-text) plus each share's delta vs the all-catalog baseline —
-  "what does the whole niche praise/complain about," the concrete counterpart to
-  quality_gap. Membership is narrower than mart_niche's (tag must be in a game's TOP-10
-  tags; genre = primary genre only) and floored at >=10 games per (niche, aspect), each
-  with >=20 sampled English text reviews. -> `niche_review_themes`.
-- **mart_market_pct / mart_market_hist / mart_market_boxleiter / mart_market_tiers /
-  mart_meta** — catalog-wide (or per-genre) percentile distributions, histograms, the
-  fitted Boxleiter owners-per-review slope per genre, dev-tier population counts, and
-  global scalar stats. -> `market_benchmarks`, `revenue_distribution`, `estimate_revenue`.
-- **mart_launch_curve / mart_game_launch_curve** — cumulative share of a genre's (or one
-  game's) first-year reviews landed by day-since-release. -> `launch_shape`.
-- **mart_timing_demand / mart_timing_congestion / mart_timing_decay** — launch-window
-  intelligence over the TRUE uncapped monthly review histograms (Steam's own per-month
-  review-graph totals, ~40K games — exact counts, unlike the sampled `reviews` table).
-  demand = share of a genre's pooled monthly review velocity per calendar month, each
-  game's first 2 months EXCLUDED so launch spikes don't read as seasonal demand;
-  congestion = avg releases (and $200K+ releases) per calendar month over the last 3
-  complete years; decay = median per-game share of first-24-months reviews landing in
-  each month since release (per-game normalized first). -> `best_launch_timing`.
-- **mart_seasonality** — release-month/weekday OUTCOME medians (median revenue of games
-  launched then). Web heatmap legacy; superseded for launch advice by the mart_timing_*
-  trio above (launch-month medians are composition-confounded — they reflect what kind
-  of game launches then, not the calendar).
-- **mart_game** — one row per game: metadata, revenue/owners, percentile-vs-genre, top
-  tags, review velocity, live players (latest + 7d avg/trend), the official socials
-  (dev_x_handle/dev_x_url, dev_discord_url, dev_youtube_url, dev_bluesky_handle — all
-  harvested from developer-CONTROLLED pages, never the platforms themselves), whether the
-  game has a playable demo (has_demo/demo_appid), and dev_x_handle — the
-  game's most prominent official X handle from the scraper's `game_socials` table
-  (links harvested from the game's developer-controlled pages: store page + dev
-  website, store-page links preferred; NOT looked up on X, so the handle may be the
-  game's, the studio's, or the dev's personal account). NULL dev_x_handle = none found
-  or socials not yet fetched — unknown, never zero. -> `game_search`, `game_profile`,
-  `find_comparables` (closest competitors, ranked on demand by tag-Jaccard over
-  `top_tags` within the same primary genre + a price band — no precomputed pairwise
-  mart).
-- **mart_game_players_daily / mart_niche_players** — daily live-player (CCU) history:
-  per-game measured days (point samples, gaps = unmeasured), and the per-niche daily
-  rollup (LOCF <= 7d, with measured_players/n_games_measured coverage columns). See the
-  "Live players (CCU)" section above. -> `game_player_history`, `niche_player_history`
-  (+ the players columns in `find_niches`/`niche_detail`/`game_profile`).
-- **mart_game_players_history / mart_niche_players_monthly** — DEEP player history from
-  steamcharts.com (monthly averages + true monthly peaks back to 2012; daily averages for
-  the trailing ~90 days), top-8k-by-reviews games only, `source`/`grain` discriminated.
-  A different MEASURE from our point samples — the tools return it as a separate
-  `monthly` block and it must never be averaged with the daily series. -> the `monthly`
-  blocks of `game_player_history` / `niche_player_history`.
-- **mart_market_lifetime** — the catalog-wide fixed-horizon survival curve over the
-  100+-reaching cohort (see "Game lifetime" above): per month-since-t0 `t` (0-72),
-  n_observable (games observable >= t months) and share_alive. -> lifetime_curve()
-- **mart_entity / mart_entity_games** — one row per (role, developer/publisher name),
-  normalized out of mart_game's comma-joined developers/publishers strings (corporate
-  suffixes like ", Inc." / ", Ltd." are re-merged into the name instead of becoming fake
-  entities), plus a thin (role, name, appid, seq) map where seq 1 = the entity's earliest
-  release. Carries game counts, first/last release year, n_recent_24m (the active/dormant
-  signal), revenue medians/hit rate, self_published_share, top genres, (publishers)
-  n_partners = distinct developer names published, and x_handle — the entity's X handle
-  by majority vote over its games' dev_x_handle (same attribution caveat as mart_game's
-  column: an official link from the games' own pages, possibly a personal account).
-  Names are self-reported strings — the same studio under variant spellings ("Ubisoft"
-  vs "UBISOFT") counts as separate entities. -> `entity_profile`,
-  `publisher_pitch_list`.
-- **mart_game_review_aspects / mart_genre_aspect_baseline / mart_game_press_summary /
-  mart_game_press_by_source / mart_game_press_timeline / mart_game_press_notable** —
-  per-game praise/complaint aspect mining (10 fixed aspects) + press footprint.
-  -> `game_teardown`.
-- **mart_press_outlet_genre / mart_press_author** — outlet x genre and journalist x genre
-  coverage, precomputed pitch-list source. -> `press_pitch_list`.
-- **mart_buzz_trends / mart_buzz_trends_summary** — rising/cooling game-concept bigrams
-  mined from journalist article titles. -> `buzz_trends`.
-- **mart_channel_mix** — per (genre, channel): share of marketing attention (raw mention
-  count AND reach-weighted). PRESS-ONLY since 2026-08-25 (the creator vertical was
-  decommissioned), so it now reads as the press channel's per-genre footprint — "how much
-  press attention does this genre actually get." -> `channel_mix`.
-- **mart_channel_buzz / mart_channel_buzz_summary** — reach-weighted trending game-concept
-  bigrams per channel (press-only since 2026-08-25), the audience-weighted sequel to
-  mart_buzz_trends. -> `channel_buzz`.
-  All three degrade to zero rows (never an error) when the press scrape hasn't populated
-  them yet.
-
-## Caveats that apply broadly (also repeated per-tool where most relevant)
-
-- **Sampling**: reviews/press are SAMPLES of the true Steam data, recency-biased toward
-  older/popular titles (reviews) or the last ~365 days (press backfill) — counts describe
-  the sample, not Steam's true totals.
-  - **Selection bias**: press coverage and "top games" lists reflect games that were
-  already notable — descriptive of what happened, not predictive/causal.
-- **Correlational, not causal**: `game_teardown`'s "why it works" framing, and any
-  press-coverage-vs-outcome read, is evidence toward an explanation, never proof.
-- **English-outlet skew**: review-text mining and press analysis both skew English-
-  language / Western-outlet.
-- Genre = Steam's own small, fixed, EXACT-match genre field (a game usually has several;
-  marts use the PRIMARY genre unless noted). Tag = SteamSpy's much larger community-tag
-  vocabulary — more specific, better for niche-finding.
-"""
+    return _data_dictionary_text()
 
 
 # ==========================================================================================
 # Niche / opportunity tools
 # ==========================================================================================
-_NICHE_SORTABLE = {
-    "opportunity", "opportunity_v2", "demand", "competition", "quality_gap",
+NicheSort = Literal[
+    "opportunity_v2", "momentum", "market_pull", "revenue_spread", "quality_gap",
+    "supply_room", "supply_brake", "opportunity", "decline_gate", "demand", "competition",
     "market_size", "total_owners", "total_rev", "total_reviews",
     "median_rev", "median_reviews", "median_price", "median_owners",
     "median_positive_ratio", "recent_velocity", "p25_rev", "p75_rev", "p90_rev",
-    "n_games", "n_recent", "hit_rate_200k", "hit_rate_500k",
+    "n_games", "n_recent", "n_recent_year", "n_prior_year", "hit_rate_200k", "hit_rate_500k",
     "beatable_share", "saturation_yoy", "self_pub_share", "winner_concentration",
     "entrant_ratio", "solo_viability",
-    # opportunity_v2's sub-scores (2026-08-31 rebuild) — sortable so "which niches have
-    # the most demand momentum" is one call rather than a client-side scan.
-    "momentum", "supply_room", "revenue_spread", "market_pull", "supply_brake",
+    "total_players_now", "players_trend_7d_pct", "players_trend_7d_rel_pct",
+    "players_trend_7d_market_pct", "players_coverage", "median_players_now",
+    "players_top5_share", "lifetime_survival_12m", "lifetime_median_dead_months",
+    "reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct",
+]
+_NICHE_SORTABLE = frozenset(NicheSort.__args__)
+# Column families, for the "this mart predates X" message a gated sort/filter returns.
+_NICHE_PLAYERS_COLS = {
     "total_players_now", "players_trend_7d_pct", "players_coverage",
     "median_players_now", "players_top5_share",
-    "lifetime_survival_12m", "lifetime_median_dead_months",
-    "reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct",
 }
-# The subset of _NICHE_SORTABLE that only exists on marts with the players columns
-# (sorting/filtering on them needs _has_players(); everything else works on older marts).
-_NICHE_PLAYERS_COLS = {"total_players_now", "players_trend_7d_pct", "players_coverage"}
-_NICHE_PLAYERS_DIST_COLS = {"median_players_now", "players_top5_share"}
-_NICHE_LIFETIME_COLS = {"lifetime_survival_12m", "lifetime_median_dead_months"}
+_NICHE_PLAYERS_FAMILY = (
+    "total_players_now", "players_trend_7d_pct", "players_trend_7d_rel_pct",
+    "players_trend_7d_market_pct", "players_coverage", "median_players_now",
+    "players_top5_share",
+)
+_NICHE_LIFETIME_COLS = ("lifetime_n_games", "lifetime_survival_12m", "lifetime_median_dead_months")
 _NICHE_DEMAND24M_COLS = {"reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct"}
-# The opportunity_v2 sub-scores (2026-08-31 rebuild). Gated like every other optional
-# family: without this, sorting on one against an older mart falls through to the generic
-# "missing the v2 columns" BinderException message, which names five columns that DO exist
-# on that mart — a misleading diagnostic, the exact failure the API side already fixed.
-_NICHE_V2_PARTS_COLS = {
-    "momentum", "supply_room", "revenue_spread", "market_pull", "supply_brake",
-}
+_NICHE_V2_PARTS_COLS = {"momentum", "supply_room", "revenue_spread", "market_pull", "supply_brake"}
 _V2_PARTS_MISSING = (
     "This mart predates the opportunity_v2 sub-scores (momentum / supply_room / "
     "revenue_spread / market_pull / supply_brake — the 2026-08-31 score rebuild). "
@@ -1122,12 +1336,15 @@ _DEMAND24M_MISSING = (
     "demand_trend_24m_pct, an older ETL build). Re-run the ETL (`task etl` in the main "
     "prospect checkout) and retry."
 )
-_NICHE_TIERS = {"micro", "umbrella", "theme", "meta"}
-# Default tier filter (tags only): buildable micro-genres + themes. Umbrella containers
-# (Open World, Sandbox, RPG...) and meta/reception tags (Great Soundtrack, Nostalgia...)
-# are EXCLUDED by default — they aren't things a developer can build. Pass
-# include_tiers=None to see everything, or an explicit list to widen/narrow.
-_DEFAULT_INCLUDE_TIERS = ["micro", "theme"]
+_NICHE_TIERS = ("micro", "theme", "umbrella", "meta")
+# Default tier filter (tags only): buildable micro-genres ONLY. Themes are settings/
+# aesthetics you attach TO a micro pick (the owner's rule: never a headline pick — six of
+# the old micro+theme default's top 25 were themes, e.g. Snow at saturation_yoy -0.28);
+# umbrella containers and meta/reception tags aren't buildable at all. Pass include_tiers
+# explicitly to see themes (they come back flagged theme_tag) or everything (None).
+_DEFAULT_INCLUDE_TIERS = ["micro"]
+# The niche-score v2 columns every niche tool needs (present since 2026-08-14).
+_NICHE_V2_REQUIRED = frozenset({"opportunity_v2", "tier", "entrant_ratio", "solo_viability", "decline_gate"})
 
 # Shared soft-fail message: the v2 columns only exist once the ETL that added them has
 # rebuilt current.duckdb. Same degrade-cleanly idiom as tag_combos/mart_tag_lift.
@@ -1137,193 +1354,191 @@ _NICHE_V2_MISSING = (
     "Re-run the ETL (`task etl` in the main prospect checkout) and retry."
 )
 
+# find_niches' lean row: the score + EVERY component (never a lone number), the inputs the
+# rules run on, and size/money. Filtered to what the mart carries.
+_NICHE_CORE = (
+    "opportunity_v2", "momentum", "market_pull", "revenue_spread", "quality_gap",
+    "supply_room", "supply_brake",
+    "demand_trend_24m_pct", "reviews_24m", "saturation_yoy", "n_recent_year", "n_prior_year",
+    "competition", "entrant_ratio", "winner_concentration", "solo_tier",
+    "n_games", "median_rev", "p90_rev", "hit_rate_200k",
+)
+# A v1-legacy mart has no v2 components: show the old score's own parts instead.
+_NICHE_CORE_V1 = ("opportunity", "decline_gate", "demand")
+# Everything a flag reads (selected even when it isn't a core output field).
+_NICHE_FLAG_INPUTS = (
+    "tier", "n_games", "saturation_yoy", "competition", "winner_concentration",
+    "entrant_ratio", "solo_tier", "solo_viability", "demand_trend_24m_pct", "demand_emerging",
+)
+# niche_detail's compact per-cut rows (fields="core").
+_NICHE_VARIANT_CORE = (
+    "window", "min_reviews", "n_games", "opportunity_v2", "competition", "median_rev",
+    "p90_rev", "hit_rate_200k", "entrant_ratio", "winner_concentration", "solo_viability",
+)
+
+
+def _niche_sort_missing(col: str) -> str:
+    if col in _NICHE_PLAYERS_COLS:
+        return _PLAYERS_MISSING
+    if col in _NICHE_LIFETIME_COLS:
+        return _LIFETIME_MISSING
+    if col in _NICHE_DEMAND24M_COLS:
+        return _DEMAND24M_MISSING
+    if col in _NICHE_V2_PARTS_COLS:
+        return _V2_PARTS_MISSING
+    return _column_missing("mart_niche", col)
+
+
+def _dedupe(seq: Iterable[str]) -> list[str]:
+    return list(dict.fromkeys(seq))
+
+
+def _niche_core_fields(cols: frozenset[str], extra: Iterable[str] = ()) -> list[str]:
+    fields = [c for c in _NICHE_CORE if c in cols]
+    if "supply_brake" not in cols:
+        # v1-legacy: right after the score, the parts it is actually made of.
+        fields[1:1] = [c for c in _NICHE_CORE_V1 if c in cols]
+    if "solo_tier" not in cols and "solo_viability" in cols:
+        fields.append("solo_viability")
+    return _dedupe(fields + [c for c in extra if c in cols])
+
+
+def _shape_niche_row(r: dict, fields: str, core: list[str]) -> dict:
+    """One output row: key, tier, the server-computed flags, then the fields. In core
+    rows an emerging niche's demand_trend_24m_pct is WITHHELD (null) — the owner's rule is
+    never to quote it, and a number in front of a model gets quoted."""
+    flags = _niche_flags(r)
+    head = {"key": r["key"], "tier": r.get("tier"), "flags": flags}
+    if fields == "all":
+        rest = {k: v for k, v in r.items() if k not in ("key", "tier")}
+        return {**head, **rest}
+    out = {**head, **{c: r.get(c) for c in core}}
+    if r.get("demand_emerging") is True and "demand_trend_24m_pct" in out:
+        out["demand_trend_24m_pct"] = None
+    return out
+
+
+@lru_cache(maxsize=1024)  # keyed on caller input — bounded
+def _niche_keys_ci(gen: int, dimension: str, key_lower: str) -> tuple[str, ...]:
+    return tuple(
+        r["key"]
+        for r in query(
+            "SELECT DISTINCT key FROM mart_niche WHERE dimension = ? AND lower(key) = ? LIMIT 2",
+            [dimension, key_lower],
+        )
+    )
+
+
+def _resolve_niche_key(dimension: str, key: str) -> tuple[str | None, str | None]:
+    """(key to query, note). An exact mart_niche key wins; then mart_tag_alias (when this
+    mart carries it — newer ETLs); then a UNIQUE case-insensitive match. (None, error
+    message) when nothing matches."""
+    if query_one(
+        "SELECT 1 AS one FROM mart_niche WHERE dimension = ? AND key = ? LIMIT 1", [dimension, key]
+    ):
+        return key, None
+    if _has_table("mart_tag_alias"):
+        try:
+            row = query_one(
+                "SELECT canonical FROM mart_tag_alias WHERE dimension = ? "
+                "AND (alias = ? OR lower(alias) = lower(?)) ORDER BY (alias = ?) DESC LIMIT 1",
+                [dimension, key, key, key],
+            )
+        except duckdb.Error:  # an alias mart shaped differently than expected — skip it
+            row = None
+        canonical = row["canonical"] if row else None
+        if canonical and query_one(
+            "SELECT 1 AS one FROM mart_niche WHERE dimension = ? AND key = ? LIMIT 1",
+            [dimension, canonical],
+        ):
+            return canonical, f"{key!r} is an alias of {canonical!r} (mart_tag_alias)."
+    matches = _niche_keys_ci(_generation, dimension, key.lower())
+    if len(matches) == 1:
+        return matches[0], f"{key!r} matched {matches[0]!r} case-insensitively."
+    return None, (
+        f"no niche found for dimension={dimension!r} key={key!r}. Use tag_suggest(q) or "
+        "find_niches for exact keys."
+    )
+
+
+def _resolve_tag(tag: str | None) -> tuple[str | None, str | None]:
+    """A tag FILTER value (game_search / tag_combos): resolved like a niche key when that
+    finds a match, otherwise used as given (a tag below the niche floor can still be on
+    games' top_tags)."""
+    if not tag:
+        return tag, None
+    resolved, note = _resolve_niche_key("tag", tag)
+    return (resolved, note) if resolved is not None else (tag, None)
+
 
 @_tool
 def find_niches(
-    dimension: Literal["tag", "genre"] = "tag",
-    window: Literal["all", "24m"] = "24m",
-    min_reviews: Literal[0, 50, 100] = 50,
-    min_median_rev: float | None = None,
-    max_competition: float | None = None,
-    min_total_owners: float | None = None,
-    min_total_players: float | None = None,
-    include_tiers: list[str] | None = _DEFAULT_INCLUDE_TIERS,
-    sort: str = "opportunity_v2",
-    limit: int = 15,
+    dimension: Dimension = "tag",
+    window: Window = "24m",
+    min_reviews: MinReviews = 50,
+    sort: Annotated[
+        NicheSort,
+        Field(description="Field to rank by (default opportunity_v2). Players/lifetime/demand/sub-score fields need a mart that carries them."),
+    ] = "opportunity_v2",
+    order: Annotated[
+        Literal["desc", "asc"],
+        Field(description="desc = highest first. asc for 'least crowded' (sort=competition) or 'smallest'."),
+    ] = "desc",
+    include_tiers: Annotated[
+        list[Literal["micro", "theme", "umbrella", "meta"]] | None,
+        Field(description="Tag tiers to include (tags only). Default ['micro'] = buildable concepts. Add 'theme' to see settings/aesthetics to ATTACH to a micro pick (flagged theme_tag); umbrella/meta are never picks. null = all tiers."),
+    ] = _DEFAULT_INCLUDE_TIERS,
+    solo_only: Annotated[
+        bool,
+        Field(description="Keep only niches whose singleplayer share (solo_viability) >= 0.8; NULL = unknown = excluded. A no-netcode proxy, not a scope measure — same rule as the API's solo_only."),
+    ] = False,
+    min_median_rev: Annotated[float | None, Field(ge=0, description="Post-filter: median_rev >= this (USD).")] = None,
+    max_competition: Annotated[float | None, Field(ge=0, le=100, description="Post-filter: competition percentile <= this.")] = None,
+    min_total_owners: Annotated[float | None, Field(ge=0, description="Post-filter: total_owners >= this (the size-of-the-pie lens).")] = None,
+    min_total_players: Annotated[float | None, Field(ge=0, description="Post-filter: total_players_now >= this (needs the players columns).")] = None,
+    fields: Fields = "core",
+    limit: Annotated[int, _limit(50, "niches")] = 15,
 ) -> dict:
-    """Rank niches (Steam community tags, or Steam genres) by demand-momentum opportunity.
-    THE headline tool — start here for "what should I build" questions. Defaults are
-    tuned for exactly that question: window="24m" (the market a new entrant actually
-    faces), sort="opportunity_v2", include_tiers=["micro","theme"]
-    (buildable concepts only). min_reviews=0 is the NO-FLOOR cut: n_games = the honest
-    full tag size (unreviewed releases included) — use for "how big is this tag really",
-    not for revenue conclusions; requires a mart built after 2026-08-17.
-    This docstring is an INTERPRETATION PLAYBOOK — the numbers
-    lie in specific, known ways; the falsification rules below are how you catch them.
+    """Rank niches (Steam community tags or genres) for "what should I build" — start here.
 
-    THE SCORES
-      - opportunity = 0.5*demand − 0.35*competition + 0.3*quality_gap, clamped [0,100]
-        (all three are 0-100 percentiles vs other niches in the same cut — exact formulas
-        in the prospect-data-dictionary resource). The ORIGINAL score, frozen and kept for
-        continuity. TWO KNOWN FAILURE MODES: it rewards LOW competition without asking WHY
-        competition is low, and 60% of its `competition` term is percentile(n_recent),
-        which on the 24m cut is just niche SIZE — so it punishes big growing markets.
-        Do not sort by it.
-      - opportunity_v2 = opp_core * supply_brake. REBUILT 2026-08-31; it is no longer
-        `opportunity * decline_gate`. Sort by this for build decisions. opp_core is the
-        weighted mean of four 0-100 sub-scores returned on every row (renormalised over
-        whichever exist, so a missing input is never read as 0):
-          momentum 0.40        demand FLOW — 50 at flat, 88.1 at +40%/24m, 10.7 at −30%.
-                               NULL for emerging niches (no comparable base).
-          market_pull 0.22     0.6*demand + 0.4*market_size — the money LEVEL.
-          revenue_spread 0.20  from winner_concentration; exactly 50 at the 0.85 bar.
-          quality_gap 0.18     unchanged.
-        supply_brake = 0.35 + 0.65*supply_room/100 (1.0 when unknown — missing data never
-        penalises), and supply_room is the WORSE of "release pipeline growth measured
-        AGAINST demand growth" and "entrant_room" (0 at entrant_ratio 0.5, 100 at the
-        catalog norm 1.08, capped). Either supply signal alone can sink a score.
-        REPORT WHICH SUB-SCORE CARRIED THE SCORE. "Deckbuilding 71.9" (momentum 99,
-        supply_room 100) and "Hunting 77.2" (momentum 92, market_pull 86, but
-        revenue_spread 17 — winner-take-most) are different recommendations.
-        The score now agrees with the Radar board's ring verdicts because it reads the
-        same axes against the same bars: on the live catalog its median by ring is
-        enter 67.6 > hold 50.2 > crowded 39.1 > declining 19.5, and >= 65 is the "scores
-        like a niche the radar would say enter" bar (~16% of the default cut).
+    RULES (rows carry server-computed `flags`; the response's `rules` defines each one that fired):
+    - Bearish reading first: state every flag before any score.
+    - Never quote opportunity_v2 alone: give momentum, market_pull, revenue_spread, quality_gap and supply_brake, and say which carried it.
+    - Negative saturation_yoy + low competition = DECLINE, not opportunity (decline_signature).
+    - Recent entrants must get paid: entrant_ratio >= 1.0 (catalog norm ~1.08).
+    - winner_concentration > 0.85 = winner-take-most: red flag; the Radar never rings it 'enter'.
+    - Solo devs: drop solo_tier 'team' (multiplayer_dependent), or pass solo_only=true.
+    - Headline picks are micro-genres (the default include_tiers). Themes are modifiers to attach to a pick; umbrella/meta tags are never picks.
+    - demand_emerging rows: the trend % is withheld — judge absolute reviews_24m.
+    - Decide on window='24m' (the default); 'all' is history.
 
-    FALSIFICATION RULES — run these before recommending a niche:
-      1. Low competition + negative saturation_yoy usually means a market in DECLINE —
-         everyone STOPPED entering — not a cracked-open opportunity. Check entrant_ratio
-         and the niche_detail saturation_trend before recommending. (This exact failure
-         put Naval/Transportation/Diplomacy — new releases shrinking 15-37%/yr — at the
-         top of the old raw-opportunity ranking.) STILL YOUR JOB even though the score
-         no longer rewards a shrinking pipeline on its own: a niche whose demand AND
-         supply are both falling nets out neutral on supply_room, and only momentum
-         catches it — so read momentum, not just the total.
-      2. entrant_ratio reads AGAINST THE NORM, not against 1.0: the catalog-median tag
-         sits at ~1.08 (price inflation + the review floor filters recent releases
-         harder), so ~1.0-1.3 is unremarkable and <1 is a real warning that newcomers
-         earn less than the back catalog did. A high ratio over a shrinking pipeline
-         (few, self-selected survivors) is NOT health — trust saturation_yoy first.
-      3. Verify recent entrants actually get paid: with window="24m", median_rev IS the
-         recent-entrant median. Cross-check hit_rate_200k and n_recent (a great median
-         over 30 games is thinner evidence than a good median over 300).
-      4. winner_concentration > 0.85 = winner-take-most: the niche's revenue lives in a
-         few hits, so the MEDIAN outcome (not the visible winners) is what a new entrant
-         should expect. Check the revenue_histogram in niche_detail.
-      5. If the asker is a solo dev, read solo_viability AS A FLAG, NOT A SCALE. MEASURED
-         over 219 live niches: median 0.975, p25 0.953, p10 0.913 — 75% of the catalog
-         sits inside a 0.047-wide band, so 0.98 vs 0.96 is noise and ranking on it is
-         meaningless. Only the ~3% below 0.80 carry information: Social Deduction 0.35,
-         MMORPG 0.45, Party Game 0.50, Party 0.64, Battle Royale 0.70, Extraction Shooter
-         0.71, eSports 0.79. Those need netcode, servers and a live player base a solo dev
-         usually can't fund — never recommend them for solo builds without flagging it.
-         Prefer solo_tier ('team' | 'mixed' | 'solo') where the mart serves it; 'mixed'
-         (0.80-0.90) clears the bar but has a real multiplayer minority.
-         (An older version of this rule said "catalog norm ~0.9" — 0.9 is the 10th
-         percentile, not the norm. Do not calibrate on that figure.)
-      6. tier: rows are 'micro' (buildable game concept), 'theme' (setting/aesthetic you
-         attach TO a game), 'umbrella' (genre/mechanic container — NOT buildable: "build
-         an Open World game" is not a plan), 'meta' (reception tags like Great
-         Soundtrack — never buildable), or 'genre' (dimension="genre" rows). Umbrella and
-         meta are EXCLUDED by default because recommending them was the second failure
-         mode this tool had; pass include_tiers=None (everything) or an explicit subset
-         of ["micro","theme","umbrella","meta"] to widen. The filter only applies when
-         dimension="tag". A 'theme' answer means "make a game ABOUT this" and still needs
-         a micro-genre attached to be a real recommendation.
+    SCORE: opportunity_v2 = weighted mean of momentum (0.40; 50 = flat demand, 88 = +40%/24m), market_pull (0.22), revenue_spread (0.20; 50 at the 0.85 winner-take-most bar) and quality_gap (0.18), times supply_brake (0.35-1.0, from supply_room). >= 65 scores like a Radar 'enter'. score_version 'v1-legacy' means the old formula (no components): rebuild before ranking.
 
-    ABSOLUTE SIZE (the "pie"), distinct from the percentile-of-medians `demand`:
-      - total_owners / total_rev / total_reviews: summed over the niche's scored games.
-      - market_size: total_owners as a 0-100 percentile vs other niches (same cut).
-    Use these (or min_total_owners) when a small share of a BIG niche beats a big share
-    of a small one — the solo-dev sizing lens.
-
-    LIVE PLAYERS (the "is it hot RIGHT NOW" lens — direct current traction, unlike the
-    ownership/revenue estimates above; one value per key, identical across cuts):
-      - total_players_now: summed current concurrent players (CCU) of the niche's scored
-        games — each game's latest nightly ~21-22:00 UTC point sample (<= 7 days old),
-        NOT a daily peak. Sort by this for "where are the players today".
-      - players_trend_7d_pct: last-7d vs prior-7d change (%), SAME-PANEL (only games
-        measured in both windows count, so coverage growth can't fake a trend). Sort by
-        this for "what's heating up this week".
-      - players_coverage: share of total_players_now measured fresh (<= 2 days). Low
-        values mean the total leans on carried-forward tail captures — trust it less.
-      - median_players_now: the TYPICAL game's live players — usually brutally small.
-      - players_top5_share: share of the niche's current players held by its top 5 games.
-      FALSIFICATION RULE for the players lens: big total_players_now + players_top5_share
-      above ~0.6 + a tiny median means the audience belongs to the HITS — do not read the
-      total as demand available to a new entrant.
-      NULL on all = players never measured for the niche (or the mart predates CCU
-      collection). min_total_players is the matching optional post-filter. Follow up with
-      niche_player_history(dimension, key) for the daily series. CAVEAT: a niche's total
-      is dominated by its biggest games (the top-12k games hold ~99% of all Steam CCU) —
-      a huge total_players_now says people play the niche's HITS, not that a new entrant
-      gets players.
-      - lifetime_survival_12m: of the niche's games that ever reached 100+ concurrent
-        players, the share still holding 10+ a year later (steamcharts top-8k coverage;
-        NULL = too few covered games — fewer than 5). lifetime_n_games = the covered
-        population behind it.
-      - lifetime_median_dead_months: median lifetime of the ALREADY-DEAD 100+ games —
-        biased LOW (ignores every still-alive game); read it with lifetime_survival_12m,
-        never alone.
-      FALSIFICATION RULE for the lifetime columns: lifetime_survival_12m below ~0.5
-      marks a hit-churn niche — games get an audience and lose it within a year; a
-      strong opportunity score there still means a SHORT revenue window (front-load the
-      launch, don't plan year-two updates). Catalog-wide baseline: lifetime_curve().
-
-    DEMAND TREND (structural; one value per key, identical across cuts; absent on marts
-    that predate the 24-month demand columns):
-      - demand_trend_24m_pct: the niche's review inflow (Steam's own monthly review
-        histogram — true counts, games with 50+ reviews) over the last 24 complete
-        months vs the 24 before them, in percent — the same 24m horizon as the radar's
-        default window. Sort by it for "which niches are structurally growing" — a
-        launch spike or a sale week cannot move it the way it moved the old 90-day
-        trend. reviews_24m / reviews_prev_24m are the raw window sums. NULL trend = no
-        prior-window baseline (a genuinely new niche), never "flat".
-      FALSIFICATION RULE — demand_emerging: young Steam tags crystallize around new
-        games only (old genre ancestors never get re-voted into them), so their
-        prior-window base is near zero BY CONSTRUCTION and a huge trend % there is the
-        label's age, not demand growth. When demand_emerging is true (prev base below
-        1000 reviews, OR >= 80% of reviews_24m from games released in the last 24
-        months — reviews_24m_new_share), do NOT quote the trend %; judge the niche by
-        its absolute reviews_24m instead.
-
-    EXACT MATERIALISATION: only the precomputed cuts exist — window in {"all","24m"} x
-    min_reviews in {0,50,100} (must stay in sync with MIN_REVIEWS_LEVELS in
-    etl/build_marts.py; the 0 cut only exists on marts built after the no-floor cut
-    landed — older marts get a clear re-run-ETL error for min_reviews=0). window="all"
-    scores full history — use it for context, not for entry decisions. min_reviews=50 is
-    broader/noisier, 100 stricter/cleaner; 0 is the no-floor honest-tag-size read.
-
-    min_median_rev / max_competition / min_total_owners are optional post-filters
-    (e.g. min_median_rev=200000, max_competition=50, min_total_owners=1000000). sort is
-    any returned numeric field. Returns compact rows only — call niche_detail(dimension,
-    key) for one niche's saturation trend, revenue histogram, and representative games.
-    Returns an {"error": ...} asking you to re-run the ETL if the analytics DB predates
-    the v2 columns.
+    Rows are lean (fields='core'); fields='all' returns every mart column. Players lens: sort='total_players_now' or 'players_trend_7d_pct' (nightly point samples; totals are the hits' players). Next: niche_detail(dimension, key), niche_games(dimension, key). Formulas: methodology('scores').
     """
+    cols = _cols("mart_niche")
+    if not _NICHE_V2_REQUIRED <= cols:
+        return {"error": _NICHE_V2_MISSING}
     if sort not in _NICHE_SORTABLE:
         return {"error": f"sort must be one of {sorted(_NICHE_SORTABLE)}"}
-    if not _has_players() and (sort in _NICHE_PLAYERS_COLS or min_total_players is not None):
+    if sort not in cols:
+        return {"error": _niche_sort_missing(sort)}
+    if min_total_players is not None and "total_players_now" not in cols:
         return {"error": _PLAYERS_MISSING}
-    if not _has_players_dist() and sort in _NICHE_PLAYERS_DIST_COLS:
-        return {"error": _PLAYERS_MISSING}
-    if not _has_lifetime() and sort in _NICHE_LIFETIME_COLS:
-        return {"error": _LIFETIME_MISSING}
-    if not _has_demand24m() and sort in _NICHE_DEMAND24M_COLS:
-        return {"error": _DEMAND24M_MISSING}
-    if not _has_v2_parts() and sort in _NICHE_V2_PARTS_COLS:
-        return {"error": _V2_PARTS_MISSING}
     if min_reviews == 0 and not _has_no_floor_cut():
         return {"error": _NO_FLOOR_MISSING}
+    if order not in ("asc", "desc"):
+        return {"error": "order must be 'asc' or 'desc'"}
     if include_tiers is not None:
         bad = [t for t in include_tiers if t not in _NICHE_TIERS]
         if bad:
-            return {"error": f"include_tiers entries must be in {sorted(_NICHE_TIERS)}, got {bad}"}
+            return {"error": f"include_tiers entries must be in {list(_NICHE_TIERS)}, got {bad}"}
         if not include_tiers:
             return {"error": "include_tiers must be None or a non-empty list"}
 
     where = ["dimension = ?", "win = ?", "min_reviews = ?"]
     params: list = [dimension, window, min_reviews]
+    filter_cols: list[str] = []
     if min_median_rev is not None:
         where.append("median_rev >= ?")
         params.append(min_median_rev)
@@ -1333,279 +1548,351 @@ def find_niches(
     if min_total_owners is not None:
         where.append("total_owners >= ?")
         params.append(min_total_owners)
+        filter_cols.append("total_owners")
     if min_total_players is not None:
         where.append("total_players_now >= ?")
         params.append(min_total_players)
+        filter_cols.append("total_players_now")
+    if solo_only:
+        # NULL solo_viability fails >= (SQL three-valued logic): unknown is NOT
+        # solo-friendly — the same deliberate reading as api/app/routers/niches.py.
+        where.append("solo_viability >= ?")
+        params.append(SOLO_FRIENDLY_MIN)
+        filter_cols.append("solo_viability")
     tiers_applied = None
     if dimension == "tag" and include_tiers is not None:
         tiers_applied = list(include_tiers)
         where.append(f"tier IN ({','.join('?' for _ in tiers_applied)})")
         params.extend(tiers_applied)
     limit = max(1, min(limit, 50))
+    where_sql = " AND ".join(where)
 
-    pct_cols = (
-        ",\n                   p25_rev, p75_rev, p90_rev" if _has_niche_p90() else ""
+    extra = [sort, *filter_cols]
+    if sort in _NICHE_PLAYERS_FAMILY or min_total_players is not None:
+        extra += list(_NICHE_PLAYERS_FAMILY)
+    if sort in _NICHE_LIFETIME_COLS:
+        extra += list(_NICHE_LIFETIME_COLS)
+    core = _niche_core_fields(cols, extra)
+    if fields == "all":
+        select = "* EXCLUDE (dimension, win, min_reviews)"
+    else:
+        select = ", ".join(c for c in _dedupe(["key", *core, *_NICHE_FLAG_INPUTS]) if c in cols)
+    # An emerging niche's trend % is not comparable (its prior window is ~0 by
+    # construction): it must never top a trend ranking.
+    order_expr = sort
+    if sort == "demand_trend_24m_pct" and "demand_emerging" in cols:
+        order_expr = "CASE WHEN demand_emerging THEN NULL ELSE demand_trend_24m_pct END"
+    rows = query(
+        f"SELECT {select} FROM mart_niche WHERE {where_sql} "
+        f"ORDER BY {order_expr} {order.upper()} NULLS LAST, n_games DESC, key LIMIT ?",
+        params + [limit],
     )
-    players_cols = (
-        ",\n                   total_players_now, players_trend_7d_pct, players_coverage"
-        if _has_players()
-        else ""
-    )
-    if _has_players_dist():
-        players_cols += ",\n                   median_players_now, players_top5_share"
-    lifetime_cols = (
-        ",\n                   lifetime_n_games, lifetime_survival_12m, lifetime_median_dead_months"
-        if _has_lifetime()
-        else ""
-    )
-    demand_cols = (
-        ",\n                   reviews_24m, reviews_prev_24m, demand_trend_24m_pct"
-        ",\n                   reviews_24m_new_share, demand_emerging"
-        if _has_demand24m()
-        else ""
-    )
-    v2_parts = _V2_PARTS_SELECT if _has_v2_parts() else ""
-    try:
-        rows = query(
-            f"""
-            SELECT key, tier, n_games, n_recent, opportunity_v2, opportunity, decline_gate,
-                   entrant_ratio, solo_viability, demand, competition, quality_gap,
-                   market_size, total_owners, total_rev, total_reviews,
-                   median_rev, median_reviews, median_price, median_positive_ratio,
-                   median_owners, recent_velocity, hit_rate_200k, hit_rate_500k,
-                   saturation_yoy, winner_concentration{pct_cols}{players_cols}{lifetime_cols}{demand_cols}{v2_parts}
-            FROM mart_niche
-            WHERE {" AND ".join(where)}
-            ORDER BY {sort} DESC NULLS LAST, n_games DESC
-            LIMIT ?
-            """,
-            params + [limit],
+    total = query_one(f"SELECT COUNT(*) AS n FROM mart_niche WHERE {where_sql}", params)
+    niches = [_shape_niche_row(r, fields, core) for r in rows]
+    fired = {f for n in niches for f in n["flags"]}
+    warnings = []
+    if window == "all":
+        warnings.append(
+            "window='all' ranks full history — context only; build decisions use window='24m'."
         )
-    except (duckdb.BinderException, duckdb.CatalogException):
-        return {"error": _NICHE_V2_MISSING}
     return {
         "dimension": dimension,
         "window": window,
         "min_reviews": min_reviews,
         "include_tiers": tiers_applied,
+        "solo_only": solo_only,
         "sort": sort,
-        "n_returned": len(rows),
-        "niches": clean_rows(rows),
+        "order": order,
+        "fields": fields,
+        "n_matching": int(total["n"]) if total else 0,
+        "n_returned": len(niches),
+        "rules": _rules_for(fired),
+        "niches": niches,
+        "warnings": warnings,
     }
 
 
-@_tool
-def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
-    """Deep dive on one niche (get valid `key` values from find_niches — exact match,
-    case-sensitive). Returns:
-      - tier: 'micro' | 'theme' | 'umbrella' | 'meta' (tags) or 'genre' — an 'umbrella'
-        or 'meta' key is a container/reception tag, not a buildable niche.
-      - variants: this niche's opportunity_v2/opportunity/demand/competition/etc at all
-        precomputed cuts — (all|24m) x (min_reviews 0|50|100; the 0 rows exist only on
-        marts built after the no-floor cut landed) — including entrant_ratio
-        (24m-vs-all-time median revenue; catalog-median tag is ~1.08, so <1 means recent
-        entrants genuinely underearn), solo_viability + solo_tier (share of scored games
-        playable single-player — a FLAG, not a scale: catalog median 0.975, so only the
-        ~3% below 0.80 mean anything, and those lean multiplayer — a red flag for solo
-        devs), decline_gate (a falsification tell, 0.5-1.0: near 1.0 = neither decline
-        signal fired; it stopped multiplying the score on 2026-08-31), and the
-        opportunity_v2 sub-scores momentum / supply_room / revenue_spread / market_pull /
-        supply_brake, which say WHY the score is what it is.
-      - saturation_trend: yearly release counts + median revenue, oldest-first — is this
-        niche heating up or cooling off? A shrinking n_releases pipeline is DECLINE even
-        when competition looks invitingly low.
-      - revenue_histogram: log-scale bucketed distribution of est. lifetime revenue
-        across the niche (min_reviews=50 population) — the full shape, not just the
-        median.
-      - representative_games: top 8 games in the niche by est. revenue.
-      - hit_rates: headline (window="all", min_reviews=50) hit_rate_200k / hit_rate_500k
-        (share of games clearing $200K/$500K est. revenue), median_rev, n_games,
-        winner_concentration.
-      - players: the niche's LIVE-player snapshot — latest daily row (date,
-        total_players, measured_players, n_games_measured, n_games_covered,
-        n_games_panel) + history bounds (first_date, last_date, n_days). total_players
-        is summed current CCU (nightly ~21-22:00 UTC point samples, <= 7d carry-forward
-        for rotation gaps — not daily peaks). The variants rows also carry
-        total_players_now / players_trend_7d_pct / players_coverage (same value on all
-        cuts). None = never measured or the mart predates CCU collection; call
-        niche_player_history(dimension, key) for the full daily series.
-      - lifetime columns on the variants rows (same value on all 4 cuts, like
-        entrant_ratio): lifetime_n_games (the niche's games that ever reached 100+
-        concurrent players, steamcharts top-8k coverage), lifetime_survival_12m (share
-        of those still holding 10+ a year after first reaching 100+ — fixed horizon,
-        only games observable >= 12 months count), lifetime_median_dead_months (median
-        lifetime of the ALREADY-DEAD games — biased LOW, it ignores every still-alive
-        game; never read it without lifetime_survival_12m). None = fewer than 5 covered
-        games or a mart built before the lifetime ETL. Catalog-wide baseline:
-        lifetime_curve().
-      - 24-month demand trend on the variants rows (same value on every cut, like
-        entrant_ratio): reviews_24m / reviews_prev_24m (the niche's review-histogram
-        inflow, last 24 complete months vs the 24 before) and demand_trend_24m_pct
-        (the percent between them). None on the trend = no prior-window baseline (a
-        genuinely new niche), never "flat". reviews_24m_new_share / demand_emerging
-        flag young tags whose prior base is near zero by construction — when
-        demand_emerging is true, do not quote the trend %; use absolute reviews_24m
-        (see find_niches). All five absent on marts that predate the 24-month demand
-        columns.
-    Returns {"error": ...} if dimension/key doesn't match any niche (call find_niches to
-    get exact valid keys — spelling and case must match precisely), or asking you to
-    re-run the ETL if the analytics DB predates the v2 columns.
-    """
-    # NOTE: `win` is selected un-aliased (not `AS window`) because `window` is a reserved
-    # word in DuckDB SQL (window functions) and can't be used unquoted in ORDER BY — same
-    # reason api/app/routers/niches.py renames win -> window in Python, after the fetch,
-    # rather than in SQL.
-    pct_cols = (
-        ",\n                   p25_rev, p75_rev, p90_rev" if _has_niche_p90() else ""
-    )
-    players_cols = (
-        ",\n                   total_players_now, players_trend_7d_pct, players_coverage"
-        if _has_players()
-        else ""
-    )
-    if _has_players_dist():
-        players_cols += ",\n                   median_players_now, players_top5_share"
-    lifetime_cols = (
-        ",\n                   lifetime_n_games, lifetime_survival_12m, lifetime_median_dead_months"
-        if _has_lifetime()
-        else ""
-    )
-    demand_cols = (
-        ",\n                   reviews_24m, reviews_prev_24m, demand_trend_24m_pct"
-        ",\n                   reviews_24m_new_share, demand_emerging"
-        if _has_demand24m()
-        else ""
-    )
-    v2_parts = _V2_PARTS_SELECT if _has_v2_parts() else ""
-    try:
-        variants = query(
-            f"""
-            SELECT win, min_reviews, tier, n_games, n_recent, opportunity_v2, opportunity,
-                   decline_gate, entrant_ratio, solo_viability, demand,
-                   competition, quality_gap, market_size, total_owners, total_rev,
-                   total_reviews, median_rev, median_reviews, median_price,
-                   median_positive_ratio, median_owners, recent_velocity, hit_rate_200k,
-                   hit_rate_500k, beatable_share, saturation_yoy, winner_concentration{pct_cols}{players_cols}{lifetime_cols}{demand_cols}{v2_parts}
-            FROM mart_niche WHERE dimension = ? AND key = ? ORDER BY win, min_reviews
-            """,
-            [dimension, key],
-        )
-    except (duckdb.BinderException, duckdb.CatalogException):
-        return {"error": _NICHE_V2_MISSING}
-    if not variants:
-        return {
-            "error": f"no niche found for dimension={dimension!r} key={key!r}. "
-            "Call find_niches to list valid keys — spelling/case must match exactly."
-        }
-    for v in variants:
-        v["window"] = v.pop("win")
+def _pick_cut(variants: list[dict], window: str, min_reviews: int) -> dict:
+    by_cut = {(v["window"], v["min_reviews"]): v for v in variants}
+    for cut in ((window, min_reviews), ("24m", 50), ("all", 50)):
+        if cut in by_cut:
+            return by_cut[cut]
+    return variants[0]
 
-    trend = query(
-        "SELECT year, n_releases, n_scored, median_rev FROM mart_niche_trend "
-        "WHERE dimension = ? AND key = ? ORDER BY year",
-        [dimension, key],
+
+def _cut_label(window: str, min_reviews: int) -> dict:
+    return {"window": window, "min_reviews": min_reviews}
+
+
+@_tool
+def niche_detail(
+    dimension: Dimension,
+    key: NicheKey,
+    window: Window = "24m",
+    min_reviews: MinReviews = 50,
+    fields: Annotated[
+        Literal["core", "all"],
+        Field(description="core = compact other-cut rows + the last 10 trend years; all = every column of every cut + the full trend."),
+    ] = "core",
+) -> dict:
+    """Deep dive on one niche (key from find_niches or tag_suggest; a known alias or a unique case-insensitive match is resolved and noted).
+
+    Read `flags` and `rules` first — the same server-computed flags as find_niches, for the headline cut. Then:
+    - headline: every mart column for the requested cut (default window='24m', min_reviews=50 — the market a new entrant faces), incl. opportunity_v2 and ALL its components; quote the components, never the lone score. An emerging niche's demand_trend_24m_pct is withheld (null).
+    - hit_rates: $200K/$500K hit rates, median revenue, n_games and winner_concentration for the SAME cut.
+    - variants: the other precomputed cuts (compact unless fields='all').
+    - representative_games: top games by est. revenue WITHIN the headline cut; marts without mart_niche_game fall back to the all-time top 8, labelled so.
+    - saturation_trend: yearly releases carrying the key (no review floor) + scored median/p90 revenue — a shrinking pipeline is decline even when competition looks low.
+    - revenue_histogram: log-scale est. revenue buckets, window='all' x min_reviews=50 only (labelled).
+    - players: latest live-player snapshot (nightly point samples, not peaks) + history bounds; niche_player_history has the series.
+    Member games: niche_games(dimension, key). Formulas: methodology('scores').
+    """
+    cols = _cols("mart_niche")
+    if not _NICHE_V2_REQUIRED <= cols:
+        return {"error": _NICHE_V2_MISSING}
+    resolved, note = _resolve_niche_key(dimension, key)
+    if resolved is None:
+        return {"error": note}
+    # `win` is selected un-aliased (and renamed in Python) because `window` is a reserved
+    # word in DuckDB SQL — same reason api/app/routers/niches.py renames it after the fetch.
+    variants = query(
+        "SELECT * EXCLUDE (dimension, key) FROM mart_niche WHERE dimension = ? AND key = ? "
+        "ORDER BY win, min_reviews",
+        [dimension, resolved],
     )
-    hist = query(
-        "SELECT x_min, x_max, count FROM mart_niche_hist "
-        "WHERE dimension = ? AND key = ? ORDER BY bucket_index",
-        [dimension, key],
-    )
-    games = query(
-        "SELECT rank_in_niche, appid, name, release_year, price_initial, owners_mid, "
-        "total_reviews, positive_ratio, est_rev_reviews, self_published FROM mart_niche_top "
-        "WHERE dimension = ? AND key = ? ORDER BY rank_in_niche LIMIT 8",
-        [dimension, key],
-    )
+    if not variants:
+        return {"error": f"no niche found for dimension={dimension!r} key={key!r}."}
+    variants = [{"window": v.pop("win"), **v} for v in variants]
+    headline = _pick_cut(variants, window, min_reviews)
+    cut = _cut_label(headline["window"], headline["min_reviews"])
+    warnings: list[str] = []
+    if (headline["window"], headline["min_reviews"]) != (window, min_reviews):
+        warnings.append(
+            f"Cut window={window}, min_reviews={min_reviews} is not materialised for this niche "
+            f"(under the 30-game floor) — the headline shows window={cut['window']}, "
+            f"min_reviews={cut['min_reviews']} instead."
+        )
+    if headline["window"] == "all":
+        warnings.append("The headline cut is window='all' (full history) — context, not the entry market.")
+    flags = _niche_flags(headline)
+    head = dict(headline)
+    if fields == "core" and head.get("demand_emerging") is True and "demand_trend_24m_pct" in head:
+        head["demand_trend_24m_pct"] = None
+    others = [v for v in variants if v is not headline]
+    if fields == "core":
+        others = [{c: v.get(c) for c in _NICHE_VARIANT_CORE if c in v} for v in others]
+
+    trend: list[dict] = []
+    if _has_table("mart_niche_trend"):
+        trend_cols = "year, n_releases, n_scored, median_rev" + (
+            ", p90_rev" if _has_column("mart_niche_trend", "p90_rev") else ""
+        )
+        trend = query(
+            f"SELECT {trend_cols} FROM mart_niche_trend WHERE dimension = ? AND key = ? ORDER BY year",
+            [dimension, resolved],
+        )
+        if fields == "core":
+            trend = trend[-10:]
+    hist: list[dict] = []
+    if _has_table("mart_niche_hist"):
+        hist = query(
+            "SELECT x_min, x_max, count FROM mart_niche_hist "
+            "WHERE dimension = ? AND key = ? ORDER BY bucket_index",
+            [dimension, resolved],
+        )
+
+    # Representative games: cut-aware when the mart carries per-cut membership, so the
+    # list describes the same population as the headline numbers (mart_niche_top is ONE
+    # cut-independent all-time top 8 — measured on Souls-like 24m/50 it listed two games
+    # that are not in that cut at all).
+    games: list[dict] = []
+    games_cut: Any = "all-time top 8 by est. revenue (cut-independent; this mart predates mart_niche_game)"
+    if _has_table("mart_niche_game"):
+        games = query(
+            "SELECT g.appid, g.name, g.release_year, g.price_initial, g.total_reviews, "
+            "g.positive_ratio, g.est_rev_reviews, g.self_published "
+            "FROM mart_niche_game m JOIN mart_game g ON g.appid = m.appid "
+            "WHERE m.dimension = ? AND m.key = ? AND m.win = ? AND m.min_reviews = ? "
+            "ORDER BY g.est_rev_reviews DESC NULLS LAST, g.appid LIMIT 8",
+            [dimension, resolved, cut["window"], cut["min_reviews"]],
+        )
+        games_cut = cut
+    elif _has_table("mart_niche_top"):
+        games = query(
+            "SELECT appid, name, release_year, price_initial, total_reviews, positive_ratio, "
+            "est_rev_reviews, self_published FROM mart_niche_top "
+            "WHERE dimension = ? AND key = ? ORDER BY rank_in_niche LIMIT 8",
+            [dimension, resolved],
+        )
+
     # Live-player snapshot (daily series lives in niche_player_history; here just the
     # latest row + bounds). None when the mart predates CCU or the niche was never
     # measured — a real answer, not an error.
     players = None
-    if _has_players():
-        try:
-            latest = query_one(
-                "SELECT date, total_players, measured_players, n_games_measured, "
-                "n_games_covered, n_games_panel FROM mart_niche_players "
-                "WHERE dimension = ? AND key = ? ORDER BY date DESC LIMIT 1",
-                [dimension, key],
-            )
-            if latest is not None:
-                bounds = query_one(
-                    "SELECT MIN(date) AS first_date, MAX(date) AS last_date, "
-                    "COUNT(*) AS n_days FROM mart_niche_players "
-                    "WHERE dimension = ? AND key = ?",
-                    [dimension, key],
-                )
-                latest["date"] = str(latest["date"])
-                players = {
-                    **clean(latest),
-                    "history": {
-                        "first_date": str(bounds["first_date"]),
-                        "last_date": str(bounds["last_date"]),
-                        "n_days": bounds["n_days"],
-                    },
-                }
-        except duckdb.CatalogException:
-            players = None
+    if _has_players() and _has_table("mart_niche_players"):
+        latest = query_one(
+            "SELECT date, total_players, measured_players, n_games_measured, "
+            "n_games_covered, n_games_panel FROM mart_niche_players "
+            "WHERE dimension = ? AND key = ? ORDER BY date DESC LIMIT 1",
+            [dimension, resolved],
+        )
+        if latest is not None:
+            bounds = query_one(
+                "SELECT MIN(date) AS first_date, MAX(date) AS last_date, "
+                "COUNT(*) AS n_days FROM mart_niche_players WHERE dimension = ? AND key = ?",
+                [dimension, resolved],
+            ) or {}
+            players = {**latest, "history": bounds}
 
-    headline = next((v for v in variants if v["window"] == "all" and v["min_reviews"] == 50), variants[0])
-    return {
-        "dimension": dimension,
-        "key": key,
-        "tier": headline.get("tier"),
-        "variants": clean_rows(variants),
-        "players": players,
-        "saturation_trend": clean_rows(trend),
-        "revenue_histogram": clean_rows(hist),
-        "representative_games": clean_rows(games),
-        "hit_rates": clean(
-            {
-                "hit_rate_200k": headline["hit_rate_200k"],
-                "hit_rate_500k": headline["hit_rate_500k"],
-                "median_rev": headline["median_rev"],
-                "n_games": headline["n_games"],
-                "winner_concentration": headline["winner_concentration"],
-            }
-        ),
-    }
+    out: dict[str, Any] = {"dimension": dimension, "key": resolved}
+    if note:
+        out["key_note"] = note
+    out.update(
+        {
+            "tier": headline.get("tier"),
+            "cut": cut,
+            "flags": flags,
+            "rules": _rules_for(flags),
+            "headline": head,
+            "hit_rates": {
+                "cut": cut,
+                "hit_rate_200k": headline.get("hit_rate_200k"),
+                "hit_rate_500k": headline.get("hit_rate_500k"),
+                "median_rev": headline.get("median_rev"),
+                "n_games": headline.get("n_games"),
+                "winner_concentration": headline.get("winner_concentration"),
+            },
+            "variants": others,
+            "saturation_trend": trend,
+            "revenue_histogram_cut": _cut_label("all", 50),
+            "revenue_histogram": hist,
+            "representative_games_cut": games_cut,
+            "representative_games": games,
+            "players": players,
+            "warnings": warnings,
+        }
+    )
+    return out
+
+
+_NICHE_GAMES_MISSING = (
+    "This mart predates mart_niche_game (per-cut niche membership, an older ETL build). "
+    "Rebuild the mart (`task etl`) and retry; niche_detail's representative_games still "
+    "lists the all-time top games."
+)
+# Request-side sort names -> mart_game columns (whitelisted; mirrors the API's _GAME_SORT).
+_NICHE_GAME_SORT = {
+    "revenue": "g.est_rev_reviews",
+    "price": "g.price_initial",
+    "reviews": "g.total_reviews",
+    "release_year": "g.release_year",
+    "name": "g.name",
+}
+
+
+@lru_cache(maxsize=None)
+def _niche_game_cuts(gen: int) -> frozenset[tuple[str, int]]:
+    return frozenset(
+        (str(r["win"]), int(r["min_reviews"]))
+        for r in query("SELECT DISTINCT win, min_reviews FROM mart_niche_game")
+    )
 
 
 @_tool
-def tag_combos(tag: str, limit: int = 15) -> dict:
-    """Which co-tags does one Steam community tag perform best/worst WITH? Answers "which
-    tags should MY game ship with?" — e.g. does 'Roguelike Deckbuilder'+'Horror' outperform
-    each tag alone? Reads mart_tag_lift: unordered tag PAIRS exploded from each game's
-    top-10 community tags (vote-floored + denylist-filtered, same hygiene as every other
-    tag mart), restricted to games with >= 50 total reviews (the same min_reviews=50 floor
-    as the niche mart, so pair and solo populations are comparable), and kept only when
-    the pair has >= 15 qualifying games (TAG_PAIR_MIN_GAMES in etl/build_marts.py — below
-    that a median is noise).
+def niche_games(
+    dimension: Dimension,
+    key: NicheKey,
+    window: Window = "24m",
+    min_reviews: MinReviews = 50,
+    scope: Annotated[
+        Literal["all", "indie"],
+        Field(description="all = every member game; indie = Steam-tagged indie games only."),
+    ] = "all",
+    sort: Annotated[
+        Literal["revenue", "price", "reviews", "release_year", "name"],
+        Field(description="revenue = est. gross lifetime revenue (default)."),
+    ] = "revenue",
+    order: Order = "desc",
+    limit: Annotated[int, _limit(50, "games")] = 15,
+) -> dict:
+    """Member games of one niche cut — who actually sells in it — mirroring the web niche page's games table.
 
-    LIFT = pair median est. revenue / GREATEST(tag A solo median, tag B solo median),
-    where the solo medians are mart_niche's (dimension='tag', window='all',
-    min_reviews=50) baselines. Lift > 1 means the combination's typical game out-earns
-    the BETTER of the two tags alone — it can't be gamed by pairing a strong tag with a
-    weak one. Lift is null when both solo medians are $0 (free-to-play-dominated tags:
-    est. revenue is reviews x owners-per-review x PRICE, so all-free tags median $0).
+    window/min_reviews select the same precomputed cut as find_niches (default 24m x 50 = games released in the last 24 months with >= 50 reviews). `stats` summarises the WHOLE cut (n_games, median/p90 est. revenue, $200K hit rate, median price) so a page of rows is never read as the population; the rows are one sorted page of it. With scope='indie' both stats and rows cover indie games only.
+    Read the rows bearish-first: a niche whose revenue sits in its top two rows is winner-take-most whatever its median says. Revenue is a Boxleiter-style ESTIMATE (gross lifetime; free games carry none). Needs mart_niche_game — older marts return a rebuild error.
+    """
+    if not _has_table("mart_niche_game"):
+        return {"error": _NICHE_GAMES_MISSING}
+    resolved, note = _resolve_niche_key(dimension, key)
+    if resolved is None:
+        return {"error": note}
+    cuts = _niche_game_cuts(_generation)
+    if (window, min_reviews) not in cuts:
+        return {
+            "error": f"cut (window={window}, min_reviews={min_reviews}) is not materialised in "
+            "mart_niche_game; available: " + ", ".join(f"({w}, {m})" for w, m in sorted(cuts))
+        }
+    if sort not in _NICHE_GAME_SORT or order not in ("asc", "desc"):
+        return {"error": f"sort must be one of {sorted(_NICHE_GAME_SORT)} and order asc|desc"}
+    limit = max(1, min(limit, 50))
+    base = (
+        "FROM mart_niche_game m JOIN mart_game g ON g.appid = m.appid "
+        "WHERE m.dimension = ? AND m.key = ? AND m.win = ? AND m.min_reviews = ?"
+    )
+    params: list = [dimension, resolved, window, min_reviews]
+    if scope == "indie":
+        base += " AND g.is_indie = 1"
+    stats = query_one(
+        "SELECT COUNT(*) AS n_games, median(g.est_rev_reviews) AS median_rev, "
+        "quantile_cont(g.est_rev_reviews, 0.9) AS p90_rev, "
+        "AVG(CASE WHEN g.est_rev_reviews > 200000 THEN 1.0 ELSE 0.0 END) AS hit_rate_200k, "
+        f"median(g.price_initial) AS median_price {base}",
+        params,
+    ) or {}
+    live = ", g.live_players" if _has_column("mart_game", "live_players") else ""
+    rows = query(
+        "SELECT g.appid, g.name, g.release_year, g.price_initial, "
+        "g.est_rev_reviews AS est_revenue, g.total_reviews, g.positive_ratio, g.is_indie, "
+        f"g.self_published{live} {base} "
+        f"ORDER BY {_NICHE_GAME_SORT[sort]} {order.upper()} NULLS LAST, g.appid LIMIT ?",
+        params + [limit],
+    )
+    out: dict[str, Any] = {"dimension": dimension, "key": resolved}
+    if note:
+        out["key_note"] = note
+    out.update(
+        {
+            "window": window,
+            "min_reviews": min_reviews,
+            "scope": scope,
+            "sort": sort,
+            "order": order,
+            "stats": stats,
+            "n_returned": len(rows),
+            "games": rows,
+            "caveats": [
+                "est_revenue is a Boxleiter-style gross lifetime ESTIMATE (owners x price); "
+                "free games carry none.",
+                "Membership = the games mart_niche scores for this exact cut (tag = any of "
+                "the game's community tags, genre = its genres), so n_games matches find_niches.",
+            ],
+        }
+    )
+    return out
 
-    Revenue throughout is est_rev_reviews — a Boxleiter-style ESTIMATE (gross lifetime
-    box revenue), never ground truth. pair_hit_rate_200k mirrors mart_niche's
-    hit_rate_200k convention (share of the pair's games clearing $200K est. revenue).
 
-    Returns solo context for `tag` (its all/50 baseline), best_combos (highest lift
-    first) and worst_combos (lowest lift first, no overlap with best), each row carrying
-    partner, n_games, pair_median_rev, pair_hit_rate_200k, the two solo medians,
-    best_solo_median_rev, and lift — plus a one-line headline takeaway.
+@_tool
+def tag_combos(
+    tag: Annotated[str, Field(description="Exact community tag (tag_suggest resolves spelling); aliases/case resolved when unambiguous.")],
+    limit: Annotated[int, _limit(50, "pairs per list")] = 15,
+) -> dict:
+    """Which co-tags does one Steam community tag perform best/worst WITH? The theme-as-modifier tool: pair a micro-genre pick with the theme/tag that lifts it.
 
-    An empty best/worst list is a real answer: the tag has no pairs meeting the 15-game
-    floor. An unknown tag returns {"error": ...} — get valid tags from
-    find_niches(dimension="tag") (exact match, case-sensitive). ALWAYS weigh n_games:
-    pairs at the floor (~15 games) are often a handful of famous titles wearing both
-    tags, not a repeatable pattern. Correlation, not causation — good games choose these
-    tag combinations as much as the combinations make games good, and tags are SteamSpy
-    community tags (crowd-applied, occasionally wrong/late, top-10-per-game only).
+    LIFT = the pair's median est. revenue / the BETTER of the two tags' solo medians (mart_niche all-time x min_reviews=50 baselines) — > 1 means the combination out-earns the stronger tag alone, so pairing a strong tag with a weak one can't game it. Pairs come from each game's top-10 community tags, games with >= 50 reviews, and need >= 15 games (below that a median is noise). Lift is null (and the pair unranked) when both solo medians are $0/unknown (free-to-play-dominated tags).
+
+    Bearish reading first: weigh n_games (a pair near the 15-game floor is often a few famous titles wearing both tags, not a repeatable pattern); correlation, not causation; ALL-TIME baselines (not the 24m entry window). Revenue is a Boxleiter-style ESTIMATE. Returns solo context, best_combos (highest lift first), worst_combos (lowest first, no overlap) and a one-line headline. An unknown tag returns an error — get tags from tag_suggest / find_niches.
     """
     limit = max(1, min(limit, 50))
-
+    tag, note = _resolve_tag(tag)
     try:
         rows = query(
             """
@@ -1639,8 +1926,8 @@ def tag_combos(tag: str, limit: int = 15) -> dict:
     if not rows and solo is None:
         return {
             "error": f"tag {tag!r} not found — it has neither a solo baseline in mart_niche "
-            "nor any pairs meeting the 15-game floor. Get valid tags from "
-            "find_niches(dimension='tag'); spelling and case must match exactly."
+            "nor any pairs meeting the 15-game floor. Get valid tags from tag_suggest(q) "
+            "or find_niches(dimension='tag')."
         }
 
     ranked = [r for r in rows if r["lift"] is not None]
@@ -1653,19 +1940,19 @@ def tag_combos(tag: str, limit: int = 15) -> dict:
         b = best[0]
         headline = (
             f"'{tag}' pairs best with '{b['partner']}': the combo's median est. revenue is "
-            f"${b['pair_median_rev']:,.0f} across {b['n_games']} games — {b['lift']:.2f}x the "
-            f"better solo tag's median (${b['best_solo_median_rev']:,.0f})."
+            f"{_usd(b['pair_median_rev'])} across {b['n_games']} games — {b['lift']:.2f}x the "
+            f"better solo tag's median ({_usd(b['best_solo_median_rev'])})."
         )
         if worst:
             w = worst[0]
             headline += (
                 f" It pairs worst with '{w['partner']}' ({w['lift']:.2f}x, "
-                f"median ${w['pair_median_rev']:,.0f} across {w['n_games']} games)."
+                f"median {_usd(w['pair_median_rev'])} across {w['n_games']} games)."
             )
     elif solo is not None:
         headline = (
             f"'{tag}' has no tag pairs meeting the 15-game reliability floor — solo baseline "
-            f"only (median est. revenue ${solo['median_rev']:,.0f} across {solo['n_games']} games)."
+            f"only (median est. revenue {_usd(solo['median_rev'])} across {solo['n_games']} games)."
         )
 
     caveats = [
@@ -1681,24 +1968,27 @@ def tag_combos(tag: str, limit: int = 15) -> dict:
     if unranked_free:
         caveats.append(
             f"{unranked_free} pair(s) omitted from the ranking: lift is undefined because both "
-            "tags' solo medians are $0 (free-to-play-dominated tags have no box revenue)."
+            "tags' solo medians are $0/unknown (free-to-play-dominated tags have no box revenue)."
         )
 
-    return {
-        "tag": tag,
-        "solo": clean(
-            {
+    out: dict[str, Any] = {"tag": tag}
+    if note:
+        out["key_note"] = note
+    out.update(
+        {
+            "solo": {
                 "n_games": solo["n_games"] if solo else None,
                 "median_rev": solo["median_rev"] if solo else None,
                 "hit_rate_200k": solo["hit_rate_200k"] if solo else None,
-            }
-        ),
-        "n_pairs": len(rows),
-        "headline": headline,
-        "best_combos": clean_rows(best),
-        "worst_combos": clean_rows(worst),
-        "caveats": caveats,
-    }
+            },
+            "n_pairs": len(rows),
+            "headline": headline,
+            "best_combos": best,
+            "worst_combos": worst,
+            "caveats": caveats,
+        }
+    )
+    return out
 
 
 _NICHE_THEME_CAVEATS = [
@@ -1721,38 +2011,16 @@ _NICHE_THEME_CAVEATS = [
 
 
 @_tool
-def niche_review_themes(dimension: Literal["tag", "genre"], key: str) -> dict:
-    """What a whole NICHE praises vs complains about — per-aspect review sentiment rolled
-    up across every review-mined game in one tag/genre niche, with each share's delta vs
-    the all-catalog baseline. This turns find_niches' abstract quality_gap score into a
-    concrete gap statement ("Souls-likes complain about Map & Navigation more than games
-    in general — ship a great map"). Get valid `key` values from find_niches (exact match,
-    case-sensitive).
+def niche_review_themes(dimension: Dimension, key: NicheKey) -> dict:
+    """What a whole NICHE praises vs complains about — per-aspect review sentiment pooled across every review-mined game in one tag/genre niche, each share with its delta vs the all-catalog baseline. It turns quality_gap into a concrete gap statement ("Souls-likes complain about Map & Navigation more than games in general — ship a great map").
 
-    What is materialized (mart_niche_themes): games from mart_game_review_aspects (>= 20
-    sampled English text reviews — TEARDOWN_MIN_REVIEWS in etl/build_marts.py) are joined
-    to tag niches via the game's TOP-10 community tags (mart_game.top_tags) and to genre
-    via primary_genre, then mention counts are POOLED per (niche, aspect) — review-volume
-    weighted, so a 5-review game can't swamp the signal (flip side: a big hit can dominate
-    its niche). A (niche, aspect) row only exists with >= 10 games mentioning the aspect
-    (NICHE_THEMES_MIN_GAMES).
+    complaint_themes: sorted by text_complaint_delta_vs_catalog (what this niche complains about MORE than games in general first); praise_themes: by text_praise_delta_vs_catalog. Each row carries the vote-based praise_share/complaint_share (+ delta) and the VADER text rates (+ deltas), plus n_games / n_reviews_sampled / total_mentions to judge depth. An aspect can top BOTH lists (polarized).
 
-    Returns the 10 fixed aspects as two rankings:
-      - complaint_themes: sorted by text_complaint_delta_vs_catalog DESC — what this niche
-        complains about MORE than games in general (positive delta) at the top.
-      - praise_themes: sorted by text_praise_delta_vs_catalog DESC — what it praises more
-        than games in general at the top.
-    Each row carries both signal families: vote-based praise_share/complaint_share (+
-    praise_delta_vs_catalog) and text-sentiment text_praise_rate/text_complaint_rate (+
-    their deltas), plus n_games / n_reviews_sampled / total_mentions to judge sample depth.
-    An aspect can rank high in BOTH lists (its reviews are polarized) — the neutral-band
-    text rates are independent, not complements.
-
-    Empty praise/complaint lists (with a `note`) mean the key IS a real niche but too few
-    of its games clear the review/games floors above — an honest "not enough review-text
-    signal", not an error. {"error": ...} means the key matched no niche at all — call
-    find_niches for valid keys — or the analytics DB predates this mart (re-run the ETL).
+    Caveats: keyword-lexicon aspects; review-volume weighted (one big hit can BE the niche's theme); membership is narrower than find_niches' (top-10 tags / primary genre); games need >= 20 sampled English reviews and an aspect >= 10 games. Empty lists with a `note` = too little review text, not an error.
     """
+    resolved, note = _resolve_niche_key(dimension, key)
+    if resolved is None:
+        return {"error": note}
     try:
         rows = query(
             """
@@ -1763,37 +2031,32 @@ def niche_review_themes(dimension: Literal["tag", "genre"], key: str) -> dict:
             FROM mart_niche_themes
             WHERE dimension = ? AND key = ?
             """,
-            [dimension, key],
+            [dimension, resolved],
         )
     except duckdb.Error as e:
-        # The production DB won't carry mart_niche_themes until the next ETL run builds it
-        # — degrade to a clear error instead of crashing the tool call.
+        # An older mart won't carry mart_niche_themes until the next ETL run builds it —
+        # degrade to a clear error instead of crashing the tool call.
         return {
             "error": "mart_niche_themes is missing from this analytics DB — it is built by "
-            "etl/marts/mart_niche_themes.sql (registered last in MART_FILES); re-run the ETL "
-            f"(`task etl`) so current.duckdb includes it. ({type(e).__name__}: {e})"
+            "etl/marts/mart_niche_themes.sql; re-run the ETL (`task etl`) so current.duckdb "
+            f"includes it. ({type(e).__name__})"
         }
 
+    out: dict[str, Any] = {"dimension": dimension, "key": resolved}
+    if note:
+        out["key_note"] = note
     if not rows:
-        known = query_one(
-            "SELECT 1 AS one FROM mart_niche WHERE dimension = ? AND key = ? LIMIT 1",
-            [dimension, key],
-        )
-        if known is None:
-            return {
-                "error": f"no niche found for dimension={dimension!r} key={key!r}. "
-                "Call find_niches to list valid keys — spelling/case must match exactly."
+        out.update(
+            {
+                "praise_themes": [],
+                "complaint_themes": [],
+                "note": "Niche exists but no aspect cleared the reliability floors (>= 10 games "
+                "with >= 20 sampled English text reviews each mentioning the aspect) — too few "
+                "review-mined games in this niche for a reliable theme read.",
+                "caveats": _NICHE_THEME_CAVEATS,
             }
-        return {
-            "dimension": dimension,
-            "key": key,
-            "praise_themes": [],
-            "complaint_themes": [],
-            "note": "Niche exists but no aspect cleared the reliability floors (>= 10 games "
-            "with >= 20 sampled English text reviews each mentioning the aspect) — too few "
-            "review-mined games in this niche for a reliable theme read.",
-            "caveats": _NICHE_THEME_CAVEATS,
-        }
+        )
+        return out
 
     def _delta_sorted(field: str) -> list[dict]:
         return sorted(
@@ -1802,14 +2065,15 @@ def niche_review_themes(dimension: Literal["tag", "genre"], key: str) -> dict:
             reverse=True,
         )[:5]
 
-    return {
-        "dimension": dimension,
-        "key": key,
-        "n_aspects": len(rows),
-        "praise_themes": clean_rows(_delta_sorted("text_praise_delta_vs_catalog")),
-        "complaint_themes": clean_rows(_delta_sorted("text_complaint_delta_vs_catalog")),
-        "caveats": _NICHE_THEME_CAVEATS,
-    }
+    out.update(
+        {
+            "n_aspects": len(rows),
+            "praise_themes": _delta_sorted("text_praise_delta_vs_catalog"),
+            "complaint_themes": _delta_sorted("text_complaint_delta_vs_catalog"),
+            "caveats": _NICHE_THEME_CAVEATS,
+        }
+    )
+    return out
 
 
 # ==========================================================================================
@@ -1817,27 +2081,22 @@ def niche_review_themes(dimension: Literal["tag", "genre"], key: str) -> dict:
 # ==========================================================================================
 @_tool
 def market_benchmarks() -> dict:
-    """Reference anchors for judging any revenue/owners number. Returns:
-      - cited: figures from public indie-market research (VG Insights / GameDiscoverCo /
-        Boxleiter method) — median indie gross ~$249, ~8.5% of releases clear $100K,
-        Boxleiter 20-55 owners-per-review (mid 30), wishlist-conversion assumptions,
-        Steam's ~70%-to-dev revenue share, and the 4 dev-tier definitions (Hobby/Small/
-        Middle/Triple-I) by lifetime copies sold.
-      - computed: this catalog's own figures (global median revenue, fitted catalog-wide
-        Boxleiter slope, % of scored games over $100K, population sizes).
-      - boxleiter_by_genre: the fitted owners-per-review slope per genre (what
-        estimate_revenue uses when you pass a genre).
-      - dev_tier_population: how many games in the catalog fall in each dev tier.
-    The cited and computed medians differ ON PURPOSE: cited figures are first-year/net
-    over ALL releases; computed figures are Boxleiter gross-lifetime over games clearing
-    the >=10-review analysis floor. Call this before quoting any dollar figure so the
-    answer is anchored to real reference points, not a guess.
+    """Reference anchors for judging any revenue/owners number — call before quoting a dollar figure.
+
+    - cited: public indie-market research (VG Insights / GameDiscoverCo / Boxleiter method) — median indie gross ~$249, ~8.5% of releases clear $100K, 20-55 owners per review (mid 30), wishlist-conversion assumptions, Steam's ~70%-to-dev share, and the 4 dev tiers (Hobby/Small/Middle/Triple-I) by lifetime copies.
+    - computed: this catalog's own figures (median revenue, fitted Boxleiter slope, % over $100K, population sizes).
+    - boxleiter_by_genre: fitted owners-per-review per genre (what estimate_revenue uses).
+    - dev_tier_population: catalog games per dev tier.
+    Cited and computed medians differ ON PURPOSE: cited = first-year/net over ALL releases; computed = Boxleiter gross-lifetime over games clearing the >= 10-review floor. Quote the bearish (cited, all-releases) anchor first when sizing a solo dev's likely outcome.
     """
-    meta = {r["key"]: r["value"] for r in query("SELECT key, value FROM mart_meta")}
+    meta = _meta(_generation)
 
     def f(k: str) -> float | None:
         v = meta.get(k)
-        return float(v) if v not in (None, "") else None
+        try:
+            return float(v) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
 
     boxleiter = query(
         "SELECT genre, n, owners_per_review_median, owners_per_review_p25, "
@@ -1861,41 +2120,36 @@ def market_benchmarks() -> dict:
             "steam_revenue_share_to_dev": STEAM_REVENUE_SHARE_TO_DEV,
             "dev_tiers": DEV_TIERS,
         },
-        "computed": clean(
-            {
-                "median_revenue_scored": f("global_median_revenue"),
-                "median_revenue_paid": f("global_median_revenue_paid"),
-                "boxleiter_owners_per_review_slope": f("boxleiter_owners_per_review"),
-                "pct_over_100k_scored": f("pct_over_100k"),
-                "n_games_total": f("n_games_total"),
-                "n_games_scored": f("n_games_scored"),
-                "population_note": (
-                    "computed medians/pct are Boxleiter gross over games with >=10 reviews "
-                    "(paid = price>0, >=1 review); cited $249/8.5% are first-year/net over "
-                    "ALL releases"
-                ),
-            }
-        ),
-        "boxleiter_by_genre": clean_rows(boxleiter),
-        "dev_tier_population": clean_rows(tiers),
+        "computed": {
+            "median_revenue_scored": f("global_median_revenue"),
+            "median_revenue_paid": f("global_median_revenue_paid"),
+            "boxleiter_owners_per_review_slope": f("boxleiter_owners_per_review"),
+            "pct_over_100k_scored": f("pct_over_100k"),
+            "n_games_total": f("n_games_total"),
+            "n_games_scored": f("n_games_scored"),
+            "population_note": (
+                "computed medians/pct are Boxleiter gross over games with >=10 reviews "
+                "(paid = price>0, >=1 review); cited $249/8.5% are first-year/net over "
+                "ALL releases"
+            ),
+        },
+        "boxleiter_by_genre": boxleiter,
+        "dev_tier_population": tiers,
     }
 
 
 @_tool
 def revenue_distribution(
-    metric: Literal["revenue", "reviews", "owners", "price"] = "revenue",
-    genre: str = "__all__",
-    window: Literal["all", "24m"] = "all",
+    metric: Annotated[
+        Literal["revenue", "reviews", "owners", "price"],
+        Field(description="revenue = est. lifetime gross; reviews = total review count; owners = SteamSpy owners_mid; price = launch price (paid games only)."),
+    ] = "revenue",
+    genre: Annotated[str, Field(description="'__all__' for the whole catalog, or an exact Steam genre label (e.g. 'RPG').")] = "__all__",
+    window: Annotated[Literal["all", "24m"], Field(description="all = every scored game; 24m = released in the last 24 months.")] = "all",
 ) -> dict:
-    """Market-wide distribution for one metric, scoped to a genre and time window.
-    metric: "revenue" (est. lifetime gross), "reviews" (total review count), "owners"
-    (SteamSpy owners_mid), or "price" (launch price, paid games only). genre="__all__"
-    for the whole catalog, or an exact Steam genre label. window="all" or "24m" (last 24
-    months only). Returns percentiles (p10..p99) plus a histogram (log-scale bins for
-    revenue/reviews/owners since they're extremely right-skewed; linear $2.50 bins for
-    price) — use this to see the FULL shape of outcomes, not just one average: revenue in
-    particular has a long tail of hits pulling the mean way above the median. Pair with
-    market_benchmarks for cited reference points to annotate these numbers.
+    """Market-wide distribution of one metric for a genre and window: percentiles (p10..p99) plus a histogram (log-scale bins for revenue/reviews/owners, linear $2.50 bins for price).
+
+    Use it to see the FULL shape of outcomes, not one average: revenue has a long tail of hits pulling the mean far above the median, so quote the median and the low percentiles first (the bearish reading), then the tail. Pair with market_benchmarks for cited reference points. window='24m' is the recent-entrant population.
     """
     pcts = query(
         "SELECT pctile, value, n FROM mart_market_pct WHERE metric = ? AND genre = ? AND win = ? ORDER BY value",
@@ -1915,34 +2169,23 @@ def revenue_distribution(
         "genre": genre,
         "window": window,
         "n": int(pcts[0]["n"]),
-        "percentiles": clean_rows(pcts),
-        "histogram": clean_rows(buckets),
+        "percentiles": pcts,
+        "histogram": buckets,
     }
 
 
 @_tool
 def estimate_revenue(
-    price: float,
-    reviews: int | None = None,
-    wishlists: int | None = None,
-    genre: str | None = None,
+    price: Annotated[float, Field(ge=0, description="Launch price in USD.")],
+    reviews: Annotated[int | None, Field(ge=0, description="Review count (Boxleiter path). Give exactly one of reviews / wishlists.")] = None,
+    wishlists: Annotated[int | None, Field(ge=0, description="Wishlist count (earlier-stage, rougher path).")] = None,
+    genre: Annotated[str | None, Field(description="Exact Steam genre label — strongly recommended: owners-per-review varies a lot by genre.")] = None,
 ) -> dict:
-    """Estimate lifetime owners + gross/net revenue from EITHER a review count OR a
-    wishlist count — provide exactly one of `reviews` / `wishlists`, plus `price` (launch
-    price in USD) and optionally `genre` (exact Steam genre label — STRONGLY recommended
-    whenever known, since owners-per-review varies a lot by genre).
+    """Estimate lifetime owners + gross/net revenue from EITHER a review count OR a wishlist count (exactly one), plus the launch price.
 
-    reviews path (Boxleiter method): owners = reviews x 20-55 owners/review, using this
-    catalog's fitted per-genre slope as the "mid" estimate (clamped to the cited 20-55
-    band); falls back to the catalog-wide slope, then the cited mid (30) if genre is
-    omitted/unrecognized.
-    wishlists path: owners = wishlists x ~8-12% first-week conversion x 5 (first-week to
-    first-year multiplier) — a rougher, earlier-stage estimate than the reviews path.
+    reviews path (Boxleiter): owners = reviews x 20-55 owners/review, with this catalog's fitted per-genre slope as the mid (clamped to the cited band; falls back to the catalog-wide slope, then the cited mid 30). wishlists path: owners = wishlists x ~8-12% first-week conversion x 5 (first-week -> first-year) — rougher.
 
-    Returns owners and revenue as {low, mid, high} ranges throughout (never a single
-    number — this is an order-of-magnitude estimate, not a forecast) plus revenue_net_usd
-    (after Steam's ~30% cut) and dev_tier (which of the 4 dev tiers the mid estimate lands
-    in). Always report the range to the user, not just the midpoint.
+    Returns owners and revenue as {low, mid, high} RANGES (an order-of-magnitude estimate, not a forecast), revenue_net_usd (after Steam's ~30% cut) and dev_tier for the mid. Always report the range, low end first — never just the midpoint.
     """
     if (reviews is None) == (wishlists is None):
         return {"error": "Provide exactly one of `reviews` or `wishlists`."}
@@ -1980,44 +2223,30 @@ def estimate_revenue(
     notes.append(f"Net = gross x {share:.0%} (after Steam's ~30% cut, before taxes/refunds).")
     notes.append(f"Gross revenue = owners x ${price:.2f} price (box revenue, lifetime).")
 
-    return clean(
-        {
-            "basis": basis,
-            "genre": genre_used,
-            "owners_per_review_used": {"low": lo, "mid": opr_mid, "high": hi},
-            "owners": owners,
-            "revenue_gross_usd": revenue_gross,
-            "revenue_net_usd": revenue_net,
-            "dev_tier": _tier_for_copies(owners["mid"]),
-            "notes": notes,
-        }
-    )
+    return {
+        "basis": basis,
+        "genre": genre_used,
+        "owners_per_review_used": {"low": lo, "mid": opr_mid, "high": hi},
+        "owners": owners,
+        "revenue_gross_usd": revenue_gross,
+        "revenue_net_usd": revenue_net,
+        "dev_tier": _tier_for_copies(owners["mid"]),
+        "notes": notes,
+    }
 
 
 @_tool
-def lifetime_curve() -> dict:
-    """How long does a Steam game keep an audience once it has one? The catalog-wide
-    survival curve from mart_market_lifetime: for every game whose steamcharts monthly
-    history ever averaged 100+ concurrent players (that first month = its t0), share_alive
-    at month t = the share still averaging 10+ t months later. Computed at FIXED horizons
-    — month t counts only games observable >= t months since t0 — so a young cohort can
-    never read as dead simply because we haven't watched it long enough (right-censoring
-    safe). n_observable per row is the population behind each point.
+def lifetime_curve(
+    include_curve: Annotated[
+        bool,
+        Field(description="Also return the raw 73-point monthly curve (t = 0..72). Off by default — quote the milestones."),
+    ] = False,
+) -> dict:
+    """How long does a Steam game keep an audience once it has one? The catalog-wide survival curve: for every game whose steamcharts monthly history ever averaged 100+ concurrent players (that month = its t0), share_alive at month t = the share still averaging 10+ t months later, at FIXED horizons (only games observable >= t months count — right-censoring safe).
 
-    HOW TO READ IT: milestones gives the m3/m6/m12/m24/m36/m60 shares — quote those, not
-    the raw 73-point curve. median_months is the first month where half the cohort has
-    died (None = the curve never crosses 0.5 within 72 months). A steep early drop means
-    a Steam audience is typically a launch-window phenomenon: plan revenue for the window
-    the curve says exists, not for a long tail.
+    SURVIVORSHIP FIRST: the cohort is games that DID reach 100+ concurrent players (top-8k-by-reviews coverage); most Steam releases never get there, so this answers "once a game has an audience, how long does it keep it" — NEVER "will my game find an audience".
 
-    SURVIVORSHIP CAVEAT — the cohort is games that DID reach 100+ concurrent players
-    (steamcharts monthly averages, top-8k-by-reviews coverage only). The MAJORITY of
-    Steam releases never get there at all, so this curve answers "once a game has an
-    audience, how long does it keep it" — NEVER "will my game find an audience". For
-    per-niche versions use find_niches' lifetime_survival_12m /
-    lifetime_median_dead_months columns (both sortable) or niche_detail; per-game fields
-    live on game_profile / game_search. Returns {"error": ...} asking you to re-run the
-    ETL when the mart predates the lifetime build.
+    Returns milestones (m3/m6/m12/m24/m36/m60 shares — quote those), median_months (first month half the cohort has died; null = never within 72 months) and the methodology. A steep early drop means an audience is a launch-window phenomenon: plan revenue for that window. Per-niche: find_niches' lifetime_survival_12m; per-game: game_profile.
     """
     if not _has_lifetime_curve():
         return {"error": _LIFETIME_MISSING}
@@ -2028,10 +2257,10 @@ def lifetime_curve() -> dict:
          if r["share_alive"] is not None and r["share_alive"] <= 0.5),
         None,
     )
-    return {
-        "curve": clean_rows(rows),
-        "milestones": clean({f"m{m}": by_t.get(m) for m in (3, 6, 12, 24, 36, 60)}),
+    out: dict[str, Any] = {
+        "milestones": {f"m{m}": by_t.get(m) for m in (3, 6, 12, 24, 36, 60)},
         "median_months": median_months,
+        "n_cohort": rows[0]["n_observable"] if rows else None,
         "methodology": (
             "t0 = a game's first calendar month averaging >= 100 concurrent players; "
             "death = the first FULL month after t0 averaging < 10 (the current partial "
@@ -2043,6 +2272,9 @@ def lifetime_curve() -> dict:
             "not in the cohort."
         ),
     }
+    if include_curve:
+        out["curve"] = rows
+    return out
 
 
 # ==========================================================================================
@@ -2059,17 +2291,25 @@ _LAUNCH_WINDOWS = [
 ]
 
 
+def _windowed_shape(cum: dict[int, float]) -> list[dict]:
+    """Marginal share of first-year reviews per launch window, from a cumulative curve.
+    Day 0 is pinned to 0.0 (the curve's own day-0 value, if any, belongs to week 1)."""
+    cum = {**cum, 0: 0.0}
+    out = []
+    for label, a, b in _LAUNCH_WINDOWS:
+        fa, fb = cum.get(a), cum.get(b)
+        share = max(0.0, fb - fa) if fa is not None and fb is not None else None
+        out.append({"window": label, "share_of_first_year_reviews": share})
+    return out
+
+
 @_tool
-def launch_shape(genre: str = "__all__") -> dict:
-    """How a genre's first-year review volume accumulates after launch, as a MARGINAL
-    windowed shape (share of first-year reviews landing in each window: 1w, 2w, 3-4w, 2m,
-    3m, 4-6m, 7-12m) — NOT a cumulative curve (which always climbs to 100% and looks
-    similar for every genre). Tall early bars = front-loaded (success hinges on launch-
-    week splash: wishlists, a big first-week marketing push); a flatter spread = slow-burn
-    (sustained post-launch marketing / word-of-mouth / updates pay off over months).
-    genre="__all__" for the whole-catalog shape, or an exact Steam genre label. Only
-    genres with enough 365+-day-old games with enough sampled first-year reviews are
-    present — check n_games for the sample size backing this.
+def launch_shape(
+    genre: Annotated[str, Field(description="'__all__' for the whole catalog, or an exact Steam genre label.")] = "__all__",
+) -> dict:
+    """How a genre's first-year review volume accumulates after launch, as a MARGINAL windowed shape (share of first-year reviews landing in 1w, 2w, 3-4w, 2m, 3m, 4-6m, 7-12m) — not a cumulative curve (which always climbs to 100% and looks alike for every genre).
+
+    Tall early bars = front-loaded: success hinges on the launch-week splash (wishlists, a big first-week push). A flatter spread = slow-burn: post-launch marketing, word of mouth and updates pay off over months. Only genres with enough 365+-day-old games are present — check n_games. Per-game version: game_reviews_summary.
     """
     rows = query(
         "SELECT day, median_cum_fraction, n_games FROM mart_launch_curve WHERE genre = ? ORDER BY day",
@@ -2077,18 +2317,8 @@ def launch_shape(genre: str = "__all__") -> dict:
     )
     if not rows:
         return {"error": f"no launch-curve data for genre={genre!r}. Try '__all__' or an exact Steam genre label."}
-
-    cum: dict[int, float] = {int(r["day"]): r["median_cum_fraction"] for r in rows}
-    cum[0] = 0.0
-    n_games = rows[0]["n_games"]
-
-    windows = []
-    for label, a, b in _LAUNCH_WINDOWS:
-        fa, fb = cum.get(a), cum.get(b)
-        share = max(0.0, fb - fa) if fa is not None and fb is not None else None
-        windows.append({"window": label, "share_of_first_year_reviews": share})
-
-    return clean({"genre": genre, "n_games": n_games, "windows": windows})
+    cum = {int(r["day"]): r["median_cum_fraction"] for r in rows}
+    return {"genre": genre, "n_games": rows[0]["n_games"], "windows": _windowed_shape(cum)}
 
 
 _TIMING_MONTH_NAMES = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -2096,33 +2326,17 @@ _TIMING_MONTH_NAMES = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
 
 
 @_tool
-def best_launch_timing(genre: str = "__all__") -> dict:
-    """When to launch in a genre, from the TRUE uncapped monthly review histograms
-    (Steam's own per-month review-graph totals for ~40K games — exact counts, not the
-    sampled `reviews` table). Three reads plus a transparent recommendation:
-      - demand_by_month: share of the genre's pooled monthly review velocity landing in
-        each calendar month over the last 5 complete years — when players in this genre
-        ACTUALLY BUY. Each game's first 2 calendar months since release are EXCLUDED, so
-        launch spikes can't masquerade as seasonal demand (without that exclusion a
-        popular launch window would "demand" itself into the data by construction).
-      - congestion_by_month: average releases (and BIG releases, est. revenue >= $200K)
-        per calendar month over the last 3 complete years — how crowded each window is.
-        Demand high + congestion low = good window.
-      - decay: median share of a game's first-24-months review total landing in months
-        0-2 / 3-5 / 6-11 / 12-23 since release (per-game normalized FIRST, then median —
-        big games don't dominate), plus the month-0 median share. How long a launch pays
-        out, i.e. how much of the payoff rides on the window you pick.
-      - recommendation: per-month score = demand_share/(1/12) -
-        avg_releases/mean(avg_releases) — both components returned per month so the
-        arithmetic is auditable — with the best 2-3 months and a plain-language
-        rationale.
-    genre="__all__" for the whole catalog, or an exact Steam genre label.
-    FALSIFICATION CAVEATS: seasonal effects are real but SECOND-ORDER vs. game quality
-    and wishlist momentum — timing tilts odds, it never rescues a weak game. Congestion
-    is genre-wide, not niche-level: your actual shelf competition may look nothing like
-    the genre average. Reviews proxy sales (Boxleiter) and everything here is
-    correlational. There is deliberately no weekday read anymore — the old month×weekday
-    medians were composition noise ("a tiebreaker, not a strategy" was the honest label).
+def best_launch_timing(
+    genre: Annotated[str, Field(description="'__all__' for the whole catalog, or an exact Steam genre label.")] = "__all__",
+) -> dict:
+    """When to launch in a genre, from the TRUE uncapped monthly review histograms (Steam's own per-month totals for ~40K games).
+
+    CAVEATS FIRST: seasonality is SECOND-ORDER vs game quality and wishlist momentum — timing tilts odds, it never rescues a weak game; congestion is genre-wide, not niche-level; reviews proxy sales; everything is correlational.
+
+    - demand_by_month: share of the genre's pooled review velocity per calendar month over the last 5 complete years — when players actually buy (each game's first 2 months excluded so launch spikes can't fake seasonality).
+    - congestion_by_month: average releases (and $200K+ releases) per calendar month over the last 3 complete years.
+    - decay: median share of a game's first-24-months reviews in months 0-2 / 3-5 / 6-11 / 12-23 (per-game normalized) — how much of the payoff rides on the window.
+    - recommendation: per-month score = demand_share/(1/12) - avg_releases/mean(avg_releases), both parts returned so the arithmetic is auditable, with the best 2-3 months and a rationale.
     """
     try:
         demand = query(
@@ -2213,7 +2427,7 @@ def best_launch_timing(genre: str = "__all__") -> dict:
             "note": "per-game normalized medians, renormalized to sum to 1 across the 24 months",
         }
 
-    return clean({
+    return {
         "genre": genre,
         "recommendation": recommendation,
         "demand_by_month": demand,
@@ -2223,79 +2437,93 @@ def best_launch_timing(genre: str = "__all__") -> dict:
             "Seasonal effects are second-order vs. game quality; congestion is genre-wide, "
             "not niche-level; reviews proxy sales; correlational throughout."
         ),
-    })
+    }
 
 
 # ==========================================================================================
 # Game tools
 # ==========================================================================================
-_GAME_SORTABLE = {
-    "name", "release_year", "price_initial", "owners_mid", "total_reviews",
-    "positive_ratio", "est_rev_reviews", "rev_pct_in_genre", "reviews_pct_in_genre",
-    "owners_pct_in_genre", "n_reviews_trailing_30d", "metacritic_score",
-    "release_date", "live_players", "first_seen", "lifetime_months",
-}
+GameSort = Literal[
+    "total_reviews", "est_rev_reviews", "owners_mid", "positive_ratio", "price_initial",
+    "release_year", "release_date", "name", "rev_pct_in_genre", "reviews_pct_in_genre",
+    "owners_pct_in_genre", "n_reviews_trailing_30d", "metacritic_score", "live_players",
+    "first_seen", "lifetime_months",
+]
+_GAME_SORTABLE = frozenset(GameSort.__args__)
+# game_search's lean row (fields="core"); columns a mart lacks are simply omitted. Dropped
+# from core on purpose: header_image (a URL no model needs), first_seen / release_date
+# (release_year carries the signal), metacritic_score (null for ~97% of games).
+_GAME_CORE = (
+    "appid", "name", "primary_genre", "release_year", "price_initial", "is_free", "is_indie",
+    "self_published", "owners_mid", "total_reviews", "positive_ratio", "est_rev_reviews",
+    "live_players", "top_tags", "lifetime_months", "lifetime_alive", "has_demo", "dev_x_handle",
+)
+_GAME_ALL = (
+    "appid", "name", "primary_genre", "release_year", "release_date", "first_public_date",
+    "release_date_1_0", "is_ea_graduate", "price_initial", "is_free", "is_indie",
+    "self_published", "owners_mid", "total_reviews", "positive_ratio", "est_rev_reviews",
+    "metacritic_score", "live_players", "players_7d_avg", "players_trend_7d_pct",
+    "first_seen", "header_image", "top_tags", "lifetime_months", "lifetime_alive",
+    "dev_x_handle", "has_demo",
+)
+PositiveFraction = Annotated[
+    float | None,
+    Field(
+        description="Floor on positive_ratio as a 0-1 FRACTION (0.8 = at least 80% positive).",
+        json_schema_extra={"minimum": 0, "maximum": 1},
+    ),
+    AfterValidator(_fraction_0_1),
+]
 
 
 @_tool
 def game_search(
-    q: str | None = None,
-    tag: str | None = None,
-    genre: str | None = None,
-    min_reviews: int = 0,
-    min_lifetime_months: int | None = None,
-    lifetime_alive: bool | None = None,
-    min_metacritic: int | None = None,
-    has_demo: bool | None = None,
-    released_within_days: int | None = None,
-    released_after: int | None = None,
-    released_before: int | None = None,
-    price_min: float | None = None,
-    price_max: float | None = None,
-    min_positive: float | None = None,
-    min_revenue: float | None = None,
-    self_published: bool | None = None,
-    indie: bool | None = None,
-    sort: str = "total_reviews",
-    order: Literal["asc", "desc"] = "desc",
-    limit: int = 15,
+    q: Annotated[str | None, Field(description="Case-insensitive substring of the game name.")] = None,
+    tag: Annotated[str | None, Field(description="Exact community tag the game carries in its top tags (tag_suggest resolves spelling).")] = None,
+    genre: Annotated[str | None, Field(description="Exact Steam genre — matches the game's PRIMARY genre only.")] = None,
+    min_reviews: Annotated[int, Field(ge=0, description="Floor on total_reviews.")] = 0,
+    min_lifetime_months: Annotated[int | None, Field(ge=0, description="Floor on lifetime_months (steamcharts top-8k coverage); drops games with unknown lifetime.")] = None,
+    lifetime_alive: Annotated[bool | None, Field(description="true = still averaging 10+ concurrent players, false = audience died; either value drops unknown-lifetime games.")] = None,
+    min_metacritic: Annotated[int | None, Field(ge=0, le=100, description="Floor on the Metacritic critic score — only ~2.6% of games have one, so this drops ~97%.")] = None,
+    has_demo: Annotated[bool | None, Field(description="true = has a playable Steam demo, false = checked and has none; either drops not-yet-checked games.")] = None,
+    released_within_days: Annotated[int | None, Field(ge=1, le=3650, description="Released within N days of the mart's data_as_of date.")] = None,
+    released_after: Annotated[int | None, Field(ge=1970, le=2100, description="release_year >= this.")] = None,
+    released_before: Annotated[int | None, Field(ge=1970, le=2100, description="release_year <= this.")] = None,
+    price_min: Annotated[float | None, Field(ge=0, description="List-price floor, USD (drops NULL-priced games).")] = None,
+    price_max: Annotated[float | None, Field(ge=0, description="List-price ceiling, USD.")] = None,
+    min_positive: PositiveFraction = None,
+    min_revenue: Annotated[float | None, Field(ge=0, description="Floor on est_rev_reviews, USD.")] = None,
+    self_published: Annotated[bool | None, Field(description="true = self-published only, false = publisher-backed only.")] = None,
+    indie: Annotated[bool | None, Field(description="true = indie only, false = non-indie only.")] = None,
+    sort: Annotated[GameSort, Field(description="Field to sort by (*_pct_in_genre = 0-100 percentile within the primary genre).")] = "total_reviews",
+    order: Order = "desc",
+    fields: Annotated[Literal["core", "all"], Field(description="core = lean rows; all = every column (incl. header_image, release_date, metacritic).")] = "core",
+    limit: Annotated[int, _limit(50, "games")] = 15,
 ) -> dict:
-    """Search/filter the game catalog (only games clearing the >=10-review analysis
-    floor). q = case-insensitive substring match on name. genre = exact Steam genre label
-    — matches the game's PRIMARY genre only (a multi-genre game is indexed under one).
-    tag = exact match against the game's top-N community tags (not a substring — must be
-    one of its actual top tags). Combine q/tag/genre freely (AND, all optional). Use this
-    to find an appid for game_profile/game_teardown, or to spot-check who the top players
-    in a niche/genre are. sort is any returned numeric field (default total_reviews);
-    *_pct_in_genre fields are 0-100 percentile rank within the game's own primary genre.
+    """Search/filter the game catalog (games clearing the >= 10-review analysis floor) — to find an appid for game_profile / find_comparables / game_teardown, or to spot-check who leads a tag or genre.
 
-    min_lifetime_months / lifetime_alive filter on the game-lifetime columns (steamcharts
-    monthly, top-8k-by-reviews coverage): lifetime_months = MONTHS from a game's first
-    calendar month averaging 100+ concurrent players (its t0) to its first full month
-    under 10 — or months-so-far while still alive; lifetime_alive = still averaging 10+.
-    NULL-DROP SEMANTICS: either filter drops every game with UNKNOWN lifetime (no
-    steamcharts coverage, or never reached 100+ — NULL matches neither condition), so
-    they narrow results to the measured head of the catalog. Both columns ride along in
-    the rows when the mart carries them.
-
-    - dev_x_handle: official X handle linked from the game's store page/website (may be
-      the game's, studio's or dev's personal account — we cannot disambiguate without X
-      API access); NULL = none found or socials not yet fetched.
-    - metacritic_score / min_metacritic: CRITIC score, only where Steam links a Metacritic
-      page — about 2.6% of the catalog (4.5k games), skewed to publisher-backed titles.
-      NULL means NO LINKED PAGE, never "reviewed badly", so min_metacritic drops ~97% of
-      games: use it to benchmark against critically-covered titles, never to size a niche.
-      For a broad quality signal use positive_ratio, which exists for the whole catalog.
-    - has_demo: does the game ship a playable Steam demo (from its own appdetails).
-      TRI-STATE — NULL means "we have not re-read this game\'s appdetails since demo
-      capture landed", NOT "no demo", so the has_demo filter drops unchecked games on
-      either value. Coverage grows nightly as the socials/demo sweep works the catalog.
+    Filters combine with AND. NULL-DROP semantics (bearish: an unmeasured game can't be shown to pass): any lifetime, demo, metacritic or price filter drops games whose value is unknown. has_demo is tri-state (NULL = not yet checked, never "no demo"). metacritic exists for ~2.6% of games (publisher-skewed) — use positive_ratio as the broad quality signal. dev_x_handle is an official X link from the game's own pages (may be the studio's or a dev's personal account). released_within_days counts back from the mart's data_as_of date, not today. Rows are lean by default (fields='all' adds the rest).
     """
     if sort not in _GAME_SORTABLE:
         return {"error": f"sort must be one of {sorted(_GAME_SORTABLE)}"}
+    if order not in ("asc", "desc"):
+        return {"error": "order must be 'asc' or 'desc'"}
+    # The schema validator gives the wire this same message; direct calls get it here.
+    try:
+        _fraction_0_1(min_positive)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    gcols = _cols("mart_game")
+    if sort not in gcols:
+        if sort == "lifetime_months":
+            return {"error": _LIFETIME_MISSING}
+        return {"error": _column_missing("mart_game", sort)}
     if (min_lifetime_months is not None or lifetime_alive is not None) and not _has_lifetime_game():
         return {"error": _LIFETIME_MISSING}
+    if has_demo is not None and not _has_demo():
+        return {"error": _DEMO_MISSING}
 
+    tag, tag_note = _resolve_tag(tag)
     where = ["total_reviews >= ?"]
     params: list = [min_reviews]
     if q:
@@ -2323,24 +2551,25 @@ def game_search(
         where.append("metacritic_score >= ?")
         params.append(min_metacritic)
     if released_within_days is not None:
-        # "New releases": released in the recent PAST. Upper-bounded to today so upcoming
-        # titles — and the far-future placeholder dates in the source (e.g. 9998-12-31) —
-        # are excluded; NULL/unparseable release dates drop out via TRY_CAST.
+        # "New releases": released in the recent PAST relative to the MART's as-of date
+        # (not the wall clock — an older mart would otherwise return nothing). Upper-bounded
+        # to that date so upcoming titles and far-future placeholder dates (9998-12-31) are
+        # excluded; NULL/unparseable release dates drop out via TRY_CAST.
+        anchor = _as_of_date().isoformat()
         where.append(
-            "TRY_CAST(release_date AS DATE) >= CURRENT_DATE - CAST(? AS INTEGER) "
-            "AND TRY_CAST(release_date AS DATE) <= CURRENT_DATE"
+            "TRY_CAST(release_date AS DATE) >= CAST(? AS DATE) - CAST(? AS INTEGER) "
+            "AND TRY_CAST(release_date AS DATE) <= CAST(? AS DATE)"
         )
-        params.append(released_within_days)
+        params.extend([anchor, released_within_days, anchor])
     if released_after is not None:
         where.append("release_year >= ?")
         params.append(released_after)
     if released_before is not None:
         where.append("release_year <= ?")
         params.append(released_before)
-    # Price band in USD. Comparisons drop NULL-priced rows naturally — a game with an unknown
-    # price cannot be shown to satisfy a price constraint. Free games (price_initial = 0) stay
-    # in whenever the floor allows 0. Filters on the LIST PRICE, not is_free, because some
-    # F2P-flagged titles sell paid editions with a real price.
+    # Price band in USD. Comparisons drop NULL-priced rows naturally. Free games
+    # (price_initial = 0) stay in whenever the floor allows 0. Filters on the LIST PRICE,
+    # not is_free, because some F2P-flagged titles sell paid editions with a real price.
     if price_min is not None:
         where.append("price_initial >= ?")
         params.append(price_min)
@@ -2360,25 +2589,20 @@ def game_search(
         where.append("is_indie = ?")
         params.append(1 if indie else 0)
     if has_demo is not None:
-        if not _has_demo():
-            return {"error": _DEMO_MISSING}
         # Tri-state: NULL (not yet checked) satisfies neither = comparison, so unknowns drop
         # out rather than being counted as "no demo".
         where.append("has_demo = ?")
         params.append(has_demo)
     limit = max(1, min(limit, 50))
 
-    lifetime_cols = (
-        ",\n               lifetime_months, lifetime_alive" if _has_lifetime_game() else ""
-    )
-    socials_cols = ",\n               dev_x_handle" if _has_dev_socials() else ""
-    demo_cols = ",\n               has_demo" if _has_demo() else ""
+    wanted = list(_GAME_ALL if fields == "all" else _GAME_CORE)
+    if min_metacritic is not None or sort == "metacritic_score":
+        wanted.append("metacritic_score")
+    wanted.append(sort)
+    select = ", ".join(c for c in _dedupe(wanted) if c in gcols)
     rows = query(
         f"""
-        SELECT appid, name, primary_genre, release_year, release_date, price_initial,
-               is_free, is_indie, self_published, owners_mid, total_reviews, positive_ratio,
-               est_rev_reviews, metacritic_score, live_players, first_seen, header_image,
-               top_tags{lifetime_cols}{socials_cols}{demo_cols}
+        SELECT {select}
         FROM mart_game
         WHERE {" AND ".join(where)}
         ORDER BY {sort} {order.upper()} NULLS LAST, total_reviews DESC
@@ -2386,77 +2610,56 @@ def game_search(
         """,
         params + [limit],
     )
-    return {
-        "filters": {
-            "q": q, "tag": tag, "genre": genre, "min_reviews": min_reviews,
+    filters = {
+        k: v
+        for k, v in {
+            "q": q, "tag": tag, "genre": genre, "min_reviews": min_reviews or None,
             "min_lifetime_months": min_lifetime_months, "lifetime_alive": lifetime_alive,
             "min_metacritic": min_metacritic, "has_demo": has_demo,
             "released_within_days": released_within_days, "released_after": released_after,
             "released_before": released_before, "price_min": price_min, "price_max": price_max,
             "min_positive": min_positive, "min_revenue": min_revenue,
             "self_published": self_published, "indie": indie,
-        },
-        "sort": sort,
-        "order": order,
-        "n_returned": len(rows),
-        "games": clean_rows(rows),
+        }.items()
+        if v is not None
     }
+    out: dict[str, Any] = {"filters": filters}
+    if tag_note:
+        out["key_note"] = tag_note
+    out.update({"sort": sort, "order": order, "n_returned": len(rows), "games": rows})
+    return out
+
+
+# game_profile's gated columns, in output order: (column, the table that must carry it).
+_PROFILE_OPTIONAL = (
+    "first_seen", "first_public_date", "release_date_1_0", "is_ea_graduate",
+    "live_players", "players_7d_avg", "players_trend_7d_pct", "players_trend_7d_market_pct",
+    "players_trend_7d_rel_pct",
+    "lifetime_first_100_month", "lifetime_died_month", "lifetime_months", "lifetime_alive",
+    "dev_x_handle", "dev_x_url", "dev_discord_url", "dev_youtube_url", "dev_bluesky_handle",
+    "dev_bluesky_url", "has_demo", "demo_appid", "metacritic_url",
+)
 
 
 @_tool
-def game_profile(appid: int) -> dict:
-    """Full profile for one game by Steam appid: metadata (primary genre, developers,
-    publishers, self-published?, indie?), price, owners/reviews/est. revenue, percentile
-    rank vs OTHER games in the same primary genre (rev_pct_in_genre, reviews_pct_in_genre,
-    owners_pct_in_genre — all 0-100), top community tags, and review-velocity (reviews
-    landed in the first 30/90/365 days post-release, plus current trailing-30d velocity —
-    a live "is this still getting attention" signal). Also live players when the mart
-    carries them: live_players (latest nightly ~21-22:00 UTC point sample — NOT a daily
-    peak), players_7d_avg (trailing-7d average of those samples) and players_trend_7d_pct
-    (vs the prior 7d); NULL = not yet measured — call game_player_history(appid) for the
-    daily series. And the game-lifetime columns when the mart carries them (steamcharts
-    monthly, top-8k-by-reviews coverage): lifetime_first_100_month (t0 — the first
-    calendar month averaging 100+ concurrent players, 'YYYY-MM-DD'),
-    lifetime_died_month (first FULL month after t0 averaging under 10; None while
-    alive), lifetime_months (death minus t0, or months-so-far while alive),
-    lifetime_alive. All None = UNKNOWN (no steamcharts coverage or never reached 100+),
-    never zero. Use game_search to find an appid by name first. Returns {"error": ...}
-    if the appid isn't in the catalog or didn't clear the >=10-review analysis floor
-    (mart_game only carries scored games).
+def game_profile(appid: Annotated[int, Field(ge=1, description="Steam appid (find it with game_search).")]) -> dict:
+    """Full profile for one game by Steam appid: metadata (primary genre, developers, publishers, self-published?, indie?), price, owners / reviews / est. revenue (Boxleiter-style ESTIMATES), percentile rank vs games in the same primary genre (rev/reviews/owners_pct_in_genre, 0-100), top community tags, review velocity (first 30/90/365 days + trailing 30 days — "is it still getting attention"), and lifetime playtime percentiles (playtime_p25/p50/p75, in MINUTES).
 
-    - dev_x_handle: official X handle linked from the game's store page/website (may be
-      the game's, studio's or dev's personal account — we cannot disambiguate without X
-      API access); NULL = none found or socials not yet fetched.
+    When the mart carries them: live_players / players_7d_avg / players_trend_7d_pct (nightly point samples, NOT daily peaks — game_player_history has the series); lifetime_first_100_month / lifetime_died_month / lifetime_months / lifetime_alive (steamcharts monthly, top-8k coverage; all null = UNKNOWN, never zero); official socials harvested from the game's own pages (dev_x_handle may be the studio's or a dev's personal account); has_demo (null = not yet checked); Early Access dates (first_public_date, release_date_1_0, is_ea_graduate) on newer marts. Returns an error for an appid below the >= 10-review floor or not in the catalog.
     """
-    players_cols = (
-        ",\n               live_players, players_7d_avg, players_trend_7d_pct"
-        if _has_players()
-        else ""
-    )
-    lifetime_cols = (
-        ",\n               lifetime_first_100_month, lifetime_died_month, lifetime_months,"
-        "\n               lifetime_alive"
-        if _has_lifetime_game()
-        else ""
-    )
-    socials_cols = ",\n               dev_x_handle" if _has_dev_socials() else ""
-    if _has_all_socials():
-        socials_cols += (",\n               dev_x_url, dev_discord_url, dev_youtube_url,"
-                         "\n               dev_bluesky_handle, dev_bluesky_url")
-    demo_cols = ",\n               has_demo, demo_appid" if _has_demo() else ""
-    if _has_metacritic_url():
-        demo_cols += ",\n               metacritic_url"
+    gcols = _cols("mart_game")
+    optional = "".join(f", {c}" for c in _PROFILE_OPTIONAL if c in gcols)
     row = query_one(
         f"""
         SELECT appid, name, release_year, release_date, price_initial, is_free,
                primary_genre, developers, publishers, self_published, is_indie,
                owners_mid, total_reviews, positive_ratio, est_rev_reviews, est_rev_owners,
                metacritic_score, achievements_count, avg_playtime_forever,
-               short_description, header_image, first_seen, rev_pct_in_genre,
+               short_description, header_image, rev_pct_in_genre,
                reviews_pct_in_genre, owners_pct_in_genre, top_tags, n_reviews_sampled,
                n_reviews_first_30d, n_reviews_first_90d,
                n_reviews_first_365d, n_reviews_trailing_30d, playtime_p25, playtime_p50,
-               playtime_p75{players_cols}{lifetime_cols}{socials_cols}{demo_cols}
+               playtime_p75{optional}
         FROM mart_game WHERE appid = ?
         """,
         [appid],
@@ -2466,41 +2669,22 @@ def game_profile(appid: int) -> dict:
             "error": f"appid {appid} not found in mart_game — either not in the catalog, "
             "or has fewer than 10 sampled reviews and didn't clear the analysis floor."
         }
-    out = clean(row)
-    if _has_players():
-        out["caveats"] = [_PLAYERS_POINT_SAMPLE_CAVEAT]
-    return out
+    if "players_7d_avg" in gcols:
+        row["caveats"] = [_PLAYERS_POINT_SAMPLE_CAVEAT]
+    return row
 
 
 @_tool
-def find_comparables(appid: int, limit: int = 15, min_reviews: int = 10) -> dict:
-    """Closest competitors for one game — "who else is fighting for this audience?"
-    Tag-overlap comparables computed on demand at query time (never precomputed pairwise
-    across the ~142K catalog). Use game_search to find the appid by name first.
+def find_comparables(
+    appid: Annotated[int, Field(ge=1, description="Target game's Steam appid.")],
+    limit: Annotated[int, _limit(50, "comparables")] = 15,
+    min_reviews: Annotated[int, Field(ge=0, description="Candidates need total_reviews >= this (raise it to keep only proven competitors).")] = 10,
+) -> dict:
+    """Closest competitors for one game — "who else is fighting for this audience?" — computed on demand (no precomputed pairwise mart).
 
-    Matching rules (exact):
-      - Same PRIMARY Steam genre as the target only. A multi-genre game is indexed under
-        one primary genre, so a near-neighbor filed under a different primary won't appear.
-      - Price band around the target's launch price: paid games match
-        [max(0, 0.5*price − $2), 2*price + $2]; FREE games are only comparable to other
-        free games (F2P competes on a different axis than any paid title).
-      - Candidates need total_reviews >= min_reviews (default 10 — raise it to keep only
-        proven competitors).
-      - Ranked by Jaccard similarity over the two games' top community tags (each game's
-        top-10 SteamSpy tags): |shared tags| / |union of both tag sets|, ties broken by
-        total_reviews. shared_tags shows exactly which tags matched.
+    Matching: same PRIMARY Steam genre only; price band [max(0, 0.5*price - $2), 2*price + $2] (free games match only free games); candidates need total_reviews >= min_reviews; ranked by Jaccard similarity of the two games' top-10 community tags (|shared| / |union|), ties by total_reviews. shared_tags shows what matched.
 
-    Returns compact rows: appid, name, release_year, price_initial, total_reviews,
-    positive_ratio, est_rev_reviews, shared_tags, jaccard (0-1), plus the price band used.
-
-    Honest caveats: tag-Jaccard is MECHANICAL similarity — a high score says the tag sets
-    overlap, not that the audiences do (two "Souls-like" matches can serve disjoint
-    players); est_rev_reviews is a Boxleiter ESTIMATE (see market_benchmarks), not
-    reported revenue; and tags are community-applied, so mistagged or thinly-tagged games
-    mismatch. Unknown appid (or one below the >=10-review analysis floor) returns
-    {"error": ...} — use game_search to find valid appids. Follow up with
-    game_profile(appid) on the closest matches to see how each performs, and
-    game_teardown(appid) to see WHY the strongest ones work.
+    Caveats first: tag-Jaccard is MECHANICAL similarity — overlapping tag sets, not overlapping audiences; est_rev_reviews is a Boxleiter ESTIMATE; mistagged or thinly-tagged games mismatch. Follow up with game_profile on the closest matches and game_teardown on the strongest.
     """
     target = query_one(
         "SELECT appid, name, primary_genre, price_initial, top_tags FROM mart_game WHERE appid = ?",
@@ -2557,7 +2741,7 @@ def find_comparables(appid: int, limit: int = 15, min_reviews: int = 10) -> dict
         "price_band": {"low": lo, "high": hi},
         "min_reviews": min_reviews,
         "n_returned": len(rows),
-        "comparables": clean_rows(rows),
+        "comparables": rows,
         "caveats": [
             "Tag-Jaccard is mechanical similarity: overlapping tag sets, not overlapping "
             "audiences — sanity-check the top matches with game_profile before leaning on them.",
@@ -2571,35 +2755,36 @@ def find_comparables(appid: int, limit: int = 15, min_reviews: int = 10) -> dict
             "No comparables matched — the target may have a rare primary genre, few/no "
             "community tags, or no same-genre games in its price band clearing min_reviews."
         )
-    return clean(result)
+    return result
 
 
 @_tool
-def game_teardown(appid: int) -> dict:
-    """"Why it works" teardown for one game — fuses (A) review-text aspect mining with
-    (B) press/PR footprint. Use game_search to find an appid by name first.
+def game_teardown(appid: Annotated[int, Field(ge=1, description="Steam appid (find it with game_search).")]) -> dict:
+    """"Why it works" teardown for one game — (A) review-text aspect mining fused with (B) its press/PR footprint.
 
-    (A) review_aspects: 10 fixed aspects (Combat & Bosses, World & Exploration, Art &
-    Visuals, Music & Audio, Story & Writing, Difficulty, Controls & Performance, Map &
-    Navigation/Backtracking, Content & Length, Price & Value), each with pos_share (share
-    of keyword-matched review mentions that were praise, i.e. from a positive review) and
-    delta_vs_genre (this game's pos_share MINUS its genre's baseline pos_share — the
-    differential signal: what makes THIS game stand out from genre peers, not just
-    "players like it").
-    (B) press: total mentions, distinct outlets, first/last-seen date, top sources, and up
-    to 5 notable articles (including the earliest) — the PR footprint / angle.
-
-    Both signals are CORRELATIONAL: evidence toward why a game got popular, never proof.
-    Degrades gracefully for low-review/low-press games — always check eligible_reviews and
-    press.total_mentions before leaning on the numbers; read `caveats` for this specific
-    game's data-quality flags.
+    Both signals are CORRELATIONAL — evidence toward why a game got popular, never proof. Check eligible_reviews and press.total_mentions before leaning on the numbers, and read `caveats` for this game's data-quality flags.
+    (A) review_aspects: 10 fixed aspects (Combat & Bosses, World & Exploration, Art & Visuals, Music & Audio, Story & Writing, Difficulty, Controls & Performance, Map & Navigation / Backtracking, Content & Length, Price & Value), each with pos_share (share of keyword-matched mentions from positive reviews) and delta_vs_genre (this game minus its genre's baseline — what makes it stand out from peers, not just "players like it"), plus the VADER text-sentiment pair where the mart has it.
+    (B) press: total mentions, distinct outlets, first/last seen, top sources, a timeline and up to 5 notable articles (incl. the earliest), plus article tone where the mart has it.
+    Quote the reviewers behind an aspect with aspect_reviews(appid, aspect, sentiment).
     """
     game = query_one("SELECT appid, name, primary_genre FROM mart_game WHERE appid = ?", [appid])
     if game is None:
         return {"error": f"appid {appid} not found in mart_game."}
 
+    # The text-sentiment / press-tone / article-link columns landed in later ETL builds —
+    # gated so an older mart still gets the vote-based teardown instead of a Binder error.
+    text_cols = ""
+    if _has_column("mart_game_review_aspects", "text_pos_share") and _has_column(
+        "mart_genre_aspect_baseline", "text_pos_share"
+    ):
+        text_cols = """,
+            -- Aspect TEXT sentiment (VADER) + its own genre-baseline differential. pos_share
+            -- is thumbs-based; these are what reviewers actually WROTE about the aspect.
+            a.n_text_pos, a.n_text_neg, a.n_text_neutral, a.text_pos_share, a.mean_compound,
+            COALESCE(gb.text_pos_share, ab.text_pos_share) AS genre_text_pos_share,
+            a.text_pos_share - COALESCE(gb.text_pos_share, ab.text_pos_share) AS text_delta_vs_genre"""
     aspect_rows = query(
-        """
+        f"""
         SELECT a.aspect, a.n_pos_mentions, a.n_neg_mentions, a.total_mentions, a.pos_share,
             a.n_reviews_sampled,
             COALESCE(gb.pos_share, ab.pos_share) AS genre_pos_share,
@@ -2608,12 +2793,7 @@ def game_teardown(appid: int) -> dict:
             -- genre where it cleared the minimum game count, else the '__all__' catalog-wide
             -- one. Without this an agent cannot tell a genre-relative claim from a global one.
             COALESCE(gb.genre, ab.genre) AS baseline_genre,
-            COALESCE(gb.n_games, ab.n_games) AS n_games_in_baseline,
-            -- Aspect TEXT sentiment (VADER) + its own genre-baseline differential. pos_share
-            -- is thumbs-based; these are what reviewers actually WROTE about the aspect.
-            a.n_text_pos, a.n_text_neg, a.n_text_neutral, a.text_pos_share, a.mean_compound,
-            COALESCE(gb.text_pos_share, ab.text_pos_share) AS genre_text_pos_share,
-            a.text_pos_share - COALESCE(gb.text_pos_share, ab.text_pos_share) AS text_delta_vs_genre
+            COALESCE(gb.n_games, ab.n_games) AS n_games_in_baseline{text_cols}
         FROM mart_game_review_aspects a
         LEFT JOIN mart_genre_aspect_baseline gb ON gb.genre = ? AND gb.aspect = a.aspect
         LEFT JOIN mart_genre_aspect_baseline ab ON ab.genre = '__all__' AND ab.aspect = a.aspect
@@ -2624,10 +2804,13 @@ def game_teardown(appid: int) -> dict:
     )
     n_reviews_sampled = int(aspect_rows[0]["n_reviews_sampled"]) if aspect_rows else 0
 
+    tone = _has_column("mart_game_press_summary", "press_pos_share")
+    tone_cols = (
+        ", n_pos_articles, n_neg_articles, n_neutral_articles, n_scored_articles, "
+        "press_pos_share, mean_compound" if tone else ""
+    )
     press_summary = query_one(
-        "SELECT total_mentions, n_sources, first_seen, last_seen, "
-        "n_pos_articles, n_neg_articles, n_neutral_articles, n_scored_articles, "
-        "press_pos_share, mean_compound "
+        f"SELECT total_mentions, n_sources, first_seen, last_seen{tone_cols} "
         "FROM mart_game_press_summary WHERE appid = ?",
         [appid],
     )
@@ -2635,13 +2818,17 @@ def game_teardown(appid: int) -> dict:
         "SELECT source, n_mentions FROM mart_game_press_by_source WHERE appid = ? ORDER BY n_mentions DESC LIMIT 8",
         [appid],
     )
+    ncols = _cols("mart_game_press_notable")
+    notable_cols = ", ".join(
+        c for c in ("source", "title", "author", "published_at", "match_confidence",
+                    "is_earliest", "url", "sentiment_compound", "sentiment")
+        if c in ncols
+    )
     notable = query(
-        "SELECT source, title, author, published_at, match_confidence, is_earliest, "
-        "url, sentiment_compound, sentiment FROM mart_game_press_notable "
+        f"SELECT {notable_cols} FROM mart_game_press_notable "
         "WHERE appid = ? ORDER BY published_at LIMIT 5",
         [appid],
     )
-
     timeline = query(
         "SELECT period, n_mentions FROM mart_game_press_timeline WHERE appid = ? ORDER BY period",
         [appid],
@@ -2667,69 +2854,50 @@ def game_teardown(appid: int) -> dict:
             "verdict — and an article's overall tone only proxies its stance on this game."
         )
 
-    return clean(
-        {
-            "appid": appid,
-            "name": game["name"],
-            "primary_genre": game["primary_genre"],
-            "eligible_reviews": len(aspect_rows) > 0,
-            "n_reviews_sampled": n_reviews_sampled,
-            "review_aspects": aspect_rows,
-            "press": {
-                "total_mentions": int(press_summary["total_mentions"]) if press_summary else 0,
-                "n_sources": int(press_summary["n_sources"]) if press_summary else 0,
-                "first_seen": press_summary["first_seen"] if press_summary else None,
-                "last_seen": press_summary["last_seen"] if press_summary else None,
-                "by_source": by_source,
-                "timeline": timeline,
-                "notable_articles": notable,
-                # Article-tone counts + share, matching the REST teardown. n_scored_articles
-                # is the denominator that makes press_pos_share readable — a share over three
-                # scored articles is not the same claim as one over thirty.
-                "n_pos_articles": int(press_summary["n_pos_articles"]) if press_summary else 0,
-                "n_neg_articles": int(press_summary["n_neg_articles"]) if press_summary else 0,
-                "n_neutral_articles": int(press_summary["n_neutral_articles"]) if press_summary else 0,
-                "n_scored_articles": int(press_summary["n_scored_articles"]) if press_summary else 0,
-                "press_pos_share": press_summary["press_pos_share"] if press_summary else None,
-                "mean_compound": press_summary["mean_compound"] if press_summary else None,
-            },
-            "caveats": caveats,
-        }
-    )
+    press: dict[str, Any] = {
+        "total_mentions": int(press_summary["total_mentions"]) if press_summary else 0,
+        "n_sources": int(press_summary["n_sources"]) if press_summary else 0,
+        "first_seen": press_summary["first_seen"] if press_summary else None,
+        "last_seen": press_summary["last_seen"] if press_summary else None,
+        "by_source": by_source,
+        "timeline": timeline,
+        "notable_articles": notable,
+    }
+    if tone:
+        # Article-tone counts + share, matching the REST teardown. n_scored_articles is the
+        # denominator that makes press_pos_share readable — a share over three scored
+        # articles is not the same claim as one over thirty.
+        for k in ("n_pos_articles", "n_neg_articles", "n_neutral_articles", "n_scored_articles"):
+            press[k] = int(press_summary[k] or 0) if press_summary else 0
+        press["press_pos_share"] = press_summary["press_pos_share"] if press_summary else None
+        press["mean_compound"] = press_summary["mean_compound"] if press_summary else None
 
-
-_VALID_ASPECTS = {
-    "Combat & Bosses",
-    "World & Exploration",
-    "Art & Visuals",
-    "Music & Audio",
-    "Story & Writing",
-    "Difficulty",
-    "Controls & Performance",
-    "Map & Navigation / Backtracking",
-    "Content & Length",
-    "Price & Value",
-}
+    return {
+        "appid": appid,
+        "name": game["name"],
+        "primary_genre": game["primary_genre"],
+        "eligible_reviews": len(aspect_rows) > 0,
+        "n_reviews_sampled": n_reviews_sampled,
+        "review_aspects": aspect_rows,
+        "press": press,
+        "caveats": caveats,
+    }
 
 
 @_tool
-def game_reviews_summary(appid: int) -> dict:
-    """How ONE game's reception moved over time, who its audience is, and how front-loaded
-    its reviews were — the per-game counterpart to the genre-level launch_shape.
+def game_reviews_summary(
+    appid: Annotated[int, Field(ge=1, description="Steam appid.")],
+    months: Annotated[int, Field(ge=1, le=600, description="Monthly timeline rows returned, most recent last (default 24 = the 24-month window). The lifetime totals always ride in timeline_summary.")] = 24,
+    include_launch_curve: Annotated[bool, Field(description="Also return the raw per-day first-year curve (launch_shape_windows always summarises it).")] = False,
+) -> dict:
+    """How ONE game's reception moved over time, who its audience is, and how front-loaded its reviews were — the per-game counterpart to launch_shape.
 
-    Four series, all for this appid alone:
-    - timeline: MONTHLY review volume and sentiment (n_reviews, n_positive, cumulative
-      totals, cum_positive_share, plus trailing_reviews / trailing_positive_share — a
-      bounded recent window that can rise AND fall, unlike the cumulative share which
-      is anchored by launch). Built from Steam's own uncapped review histogram, falling
-      back to our sample only where the sample provably covers the true total.
-    - language_split: share of reviews by language — who actually plays it.
-    - playtime_at_review: percentiles of hours played AT THE MOMENT OF REVIEWING. NOT the
-      same as game_profile's playtime_p25/p50/p75, which are lifetime playtime_forever.
-    - launch_curve: this game's own cumulative first-year review fraction by day.
-
-    Empty lists (eligible=false) mean this game has too few sampled reviews for the marts,
-    not that it was badly received."""
+    - timeline: the last `months` MONTHLY rows (n_reviews, n_positive, cumulative totals, cum_positive_share, and trailing_reviews / trailing_positive_share — a bounded recent window that can fall, unlike the launch-anchored cumulative share: read the trailing one first). From Steam's own uncapped review histogram. timeline_summary keeps the lifetime totals.
+    - language_split: share of reviews by language (from our SAMPLE — who actually plays it).
+    - playtime_at_review: MINUTES played when the review was written (not game_profile's lifetime playtime).
+    - launch_shape_windows: share of first-year reviews per launch window (1w ... 7-12m).
+    Empty lists (eligible=false) mean too few sampled reviews, not a bad reception.
+    """
     if not _has_game_reviews():
         return {
             "error": "mart_game_reviews_* are not present in this analytics DB — it was "
@@ -2740,12 +2908,19 @@ def game_reviews_summary(appid: int) -> dict:
             "error": f"appid {appid} not found in mart_game — either not in the catalog, or "
             "below the analysis floor."
         }
+    months = max(1, min(months, 600))
     timeline = query(
         "SELECT period, n_reviews, n_positive, cum_reviews, cum_positive, cum_positive_share, "
         "trailing_reviews, trailing_positive_share "
-        "FROM mart_game_reviews_timeline WHERE appid = ? ORDER BY period",
-        [appid],
+        "FROM mart_game_reviews_timeline WHERE appid = ? ORDER BY period DESC LIMIT ?",
+        [appid, months],
     )
+    timeline.reverse()
+    span = query_one(
+        "SELECT MIN(period) AS first_period, MAX(period) AS last_period, COUNT(*) AS n_months "
+        "FROM mart_game_reviews_timeline WHERE appid = ?",
+        [appid],
+    ) or {}
     lang = query(
         "SELECT language, n, share FROM mart_game_reviews_lang WHERE appid = ? ORDER BY n DESC",
         [appid],
@@ -2759,41 +2934,67 @@ def game_reviews_summary(appid: int) -> dict:
         "WHERE appid = ? ORDER BY day",
         [appid],
     )
-    return clean(
-        {
-            "appid": appid,
-            "eligible": bool(timeline or lang or playtime),
-            "timeline": timeline,
-            "language_split": lang,
-            "playtime_at_review": playtime,
-            "launch_curve": curve,
-            "caveats": [
-                "timeline uses Steam's uncapped monthly review histogram; language_split and "
-                "playtime_at_review are composed from our SAMPLE of reviews, so they describe "
-                "the sample's mix rather than every review ever written.",
-                "playtime_at_review is hours played WHEN THE REVIEW WAS WRITTEN — distinct "
-                "from game_profile's playtime_p25/p50/p75 (lifetime playtime_forever).",
-            ],
-        }
-    )
+    last = timeline[-1] if timeline else None
+    out: dict[str, Any] = {
+        "appid": appid,
+        "eligible": bool(timeline or lang or playtime),
+        "timeline_summary": {
+            **span,
+            "cum_reviews": last["cum_reviews"] if last else None,
+            "cum_positive_share": last["cum_positive_share"] if last else None,
+            "months_returned": len(timeline),
+        },
+        "timeline": timeline,
+        "language_split": lang,
+        "playtime_at_review": playtime,
+        "launch_shape_windows": (
+            _windowed_shape({int(r["day"]): r["cum_fraction"] for r in curve}) if curve else []
+        ),
+        "caveats": [
+            "timeline uses Steam's uncapped monthly review histogram; language_split and "
+            "playtime_at_review are composed from our SAMPLE of reviews, so they describe "
+            "the sample's mix rather than every review ever written.",
+            "playtime_at_review is MINUTES played WHEN THE REVIEW WAS WRITTEN — distinct "
+            "from game_profile's playtime_p25/p50/p75 (lifetime playtime_forever, also minutes).",
+        ],
+    }
+    if include_launch_curve:
+        out["launch_curve"] = curve
+    return out
+
+
+_VALID_ASPECTS = (
+    "Combat & Bosses",
+    "World & Exploration",
+    "Art & Visuals",
+    "Music & Audio",
+    "Story & Writing",
+    "Difficulty",
+    "Controls & Performance",
+    "Map & Navigation / Backtracking",
+    "Content & Length",
+    "Price & Value",
+)
 
 
 @_tool
 def aspect_reviews(
-    appid: int,
-    aspect: str,
-    sentiment: Literal["praise", "complaint"],
-    limit: int = 4,
+    appid: Annotated[int, Field(ge=1, description="Steam appid.")],
+    aspect: Annotated[
+        Literal[
+            "Combat & Bosses", "World & Exploration", "Art & Visuals", "Music & Audio",
+            "Story & Writing", "Difficulty", "Controls & Performance",
+            "Map & Navigation / Backtracking", "Content & Length", "Price & Value",
+        ],
+        Field(description="One of game_teardown's 10 aspect labels."),
+    ],
+    sentiment: Annotated[Literal["praise", "complaint"], Field(description="Which side of the aspect to quote.")],
+    limit: Annotated[int, _limit(10, "excerpts")] = 4,
 ) -> dict:
-    """The verbatim review excerpts behind ONE game_teardown aspect's praise or complaint
-    share — the evidence layer under the numbers. Run game_teardown first to see which
-    aspects are unusually strong or weak, then quote the reviewers here.
+    """The verbatim review excerpts behind ONE game_teardown aspect's praise or complaint share — the evidence layer under the numbers. Run game_teardown first to see which aspects stand out, then quote the reviewers here.
 
-    aspect must be one of the exact labels game_teardown returns (e.g. 'Combat & Bosses',
-    'Price & Value'). Excerpts are keyword-window snippets from the same sampled English
-    reviews and the same floor as game_teardown, highest-voted first. An eligible game with
-    nothing said about that aspect returns an empty list — that is an absence of evidence,
-    not a negative finding."""
+    Excerpts are keyword-window snippets from the same sampled English reviews and floor as game_teardown, highest-voted first. An eligible game with nothing said about the aspect returns an empty list — absence of evidence, not a negative finding.
+    """
     if not _has_aspect_reviews():
         return {
             "error": "mart_game_aspect_reviews is not present in this analytics DB — it was "
@@ -2812,23 +3013,21 @@ def aspect_reviews(
         """,
         [appid, aspect, sentiment, limit],
     )
-    return clean(
-        {
-            "appid": appid,
-            "aspect": aspect,
-            "sentiment": sentiment,
-            "n_returned": len(rows),
-            "items": rows,
-        }
-    )
+    return {
+        "appid": appid,
+        "aspect": aspect,
+        "sentiment": sentiment,
+        "n_returned": len(rows),
+        "items": rows,
+    }
 
 
 # In-process cache of the distinct (tag, n_games) list behind tag_suggest. Same tradeoff
 # the REST twin measured (api/app/routers/games.py::_tag_frequencies, duplicated here per
 # this file's no-api-imports rule): re-running the UNNEST(top_tags) aggregate over
 # mart_game costs ~90ms per call, while the FULL distinct list is only ~460 rows — build
-# it once (~25ms), then every suggest call is a sub-millisecond in-memory substring
-# filter. Keyed on _generation, so a hot-reloaded mart rebuilds it.
+# it once per mart generation (~25ms), then every suggest call is a sub-millisecond
+# in-memory substring filter. Keyed on _generation, so a hot-reloaded mart rebuilds it.
 @lru_cache(maxsize=4)
 def _tag_freqs(gen: int) -> tuple[tuple[str, int], ...]:
     rows = query(
@@ -2845,11 +3044,11 @@ def _tag_frequencies() -> tuple[tuple[str, int], ...]:
 
 
 @_tool
-def tag_suggest(q: str = "", limit: int = 10) -> dict:
-    """Resolve a partial tag to the EXACT tag strings the catalog uses, with how many games
-    carry each. Steam tags are exact-match everywhere else in this server ('Rogue-like' and
-    'Roguelike' are different tags), so call this before passing `tag` to game_search or
-    find_niches rather than guessing the spelling. Empty q returns the most common tags."""
+def tag_suggest(
+    q: Annotated[str, Field(description="Partial tag, case-insensitive (e.g. 'rogue'). Empty = the most common tags.")] = "",
+    limit: Annotated[int, _limit(50, "tags")] = 10,
+) -> dict:
+    """Resolve a partial tag to the EXACT tag strings the catalog uses, with how many games carry each. Tags are exact-match everywhere else ('Rogue-like' and 'Roguelike' are different tags), so call this before passing a tag to game_search, tag_combos or the niche tools rather than guessing the spelling."""
     needle = (q or "").strip().lower()
     limit = max(1, min(limit, 50))
     freqs = _tag_frequencies()
@@ -2920,37 +3119,14 @@ def _entity_trajectory(games: list[dict]) -> dict:
 
 
 @_tool
-def entity_profile(name: str, role: Literal["developer", "publisher"] = "developer") -> dict:
-    """Profile one developer or publisher ENTITY by exact name: aggregate track record
-    (n_games, first/last release year, n_recent_24m — releases in the last 24 months, the
-    active/dormant signal — total/median est. revenue, hit_rate_200k, median reviews/
-    rating, self_published_share, top genres, and for publishers n_partners = distinct
-    developer names they've published), its games (oldest first by seq: appid, name,
-    release_year, price, total_reviews, positive_ratio, est_rev_reviews, primary_genre),
-    and a release-trajectory summary (per-seq revenue: debut -> latest arc, plus first-5
-    vs last-5 median revenue). Entities with more than 40 games return the earliest +
-    latest 20 games and a BUCKETED trajectory (games_omitted says how many middle games
-    were elided) — the aggregates always cover ALL games.
+def entity_profile(
+    name: Annotated[str, Field(description="Exact developer/publisher name (trimmed, case-sensitive); a miss returns close-match suggestions.")],
+    role: Annotated[Literal["developer", "publisher"], Field(description="Which side of the credit to profile.")] = "developer",
+) -> dict:
+    """Profile one developer or publisher ENTITY: track record (n_games, first/last release year, n_recent_24m — the active/dormant signal — total/median est. revenue, hit_rate_200k, median reviews/rating, self_published_share, top genres, and for publishers n_partners = distinct developers published), its games (oldest first by seq) and a release trajectory (debut -> latest, first-5 vs last-5 median revenue). Entities with > 40 games return the earliest + latest 20 and a BUCKETED trajectory (games_omitted says how many); the aggregates always cover ALL games.
 
-    Entities come from mart_game's self-reported developers/publishers strings, split on
-    commas with corporate suffixes re-merged (", Inc."/", Ltd." never become entities) —
-    but NO fuzzy identity resolution: the same studio under variant spellings/branding
-    ("Ubisoft" vs "UBISOFT", "FromSoftware, Inc." vs "FromSoftware") counts as SEPARATE
-    entities, so a famous studio's numbers may be split across variants — check the
-    suggestions on a miss, and sum variants yourself when it matters. Revenue is
-    est_rev_reviews (Boxleiter-style gross lifetime ESTIMATE), never ground truth.
-    self_published_share = share of its games where the same name is on both sides
-    (developer AND publisher).
-
-    name must match EXACTLY (trimmed, case-sensitive). On a miss, returns {"error": ...}
-    with up to 5 close-match suggestions (substring, case-insensitive) — and says so if
-    the exact name exists under the OTHER role (e.g. a publisher-only entity queried as
-    a developer).
-
-    - x_handle: the entity's X handle by majority vote over its games' dev_x_handle —
-      official X links from the games' store pages/websites (may be a game's, the
-      studio's or the dev's personal account — we cannot disambiguate without X API
-      access); NULL = none found or socials not yet fetched."""
+    Caveats: entities come from self-reported developer/publisher strings with NO fuzzy identity resolution — "Ubisoft" and "UBISOFT" are separate entities, so a studio's numbers may be split across variants (check the suggestions; sum variants yourself when it matters). Revenue is a Boxleiter-style ESTIMATE. x_handle = the majority official X link across its games (may be a personal account). A miss says when the exact name exists under the OTHER role.
+    """
     socials_cols = ",\n                   x_handle" if _has_dev_socials() else ""
     try:
         ent = query_one(
@@ -2968,7 +3144,7 @@ def entity_profile(name: str, role: Literal["developer", "publisher"] = "develop
     if ent is None:
         other_role = "publisher" if role == "developer" else "developer"
         hints = []
-        if query_one("SELECT 1 FROM mart_entity WHERE role = ? AND name = ?", [other_role, name]):
+        if query_one("SELECT 1 AS one FROM mart_entity WHERE role = ? AND name = ?", [other_role, name]):
             hints.append(f"{name!r} exists as a {other_role} — call entity_profile(name, role={other_role!r}).")
         suggestions = query(
             "SELECT name, n_games FROM mart_entity WHERE role = ? AND name ILIKE ? "
@@ -3001,51 +3177,31 @@ def entity_profile(name: str, role: Literal["developer", "publisher"] = "develop
         games_omitted = len(games) - 2 * _ENTITY_HEAD_TAIL
         games = games[:_ENTITY_HEAD_TAIL] + games[-_ENTITY_HEAD_TAIL:]
 
-    return clean(
-        {
-            "entity": ent,
-            "games": games,
-            "games_omitted": games_omitted,
-            "trajectory": trajectory,
-            "caveats": [
-                "Revenue is est_rev_reviews — a Boxleiter-style gross lifetime ESTIMATE.",
-                "Entity names are self-reported strings; variant spellings of the same "
-                "studio are separate entities (no fuzzy identity resolution).",
-                "Population is the full live catalog including 0-review games — medians "
-                "and hit_rate_200k are computed over games with revenue estimates only.",
-            ],
-        }
-    )
+    return {
+        "entity": ent,
+        "games": games,
+        "games_omitted": games_omitted,
+        "trajectory": trajectory,
+        "caveats": [
+            "Revenue is est_rev_reviews — a Boxleiter-style gross lifetime ESTIMATE.",
+            "Entity names are self-reported strings; variant spellings of the same "
+            "studio are separate entities (no fuzzy identity resolution).",
+            "Population is the full live catalog including 0-review games — medians "
+            "and hit_rate_200k are computed over games with revenue estimates only.",
+        ],
+    }
 
 
 @_tool
-def publisher_pitch_list(genre: str, min_games: int = 3, limit: int = 15) -> dict:
-    """Which publishers to pitch for one Steam genre (exact PRIMARY-genre label, e.g.
-    "RPG", "Strategy" — see game_profile/market_benchmarks for valid labels): publishers
-    with >= min_games total releases and >= 1 in this genre, ACTIVE ones first (active =
-    any release in the last 24 months; dormant publishers rank below every active one —
-    check the flag before pitching), then by games in this genre. Per row: n_games (total),
-    n_in_genre, n_recent_24m, active, median_rev_in_genre (median est. revenue of THEIR
-    games in this genre), example_game (their top-earning title in the genre — name-drop /
-    fit-check it), n_partners (distinct developer names they've published — a proxy for
-    how many external studios they actually work with), and self_published_share.
+def publisher_pitch_list(
+    genre: Annotated[str, Field(description="Exact Steam PRIMARY-genre label (e.g. 'RPG', 'Strategy') — not a community tag.")],
+    min_games: Annotated[int, Field(ge=1, description="Minimum total releases for a publisher to be listed.")] = 3,
+    limit: Annotated[int, _limit(50, "publishers")] = 15,
+) -> dict:
+    """Which publishers to pitch for one Steam genre: publishers with >= min_games releases and >= 1 in this genre, ACTIVE first (a release in the last 24 months; dormant ones rank below every active one), then by games in the genre. Per row: n_games, n_in_genre, n_recent_24m, active, median_rev_in_genre, example_game (their top earner in the genre — fit-check it), n_partners (distinct developers published — how many outside studios they really work with) and self_published_share.
 
-    Read the numbers with these falsification rules in mind:
-      - Revenue is est_rev_reviews — a Boxleiter-style ESTIMATE, not ground truth.
-      - A publisher's median outcome is NOT publisher value-add: good publishers SELECT
-        good games (selection bias) — a high median_rev_in_genre says "they pick/attract
-        winners", not "they will make yours one".
-      - Entity names are self-reported strings; the same publisher under variant
-        spellings counts as separate rows.
-      - Self-published games are NOT excluded (Steam lists the dev as its own publisher),
-        so a "publisher" with self_published_share ~1.0 is really a self-publishing dev
-        who has never taken third-party games — filter those out when scouting for an
-        actual publishing partner (that's why the share is surfaced per row).
-
-    An empty list is a real answer (no publisher meets the floors in this genre) — but
-    double-check the genre label first: it must be an exact Steam PRIMARY genre, not a
-    community tag ("Roguelike" is a tag; its games' primary genre is usually "Action" or
-    "Strategy"). Use entity_profile(name, role="publisher") to deep-dive a row."""
+    Falsification rules first: a publisher's median outcome is SELECTION, not value-add (good publishers pick good games); self_published_share ~1.0 means a self-publishing dev, not a partner — filter those out; names are self-reported (variant spellings split); revenue is a Boxleiter ESTIMATE. An empty list is a real answer — but check the genre is an exact PRIMARY genre ("Roguelike" is a tag). Deep-dive a row with entity_profile(name, role='publisher').
+    """
     min_games = max(1, min_games)
     limit = max(1, min(limit, 50))
     try:
@@ -3098,7 +3254,7 @@ def publisher_pitch_list(genre: str, min_games: int = 3, limit: int = 15) -> dic
         "genre": genre,
         "min_games": min_games,
         "n_returned": len(rows),
-        "publishers": clean_rows(rows),
+        "publishers": rows,
         "caveats": caveats,
     }
 
@@ -3107,28 +3263,22 @@ def publisher_pitch_list(genre: str, min_games: int = 3, limit: int = 15) -> dic
 # Press / buzz tools
 # ==========================================================================================
 @_tool
-def press_pitch_list(genre: str, limit: int = 15) -> dict:
-    """Who to pitch for press coverage in one Steam genre (exact label, e.g. "RPG",
-    "Action" — see a game_profile/game_search result's primary_genre, or
-    market_benchmarks' boxleiter_by_genre, for valid labels). Returns:
-      - outlets: ranked by article count — source, n_articles, n_games_covered, median
-        outcome (est. revenue/owners/rating) of the games it covered, one example
-        headline+date+url.
-      - journalists: ranked by article count — author, n_articles, n_distinct_games,
-        which outlets they've written for, one example headline+date+url.
-    Steam News (dev-authored posts) is excluded — journalist/trade-press coverage only.
-    Ranked by ALL-TIME volume: always check the example article's date (and
-    n_articles_recent_24m) before pitching — a prolific past contributor may no longer
-    cover the beat. A genre with zero rows is a real, honest answer (selection bias / thin
-    coverage), not an error — double-check the exact genre spelling first.
+def press_pitch_list(
+    genre: Annotated[str, Field(description="Exact Steam genre label (e.g. 'RPG', 'Action') — not a community tag.")],
+    limit: Annotated[int, _limit(50, "outlets and journalists (each)")] = 15,
+) -> dict:
+    """Who to pitch for press coverage in one Steam genre: outlets (article count, games covered, the median outcome of games they covered, one example headline + date + url) and journalists (article count, distinct games, outlets written for, an example), each ranked by ALL-TIME volume and capped at `limit`.
+
+    Bearish reading first: all-time volume flatters past contributors — check n_articles_recent_24m and the example date before pitching; these outlets already chose this genre (selection bias, not a coverage promise); coverage is fuzzy-matched to games, and a lower-volume specialist can be a sharper target than the top row. Steam News (dev-authored posts) is excluded. Zero rows is an honest answer — double-check the exact genre spelling first.
     """
+    limit = max(1, min(limit, 50))
     outlets = query(
         "SELECT source, n_articles, n_articles_recent_24m, n_games_covered, median_est_rev, "
         "median_owners, median_positive_ratio, example_author, example_title, example_url, "
-        "example_published_at FROM mart_press_outlet_genre WHERE genre = ? ORDER BY n_articles DESC",
-        [genre],
+        "example_published_at FROM mart_press_outlet_genre WHERE genre = ? "
+        "ORDER BY n_articles DESC LIMIT ?",
+        [genre, limit],
     )
-    limit = max(1, min(limit, 50))
     authors = query(
         "SELECT author, n_articles, n_articles_recent_24m, n_distinct_games, outlets, "
         "example_source, example_title, example_url, example_published_at "
@@ -3155,39 +3305,29 @@ def press_pitch_list(genre: str, limit: int = 15) -> dict:
         )
     return {
         "genre": genre,
-        "outlets": clean_rows(outlets),
-        "journalists": clean_rows(authors),
+        "outlets": outlets,
+        "journalists": authors,
         "caveats": caveats,
     }
 
 
 @_tool
 def buzz_trends(
-    direction: Literal["rising", "cooling"] = "rising",
-    limit: int = 15,
-    include_series: bool = False,
+    direction: Annotated[Literal["rising", "cooling"], Field(description="rising = steepest recent-vs-prior increase first; cooling = steepest decrease first.")] = "rising",
+    limit: Annotated[int, _limit(50, "terms")] = 15,
+    include_series: Annotated[bool, Field(description="Add each term's 12-point monthly mention series.")] = False,
 ) -> dict:
-    """Rising or cooling game-concept buzz: bigram terms (mechanics/genres/tags — e.g.
-    "open world", "roguelike deckbuilder") mined from journalist article TITLES over the
-    last 12 complete months, restricted to Steam's own tag/genre vocabulary so this reads
-    as game concepts, not news noise (sale events, publisher names, franchise titles).
-    This is a LEADING indicator — buzz building in press coverage before it shows up in
-    actual releases/sales — distinct from niche_detail's saturation_trend (a LAGGING
-    signal based on real releases).
+    """Rising or cooling game-concept buzz: bigrams (mechanics/genres/tags, e.g. "roguelike deckbuilder") mined from journalist article TITLES over the last 12 complete months, restricted to Steam's own tag/genre vocabulary so it reads as game concepts, not news noise. A LEADING indicator (press attention before releases/sales) — distinct from niche_detail's lagging saturation_trend.
 
-    direction="rising" sorts by steepest recent-vs-prior 3-month increase first;
-    "cooling" by steepest decrease first. include_series=True adds each term's monthly
-    mention-count series (12 points/term) — leave False (default) for a compact
-    summary-only response (total_mentions, recent_avg, prior_avg, slope per term).
+    Bearish reading first: title bigrams are a coarse, cheap signal from an English-outlet sample; the last 3 complete months are compared with the 3 before, so a single news cycle can move a small term — weigh total_mentions. Returns total_mentions, recent_avg, prior_avg and slope per term.
     """
     order = "DESC" if direction == "rising" else "ASC"
     limit = max(1, min(limit, 50))
-    rows = query(
+    items = query(
         f"SELECT term, total_mentions, recent_avg, prior_avg, slope FROM mart_buzz_trends_summary "
         f"WHERE direction = ? ORDER BY slope {order} LIMIT ?",
         [direction, limit],
     )
-    items = clean_rows(rows)
 
     if include_series and items:
         terms = [item["term"] for item in items]
@@ -3222,20 +3362,18 @@ def buzz_trends(
 # ==========================================================================================
 # Marketing tools (Track M — Press; creator platforms removed 2026-08-25)
 # ==========================================================================================
+_PRESS_ONLY_NOTE = (
+    "Press is the ONLY channel since the creator platforms were decommissioned (2026-08-25): "
+    "shares are 1.0 by construction and weights are 1 per mention — this is a press-volume "
+    "read, not a multi-channel comparison."
+)
 
 
 @_tool
-def channel_mix(genre: str | None = None) -> dict:
-    """Marketing-attention volume by channel for one genre, or the full matrix if genre is
-    omitted. PRESS-ONLY since 2026-08-25: the creator platforms (YouTube/Reddit/Twitch/X)
-    were decommissioned and the mart now carries only the press channel, so every genre's
-    mix reads 100% press (share_mentions = share_reach_weighted = 1.0) and the useful
-    number per row is the absolute n_mentions — how much press coverage this genre
-    actually gets. reach_weighted = n_mentions for press (1/mention; outlets carry no
-    audience-size figure). The per-channel SHARE framing is kept so the shape is stable
-    if another channel is ever added back. An empty result means the genre label is
-    wrong/unrecognized or no press data has been collected yet — a real answer, not an
-    error.
+def channel_mix(
+    genre: Annotated[str | None, Field(description="Exact Steam genre label; omit for every genre.")] = None,
+) -> dict:
+    """PRESS attention volume per genre — honestly a single-channel read: the creator platforms (YouTube/Reddit/Twitch/X) were decommissioned 2026-08-25, so every genre's "mix" is 100% press (share_mentions = share_reach_weighted = 1.0 by construction) and the only informative number is n_mentions — how much press coverage the genre gets. reach_weighted = n_mentions (outlets carry no audience figure). The share columns are kept only so the shape is stable if a channel returns. An empty result = unknown genre label or no press data yet.
     """
     where = ""
     params: list = []
@@ -3261,34 +3399,32 @@ def channel_mix(genre: str | None = None) -> dict:
             "note": "No channel-mix data yet for this genre — either the genre label is "
             "wrong/unrecognized, or no press data has been collected yet.",
         }
-    return {"genre": genre, "n_returned": len(rows), "items": clean_rows(rows)}
+    channels = {r["channel"] for r in rows}
+    out: dict[str, Any] = {"genre": genre, "n_returned": len(rows), "items": rows}
+    if channels == {"press"}:
+        out["note"] = _PRESS_ONLY_NOTE
+    return out
 
 
 @_tool
-def channel_buzz(direction: Literal["rising", "cooling"] = "rising", limit: int = 15, include_series: bool = False) -> dict:
-    """Reach-WEIGHTED trending game-concepts by marketing channel — PRESS-ONLY since
-    2026-08-25 (the creator platforms were decommissioned) — the sequel to buzz_trends
-    (which is press-title-only and unweighted). Same bigram/concept-allowlist mining as
-    buzz_trends, but each mention carries a reach weight — press = 1/mention since
-    outlets have no audience-size figure here, so with press as the only channel
-    total_weighted currently tracks total_mentions. by_channel shows which channel(s)
-    drive a term (today: press alone; the shape is kept for if a channel is added back).
-
-    direction="rising"/"cooling" sorts by steepest recent-vs-prior weighted-average change.
-    include_series=True adds each term's per-period (n_mentions, reach_weighted_score) —
-    leave False for a compact summary.
+def channel_buzz(
+    direction: Annotated[Literal["rising", "cooling"], Field(description="rising = steepest weighted increase first; cooling = steepest decrease.")] = "rising",
+    limit: Annotated[int, _limit(50, "terms")] = 15,
+    include_series: Annotated[bool, Field(description="Add each term's per-period (n_mentions, reach_weighted_score).")] = False,
+) -> dict:
+    """Reach-weighted trending game concepts by marketing channel — today a DUPLICATE of buzz_trends: press is the only channel left (creator platforms decommissioned 2026-08-25) and press weighs 1 per mention, so total_weighted == total_mentions and by_channel is always press alone. Prefer buzz_trends; this stays for shape stability if a weighted channel returns. Same bigram/concept mining as buzz_trends (article titles, Steam tag/genre vocabulary, last 3 complete months vs the 3 before).
     """
     order = "DESC" if direction == "rising" else "ASC"
     limit = max(1, min(limit, 50))
     try:
-        rows = query(
+        items = query(
             f"SELECT term, total_mentions, total_weighted, recent_avg_weighted, prior_avg_weighted, "
             f"slope_weighted FROM mart_channel_buzz_summary WHERE direction = ? "
             f"ORDER BY slope_weighted {order} LIMIT ?",
             [direction, limit],
         )
-        items = clean_rows(rows)
 
+        channels: set[str] = set()
         if items:
             terms = [item["term"] for item in items]
             placeholders = ",".join("?" for _ in terms)
@@ -3296,7 +3432,8 @@ def channel_buzz(direction: Literal["rising", "cooling"] = "rising", limit: int 
             series: dict[str, dict[str, dict]] = {t: {} for t in terms}
             if include_series:
                 # Per-period detail: one scan feeds BOTH the per-channel totals and each
-                # term's period series.
+                # term's period series. Values arrive as floats (DECIMAL is coerced in
+                # query()), so the roll-up is plain float arithmetic.
                 detail_rows = query(
                     f"SELECT term, channel, period, n_mentions, reach_weighted_score FROM mart_channel_buzz "
                     f"WHERE term IN ({placeholders}) ORDER BY term, period",
@@ -3304,12 +3441,13 @@ def channel_buzz(direction: Literal["rising", "cooling"] = "rising", limit: int 
                 )
                 for r in detail_rows:
                     t, ch, per = r["term"], r["channel"], r["period"]
+                    weight = float(r["reach_weighted_score"] or 0.0)
                     cb = breakdown[t].setdefault(ch, {"n_mentions": 0, "reach_weighted_score": 0.0})
-                    cb["n_mentions"] += r["n_mentions"]
-                    cb["reach_weighted_score"] += r["reach_weighted_score"]
+                    cb["n_mentions"] += int(r["n_mentions"] or 0)
+                    cb["reach_weighted_score"] += weight
                     sp = series[t].setdefault(per, {"n_mentions": 0, "reach_weighted_score": 0.0})
-                    sp["n_mentions"] += r["n_mentions"]
-                    sp["reach_weighted_score"] += r["reach_weighted_score"]
+                    sp["n_mentions"] += int(r["n_mentions"] or 0)
+                    sp["reach_weighted_score"] += weight
             else:
                 # Summary-only: by_channel needs per-(term, channel) TOTALS, not the
                 # per-period rows — aggregate in the DB and skip shipping/looping the full
@@ -3322,18 +3460,17 @@ def channel_buzz(direction: Literal["rising", "cooling"] = "rising", limit: int 
                     terms,
                 ):
                     breakdown[r["term"]][r["channel"]] = {
-                        "n_mentions": int(r["n_mentions"]),
-                        "reach_weighted_score": r["reach_weighted_score"],
+                        "n_mentions": int(r["n_mentions"] or 0),
+                        "reach_weighted_score": float(r["reach_weighted_score"] or 0.0),
                     }
             for item in items:
-                item["by_channel"] = clean_rows(
-                    [
-                        {"channel": ch, **v}
-                        for ch, v in sorted(breakdown[item["term"]].items(), key=lambda kv: -kv[1]["reach_weighted_score"])
-                    ]
-                )
+                channels.update(breakdown[item["term"]])
+                item["by_channel"] = [
+                    {"channel": ch, **v}
+                    for ch, v in sorted(breakdown[item["term"]].items(), key=lambda kv: -kv[1]["reach_weighted_score"])
+                ]
                 if include_series:
-                    item["series"] = clean_rows([{"period": per, **v} for per, v in sorted(series[item["term"]].items())])
+                    item["series"] = [{"period": per, **v} for per, v in sorted(series[item["term"]].items())]
     except duckdb.CatalogException:
         return {
             "error": "mart_channel_buzz/mart_channel_buzz_summary are not present in this "
@@ -3342,47 +3479,50 @@ def channel_buzz(direction: Literal["rising", "cooling"] = "rising", limit: int 
             "and retry."
         }
 
+    caveats = [
+        "Compares the last 3 complete months to the 3 before that; the current in-progress "
+        "month is excluded.",
+        "Restricted to Steam's tag/genre vocabulary (word-level match), same as buzz_trends.",
+    ]
+    if channels <= {"press"}:
+        caveats.insert(0, _PRESS_ONLY_NOTE + " Use buzz_trends — it carries the same terms.")
     return {
         "direction": direction,
         "n_returned": len(items),
         "terms": items,
-        "caveats": [
-            "Weighting: press = 1/mention (outlets carry no audience-size figure), and press "
-            "is the only channel since the creator platforms were decommissioned 2026-08-25 — "
-            "total_weighted currently tracks total_mentions.",
-            "Compares the last 3 complete months to the 3 before that; the current in-progress "
-            "month is excluded.",
-            "Restricted to Steam's tag/genre vocabulary (word-level match), same as buzz_trends.",
-        ],
+        "caveats": caveats,
     }
 
 
 # ==========================================================================================
 # Live-player (CCU) history tools — daily point-sample series from mart_players.sql
 # ==========================================================================================
-@_tool
-def game_player_history(appid: int, days: int = 30) -> dict:
-    """Daily concurrent-player (CCU) history for one game — REAL current traction over
-    time, the direct "are people actually playing this" signal (unlike owners/revenue,
-    which are lifetime estimates). One value per day: the LAST capture of the UTC date
-    from the nightly ~21-22:00 UTC sweep of Steam's keyless GetNumberOfCurrentPlayers —
-    a point sample, NOT the daily peak (SteamDB-style peaks run higher). Gaps in the
-    series = unmeasured days, never zero: collection started 2026-07-18 and games outside
-    the top-8k-by-reviews head are captured on a ~3-8 night rotation.
+PlayerDays = Annotated[
+    int,
+    Field(ge=7, le=3650, description="Window length in days, counted back from the mart's last capture date; bounds BOTH the daily series and the monthly (steamcharts) block. Up to 3650 for deep monthly history."),
+]
 
-    days (clamped 7-365) bounds the returned series. summary always describes the FULL
-    measured history (latest sample, trailing-7d avg vs prior-7d trend, window peak,
-    measured-day count, first/last measured dates) so a short series still gets context.
-    Use game_search to find the appid by name. A game with no history at all is a real
-    answer (never captured: below the 50-review CCU floor, or not yet reached by the
-    rotation), not an error. Returns {"error": ...} for an unknown appid or a mart that
-    predates the CCU marts (re-run the ETL).
+
+@_tool
+def game_player_history(
+    appid: Annotated[int, Field(ge=1, description="Steam appid (find it with game_search).")],
+    days: PlayerDays = 30,
+) -> dict:
+    """Daily concurrent-player (CCU) history for one game — direct "are people actually playing this" traction (owners/revenue are lifetime estimates; this is measured).
+
+    Caveats first: one value per day = the LAST capture of the UTC date from the nightly ~21-22:00 UTC sweep — a point sample, NOT the daily peak (SteamDB peaks run higher); a gap = unmeasured, never zero (collection began 2026-07-18; games outside the top-8k-by-reviews head rotate every ~3-8 nights).
+
+    The window ends at the mart's LAST capture date (summary.as_of), not today, so an older mart still shows its own last `days`. summary always covers the FULL measured history: latest sample, trailing-7d average vs prior 7d, the window's peak, measured-day count and first/last dates. monthly = steamcharts monthly averages/peaks inside the same window — a DIFFERENT measure; never blend it with the daily series. No history at all is a real answer (below the 50-review CCU floor, or not yet rotated in).
     """
     if not _has_players():
         return {"error": _PLAYERS_MISSING}
-    days = max(7, min(days, 365))
+    days = max(7, min(days, 3650))
+    gcols = _cols("mart_game")
+    trend_cols = "".join(
+        f", {c}" for c in ("players_trend_7d_market_pct", "players_trend_7d_rel_pct") if c in gcols
+    )
     game = query_one(
-        "SELECT appid, name, live_players, players_7d_avg, players_trend_7d_pct "
+        f"SELECT appid, name, live_players, players_7d_avg, players_trend_7d_pct{trend_cols} "
         "FROM mart_game WHERE appid = ?",
         [appid],
     )
@@ -3392,64 +3532,72 @@ def game_player_history(appid: int, days: int = 30) -> dict:
             "or below the >=10-review analysis floor. Use game_search to find valid appids."
         }
 
-    series = query(
-        f"SELECT date, players, n_captures FROM mart_game_players_daily "
-        f"WHERE appid = ? AND date >= CURRENT_DATE - INTERVAL {days} DAY ORDER BY date",
-        [appid],
-    )
-    for r in series:
-        r["date"] = str(r["date"])
-
-    stats = query_one(
-        f"""
-        SELECT COUNT(*) AS n_days_measured,
-               MIN(date) AS first_date, MAX(date) AS last_date,
-               max_by(players, date) AS latest_players,
-               MAX(players) FILTER (WHERE date >= CURRENT_DATE - INTERVAL {days} DAY) AS window_peak,
-               max_by(date, players) FILTER (WHERE date >= CURRENT_DATE - INTERVAL {days} DAY) AS peak_date,
-               AVG(players) FILTER (WHERE date >  CURRENT_DATE - INTERVAL 7 DAY) AS avg_recent_7d,
-               AVG(players) FILTER (WHERE date <= CURRENT_DATE - INTERVAL 7 DAY
-                                      AND date >  CURRENT_DATE - INTERVAL 14 DAY) AS avg_prior_7d
-        FROM mart_game_players_daily WHERE appid = ?
-        """,
-        [appid],
-    )
+    anchor = _max_date(_generation, "mart_game_players_daily")
     notes: list[str] = []
+    series: list[dict] = []
+    stats: dict | None = None
+    if anchor is not None:
+        start = anchor - timedelta(days=days - 1)  # `days` dates, ending at the anchor
+        series = query(
+            "SELECT date, players, n_captures FROM mart_game_players_daily "
+            "WHERE appid = ? AND date >= CAST(? AS DATE) ORDER BY date",
+            [appid, start.isoformat()],
+        )
+        a, s = anchor.isoformat(), start.isoformat()
+        stats = query_one(
+            """
+            SELECT COUNT(*) AS n_days_measured,
+                   MIN(date) AS first_date, MAX(date) AS last_date,
+                   max_by(players, date) AS latest_players,
+                   MAX(players) FILTER (WHERE date >= CAST(? AS DATE)) AS window_peak,
+                   max_by(date, players) FILTER (WHERE date >= CAST(? AS DATE)) AS peak_date,
+                   AVG(players) FILTER (WHERE date > CAST(? AS DATE) - 7) AS avg_recent_7d,
+                   AVG(players) FILTER (WHERE date <= CAST(? AS DATE) - 7
+                                          AND date > CAST(? AS DATE) - 14) AS avg_prior_7d
+            FROM mart_game_players_daily WHERE appid = ?
+            """,
+            [s, s, a, a, a, appid],
+        )
     if not stats or not stats["n_days_measured"]:
         notes.append(
             "never captured — the game is below the 50-review CCU collection floor, or the "
             "capture rotation hasn't reached it yet."
         )
-        summary = {"n_days_measured": 0}
+        summary: dict[str, Any] = {"as_of": anchor.isoformat() if anchor else None, "n_days_measured": 0}
     else:
         summary = {
-            "latest": {"date": str(stats["last_date"]), "players": stats["latest_players"]},
+            "as_of": anchor.isoformat(),
+            "latest": {"date": stats["last_date"], "players": stats["latest_players"]},
             # Prefer the mart's precomputed values (tool and mart must never disagree);
             # the live-computed fallback only covers a NULL mart value.
             "players_7d_avg": game["players_7d_avg"] if game["players_7d_avg"] is not None else stats["avg_recent_7d"],
             "players_prior_7d_avg": stats["avg_prior_7d"],
             "players_trend_7d_pct": game["players_trend_7d_pct"],
-            "window_peak": {"date": str(stats["peak_date"]), "players": stats["window_peak"]},
+            **{c: game[c] for c in ("players_trend_7d_market_pct", "players_trend_7d_rel_pct") if c in game},
+            "window_peak": {"date": stats["peak_date"], "players": stats["window_peak"]},
             "n_days_measured": stats["n_days_measured"],
-            "history": {"first_date": str(stats["first_date"]), "last_date": str(stats["last_date"])},
+            "history": {"first_date": stats["first_date"], "last_date": stats["last_date"]},
         }
         if not series:
             notes.append(
-                f"measured history exists but none in the last {days} days "
-                f"(last measured {stats['last_date']}) — likely rotated out or delisted."
+                f"measured history exists but none in the {days} days up to the mart's last "
+                f"capture ({anchor.isoformat()}); last measured {stats['last_date']} — "
+                "rotated out of collection, or delisted."
             )
 
     monthly: list[dict] = []
-    if _has_players_history():
+    if _has_players_history() and anchor is not None:
+        month_start = (anchor - timedelta(days=days - 1)).replace(day=1)
         monthly = query(
             "SELECT CAST(date AS VARCHAR) AS month, avg_players, peak_players "
-            "FROM mart_game_players_history WHERE appid = ? AND grain = 'monthly' ORDER BY date",
-            [appid],
+            "FROM mart_game_players_history WHERE appid = ? AND grain = 'monthly' "
+            "AND date >= CAST(? AS DATE) ORDER BY date",
+            [appid, month_start.isoformat()],
         )
         if monthly:
             notes.append(
                 "monthly = EXTERNAL history via steamcharts.com (period averages + true monthly "
-                "peaks, back to the game's launch) — a different measure from the nightly point "
+                "peaks) within the same window — a different measure from the nightly point "
                 "samples in `series`; never blend them."
             )
 
@@ -3457,62 +3605,57 @@ def game_player_history(appid: int, days: int = 30) -> dict:
         "appid": appid,
         "name": game["name"],
         "days": days,
-        "summary": clean(summary),
-        "series": clean_rows(series),
-        "monthly": clean_rows(monthly),
+        "summary": summary,
+        "series": series,
+        "monthly": monthly,
         "caveats": [_PLAYERS_POINT_SAMPLE_CAVEAT, _PLAYERS_HISTORY_CAVEAT] + notes,
     }
 
 
 @_tool
-def niche_player_history(dimension: Literal["tag", "genre"], key: str, days: int = 30) -> dict:
-    """Daily total-live-players series for one niche — the direct "is this niche hot,
-    and which way is it moving" signal. Sums the niche's scored games' (>= 50 reviews)
-    daily CCU point samples; each game's last capture is carried forward up to 7 days
-    (LOCF) so the collector's tail rotation doesn't read as audience dips — games staler
-    than 7 days drop out of the sum. measured_players / n_games_measured expose the raw
-    same-day coverage next to the carried total, so the carry is always inspectable.
+def niche_player_history(dimension: Dimension, key: NicheKey, days: PlayerDays = 30) -> dict:
+    """Daily total-live-players series for one niche — "is this niche hot, and which way is it moving".
 
-    Returns summary (the niche's mart_niche players columns: total_players_now,
-    players_trend_7d_pct — SAME-PANEL, only games measured in both 7d windows count —
-    and players_coverage, the fresh-measured share) + series of {date, total_players,
-    measured_players, n_games_measured} rows (days clamped 7-365) + n_games_panel (niche
-    games ever measured). An empty series for a real niche is a real answer: fewer than
-    10 of its games have ever been measured. Get exact keys from find_niches (exact
-    match, case-sensitive); returns {"error": ...} for an unknown niche or a mart that
-    predates the CCU marts (re-run the ETL). CAVEAT: totals are dominated by the niche's
-    biggest games (the top-12k games hold ~99% of all Steam CCU) — a big total says
-    people play the niche's HITS, not that a new entrant gets players.
+    Caveats first: totals are dominated by the niche's biggest games (the top ~12k games hold ~99% of Steam CCU) — a big total says people play the niche's HITS, not that a new entrant gets players; check players_top5_share and median_players_now. Values are nightly point samples (not peaks); each game's last capture is carried forward up to 7 days (LOCF) so rotation gaps don't read as dips — measured_players / n_games_measured show the raw same-day coverage.
+
+    summary = the niche's mart_niche players columns: total_players_now, players_trend_7d_pct (SAME-PANEL: only games measured in both 7-day windows), players_coverage (fresh-measured share), median_players_now, players_top5_share (+ market-relative trends on newer marts), n_games_panel and history bounds. The window ends at the mart's last capture date (summary.as_of). monthly = summed steamcharts monthly averages (top-8k games only) inside the same window — a different measure; never blend. An empty series for a real niche = fewer than 10 of its games ever measured.
     """
     if not _has_players():
         return {"error": _PLAYERS_MISSING}
-    days = max(7, min(days, 365))
-    dist_cols = ", median_players_now, players_top5_share" if _has_players_dist() else ""
+    days = max(7, min(days, 3650))
+    resolved, note = _resolve_niche_key(dimension, key)
+    if resolved is None:
+        return {"error": note}
+    ncols = _cols("mart_niche")
+    summary_cols = [
+        c for c in (
+            "total_players_now", "players_trend_7d_pct", "players_trend_7d_market_pct",
+            "players_trend_7d_rel_pct", "players_coverage", "median_players_now",
+            "players_top5_share",
+        )
+        if c in ncols
+    ]
     niche = query_one(
-        f"SELECT total_players_now, players_trend_7d_pct, players_coverage{dist_cols} "
-        "FROM mart_niche WHERE dimension = ? AND key = ? LIMIT 1",
-        [dimension, key],
-    )
-    if niche is None:
-        return {
-            "error": f"no niche found for dimension={dimension!r} key={key!r}. "
-            "Call find_niches to list valid keys — spelling/case must match exactly."
-        }
+        f"SELECT {', '.join(summary_cols)} FROM mart_niche WHERE dimension = ? AND key = ? LIMIT 1",
+        [dimension, resolved],
+    ) or {}
 
-    series = query(
-        f"SELECT date, total_players, measured_players, n_games_measured "
-        f"FROM mart_niche_players WHERE dimension = ? AND key = ? "
-        f"AND date >= CURRENT_DATE - INTERVAL {days} DAY ORDER BY date",
-        [dimension, key],
-    )
+    anchor = _max_date(_generation, "mart_niche_players")
+    series: list[dict] = []
+    if anchor is not None:
+        start = anchor - timedelta(days=days - 1)
+        series = query(
+            "SELECT date, total_players, measured_players, n_games_measured "
+            "FROM mart_niche_players WHERE dimension = ? AND key = ? "
+            "AND date >= CAST(? AS DATE) ORDER BY date",
+            [dimension, resolved, start.isoformat()],
+        )
     panel = query_one(
         "SELECT MAX(n_games_panel) AS n_games_panel, MIN(date) AS first_date, "
         "MAX(date) AS last_date, COUNT(*) AS n_days FROM mart_niche_players "
         "WHERE dimension = ? AND key = ?",
-        [dimension, key],
+        [dimension, resolved],
     )
-    for r in series:
-        r["date"] = str(r["date"])
 
     notes: list[str] = []
     if not panel or not panel["n_days"]:
@@ -3524,21 +3667,20 @@ def niche_player_history(dimension: Literal["tag", "genre"], key: str, days: int
         history = None
     else:
         history = {
-            "first_date": str(panel["first_date"]),
-            "last_date": str(panel["last_date"]),
+            "first_date": panel["first_date"],
+            "last_date": panel["last_date"],
             "n_days": panel["n_days"],
         }
 
     monthly: list[dict] = []
-    if _has_players_history():
-        try:
-            monthly = query(
-                "SELECT CAST(month AS VARCHAR) AS month, avg_players_sum, n_games_measured "
-                "FROM mart_niche_players_monthly WHERE dimension = ? AND key = ? ORDER BY month",
-                [dimension, key],
-            )
-        except duckdb.CatalogException:
-            monthly = []
+    if _has_players_history() and _has_table("mart_niche_players_monthly") and anchor is not None:
+        month_start = (anchor - timedelta(days=days - 1)).replace(day=1)
+        monthly = query(
+            "SELECT CAST(month AS VARCHAR) AS month, avg_players_sum, n_games_measured "
+            "FROM mart_niche_players_monthly WHERE dimension = ? AND key = ? "
+            "AND month >= CAST(? AS DATE) ORDER BY month",
+            [dimension, resolved, month_start.isoformat()],
+        )
         if monthly:
             notes.append(
                 "monthly = the niche's summed steamcharts monthly AVERAGES (top-8k games only — "
@@ -3547,42 +3689,62 @@ def niche_player_history(dimension: Literal["tag", "genre"], key: str, days: int
             )
 
     top_games: list[dict] = []
-    if _has_players_dist():
-        try:
-            top_games = query(
-                "SELECT rank, appid, name, players, share FROM mart_niche_players_top "
-                "WHERE dimension = ? AND key = ? ORDER BY rank LIMIT 5",
-                [dimension, key],
-            )
-        except duckdb.CatalogException:
-            top_games = []
+    if _has_players_dist() and _has_table("mart_niche_players_top"):
+        top_games = query(
+            "SELECT rank, appid, name, players, share FROM mart_niche_players_top "
+            "WHERE dimension = ? AND key = ? ORDER BY rank LIMIT 5",
+            [dimension, resolved],
+        )
 
-    return {
-        "dimension": dimension,
-        "key": key,
-        "days": days,
-        "summary": clean(
-            {
-                "total_players_now": niche["total_players_now"],
-                "players_trend_7d_pct": niche["players_trend_7d_pct"],
-                "players_coverage": niche["players_coverage"],
-                "median_players_now": niche.get("median_players_now") if _has_players_dist() else None,
-                "players_top5_share": niche.get("players_top5_share") if _has_players_dist() else None,
+    out: dict[str, Any] = {"dimension": dimension, "key": resolved}
+    if note:
+        out["key_note"] = note
+    out.update(
+        {
+            "days": days,
+            "summary": {
+                "as_of": anchor.isoformat() if anchor else None,
+                "total_players_now": niche.get("total_players_now"),
+                "players_trend_7d_pct": niche.get("players_trend_7d_pct"),
+                **{c: niche.get(c) for c in ("players_trend_7d_market_pct", "players_trend_7d_rel_pct") if c in niche},
+                "players_coverage": niche.get("players_coverage"),
+                "median_players_now": niche.get("median_players_now"),
+                "players_top5_share": niche.get("players_top5_share"),
                 "n_games_panel": panel["n_games_panel"] if panel else None,
                 "history": history,
-            }
-        ),
-        "top_games_now": clean_rows(top_games),
-        "series": clean_rows(series),
-        "monthly": clean_rows(monthly),
-        "caveats": [
-            _PLAYERS_POINT_SAMPLE_CAVEAT,
-            _PLAYERS_HISTORY_CAVEAT,
-            "total_players carries each game's last capture forward up to 7 days (LOCF); "
-            "players_trend_7d_pct is same-panel (games measured in BOTH windows), so "
-            "coverage growth can't masquerade as audience growth.",
-        ] + notes,
-    }
+            },
+            "top_games_now": top_games,
+            "series": series,
+            "monthly": monthly,
+            "caveats": [
+                _PLAYERS_POINT_SAMPLE_CAVEAT,
+                _PLAYERS_HISTORY_CAVEAT,
+                "total_players carries each game's last capture forward up to 7 days (LOCF); "
+                "players_trend_7d_pct is same-panel (games measured in BOTH windows), so "
+                "coverage growth can't masquerade as audience growth.",
+            ] + notes,
+        }
+    )
+    return out
+
+
+# ==========================================================================================
+# Methodology — the long-form docs, by topic
+# ==========================================================================================
+@_tool
+def methodology(
+    topic: Annotated[
+        Literal["rules", "scores", "fields", "falsification", "players", "lifetime", "demand",
+                "cuts", "revenue", "marts", "caveats", "all"],
+        Field(description="rules = the analysis rules + every flag code; scores = opportunity_v2/v1 formulas and the Radar rings; fields = niche columns (entrant_ratio, solo_viability, tier, size); falsification = how each metric lies; players / lifetime / demand = those column families; cuts = window x min_reviews; revenue = how estimates are made; marts = what each mart covers; caveats = data biases; all = everything."),
+    ] = "rules",
+) -> dict:
+    """The long-form methodology behind every tool — formulas, thresholds, flag definitions, falsification rules and caveats — served by topic (it used to live in the tool descriptions, which clients truncate at ~2K chars). Start with topic='rules' (the owner's analysis rules and every flag code find_niches/niche_detail emit), then 'scores' before explaining an opportunity_v2 value. The same text is the prospect-data-dictionary resource.
+    """
+    text = _data_dictionary_text() if topic == "all" else _DOCS.get(topic)
+    if text is None:
+        return {"error": f"topic must be one of {[*_DOC_TOPICS, 'all']}"}
+    return {"topic": topic, "text": text}
 
 
 if __name__ == "__main__":
