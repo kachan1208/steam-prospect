@@ -47,6 +47,12 @@ STATIC_FILE_CONTENT = "user-agent: test-bot"
 SPA_SECRET_FILE = _TMP_DIR / "secret.txt"  # OUTSIDE STATIC_DIR — the traversal target
 SPA_SECRET_CONTENT = "TOP-SECRET: must never be served by the SPA fallback"
 SPA_SECRET_FILE.write_text(SPA_SECRET_CONTENT, encoding="utf-8")
+# A Vite-style content-hashed asset, so the /assets mount (and its cache policy) exists in
+# the suite — main.py only mounts it when STATIC_DIR/assets is a directory at import time.
+ASSET_NAME = "index-3f9a1c2b.js"
+ASSET_CONTENT = "console.log('fixture asset');"
+(STATIC_DIR / "assets").mkdir()
+(STATIC_DIR / "assets" / ASSET_NAME).write_text(ASSET_CONTENT, encoding="utf-8")
 os.environ["PROSPECT_STATIC_DIR"] = str(STATIC_DIR)
 
 

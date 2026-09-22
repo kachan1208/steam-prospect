@@ -184,12 +184,37 @@ _STATIC_DIR = Path(settings.static_dir) if settings.static_dir else None
 _INDEX_HTML = (_STATIC_DIR / "index.html") if _STATIC_DIR else None
 _SERVE_SPA = bool(_STATIC_DIR and _INDEX_HTML and _INDEX_HTML.exists())
 
+# Cache policy for the SPA. index.html (and every client route, which IS index.html) must be
+# revalidated on every load: it carried ETag/Last-Modified but no Cache-Control, so browsers
+# applied heuristic freshness and could keep an OLD index.html after a rebuild — one that
+# references hashed /assets/*.js files the new build no longer contains, i.e. a blank page
+# until a hard refresh. "no-cache" still allows a cheap 304 via the ETag. The unhashed
+# top-level files (favicon, robots.txt) get the same treatment. Vite's /assets/* names carry
+# a content hash, so a given URL's bytes never change: cache those for a year, immutable.
+_SPA_CACHE_CONTROL = "no-cache"
+_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
+
+
+class _ImmutableAssets(StaticFiles):
+    """StaticFiles for Vite's content-hashed /assets. Only successful answers (200/304) are
+    marked immutable — a 404 for an asset an old page still references must never be."""
+
+    async def get_response(self, path: str, scope: Scope):
+        response = await super().get_response(path, scope)
+        if response.status_code in (200, 304):
+            response.headers["Cache-Control"] = _ASSET_CACHE_CONTROL
+        return response
+
+
+def _spa_file(path: Path) -> FileResponse:
+    return FileResponse(str(path), headers={"Cache-Control": _SPA_CACHE_CONTROL})
+
 
 @app.get("/", include_in_schema=False)
 def root():
     # Hosted mode: the root path is the app itself. Local/dev: a small JSON pointer.
     if _SERVE_SPA:
-        return FileResponse(str(_INDEX_HTML))
+        return _spa_file(_INDEX_HTML)
     return {
         "name": settings.api_title,
         "version": settings.api_version,
@@ -202,7 +227,7 @@ if _SERVE_SPA:
     # Hashed JS/CSS/images emitted by Vite live under /assets.
     _assets_dir = _STATIC_DIR / "assets"
     if _assets_dir.is_dir():
-        app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="assets")
+        app.mount("/assets", _ImmutableAssets(directory=str(_assets_dir)), name="assets")
 
     # SPA fallback — registered LAST so it never shadows /api/*, /api/docs, /api/openapi.json,
     # /metrics (each matched by its own route above). Any other path returns a real static
@@ -239,5 +264,5 @@ if _SERVE_SPA:
             and candidate.is_file()
             and candidate.resolve().is_relative_to(_STATIC_DIR.resolve())
         ):
-            return FileResponse(str(candidate))
-        return FileResponse(str(_INDEX_HTML))
+            return _spa_file(candidate)
+        return _spa_file(_INDEX_HTML)
