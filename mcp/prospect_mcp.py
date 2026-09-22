@@ -9,24 +9,46 @@ refactor api/app/* (that's a separate, concurrently-edited part of the app) — 
 and constant duplication vs. the FastAPI routers is intentional, see api/app/routers/*.py
 and api/app/benchmarks.py for the endpoints this mirrors.
 
-Every tool returns compact, top-N / summarized JSON (never a raw mart dump) so an agent's
-context stays lean. Read the `prospect-data-dictionary` resource first for what
-opportunity/demand/competition/quality_gap mean and what each mart covers.
+Every tool goes through `_tool` (see "Tool plumbing" below), which gives it:
+  - HOT RELOAD: a mart swap (data/current.duckdb retargeted by the nightly ETL) is noticed
+    within RELOAD_CHECK_S and the connection reopened; capability probes are re-run.
+  - An ENVELOPE leading every response — data_as_of / mart_version / score_version /
+    warnings — so a stale or pre-v2 mart can never answer silently.
+  - JSON-safe values (DECIMAL -> float, DATE -> ISO string, NaN -> null, magnitude-based
+    rounding) and COMPACT JSON on the wire (pretty-printing cost ~29% of every response).
+  - A friendly "this mart predates <column>; rebuild" error instead of a raw DuckDB
+    Binder/Catalog exception when an older mart lacks something.
+
+Read the `prospect-data-dictionary` resource first for what opportunity/demand/
+competition/quality_gap mean and what each mart covers.
 """
 from __future__ import annotations
 
+import functools
+import inspect
+import json
+import math
 import os
+import re
+import statistics
+import sys
 import threading
+import time
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as dt_time
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
+from uuid import UUID
 
 import duckdb
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 # ----------------------------------------------------------------------------------------
-# DB connection — single read-only connection + lock, same idiom as api/app/analytics_db.py
-# (this file's only relationship to that module: mirroring its idiom, not importing it).
+# DB connection — one read-only connection + lock (same idiom as api/app/analytics_db.py;
+# this file's only relationship to that module is mirroring its idiom, not importing it).
 # ----------------------------------------------------------------------------------------
 DB_PATH = Path(
     os.environ.get(
@@ -45,17 +67,126 @@ if not DB_PATH.exists():
         "current.duckdb."
     )
 
-_conn = duckdb.connect(str(DB_PATH), read_only=True)
-_lock = threading.Lock()
+# HOT RELOAD. The nightly ETL publishes a new mart by atomically retargeting
+# data/current.duckdb (a symlink) at a freshly built prospect_YYYYMMDD.duckdb. A connection
+# opened once at import keeps reading the file it was opened on for the life of the
+# process, so a long-lived stdio session or /mcp worker silently served an old mart until
+# someone restarted it. Mirrors the API's reload idea independently (no api/ import, per
+# the header): at most every RELOAD_CHECK_S a tool call stats DB_PATH, and when it now
+# resolves to a different file (realpath or inode changed) the connection is reopened under
+# the query lock. Every capability probe / cached lookup is keyed on _generation, so an
+# answer computed against the old file can never be served for the new one.
+RELOAD_CHECK_S = 30.0
+
+
+def _db_identity() -> tuple[str, int, int] | None:
+    """(resolved path, st_dev, st_ino) of the file DB_PATH points at right now; None while it
+    is missing (mid-swap). Both halves matter: a symlink retarget changes the resolved path,
+    an os.replace() of a plain file keeps the path but changes the inode."""
+    try:
+        real = os.path.realpath(DB_PATH)
+        st = os.stat(real)
+    except OSError:
+        return None
+    return real, st.st_dev, st.st_ino
+
+
+_identity = _db_identity()
+# Opened on the RESOLVED path so the connection reads exactly the file _identity describes,
+# even if the symlink is retargeted between the stat and the connect.
+_conn = duckdb.connect(_identity[0] if _identity else str(DB_PATH), read_only=True)
+_lock = threading.Lock()  # serialises every read on the shared connection
+_reload_lock = threading.Lock()  # one reload check / swap at a time
+_generation = 0  # bumped on every swap; every cache below is keyed on it
+_last_reload_check = time.monotonic()
+_closed = False
+
+
+def _log(msg: str) -> None:
+    # stderr, never stdout: stdout IS the MCP protocol stream in stdio mode.
+    print(f"[prospect-mcp] {msg}", file=sys.stderr, flush=True)
+
+
+def _maybe_reload(force: bool = False) -> bool:
+    """Reopen the connection if DB_PATH now resolves to a different mart. Returns at once
+    unless RELOAD_CHECK_S passed since the last check (or force=True), so it costs one
+    monotonic() read per tool call. A failed reopen keeps serving the old mart and retries
+    at the next check. Returns True when a swap happened."""
+    global _conn, _identity, _generation, _last_reload_check
+    if _closed or (not force and time.monotonic() - _last_reload_check < RELOAD_CHECK_S):
+        return False
+    with _reload_lock:
+        if _closed or (not force and time.monotonic() - _last_reload_check < RELOAD_CHECK_S):
+            return False
+        _last_reload_check = time.monotonic()
+        new_identity = _db_identity()
+        if new_identity is None or new_identity == _identity:
+            return False
+        try:
+            new_conn = duckdb.connect(new_identity[0], read_only=True)
+        except duckdb.Error as exc:
+            _log(f"mart swap to {new_identity[0]} seen but reopen failed ({exc!r}); "
+                 f"still serving {_identity[0] if _identity else DB_PATH}")
+            return False
+        with _lock:
+            if _closed:
+                new_conn.close()
+                return False
+            old, _conn = _conn, new_conn
+            _identity = new_identity
+            # Bumped AFTER _conn is replaced: a reader that sees the new generation is
+            # guaranteed to query the new connection.
+            _generation += 1
+        try:
+            old.close()
+        except Exception:  # noqa: BLE001 — the old conn is abandoned either way
+            pass
+        _log(f"mart swapped -> {new_identity[0]} (generation {_generation})")
+        return True
+
+
+# Column types whose Python values are not JSON-native. DuckDB hands back DECIMAL as
+# decimal.Decimal (the SDK's str() fallback then shipped "55.0" strings, and
+# `float += Decimal` crashed channel_buzz) and DATE as datetime.date — coerced HERE, once,
+# for every tool, instead of per call site.
+_COERCE_TYPES = ("DECIMAL", "DATE", "TIME", "INTERVAL", "UUID")
+
+
+def _to_json_native(v: Any) -> Any:
+    if isinstance(v, Decimal):
+        return float(v)
+    if isinstance(v, (datetime, date, dt_time)):
+        return v.isoformat()
+    if isinstance(v, timedelta):
+        return v.total_seconds()
+    if isinstance(v, UUID):
+        return str(v)
+    if isinstance(v, (list, tuple)):
+        return [_to_json_native(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _to_json_native(x) for k, x in v.items()}
+    return v
+
+
+@lru_cache(maxsize=256)
+def _needs_coercion(type_name: str) -> bool:
+    return any(t in type_name for t in _COERCE_TYPES)
 
 
 def query(sql: str, params: list[Any] | None = None) -> list[dict]:
     with _lock:
         cur = _conn.cursor()
         cur.execute(sql, params or [])
-        cols = [d[0] for d in cur.description]
+        desc = cur.description or []
         rows = cur.fetchall()
-    return [dict(zip(cols, row)) for row in rows]
+    cols = [d[0] for d in desc]
+    coerce = [_needs_coercion(str(d[1])) for d in desc]
+    if not any(coerce):
+        return [dict(zip(cols, row)) for row in rows]
+    return [
+        {c: (_to_json_native(v) if f and v is not None else v) for c, f, v in zip(cols, coerce, row)}
+        for row in rows
+    ]
 
 
 def query_one(sql: str, params: list[Any] | None = None) -> dict | None:
@@ -63,14 +194,11 @@ def query_one(sql: str, params: list[Any] | None = None) -> dict | None:
     return rows[0] if rows else None
 
 
-_closed = False
-
-
 def close() -> None:
     """Close the module-global read-only DuckDB connection. Idempotent — the hosted API
     calls this from its shutdown path (api/app/main.py lifespan); standalone stdio runs
-    simply exit and never need it. After close(), query() raises, so it must be the last
-    thing this module does."""
+    simply exit and never need it. After close(), query() raises (and no hot reload
+    reopens it), so it must be the last thing this module does."""
     global _closed
     with _lock:
         if _closed:
@@ -81,30 +209,38 @@ def close() -> None:
 
 # ----------------------------------------------------------------------------------------
 # Schema-capability probes — which additive marts/columns this current.duckdb carries.
-# LAZY on purpose (evaluated on first use, cached for the process lifetime): the hosted
-# API imports this module at startup, and running all ~18 probe queries per worker at
-# import time taxed every cold start before a single request was served. Caching is safe
-# for exactly the reason the old module-level read-once probes were: the analytics DB is
-# swapped atomically + the process restarted on each ETL build, so capabilities cannot
-# change under a running process. None of these feed docstrings or registration-time
-# logic (docstrings are static strings), so every probe can be lazy.
+# LAZY on purpose (evaluated on first use): the hosted API imports this module at startup,
+# and running every probe per worker at import time taxed each cold start. Cached per
+# _generation — ONE information_schema read per table per mart — so a hot-reloaded mart is
+# re-probed from scratch and a probe answered against the old file is never read again.
+# None of these feed docstrings or registration-time logic (docstrings are static).
 # ----------------------------------------------------------------------------------------
 @lru_cache(maxsize=None)
-def _has_column(table: str, column: str) -> bool:
-    return bool(
-        query(
-            "SELECT 1 FROM information_schema.columns "
-            "WHERE table_name = ? AND column_name = ?",
-            [table, column],
+def _table_columns(gen: int, table: str) -> frozenset[str]:
+    return frozenset(
+        r["column_name"]
+        for r in query(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ?", [table]
         )
     )
 
 
 @lru_cache(maxsize=None)
+def _tables(gen: int) -> frozenset[str]:
+    return frozenset(r["table_name"] for r in query("SELECT table_name FROM information_schema.tables"))
+
+
+def _cols(table: str) -> frozenset[str]:
+    """The columns `table` has in the CURRENT mart (empty when the table is absent)."""
+    return _table_columns(_generation, table)
+
+
+def _has_column(table: str, column: str) -> bool:
+    return column in _cols(table)
+
+
 def _has_table(table: str) -> bool:
-    return bool(
-        query("SELECT 1 FROM information_schema.tables WHERE table_name = ?", [table])
-    )
+    return table in _tables(_generation)
 
 
 def _has_name_lower() -> bool:
@@ -191,42 +327,51 @@ def _has_aspect_reviews() -> bool:
 
 
 def _has_niche_p90() -> bool:
-    """Revenue percentiles per niche (p25/p75/p90_rev). They land in mart_niche from the
-    same ETL, and the REST API has exposed them since 2026-08-14 — the MCP simply never
-    selected them, so agents could only ever see the MEDIAN of a niche. The median is the
-    wrong target for someone deciding what to build: it is dragged down by asset flips
-    and abandoned projects, while p90 is what a niche pays when the game actually
-    lands."""
+    """Revenue percentiles per niche (p25/p75/p90_rev). The median is the wrong target for
+    someone deciding what to build: it is dragged down by asset flips and abandoned
+    projects, while p90 is what a niche pays when the game actually lands."""
     return _has_column("mart_niche", "p90_rev")
 
 
 def _has_demand24m() -> bool:
     """24-month demand trend per niche (reviews_24m / reviews_prev_24m /
     demand_trend_24m_pct, plus the emerging pair reviews_24m_new_share / demand_emerging
-    — one ETL build, one probe): the niche's review-histogram inflow over the last 24
-    complete months vs the 24 before them — the structural demand read the Radar surfaces
-    ring on, matching the radar's own pinned 24m membership cut. Cut-independent in the
-    mart (one value per (dimension, key), identical on every window/floor cut). These
-    REPLACED the earlier 12-month columns outright (which had replaced the 90-day ones),
-    so a mart carrying only those old columns probes False here and the fields are simply
-    omitted."""
+    — one ETL build, one probe). These REPLACED the earlier 12-month columns outright
+    (which had replaced the 90-day ones), so a mart carrying only those old columns probes
+    False here and the fields are simply omitted."""
     return _has_column("mart_niche", "demand_trend_24m_pct")
 
 
 def _has_v2_parts() -> bool:
     """opportunity_v2's sub-scores (momentum / supply_room / revenue_spread / market_pull
     / supply_brake) plus solo_tier — the 2026-08-31 score rebuild, one ETL build, one
-    probe. opportunity_v2 ITSELF is served by every mart; what an older one cannot serve
-    is the breakdown, so these columns are simply omitted from the row rather than
-    erroring. Beware when they are absent: the score that mart carries is the OLD formula,
-    which ranked the opposite way to the Radar's rings (see the data dictionary)."""
+    probe. It also decides the envelope's score_version: without them the mart's
+    opportunity_v2 is the OLD formula (opportunity x decline_gate), which ranked the
+    opposite way to the Radar's rings."""
     return _has_column("mart_niche", "supply_brake")
 
 
-_V2_PARTS_SELECT = (
-    ",\n                   momentum, supply_room, revenue_spread, market_pull,"
-    " supply_brake, solo_tier"
-)
+@lru_cache(maxsize=None)
+def _no_floor_cut(gen: int) -> bool:
+    # Row probe, not a schema probe: the min_reviews=0 (no-floor) cut adds ROWS to
+    # mart_niche, not columns, so its presence is detected by looking for one.
+    return bool(query("SELECT 1 FROM mart_niche WHERE min_reviews = 0 LIMIT 1"))
+
+
+def _has_no_floor_cut() -> bool:
+    return _no_floor_cut(_generation)
+
+
+@lru_cache(maxsize=None)
+def _max_date(gen: int, table: str) -> date | None:
+    """MAX(date) of a daily players mart — the ANCHOR every players window is measured
+    back from. Anchoring to CURRENT_DATE made an older mart look empty ("likely rotated
+    out or delisted") for games it has plenty of history for. Table names are this
+    module's own literals, never caller input."""
+    row = query_one(f"SELECT MAX(date) AS d FROM {table}")
+    d = row["d"] if row else None
+    return date.fromisoformat(d) if d else None
+
 
 _PLAYERS_MISSING = (
     "this analytics DB predates the live-player (CCU) marts (mart_game_players_daily / "
@@ -244,17 +389,18 @@ _DEMO_MISSING = (
     "the ETL (`task etl` in the main prospect checkout) and retry."
 )
 
-# Row probe, not a schema probe: the min_reviews=0 (no-floor) cut adds ROWS to mart_niche,
-# not columns, so its presence is detected by looking for one. Cached directly (it can't
-# share the schema-probe helpers) — same lazy/read-once semantics as the rest.
-@lru_cache(maxsize=None)
-def _has_no_floor_cut() -> bool:
-    return bool(query("SELECT 1 FROM mart_niche WHERE min_reviews = 0 LIMIT 1"))
-
 _NO_FLOOR_MISSING = (
     "This mart predates the no-floor (min_reviews=0) cut of mart_niche (an older ETL "
     "build). Use min_reviews=50 or 100, or re-run the ETL (`task etl`) and retry."
 )
+
+
+def _column_missing(table: str, column: str) -> str:
+    return (
+        f"This mart predates {table}.{column} (an older ETL build). Rebuild the mart "
+        "(`task etl` in the main prospect checkout) and retry."
+    )
+
 
 # The two marts EVERY tool path ultimately reads. Not a capability probe: their absence is
 # not a degradable feature gap, it is a broken analytics DB.
@@ -268,7 +414,7 @@ def missing_core_marts() -> list[str]:
     before a tool is called. The hosted API (api/app/mcp_mount.py) calls it once at load
     time and refuses to mount /mcp when it returns anything: with every capability probe
     lazy, a mart-less or half-built current.duckdb (failed/OOM-killed nightly ETL) would
-    otherwise import cleanly, advertise all 25 tools, and then raise raw
+    otherwise import cleanly, advertise every tool, and then raise raw
     duckdb.CatalogException inside every connected Claude client with nothing in the
     startup log to say the MCP was broken. Two cheap queries (catalog lookup + COUNT).
     Standalone stdio runs never call it — a human running `python prospect_mcp.py`
@@ -307,24 +453,51 @@ _PLAYERS_HISTORY_CAVEAT = (
 )
 
 
-def _round(v: Any, nd: int) -> Any:
+# ----------------------------------------------------------------------------------------
+# JSON-safe rounding. Magnitude-based so no field carries garbage digits: >= 1000 -> whole
+# number (revenue, owners, review counts — they are estimates anyway), >= 1 -> 2 decimals
+# (0-100 scores, ratios, prices), below 1 -> 4 decimals (shares). NaN/inf -> null (JSON
+# has no NaN, and a strict client rejects the whole response over one).
+# ----------------------------------------------------------------------------------------
+def _num(v: float) -> float | int | None:
+    if not math.isfinite(v):
+        return None
+    a = abs(v)
+    if a >= 1000:
+        return int(round(v))
+    if a >= 1:
+        return round(v, 2)
+    return round(v, 4)
+
+
+def _jsonable(v: Any) -> Any:
     if isinstance(v, float):
-        return round(v, nd)
+        return _num(v)
     if isinstance(v, dict):
-        return {k: _round(x, nd) for k, x in v.items()}
-    if isinstance(v, list):
-        return [_round(x, nd) for x in v]
+        return {k: _jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    if isinstance(v, Decimal):
+        return _num(float(v))
+    if isinstance(v, (datetime, date, dt_time)):
+        return v.isoformat()
     return v
 
 
-def clean(row: dict, nd: int = 4) -> dict:
+def clean(row: dict) -> dict:
     """Round floats (recursively) so DuckDB float noise like 75524.40000000001 doesn't
     burn agent context on garbage digits."""
-    return {k: _round(v, nd) for k, v in row.items()}
+    return _jsonable(row)
 
 
-def clean_rows(rows: list[dict], nd: int = 4) -> list[dict]:
-    return [clean(r, nd) for r in rows]
+def clean_rows(rows: list[dict]) -> list[dict]:
+    return _jsonable(rows)
+
+
+def _usd(v: Any) -> str:
+    """'$1,234' for a revenue figure, 'n/a' when it is NULL (free games carry no revenue
+    estimate, so a free-dominated niche/pair can have a NULL median)."""
+    return f"${v:,.0f}" if isinstance(v, (int, float)) else "n/a"
 
 
 # ----------------------------------------------------------------------------------------
@@ -370,7 +543,8 @@ def _tier_for_copies(copies: float | None) -> str:
 def _genre_owners_per_review(genre: str | None) -> tuple[str, float]:
     """(genre_used, mid owners/review) from the fitted Boxleiter slope for `genre`,
     clamped to the cited 20-55 band; falls back to the catalog-wide ('__all__') slope,
-    then the cited mid. Mirrors api/app/routers/estimate.py's helper of the same name."""
+    then the cited mid. The web estimator's owner math lives client-side now (the old
+    api/app/routers/estimate.py it once mirrored is gone); this is the MCP's own copy."""
     lo, hi = float(BOXLEITER_OWNERS_PER_REVIEW_MIN), float(BOXLEITER_OWNERS_PER_REVIEW_MAX)
     default = float(BOXLEITER_OWNERS_PER_REVIEW_MID)
     for candidate in [genre, "__all__"]:
@@ -382,6 +556,124 @@ def _genre_owners_per_review(genre: str | None) -> tuple[str, float]:
     return ("__all__", default)
 
 
+_V2_PARTS_SELECT = (
+    ",\n                   momentum, supply_room, revenue_spread, market_pull,"
+    " supply_brake, solo_tier"
+)
+
+
+# ----------------------------------------------------------------------------------------
+# The envelope — leads every response. data_as_of is mart_meta.built_at; score_version is
+# "v2" (the 2026-08-31 rebuild, components present) or "v1-legacy". warnings carry
+# everything that should change how the rest of the answer is read.
+# ----------------------------------------------------------------------------------------
+STALE_AFTER_DAYS = 3
+
+_V1_LEGACY_WARNING = (
+    "This mart predates opportunity v2 (the 2026-08-31 score rebuild): opportunity_v2 here is "
+    "the OLD formula — it ranked shrinking niches on top and has no components, so rankings "
+    "differ from the Radar. Rebuild the mart (task etl) before recommending."
+)
+
+
+@lru_cache(maxsize=None)
+def _meta(gen: int) -> dict[str, str]:
+    """mart_meta as {key: value} for mart generation `gen` ({} when the mart predates it)."""
+    try:
+        rows = query("SELECT key, value FROM mart_meta")
+    except duckdb.Error:  # absent (very old mart) or shaped differently — no metadata
+        return {}
+    return {str(r["key"]): r["value"] for r in rows if r["key"] is not None}
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    if not value:
+        return None
+    s = str(value)
+    for candidate in (s, s[:10]):
+        try:
+            dt = datetime.fromisoformat(candidate)
+        except ValueError:
+            continue
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _as_of_date() -> date:
+    """The mart's own 'today' (mart_meta.built_at's date), so date windows describe the
+    snapshot the mart holds rather than the wall clock — an older mart would otherwise
+    answer 'released in the last 30 days' with nothing."""
+    dt = _parse_ts(_meta(_generation).get("built_at"))
+    return dt.date() if dt else datetime.now(timezone.utc).date()
+
+
+def envelope() -> dict:
+    meta = _meta(_generation)
+    built_at = meta.get("built_at")
+    v2 = _has_v2_parts()
+    env: dict[str, Any] = {
+        "data_as_of": built_at,
+        "mart_version": meta.get("mart_version"),
+        "score_version": "v2" if v2 else "v1-legacy",
+    }
+    warnings: list[str] = []
+    if not v2:
+        warnings.append(_V1_LEGACY_WARNING)
+    built_dt = _parse_ts(built_at)
+    if built_dt is None:
+        warnings.append(
+            "Mart build time unknown (no mart_meta.built_at) — treat every number as possibly "
+            "stale."
+        )
+    else:
+        age = (datetime.now(timezone.utc) - built_dt).days
+        if age > STALE_AFTER_DAYS:
+            warnings.append(
+                f"Data is {age} days old (built {built_dt.date().isoformat()}) — live players, "
+                "demand trends and review velocity describe that date. Rebuild the mart "
+                "(task etl) for current numbers."
+            )
+    owners_as_of = meta.get("owners_as_of")
+    if owners_as_of:
+        # Capability-gated: newer ETLs stamp when the SteamSpy owner estimates were taken,
+        # which can lag the build itself.
+        env["owners_as_of"] = owners_as_of
+        owners_dt = _parse_ts(owners_as_of)
+        if owners_dt and built_dt and (built_dt - owners_dt).days > 30:
+            warnings.append(
+                f"Owner/revenue estimates date from {owners_dt.date().isoformat()} — "
+                f"{(built_dt - owners_dt).days} days older than the rest of the mart."
+            )
+    env["warnings"] = warnings
+    return env
+
+
+def _with_envelope(result: Any) -> dict:
+    env = envelope()
+    if not isinstance(result, dict):
+        return {**env, "result": result}
+    extra = result.get("warnings") or []
+    body = {k: v for k, v in result.items() if k != "warnings"}
+    env["warnings"] = env["warnings"] + list(extra)
+    return {**env, **body}
+
+
+def _predates_error(exc: Exception) -> str:
+    """A DuckDB Binder/Catalog error means this (older) mart lacks a column/table the tool
+    reads — say that, name it, and say how to fix it, instead of a raw stack message."""
+    msg = str(exc)
+    m = re.search(r'column "([^"]+)"', msg) or re.search(r"Table with name (\w+)", msg)
+    what = f"`{m.group(1)}`" if m else "a column or table this tool reads"
+    version = _meta(_generation).get("mart_version") or "unknown build"
+    return (
+        f"This mart ({version}) predates {what}, which a newer ETL added. Rebuild the mart "
+        "(`task etl` in the main prospect checkout) and retry; other tools still work."
+    )
+
+
+# ==========================================================================================
+# Server + tool plumbing
+# ==========================================================================================
 mcp = FastMCP(
     "prospect-market-intel",
     instructions=(
@@ -417,6 +709,48 @@ mcp = FastMCP(
         "peaks, and totals are dominated by each niche's biggest games."
     ),
 )
+
+_TOOL_ANNOTATIONS = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+
+
+def _dumps(obj: Any) -> str:
+    # Compact (no indent): the SDK's default indent=2 added ~29% to every response.
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def _tool(fn):
+    """Register `fn` as an MCP tool and return the DIRECT-call wrapper.
+
+    The direct wrapper (bound to the module attribute, so `prospect_mcp.find_niches()` in
+    tests/smoke runs gets exactly what the wire gets) hot-reloads the mart if it was
+    swapped, runs the tool, turns an older mart's Binder/Catalog error into a rebuild
+    message, prepends the envelope and makes every value JSON-safe. The MCP-facing entry
+    point serialises that to compact JSON text; structured_output=False keeps the SDK from
+    also shipping a second (structured) copy of every payload. The description is the
+    docstring, cleandoc'd (indentation no longer counts against the ~2K budget)."""
+
+    @functools.wraps(fn)
+    def call(*args, **kwargs):
+        _maybe_reload()
+        try:
+            result = fn(*args, **kwargs)
+        except (duckdb.BinderException, duckdb.CatalogException) as exc:
+            _log(f"{fn.__name__}: {type(exc).__name__}: {exc}")
+            result = {"error": _predates_error(exc)}
+        return _jsonable(_with_envelope(result))
+
+    @functools.wraps(fn)
+    def mcp_entry(*args, **kwargs):
+        return _dumps(call(*args, **kwargs))
+
+    mcp.add_tool(
+        mcp_entry,
+        name=fn.__name__,
+        description=inspect.cleandoc(fn.__doc__ or ""),
+        annotations=_TOOL_ANNOTATIONS,
+        structured_output=False,
+    )
+    return call
 
 
 # ==========================================================================================
@@ -804,7 +1138,7 @@ _NICHE_V2_MISSING = (
 )
 
 
-@mcp.tool()
+@_tool
 def find_niches(
     dimension: Literal["tag", "genre"] = "tag",
     window: Literal["all", "24m"] = "24m",
@@ -1060,7 +1394,7 @@ def find_niches(
     }
 
 
-@mcp.tool()
+@_tool
 def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
     """Deep dive on one niche (get valid `key` values from find_niches — exact match,
     case-sensitive). Returns:
@@ -1235,7 +1569,7 @@ def niche_detail(dimension: Literal["tag", "genre"], key: str) -> dict:
     }
 
 
-@mcp.tool()
+@_tool
 def tag_combos(tag: str, limit: int = 15) -> dict:
     """Which co-tags does one Steam community tag perform best/worst WITH? Answers "which
     tags should MY game ship with?" — e.g. does 'Roguelike Deckbuilder'+'Horror' outperform
@@ -1386,7 +1720,7 @@ _NICHE_THEME_CAVEATS = [
 ]
 
 
-@mcp.tool()
+@_tool
 def niche_review_themes(dimension: Literal["tag", "genre"], key: str) -> dict:
     """What a whole NICHE praises vs complains about — per-aspect review sentiment rolled
     up across every review-mined game in one tag/genre niche, with each share's delta vs
@@ -1481,7 +1815,7 @@ def niche_review_themes(dimension: Literal["tag", "genre"], key: str) -> dict:
 # ==========================================================================================
 # Market / revenue tools
 # ==========================================================================================
-@mcp.tool()
+@_tool
 def market_benchmarks() -> dict:
     """Reference anchors for judging any revenue/owners number. Returns:
       - cited: figures from public indie-market research (VG Insights / GameDiscoverCo /
@@ -1547,7 +1881,7 @@ def market_benchmarks() -> dict:
     }
 
 
-@mcp.tool()
+@_tool
 def revenue_distribution(
     metric: Literal["revenue", "reviews", "owners", "price"] = "revenue",
     genre: str = "__all__",
@@ -1586,7 +1920,7 @@ def revenue_distribution(
     }
 
 
-@mcp.tool()
+@_tool
 def estimate_revenue(
     price: float,
     reviews: int | None = None,
@@ -1660,7 +1994,7 @@ def estimate_revenue(
     )
 
 
-@mcp.tool()
+@_tool
 def lifetime_curve() -> dict:
     """How long does a Steam game keep an audience once it has one? The catalog-wide
     survival curve from mart_market_lifetime: for every game whose steamcharts monthly
@@ -1725,7 +2059,7 @@ _LAUNCH_WINDOWS = [
 ]
 
 
-@mcp.tool()
+@_tool
 def launch_shape(genre: str = "__all__") -> dict:
     """How a genre's first-year review volume accumulates after launch, as a MARGINAL
     windowed shape (share of first-year reviews landing in each window: 1w, 2w, 3-4w, 2m,
@@ -1761,7 +2095,7 @@ _TIMING_MONTH_NAMES = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
-@mcp.tool()
+@_tool
 def best_launch_timing(genre: str = "__all__") -> dict:
     """When to launch in a genre, from the TRUE uncapped monthly review histograms
     (Steam's own per-month review-graph totals for ~40K games — exact counts, not the
@@ -1903,7 +2237,7 @@ _GAME_SORTABLE = {
 }
 
 
-@mcp.tool()
+@_tool
 def game_search(
     q: str | None = None,
     tag: str | None = None,
@@ -2069,7 +2403,7 @@ def game_search(
     }
 
 
-@mcp.tool()
+@_tool
 def game_profile(appid: int) -> dict:
     """Full profile for one game by Steam appid: metadata (primary genre, developers,
     publishers, self-published?, indie?), price, owners/reviews/est. revenue, percentile
@@ -2138,7 +2472,7 @@ def game_profile(appid: int) -> dict:
     return out
 
 
-@mcp.tool()
+@_tool
 def find_comparables(appid: int, limit: int = 15, min_reviews: int = 10) -> dict:
     """Closest competitors for one game — "who else is fighting for this audience?"
     Tag-overlap comparables computed on demand at query time (never precomputed pairwise
@@ -2240,7 +2574,7 @@ def find_comparables(appid: int, limit: int = 15, min_reviews: int = 10) -> dict
     return clean(result)
 
 
-@mcp.tool()
+@_tool
 def game_teardown(appid: int) -> dict:
     """"Why it works" teardown for one game — fuses (A) review-text aspect mining with
     (B) press/PR footprint. Use game_search to find an appid by name first.
@@ -2378,7 +2712,7 @@ _VALID_ASPECTS = {
 }
 
 
-@mcp.tool()
+@_tool
 def game_reviews_summary(appid: int) -> dict:
     """How ONE game's reception moved over time, who its audience is, and how front-loaded
     its reviews were — the per-game counterpart to the genre-level launch_shape.
@@ -2444,7 +2778,7 @@ def game_reviews_summary(appid: int) -> dict:
     )
 
 
-@mcp.tool()
+@_tool
 def aspect_reviews(
     appid: int,
     aspect: str,
@@ -2494,10 +2828,9 @@ def aspect_reviews(
 # this file's no-api-imports rule): re-running the UNNEST(top_tags) aggregate over
 # mart_game costs ~90ms per call, while the FULL distinct list is only ~460 rows — build
 # it once (~25ms), then every suggest call is a sub-millisecond in-memory substring
-# filter. Caching for the process lifetime is safe because the analytics DB is swapped +
-# the process restarted on each ETL build (the same invariant the schema probes rely on).
-@lru_cache(maxsize=1)
-def _tag_frequencies() -> tuple[tuple[str, int], ...]:
+# filter. Keyed on _generation, so a hot-reloaded mart rebuilds it.
+@lru_cache(maxsize=4)
+def _tag_freqs(gen: int) -> tuple[tuple[str, int], ...]:
     rows = query(
         "SELECT tag, COUNT(*) AS n_games "
         "FROM (SELECT UNNEST(top_tags) AS tag FROM mart_game) "
@@ -2507,7 +2840,11 @@ def _tag_frequencies() -> tuple[tuple[str, int], ...]:
     return tuple((r["tag"], int(r["n_games"])) for r in rows)
 
 
-@mcp.tool()
+def _tag_frequencies() -> tuple[tuple[str, int], ...]:
+    return _tag_freqs(_generation)
+
+
+@_tool
 def tag_suggest(q: str = "", limit: int = 10) -> dict:
     """Resolve a partial tag to the EXACT tag strings the catalog uses, with how many games
     carry each. Steam tags are exact-match everywhere else in this server ('Rogue-like' and
@@ -2542,7 +2879,6 @@ def _median_of(vals: list) -> float | None:
     vals = [v for v in vals if v is not None]
     if not vals:
         return None
-    import statistics
     return float(statistics.median(vals))
 
 
@@ -2583,7 +2919,7 @@ def _entity_trajectory(games: list[dict]) -> dict:
     return out
 
 
-@mcp.tool()
+@_tool
 def entity_profile(name: str, role: Literal["developer", "publisher"] = "developer") -> dict:
     """Profile one developer or publisher ENTITY by exact name: aggregate track record
     (n_games, first/last release year, n_recent_24m — releases in the last 24 months, the
@@ -2682,7 +3018,7 @@ def entity_profile(name: str, role: Literal["developer", "publisher"] = "develop
     )
 
 
-@mcp.tool()
+@_tool
 def publisher_pitch_list(genre: str, min_games: int = 3, limit: int = 15) -> dict:
     """Which publishers to pitch for one Steam genre (exact PRIMARY-genre label, e.g.
     "RPG", "Strategy" — see game_profile/market_benchmarks for valid labels): publishers
@@ -2770,7 +3106,7 @@ def publisher_pitch_list(genre: str, min_games: int = 3, limit: int = 15) -> dic
 # ==========================================================================================
 # Press / buzz tools
 # ==========================================================================================
-@mcp.tool()
+@_tool
 def press_pitch_list(genre: str, limit: int = 15) -> dict:
     """Who to pitch for press coverage in one Steam genre (exact label, e.g. "RPG",
     "Action" — see a game_profile/game_search result's primary_genre, or
@@ -2825,7 +3161,7 @@ def press_pitch_list(genre: str, limit: int = 15) -> dict:
     }
 
 
-@mcp.tool()
+@_tool
 def buzz_trends(
     direction: Literal["rising", "cooling"] = "rising",
     limit: int = 15,
@@ -2888,7 +3224,7 @@ def buzz_trends(
 # ==========================================================================================
 
 
-@mcp.tool()
+@_tool
 def channel_mix(genre: str | None = None) -> dict:
     """Marketing-attention volume by channel for one genre, or the full matrix if genre is
     omitted. PRESS-ONLY since 2026-08-25: the creator platforms (YouTube/Reddit/Twitch/X)
@@ -2928,7 +3264,7 @@ def channel_mix(genre: str | None = None) -> dict:
     return {"genre": genre, "n_returned": len(rows), "items": clean_rows(rows)}
 
 
-@mcp.tool()
+@_tool
 def channel_buzz(direction: Literal["rising", "cooling"] = "rising", limit: int = 15, include_series: bool = False) -> dict:
     """Reach-WEIGHTED trending game-concepts by marketing channel — PRESS-ONLY since
     2026-08-25 (the creator platforms were decommissioned) — the sequel to buzz_trends
@@ -3024,7 +3360,7 @@ def channel_buzz(direction: Literal["rising", "cooling"] = "rising", limit: int 
 # ==========================================================================================
 # Live-player (CCU) history tools — daily point-sample series from mart_players.sql
 # ==========================================================================================
-@mcp.tool()
+@_tool
 def game_player_history(appid: int, days: int = 30) -> dict:
     """Daily concurrent-player (CCU) history for one game — REAL current traction over
     time, the direct "are people actually playing this" signal (unlike owners/revenue,
@@ -3128,7 +3464,7 @@ def game_player_history(appid: int, days: int = 30) -> dict:
     }
 
 
-@mcp.tool()
+@_tool
 def niche_player_history(dimension: Literal["tag", "genre"], key: str, days: int = 30) -> dict:
     """Daily total-live-players series for one niche — the direct "is this niche hot,
     and which way is it moving" signal. Sums the niche's scored games' (>= 50 reviews)
