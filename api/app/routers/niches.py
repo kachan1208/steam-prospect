@@ -292,23 +292,42 @@ def _niche_list_cuts() -> tuple[tuple[str, int], ...]:
     """The (win, min_reviews) cuts mart_niche itself carries — the list surface's twin of
     _niche_game_cuts(), memoized once per mart the same way."""
     def compute() -> tuple[tuple[str, int], ...]:
-        rows = analytics_db.query("SELECT DISTINCT win, min_reviews FROM mart_niche")
+        try:
+            rows = analytics_db.query("SELECT DISTINCT win, min_reviews FROM mart_niche")
+        except duckdb.CatalogException as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="mart_niche has not been built — rebuild the marts (task etl).",
+            ) from exc
         return tuple(sorted((str(r["win"]), int(r["min_reviews"])) for r in rows))
 
     return analytics_db.memo("niches.list_cuts", compute)
 
 
+def _cut_422(win_param: str, win: str, min_reviews: int, table: str, cuts) -> HTTPException:
+    return HTTPException(
+        status_code=422,
+        detail=(
+            f"cut ({win_param}={win}, min_reviews={min_reviews}) is not materialised in "
+            f"{table}; available: " + ", ".join(f"({w}, {m})" for w, m in cuts)
+        ),
+    )
+
+
 def _require_cut(win: str, min_reviews: int) -> None:
     cuts = _niche_game_cuts()
     if (win, min_reviews) not in cuts:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"cut (win={win}, min_reviews={min_reviews}) is not materialised in "
-                f"mart_niche_game; available: "
-                + ", ".join(f"({w}, {m})" for w, m in cuts)
-            ),
-        )
+        raise _cut_422("win", win, min_reviews, "mart_niche_game", cuts)
+
+
+def _require_list_cut(window: str, min_reviews: int) -> None:
+    """The list surface's input validation, against the cuts mart_niche actually carries
+    — the same loud 422 the drill-down endpoints give. Only 0/50/100 exist; min_reviews=25
+    (or -3) used to return `total: 0` from the list and a header-only CSV from the export,
+    which read as "no niche clears this bar" instead of "that bar doesn't exist"."""
+    cuts = _niche_list_cuts()
+    if (window, min_reviews) not in cuts:
+        raise _cut_422("window", window, min_reviews, "mart_niche", cuts)
 
 
 def _require_dimension(dimension: str) -> None:
@@ -572,6 +591,7 @@ def list_niches(
     offset: int = Query(0, ge=0),
 ) -> NicheList:
     _require_list_capabilities(sort, min_reviews)
+    _require_list_cut(window, min_reviews)
     tiers_arg = tiers if tiers else None  # "" (explicit empty) = no tier filter
     where, params = _build_filters(
         dimension, window, min_reviews, q, tiers_arg, min_total_players, min_total_owners
@@ -1081,8 +1101,10 @@ def export_csv(
 ) -> Response:
     # The SAME capability gates as list_niches — the export is the list in CSV clothes,
     # so a request the list would answer with a specific 503 must not fall through to
-    # _niche_query's generic (and here misleading) v2-columns 503.
+    # _niche_query's generic (and here misleading) v2-columns 503. Same cut validation too:
+    # an unknown min_reviews used to download a header-only CSV.
     _require_list_capabilities(sort, min_reviews)
+    _require_list_cut(window, min_reviews)
     tiers_arg = tiers if tiers else None
     where, params = _build_filters(dimension, window, min_reviews, q, tiers_arg, None, None)
     rows = _niche_query(where, params, sort, order, limit, None)

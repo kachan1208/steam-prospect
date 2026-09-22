@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Query, Response
 
 from .. import analytics_db, benchmarks, histograms, response_cache
@@ -15,8 +17,6 @@ from ..schemas import (
 )
 
 router = APIRouter(prefix="/api/market", tags=["market"])
-
-_METRICS = {"revenue", "reviews", "owners", "price"}
 
 
 def _marks_for(metric: str) -> list[BenchmarkMark]:
@@ -42,12 +42,12 @@ def _marks_for(metric: str) -> list[BenchmarkMark]:
 
 @router.get("/distribution", response_model=MarketDistribution)
 def distribution(
-    metric: str = Query("revenue"),
+    # A Literal, so an unknown metric is FastAPI's 422 naming the valid ones. It used to be
+    # silently rewritten to "revenue" — a typo'd metric=review got a revenue chart back.
+    metric: Literal["revenue", "reviews", "owners", "price"] = Query("revenue"),
     genre: str = Query("__all__"),
     window: str = Query("all", pattern="^(all|24m)$"),
 ) -> MarketDistribution:
-    if metric not in _METRICS:
-        metric = "revenue"
     buckets = analytics_db.query(
         "SELECT bucket_index, x_min, x_max, count FROM mart_market_hist "
         "WHERE metric = ? AND genre = ? AND win = ? ORDER BY bucket_index",
