@@ -18,6 +18,7 @@ the pool is simply rebuilt on startup — no live-reopen logic needed.
 """
 from __future__ import annotations
 
+import logging
 import queue
 import time
 from contextlib import contextmanager
@@ -27,6 +28,8 @@ from typing import Any
 
 import duckdb
 from fastapi import HTTPException
+
+logger = logging.getLogger(__name__)
 
 _conn: duckdb.DuckDBPyConnection | None = None
 _pool: "queue.Queue[duckdb.DuckDBPyConnection] | None" = None
@@ -68,29 +71,89 @@ _DB_MISSING_DETAIL = (
 _POOL_BUSY_DETAIL = (
     "server busy — all analytics cursors are in use; retry shortly"
 )
+_UNREADABLE_DETAIL = (
+    "analytics database unreadable — an I/O error while reading the mart (truncated or "
+    "corrupt file?); it needs rebuilding or restoring"
+)
+
+# Why the last init() failed, in operator-facing words (None = never failed, or the DB is
+# open). main.py keeps the app up on a failed open — the health endpoint and every 503 then
+# say WHICH failure it was, instead of all of them claiming "the ETL hasn't run yet" when
+# the real story is a truncated download or a corrupt file.
+_init_error: str | None = None
+
+
+class MartUnavailable(RuntimeError):
+    """init() could not open a usable mart. str(exc) is the operator-facing reason.
+
+    Raised for EVERY way the open can fail — a missing file, but also a 0-byte, truncated
+    or garbage file (duckdb.IOException), an unreadable one (PermissionError) or a DuckDB
+    file with no tables in it. main.py's lifespan catches exactly this and keeps the API up
+    in degraded mode; before it existed only FileNotFoundError was caught, so a corrupt
+    mart raised straight out of the lifespan, the worker died with STARTUP_FAILURE and the
+    container exited — the opposite of the documented "endpoints will 503" contract."""
+
+
+def _one_line(exc: BaseException, limit: int = 300) -> str:
+    text = " ".join(str(exc).split())
+    return f"{type(exc).__name__}: {text[:limit]}"
 
 
 def init(path: str, pool_size: int = 4) -> None:
-    global _conn, _pool, _mart_meta
+    global _conn, _pool, _mart_meta, _init_error
+    # init() means "serve THIS mart": whatever was open before is closed first, so a failed
+    # open leaves the API honestly degraded rather than silently serving the previous file.
+    close()
     p = Path(path)
     if not p.exists():
-        raise FileNotFoundError(
-            f"Analytics DB not found at {path}. Run `make etl` first to build the marts."
+        _init_error = f"no analytics database at {path} (the ETL hasn't produced it yet)"
+        raise MartUnavailable(
+            f"Analytics DB not found at {path}. Run `task etl` first to build the marts."
         )
     n = max(1, pool_size)
-    _conn = duckdb.connect(str(p), read_only=True)
-    _pool = queue.Queue(maxsize=n)
-    for _ in range(n):
-        _pool.put(_conn.cursor())
+    conn: duckdb.DuckDBPyConnection | None = None
     try:
-        rows = _conn.execute("SELECT key, value FROM mart_meta").fetchall()
-        _mart_meta = {str(k): str(v) for k, v in rows if k is not None and v is not None}
-    except duckdb.Error:  # mart predates mart_meta — nothing to key caches on
-        _mart_meta = {}
+        conn = duckdb.connect(str(p), read_only=True)
+        # An EMPTY DuckDB file is a valid database with nothing in it — every query would
+        # then fail one by one. A mart with zero tables is not a mart: refuse it up front.
+        n_tables = conn.execute("SELECT COUNT(*) FROM information_schema.tables").fetchone()[0]
+        if not n_tables:
+            raise MartUnavailable(f"{path} is a DuckDB file with no tables in it")
+        pool: queue.Queue[duckdb.DuckDBPyConnection] = queue.Queue(maxsize=n)
+        for _ in range(n):
+            pool.put(conn.cursor())
+        try:
+            rows = conn.execute("SELECT key, value FROM mart_meta").fetchall()
+            meta = {str(k): str(v) for k, v in rows if k is not None and v is not None}
+        except duckdb.CatalogException:  # mart predates mart_meta — nothing to key caches on
+            meta = {}
+    except Exception as exc:  # duckdb.Error (IOException: 0-byte/garbage/truncated), OSError
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        reason = str(exc) if isinstance(exc, MartUnavailable) else _one_line(exc)
+        _init_error = f"analytics database at {path} is unusable — {reason}"
+        raise MartUnavailable(_init_error) from exc
+    _conn, _pool, _mart_meta, _init_error = conn, pool, meta, None
+
+
+def unavailable_reason() -> str | None:
+    """Why the analytics DB is not open (None when it is, or when it was closed on
+    purpose). Surfaced by /api/health and folded into every data endpoint's 503."""
+    return _init_error if _pool is None else None
+
+
+def missing_detail() -> str:
+    """The 503 detail for "no usable mart": the specific reason when init() failed."""
+    reason = unavailable_reason()
+    return f"analytics database not available — {reason}" if reason else _DB_MISSING_DETAIL
 
 
 def close() -> None:
-    global _conn, _pool, _mart_meta
+    global _conn, _pool, _mart_meta, _init_error
+    _init_error = None  # closed on purpose: nothing failed
     if _pool is not None:
         while True:
             try:
@@ -162,7 +225,7 @@ def _cursor():
     # re-checking is_ready() — previously only entities/timing checked, and everything else
     # leaked a RuntimeError 500.
     if _pool is None:
-        raise HTTPException(status_code=503, detail=_DB_MISSING_DETAIL)
+        raise HTTPException(status_code=503, detail=missing_detail())
     try:
         # Bounded wait (was: block forever — pool of 4 vs concurrency 40 parked every
         # worker in this call, a documented production hang), and bounded again by what is
@@ -174,7 +237,7 @@ def _cursor():
         )
     try:
         yield cur
-    except Exception:
+    except Exception as exc:
         # A failed query can leave the cursor in an odd state — replace it with a fresh
         # one so it doesn't poison the pool, then re-raise for the caller.
         try:
@@ -182,6 +245,12 @@ def _cursor():
         except Exception:
             pass
         _pool.put(_conn.cursor() if _conn is not None else cur)
+        if isinstance(exc, duckdb.IOException):
+            # The file went bad UNDER an open connection (a block past EOF on a truncated
+            # mart, a failing disk). Not a client error and not a bug in the handler: shed
+            # it as the same 503 family as "no mart", loudly logged, never a bare 500.
+            logger.error("analytics DB read failed: %s", _one_line(exc))
+            raise HTTPException(status_code=503, detail=_UNREADABLE_DETAIL) from exc
         raise
     else:
         _pool.put(cur)

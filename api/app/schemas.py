@@ -8,7 +8,9 @@ from pydantic import BaseModel, Field
 
 # ---- health ---------------------------------------------------------------------------
 class Health(BaseModel):
-    status: str
+    status: str  # "ok" | "degraded"
+    # Why the API is degraded (missing mart, corrupt/truncated file, ...). None when ok.
+    detail: Optional[str] = None
     mart_version: Optional[str] = None
     built_at: Optional[str] = None
     source_db: Optional[str] = None

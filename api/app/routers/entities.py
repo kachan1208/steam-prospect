@@ -48,9 +48,6 @@ _MARTS_MISSING_DETAIL = (
     "entity data is refreshing — the developer/publisher marts haven't been built yet "
     "(mart_entity/mart_entity_games missing; they appear after the next ETL run)"
 )
-_DB_MISSING_DETAIL = (
-    "analytics database not available — the ETL hasn't produced current.duckdb yet"
-)
 
 
 def _q(sql: str, params: list | None = None) -> list[dict]:
@@ -60,7 +57,7 @@ def _q(sql: str, params: list | None = None) -> list[dict]:
     main.py deliberately keeps the app up, see its lifespan), and the DB present but built
     by an ETL that predates the entity marts (CatalogException on the missing table)."""
     if not analytics_db.is_ready():
-        raise HTTPException(status_code=503, detail=_DB_MISSING_DETAIL)
+        raise HTTPException(status_code=503, detail=analytics_db.missing_detail())
     try:
         return analytics_db.query(sql, params)
     except duckdb.CatalogException:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -25,14 +26,22 @@ from .mcp_mount import close_prospect_mcp, load_prospect_mcp
 _prospect_mcp, _mcp_asgi = load_prospect_mcp()
 
 
+_log = logging.getLogger("prospect.api")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Analytics plane: open the read-only marts. Fail loud if the ETL hasn't run.
+    # Analytics plane: open the read-only marts. Fail LOUD in the log, never by dying.
     try:
         analytics_db.init(settings.analytics_db_path, settings.analytics_pool_size)
-    except FileNotFoundError as exc:
-        # Keep the app up so /api/docs and a clear error are reachable; endpoints will 503.
+    except analytics_db.MartUnavailable as exc:
+        # Keep the app up so /api/docs and a clear error are reachable; endpoints will 503
+        # and /api/health reports status=degraded with this reason. MartUnavailable covers
+        # EVERY failed open — a missing file, and also a 0-byte / truncated / garbage one
+        # (duckdb.IOException), which used to escape this block, kill the worker with
+        # STARTUP_FAILURE and take the whole container down with it.
         print(f"[api] WARNING: {exc}")
+        _log.warning("analytics DB unavailable at startup: %s", exc)
     # The mounted MCP's Streamable-HTTP transport needs its session manager running for the
     # whole app lifetime; drive it here when the MCP is enabled.
     if _prospect_mcp is not None:

@@ -20,12 +20,19 @@ def health() -> Health:
     # restart verification that the container is dead precisely when it is merely busy, i.e.
     # restart-loop the box under load. Liveness must not depend on the pool.
     meta = analytics_db.mart_meta()
+    ready = analytics_db.is_ready()
     return Health(
-        status="ok" if analytics_db.is_ready() else "degraded",
+        status="ok" if ready else "degraded",
+        # WHY degraded, in words: "no mart yet" and "the mart file is corrupt" need very
+        # different fixes, and both used to look identical from the outside.
+        detail=None if ready else (analytics_db.unavailable_reason() or _NOT_OPEN),
         mart_version=meta.get("mart_version"),
         built_at=meta.get("built_at"),
         source_db=meta.get("source_db"),
     )
+
+
+_NOT_OPEN = "analytics database not open — the ETL hasn't produced current.duckdb yet"
 
 
 @router.get("/api/health/ready")
@@ -34,8 +41,13 @@ def ready() -> dict:
     otherwise — same status the data endpoints themselves return pre-ETL, so a router
     pointing traffic at this signal never sends requests into a wall of 503s."""
     if not analytics_db.is_ready():
+        reason = analytics_db.unavailable_reason()
         raise HTTPException(
             status_code=503,
-            detail="analytics database not available — the ETL hasn't produced current.duckdb yet",
+            detail=(
+                f"analytics database not available — {reason}"
+                if reason
+                else "analytics database not available — the ETL hasn't produced current.duckdb yet"
+            ),
         )
     return {"status": "ready"}

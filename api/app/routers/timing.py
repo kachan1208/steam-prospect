@@ -42,9 +42,6 @@ _MARTS_MISSING_DETAIL = (
     "(mart_timing_demand/mart_timing_congestion/mart_timing_decay missing; they appear "
     "after the next ETL run)"
 )
-_DB_MISSING_DETAIL = (
-    "analytics database not available — the ETL hasn't produced current.duckdb yet"
-)
 
 _MONTH_NAMES = ["", *calendar.month_abbr[1:]]  # 1-indexed Jan..Dec
 
@@ -53,7 +50,7 @@ def _q(sql: str, params: list | None = None) -> list[dict]:
     """analytics_db.query with the pre-ETL failure modes mapped to a clean 503 (mirrors
     entities.py's _q — whole DB absent vs. DB present but built by an older ETL)."""
     if not analytics_db.is_ready():
-        raise HTTPException(status_code=503, detail=_DB_MISSING_DETAIL)
+        raise HTTPException(status_code=503, detail=analytics_db.missing_detail())
     try:
         return analytics_db.query(sql, params)
     except duckdb.CatalogException:
