@@ -1183,8 +1183,51 @@ MART_FILES = [
 HERE = Path(__file__).resolve().parent
 
 
+# --------------------------------------------------------------------------------------
+# ONE CLOCK: UTC (2026-09-22). DuckDB's TimeZone setting defaults to the HOST's zone, and
+# nothing here used to pin it. On the owner's Mac (Europe/Kiev, UTC+3) a review written at
+# 22:30 UTC was dated the NEXT day by `CAST(to_timestamp(...) AS DATE)` in staging, CURRENT_DATE
+# (the 24m windows, trailing-30d counts) was the local date, and date.today() named the mart
+# and set CUR_YEAR — while mart_game_trends.sql's make_timestamp() and every *_at column are
+# UTC. One build therefore mixed two calendars, and the same source produced different marts on
+# a UTC droplet and a UTC+3 laptop. Every DuckDB connection the ETL opens goes through
+# _connect(), which pins the session to UTC before any query runs (ATTACHed databases — the
+# sqlite source, the sentiment cache, the previous mart — share their connection's session),
+# and every Python-side date comes from _utc_today(). Pinned by tests/test_build_timezone_utc.py,
+# which runs the build under a non-UTC TZ.
+# --------------------------------------------------------------------------------------
+def _connect(database: str = ":memory:", read_only: bool = False) -> duckdb.DuckDBPyConnection:
+    """duckdb.connect() with the session TimeZone pinned to UTC — the only way the ETL opens
+    DuckDB. See the ONE CLOCK note above."""
+    con = duckdb.connect(database, read_only=read_only)
+    try:
+        con.execute("SET TimeZone = 'UTC'")
+    except BaseException:
+        con.close()
+        raise
+    return con
+
+
+def _cursor(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
+    """con.cursor(), UTC-pinned. A DuckDB cursor is a NEW connection to the same database and
+    does NOT inherit its parent's session settings (measured: a cursor of a UTC-pinned
+    connection reports the host zone), so it needs the same SET as _connect()."""
+    cur = con.cursor()
+    try:
+        cur.execute("SET TimeZone = 'UTC'")
+    except BaseException:
+        cur.close()
+        raise
+    return cur
+
+
+def _utc_today() -> date:
+    """Today's date in UTC — the mart version and CUR_YEAR, whatever the host's zone."""
+    return datetime.now(timezone.utc).date()
+
+
 def build_params() -> dict[str, str]:
-    today = date.today()
+    today = _utc_today()
     cur_year = today.year
     # Aspect keyword regexes (single source of truth) rendered into both teardown SQL files,
     # plus the shared sentiment/excerpt window size — see ASPECT_LEXICON above.
@@ -2572,7 +2615,7 @@ def _stream_scored(con: duckdb.DuckDBPyConnection, select_sql: str, insert_sql: 
     same order, as the inline path inserts. Returns the number of rows scored."""
     target = _StagedInsert(con, insert_sql)
     pool = _SCORE_POOL
-    read = con.cursor()
+    read = _cursor(con)
     read.execute(select_sql)
     n = 0
     try:
@@ -4763,7 +4806,7 @@ def _validate_max_drop_pct() -> float:
 def _mart_row_counts(db_path: Path) -> dict[str, int]:
     """Row count of every mart% table in a mart file, opened READ-ONLY (the previous mart may
     be concurrently served; the new one is finished and closed)."""
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect(str(db_path), read_only=True)
     try:
         tables = [r[0] for r in con.execute(
             "SELECT table_name FROM information_schema.tables "
@@ -4778,7 +4821,7 @@ def _mart_table_columns(db_path: Path) -> dict[str, set[str]]:
     """Column-name set of every mart% table in a mart file, opened READ-ONLY (same
     concurrency story as _mart_row_counts). Row counts alone cannot see a renamed or dropped
     column — the table keeps its name and roughly its size while a consumer's query breaks."""
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect(str(db_path), read_only=True)
     try:
         rows = con.execute(
             "SELECT table_name, column_name FROM information_schema.columns "
@@ -4799,7 +4842,7 @@ def _recorded_absent_sources(db_path: Path) -> set[str]:
     file. An unreadable/absent mart_meta yields no exemptions — refuse to explain away
     emptiness we cannot prove was intended."""
     try:
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = _connect(str(db_path), read_only=True)
         try:
             row = con.execute(
                 "SELECT value FROM mart_meta WHERE key = 'absent_sources'"
@@ -4958,7 +5001,7 @@ def _light_overwrite_error(versioned: Path) -> str | None:
     if not versioned.exists():
         return None
     try:
-        c = duckdb.connect(str(versioned), read_only=True)
+        c = _connect(str(versioned), read_only=True)
         try:
             row = c.execute("SELECT value FROM mart_meta WHERE key = 'build_mode'").fetchone()
         finally:
@@ -5043,7 +5086,7 @@ def _read_mart_meta(db_path: Path) -> dict[str, str]:
     {} when the file, or its mart_meta, cannot be read — the cadence reads that as "no
     provenance" and rebuilds, the same verdict a pre-cadence mart gets."""
     try:
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = _connect(str(db_path), read_only=True)
         try:
             rows = con.execute("SELECT key, value FROM mart_meta").fetchall()
         finally:
@@ -5547,7 +5590,7 @@ def main() -> int:
 
     data_dir = Path(args.data_dir).resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
-    mart_version = date.today().strftime("%Y%m%d")
+    mart_version = _utc_today().strftime("%Y%m%d")   # UTC, whatever the host zone (ONE CLOCK)
     versioned = data_dir / f"prospect_{mart_version}.duckdb"
     current = data_dir / "current.duckdb"
 
@@ -5673,7 +5716,7 @@ def main() -> int:
     # name would hand both processes their own inode and let them both run.
     reused_scratch = cache_only and building.exists()
     try:
-      con = duckdb.connect(str(building))
+      con = _connect(str(building))
       if reused_scratch:
           print(f"[etl] reusing the scratch {building.name} left by a previous run "
                 "(nothing in it is durable — see the rescore-scratch notes)")
