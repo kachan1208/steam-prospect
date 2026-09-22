@@ -121,14 +121,9 @@ def test_io_error_while_serving_is_a_503_not_a_500(client, monkeypatch):
         def close(self):
             pass
 
-    pool = analytics_db._pool
-    assert pool is not None
-    held = []
-    while True:
-        try:
-            held.append(pool.get_nowait())
-        except Exception:
-            break
+    from conftest import drain_pool
+
+    pool, held = drain_pool()
     broken = _BrokenCursor()
     pool.put(broken)
     try:

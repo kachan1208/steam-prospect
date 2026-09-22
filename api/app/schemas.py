@@ -11,9 +11,24 @@ class Health(BaseModel):
     status: str  # "ok" | "degraded"
     # Why the API is degraded (missing mart, corrupt/truncated file, ...). None when ok.
     detail: Optional[str] = None
+    # The mart THIS process serves (mart_meta of the loaded generation).
     mart_version: Optional[str] = None
     built_at: Optional[str] = None
     source_db: Optional[str] = None
+    # Loaded vs published (analytics_db hot reload). loaded_file is the file the served mart
+    # was opened from; link_target is what the watched path (current.duckdb) points at NOW,
+    # and link_target_version the YYYYMMDD token in its name. target_differs=true means a
+    # new mart is published but not yet served — normal for up to reload_interval_s after a
+    # nightly swap; with reload_error set it means the new file could not be opened and the
+    # previous mart is still being served.
+    loaded_file: Optional[str] = None
+    loaded_at: Optional[str] = None  # when this process opened it (UTC ISO)
+    link_target: Optional[str] = None
+    link_target_exists: bool = False
+    link_target_version: Optional[str] = None
+    target_differs: bool = False
+    reload_error: Optional[str] = None
+    reload_interval_s: Optional[float] = None  # 0 = hot reload disabled
 
 
 class HistBucket(BaseModel):

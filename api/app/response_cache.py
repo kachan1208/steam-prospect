@@ -2,17 +2,20 @@
 
 A few endpoints (market benchmarks, seasonality, launch curve, timing overview) read
 precomputed mart tables and do arithmetic on them — no request state, no user data. The
-mart itself only changes when the nightly ETL swaps the whole DuckDB file in and the app
-restarts, so within one process their answers are constants. Computing them per request
-is pure waste (timing/overview alone is three queries plus a 12-month scoring pass).
+mart itself only changes when the nightly ETL publishes a new DuckDB file, so between two
+publishes their answers are constants. Computing them per request is pure waste
+(timing/overview alone is three queries plus a 12-month scoring pass).
 
-Every entry is keyed by the loaded mart's IDENTITY — `analytics_db.mart_version()` AND
-`analytics_db.built_at()` — alongside the handler name and its parameters, so a process
-serving an older mart can never hand back a newer mart's numbers. Both halves are needed:
-mart_version is only the build DATE, so a light build and the nightly build of the same day
-(or a rebuild after a fix) share it; built_at is the build timestamp and separates them. In
-the deployment the app restarts on every swap, so entries are simply never read again after
-one; the pair is what makes the key safe if the DB is ever re-opened live instead.
+Every entry is keyed by the served mart's IDENTITY — `analytics_db.mart_version()` AND
+`analytics_db.built_at()`, both read off the generation the request is pinned to —
+alongside the handler name and its parameters, so a request served by one mart can never
+hand back another mart's numbers. Both halves are needed: mart_version is only the build
+DATE, so a light build and the nightly build of the same day (or a rebuild after a fix)
+share it; built_at is the build timestamp and separates them. analytics_db hot-reloads a
+newly published mart without a restart and calls clear() on every swap (a swap listener,
+registered below), so the previous mart's entries are dropped at once rather than lingering
+until LRU eviction; the identity key is what keeps a request still pinned to the OLD mart
+during the swap from reading or writing the new mart's answers.
 When the mart carries no version (pre-mart_meta build, or the DB isn't open at all) the
 result is computed and NOT cached — an unversioned answer has nothing safe to key on.
 
@@ -51,8 +54,11 @@ T = TypeVar("T")
 
 
 def clear() -> None:
-    """Drop every cached response (test hook; also handy after a live DB swap)."""
+    """Drop every cached response (called on every mart swap, and a test hook)."""
     _cache.clear()
+
+
+analytics_db.add_swap_listener(clear)
 
 
 def size() -> int:

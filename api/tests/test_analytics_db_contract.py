@@ -17,6 +17,7 @@ from fastapi import HTTPException
 
 from app import analytics_db
 from app.config import settings
+from conftest import drain_pool
 
 
 @pytest.fixture
@@ -56,14 +57,7 @@ def test_routers_with_their_own_check_still_503(uninitialised_db):
 
 def test_pool_exhaustion_sheds_with_503_and_retry_after(client, monkeypatch):
     monkeypatch.setattr(analytics_db, "_ACQUIRE_TIMEOUT_S", 0.05)
-    pool = analytics_db._pool
-    assert pool is not None
-    held = []
-    while True:  # drain every cursor so the next request finds an empty pool
-        try:
-            held.append(pool.get_nowait())
-        except Exception:
-            break
+    pool, held = drain_pool()  # every cursor out: the next request finds an empty pool
     try:
         r = client.get("/api/games/1001")
         assert r.status_code == 503
@@ -104,14 +98,7 @@ def test_mart_meta_empty_when_closed(uninitialised_db):
 @pytest.fixture
 def drained_pool(client):
     """Check out every cursor for the duration of a test, then put them all back."""
-    pool = analytics_db._pool
-    assert pool is not None
-    held = []
-    while True:
-        try:
-            held.append(pool.get_nowait())
-        except Exception:
-            break
+    pool, held = drain_pool()
     try:
         yield pool
     finally:

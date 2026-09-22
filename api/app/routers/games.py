@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import Literal
 
 import duckdb
@@ -47,21 +46,19 @@ SORTABLE = {
     "lifetime_months", "metacritic_score",
 }
 
-@lru_cache(maxsize=1)
 def _has_name_lower() -> bool:
-    """Whether the current mart carries the persisted lowercased search column.
+    """Whether the served mart carries the persisted lowercased search column.
 
     mart_game.sql builds `name_lower` (lower(name)) so search can filter with the cheaper
     contains(name_lower, ?) instead of name ILIKE '%q%' (~2.3x faster — no per-row lower()
     over the ~170K-row full scan the leading-wildcard forces). The column only appears after
     the ETL rebuilds the mart, so we gate on its existence and fall back to ILIKE otherwise —
-    the router stays correct on both the pre-column mart and the rebuilt one. Cached: the DB
-    is swapped + app restarted on each nightly ETL, so the schema can't change under us."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'name_lower'"
-    )
-    return bool(rows)
+    the router stays correct on both the pre-column mart and the rebuilt one.
+
+    Like every probe in this module it answers from analytics_db's per-mart schema snapshot
+    (no query), so a hot-reloaded mart re-answers it — these used to be process-lifetime
+    lru_caches that assumed an app restart on every mart swap."""
+    return analytics_db.has_column("mart_game", "name_lower")
 
 
 _SEARCH_COLS = (
@@ -82,86 +79,56 @@ _PROFILE_COLS = (
 )
 
 
-@lru_cache(maxsize=1)
 def _has_players_summary() -> bool:
-    """Whether the current mart carries the daily-CCU summary columns (players_7d_avg /
+    """Whether the served mart carries the daily-CCU summary columns (players_7d_avg /
     players_trend_7d_pct from mart_players.sql). Gated like _has_name_lower(): the columns
     only appear after the ETL that added them rebuilds the mart, and this app can boot
     against an older mart (e.g. the App Platform path downloads a published duckdb) — the
-    profile must not 500 there. Cached for the same swap-then-restart reason."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'players_7d_avg'"
-    )
-    return bool(rows)
+    profile must not 500 there."""
+    return analytics_db.has_column("mart_game", "players_7d_avg")
 
 
-@lru_cache(maxsize=1)
 def _has_lifetime_game() -> bool:
-    """Whether the current mart carries the game-lifetime columns (mart_players.sql
+    """Whether the served mart carries the game-lifetime columns (mart_players.sql
     _game_lifetime: months from the first 100+-avg-CCU month to the first full month
-    under 10). Gated + cached exactly like _has_players_summary() and for the same
-    reasons — the app must serve marts built before the lifetime ETL landed."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'lifetime_months'"
-    )
-    return bool(rows)
+    under 10). Gated exactly like _has_players_summary() and for the same reasons — the
+    app must serve marts built before the lifetime ETL landed."""
+    return analytics_db.has_column("mart_game", "lifetime_months")
 
 
-@lru_cache(maxsize=1)
 def _has_dev_socials() -> bool:
-    """Whether the current mart carries dev_x_handle (mart_game.sql dev_x: the game's most
+    """Whether the served mart carries dev_x_handle (mart_game.sql dev_x: the game's most
     prominent official X handle, harvested from its developer-controlled pages — store
-    page + dev website — NOT from X itself). Gated + cached exactly like
-    _has_players_summary() and for the same reasons — the app must serve marts built
-    before the socials ETL landed. The column isn't filterable/sortable, so absence just
-    omits it (schema default None); there's no 503 path."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'dev_x_handle'"
-    )
-    return bool(rows)
+    page + dev website — NOT from X itself). Gated exactly like _has_players_summary() and
+    for the same reasons — the app must serve marts built before the socials ETL landed.
+    The column isn't filterable/sortable, so absence just omits it (schema default None);
+    there's no 503 path."""
+    return analytics_db.has_column("mart_game", "dev_x_handle")
 
 
-@lru_cache(maxsize=1)
 def _has_demo_flag() -> bool:
-    """Whether the current mart carries has_demo/demo_appid (mart_game.sql: the game's
-    playable demo from its own Steam appdetails `demos` field). Gated + cached exactly
-    like _has_players_summary() and for the same reasons. has_demo is tri-state — NULL
-    means the game's appdetails was never re-checked since demo capture landed, so the
-    filter drops unknowns naturally rather than reading them as 'no demo'."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'has_demo'"
-    )
-    return bool(rows)
+    """Whether the served mart carries has_demo/demo_appid (mart_game.sql: the game's
+    playable demo from its own Steam appdetails `demos` field). Gated exactly like
+    _has_players_summary() and for the same reasons. has_demo is tri-state — NULL means the
+    game's appdetails was never re-checked since demo capture landed, so the filter drops
+    unknowns naturally rather than reading them as 'no demo'."""
+    return analytics_db.has_column("mart_game", "has_demo")
 
 
-@lru_cache(maxsize=1)
 def _has_all_socials() -> bool:
     """Whether the mart carries the per-platform social columns (Discord/YouTube/Bluesky and
-    the X profile URL) rather than only dev_x_handle. Gated + cached like the others: the
-    harvest has always collected all four platforms, but until the widened dev_x CTE landed
-    the mart kept only the X handle."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'dev_discord_url'"
-    )
-    return bool(rows)
+    the X profile URL) rather than only dev_x_handle. Gated like the others: the harvest has
+    always collected all four platforms, but until the widened dev_x CTE landed the mart
+    kept only the X handle."""
+    return analytics_db.has_column("mart_game", "dev_discord_url")
 
 
-@lru_cache(maxsize=1)
 def _has_metacritic_url() -> bool:
-    """Whether the current mart carries metacritic_url (the Metacritic page Steam links in
-    appdetails). Gated + cached like the other additive columns. The SCORE needs no gate —
-    it has been in every mart — so filtering and sorting by it work regardless; only the
-    outbound link is conditional."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'metacritic_url'"
-    )
-    return bool(rows)
+    """Whether the served mart carries metacritic_url (the Metacritic page Steam links in
+    appdetails). Gated like the other additive columns. The SCORE needs no gate — it has
+    been in every mart — so filtering and sorting by it work regardless; only the outbound
+    link is conditional."""
+    return analytics_db.has_column("mart_game", "metacritic_url")
 
 
 _LIFETIME_PROFILE_COLS = (
@@ -357,28 +324,24 @@ def search_games(
     )
 
 
-# In-process cache of the distinct (tag, n_games) list for /tags/suggest. Tradeoff, measured
-# on the real ~170K-row data/current.duckdb: running the UNNEST(top_tags) + ILIKE aggregate
-# per keystroke costs ~90ms per request (well over the 50ms budget — the scan re-unnests
-# every game's tag list each time), while building the FULL distinct list once costs ~25ms
-# and yields only ~460 rows, after which each suggest call is a sub-millisecond in-memory
-# substring filter. Cached lazily for the process lifetime: safe because the analytics DB is
-# swapped + the app restarted on each nightly ETL (the same invariant _has_name_lower()
-# relies on), so the tag universe can't change under a running process.
-_tag_freq_cache: list[tuple[str, int]] | None = None
-
-
+# The distinct (tag, n_games) list for /tags/suggest, memoized on the served mart
+# generation. Tradeoff, measured on the real ~170K-row data/current.duckdb: running the
+# UNNEST(top_tags) + ILIKE aggregate per keystroke costs ~90ms per request (well over the
+# 50ms budget — the scan re-unnests every game's tag list each time), while building the
+# FULL distinct list once costs ~25ms and yields only ~460 rows, after which each suggest
+# call is a sub-millisecond in-memory substring filter. Built once per mart: analytics_db
+# drops the memo along with the generation when a new mart is hot-reloaded.
 def _tag_frequencies() -> list[tuple[str, int]]:
-    global _tag_freq_cache
-    if _tag_freq_cache is None:
+    def compute() -> list[tuple[str, int]]:
         rows = analytics_db.query(
             "SELECT tag, COUNT(*) AS n_games "
             "FROM (SELECT UNNEST(top_tags) AS tag FROM mart_game) "
             "WHERE tag IS NOT NULL "
             "GROUP BY tag ORDER BY n_games DESC, tag"
         )
-        _tag_freq_cache = [(r["tag"], int(r["n_games"])) for r in rows]
-    return _tag_freq_cache
+        return [(r["tag"], int(r["n_games"])) for r in rows]
+
+    return analytics_db.memo("games.tag_frequencies", compute)
 
 
 # NOTE: registered before the /{appid} route below — FastAPI matches in declaration order,
@@ -709,7 +672,6 @@ _VALID_ASPECTS = {
 }
 
 
-@lru_cache(maxsize=1)
 def _has_aspect_full_text() -> bool:
     """Whether mart_game_aspect_reviews carries the open-the-whole-review columns
     (review_text + steam_url, added 2026-08-21).
@@ -723,13 +685,9 @@ def _has_aspect_full_text() -> bool:
 
     One probe for both columns on purpose: they are written by the same CREATE TABLE in
     etl/marts/mart_game_aspect_reviews.sql, so there is no build in which one exists without
-    the other. Cached like _has_name_lower() — the DB is swapped atomically and the app
-    restarted on each ETL, so a per-process answer cannot go stale under a live process."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game_aspect_reviews' AND column_name = 'review_text'"
-    )
-    return bool(rows)
+    the other. Answered from the per-mart schema snapshot like _has_name_lower(), so the
+    rebuilt mart lights the columns up the moment it is hot-reloaded."""
+    return analytics_db.has_column("mart_game_aspect_reviews", "review_text")
 
 
 @router.get("/{appid}/aspect-reviews", response_model=AspectReviewsResponse)

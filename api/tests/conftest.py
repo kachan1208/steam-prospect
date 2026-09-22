@@ -553,9 +553,12 @@ _build_fixture_mart(ANALYTICS_DB_PATH)
 # Import the app only AFTER the env vars + fixture DB above are in place (see module
 # docstring) — Settings() and the analytics_db module-level state all key off
 # settings.analytics_db_path / settings.static_dir at (or shortly after) import time.
+from contextlib import contextmanager  # noqa: E402
+
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import response_cache  # noqa: E402
+from app import analytics_db, response_cache  # noqa: E402
+from app.config import settings  # noqa: E402
 from app.main import app  # noqa: E402
 
 
@@ -563,6 +566,37 @@ from app.main import app  # noqa: E402
 def client():
     with TestClient(app) as c:
         yield c
+
+
+@contextmanager
+def serving(path, pool_size: int = 2):
+    """Serve `path` as the analytics mart for the duration, then put the shared fixture mart
+    back. Callers must already hold the session `client` (so the app's lifespan has run its
+    own init() and cannot overwrite the swap).
+
+    Nothing to cache_clear(): every capability probe answers from analytics_db's per-mart
+    schema snapshot and every mart-derived memo lives on the served generation, so the swap
+    alone re-answers all of them — exactly what a production hot reload relies on."""
+    analytics_db.close()
+    analytics_db.init(str(path), pool_size)
+    try:
+        yield
+    finally:
+        analytics_db.close()
+        analytics_db.init(str(ANALYTICS_DB_PATH), settings.analytics_pool_size)
+
+
+def drain_pool():
+    """Check out every cursor of the served mart's pool; returns (pool, held) so the
+    caller can put them back. For tests that need a saturated pool."""
+    pool = analytics_db._current.pool
+    held = []
+    while True:
+        try:
+            held.append(pool.get_nowait())
+        except Exception:
+            break
+    return pool, held
 
 
 @pytest.fixture(autouse=True)

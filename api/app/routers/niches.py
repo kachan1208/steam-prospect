@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import csv
 import io
-from functools import lru_cache
 
 import duckdb
 from fastapi import APIRouter, HTTPException, Query, Response
@@ -161,71 +160,46 @@ _BASE_COLS = [
 ]
 
 
-@lru_cache(maxsize=1)
+# Every capability probe below answers from analytics_db's per-mart SCHEMA SNAPSHOT (or, for
+# the row/data probes, its per-mart memo) — no query per call, and a hot-reloaded mart gets
+# fresh answers. They used to be process-lifetime lru_caches that assumed "the DB is swapped
+# and the app restarted on each nightly rebuild", which nothing enforced.
 def _has_players() -> bool:
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_niche' AND column_name = 'total_players_now'"
-    )
-    return bool(rows)
+    return analytics_db.has_column("mart_niche", "total_players_now")
 
 
-@lru_cache(maxsize=1)
 def _has_players_dist() -> bool:
     """median_players_now / players_top5_share (the who-holds-the-players columns) —
     landed after the first players columns, so they get their own gate."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_niche' AND column_name = 'players_top5_share'"
-    )
-    return bool(rows)
+    return analytics_db.has_column("mart_niche", "players_top5_share")
 
 
-@lru_cache(maxsize=1)
 def _has_lifetime() -> bool:
     """lifetime_n_games / lifetime_survival_12m / lifetime_median_dead_months (how long a
     game keeps an audience) — landed after the players-distribution columns, so they get
     their own gate."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_niche' AND column_name = 'lifetime_survival_12m'"
-    )
-    return bool(rows)
+    return analytics_db.has_column("mart_niche", "lifetime_survival_12m")
 
 
-@lru_cache(maxsize=1)
 def _has_no_floor_cut() -> bool:
     """Whether the mart materialises the min_reviews=0 cut (the whole tag, no review floor
     — MIN_REVIEWS_LEVELS gained 0 after the lifetime columns landed). A ROW probe, not a
-    column probe: the cut adds rows, not schema. Cached for the usual swap-then-restart
-    reason."""
-    rows = analytics_db.query("SELECT 1 FROM mart_niche WHERE min_reviews = 0 LIMIT 1")
-    return bool(rows)
+    column probe: the cut adds rows, not schema — answered off _niche_list_cuts()."""
+    return any(m == 0 for _, m in _niche_list_cuts())
 
 
-@lru_cache(maxsize=1)
 def _has_p90() -> bool:
     """p90_rev landed 2026-08-14; gate it like the players columns so the app still
     serves a mart built before that ETL."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_niche' AND column_name = 'p90_rev'"
-    )
-    return bool(rows)
+    return analytics_db.has_column("mart_niche", "p90_rev")
 
 
-@lru_cache(maxsize=1)
 def _has_p90_trend() -> bool:
     """mart_niche_trend.p90_rev (yearly p90 for the saturation-trend chart) — gated
     separately from mart_niche.p90_rev because they can land in different ETL builds."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_niche_trend' AND column_name = 'p90_rev'"
-    )
-    return bool(rows)
+    return analytics_db.has_column("mart_niche_trend", "p90_rev")
 
 
-@lru_cache(maxsize=1)
 def _has_demand24m() -> bool:
     """reviews_24m / reviews_prev_24m / demand_trend_24m_pct — the ranking metric behind
     the Radar board's verdict rings. 24-month windows REPLACED the 12-month ones outright
@@ -236,30 +210,18 @@ def _has_demand24m() -> bool:
     mart carrying only the older 90d/12m columns still answers False here and degrades
     the same way a pre-demand mart does. One probe covers the whole family: the emerging
     columns (reviews_24m_new_share / demand_emerging) ship in the same ETL build as the
-    24m windows, never separately. Gated exactly like _has_p90/_has_players: an
-    information_schema probe, cached per process (the DB is swapped and the app restarted
-    on each nightly rebuild, so a per-process answer can't go stale)."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_niche' AND column_name = 'demand_trend_24m_pct'"
-    )
-    return bool(rows)
+    24m windows, never separately. Gated exactly like _has_p90/_has_players."""
+    return analytics_db.has_column("mart_niche", "demand_trend_24m_pct")
 
 
-@lru_cache(maxsize=1)
 def _has_solo_evidence() -> bool:
     """The solo-evidence trio (see _SOLO_EVIDENCE_COLS) — landed after the 24m demand
     columns, so it gets its own gate. The mart on the server predates these columns for
     hours after every deploy that adds them: rows then carry null and the UI omits the
     evidence line — degrade, never a BinderException 500."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_niche' AND column_name = 'med_playtime_h'"
-    )
-    return bool(rows)
+    return analytics_db.has_column("mart_niche", "med_playtime_h")
 
 
-@lru_cache(maxsize=1)
 def _has_v2_parts() -> bool:
     """The opportunity_v2 sub-scores + solo_tier (see _V2_PARTS_COLS) — landed with the
     2026-08-31 score rebuild, so they get their own gate. IMPORTANT: opportunity_v2 itself
@@ -267,14 +229,9 @@ def _has_v2_parts() -> bool:
     Rows then carry null for the parts and the UI omits the breakdown — degrade, never a
     BinderException 500 — but the score column stays populated (with the OLD formula's
     values until the nightly rebuild lands, which is the honest state of that DB)."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_niche' AND column_name = 'supply_brake'"
-    )
-    return bool(rows)
+    return analytics_db.has_column("mart_niche", "supply_brake")
 
 
-@lru_cache(maxsize=1)
 def _has_niche_games() -> bool:
     """mart_niche_game — the (dimension, key, win, min_reviews) -> appid membership map that
     backs the drill-down surface (/games, /distribution, /combined).
@@ -283,14 +240,8 @@ def _has_niche_games() -> bool:
     the nightly mart rebuild runs, and the API is always deployed BEFORE that rebuild lands
     — so "absent" is the state production is genuinely in first, for hours, not an error.
     Every endpoint below therefore degrades to an explicit 503 + rebuild hint (the same
-    convention as _niche_query's v2-columns 503), never a BinderException 500.
-
-    lru_cached for the usual reason: the whole DB is swapped atomically and the app
-    restarted on each ETL, so a per-process answer can't go stale in practice."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.tables WHERE table_name = 'mart_niche_game'"
-    )
-    return bool(rows)
+    convention as _niche_query's v2-columns 503), never a BinderException 500."""
+    return analytics_db.has_table("mart_niche_game")
 
 
 _NO_NICHE_GAMES = (
@@ -305,9 +256,9 @@ def _require_niche_games() -> None:
 
 
 def _mq(sql: str, params: list) -> list[dict]:
-    """query() for the mart_niche_game-backed SQL below. _has_niche_games() is cached for
-    the process lifetime, so a DB swapped in under a running process could otherwise turn a
-    vanished table into a 500 — map it onto the same 503 the probe raises."""
+    """query() for the mart_niche_game-backed SQL below. Requests are pinned to one mart
+    generation, so the probe and the query can't disagree today — but a vanished table must
+    never surface as a 500 regardless: map it onto the same 503 the probe raises."""
     try:
         return analytics_db.query(sql, params)
     except duckdb.CatalogException as exc:
@@ -321,7 +272,6 @@ def _mscalar(sql: str, params: list):
     return next(iter(rows[0].values()))
 
 
-@lru_cache(maxsize=1)
 def _niche_game_cuts() -> tuple[tuple[str, int], ...]:
     """The (win, min_reviews) cuts mart_niche_game actually materialises — MIN_REVIEWS_LEVELS
     x {all, 24m} in etl/build_marts.py, but read off the data rather than hardcoded so a
@@ -329,10 +279,23 @@ def _niche_game_cuts() -> tuple[tuple[str, int], ...]:
     never built must be a loud 422 listing what exists, not a silent `total: 0` that the UI
     would render as "this niche has no games".
 
-    One cached DISTINCT over two low-cardinality columns, once per process — the only full
+    One DISTINCT over two low-cardinality columns, memoized once per mart — the only full
     scan in this module, and it buys every endpoint its input validation."""
-    rows = _mq("SELECT DISTINCT win, min_reviews FROM mart_niche_game", [])
-    return tuple(sorted((str(r["win"]), int(r["min_reviews"])) for r in rows))
+    def compute() -> tuple[tuple[str, int], ...]:
+        rows = _mq("SELECT DISTINCT win, min_reviews FROM mart_niche_game", [])
+        return tuple(sorted((str(r["win"]), int(r["min_reviews"])) for r in rows))
+
+    return analytics_db.memo("niches.niche_game_cuts", compute)
+
+
+def _niche_list_cuts() -> tuple[tuple[str, int], ...]:
+    """The (win, min_reviews) cuts mart_niche itself carries — the list surface's twin of
+    _niche_game_cuts(), memoized once per mart the same way."""
+    def compute() -> tuple[tuple[str, int], ...]:
+        rows = analytics_db.query("SELECT DISTINCT win, min_reviews FROM mart_niche")
+        return tuple(sorted((str(r["win"]), int(r["min_reviews"])) for r in rows))
+
+    return analytics_db.memo("niches.list_cuts", compute)
 
 
 def _require_cut(win: str, min_reviews: int) -> None:

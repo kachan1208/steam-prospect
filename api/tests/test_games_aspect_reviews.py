@@ -17,21 +17,20 @@ excerpt rows and differing only in whether the two columns exist:
 conftest's shared fixture mart has no mart_game_aspect_reviews at all, so (like
 test_niches_games_mart.py) each fixture swaps analytics_db onto its own DB and restores
 afterwards. The swap is per-TEST, not per-module: two module-scoped swaps would fight over
-which DB is mounted depending on test order. games._has_aspect_full_text is lru_cached per
-process, so every swap clears it.
+which DB is mounted depending on test order. games._has_aspect_full_text answers from the
+served mart's schema snapshot, so the swap alone re-answers it (it used to be an
+lru_cache every swap had to clear by hand).
 """
 from __future__ import annotations
 
 import tempfile
-from contextlib import contextmanager
 from pathlib import Path
 
 import duckdb
 import pytest
 
-from app import analytics_db
-from app.config import settings
 from app.routers import games
+from conftest import serving
 
 APPID = 4242
 STEAMID_A = "76561198000000001"
@@ -106,35 +105,17 @@ def mart_paths() -> dict[str, Path]:
     return paths
 
 
-@contextmanager
-def _swapped(path: Path):
-    """Mount `path` as the analytics DB for one test, then put the shared fixture mart back.
-
-    _has_aspect_full_text() answers per process, so it is cleared on the way in AND on the way
-    out — otherwise the first test to run would pin its answer for every test after it, and the
-    two states would silently become one."""
-    analytics_db.close()
-    analytics_db.init(str(path), 2)
-    games._has_aspect_full_text.cache_clear()
-    try:
-        yield
-    finally:
-        analytics_db.close()
-        analytics_db.init(settings.analytics_db_path, settings.analytics_pool_size)
-        games._has_aspect_full_text.cache_clear()
-
-
 @pytest.fixture
 def new_mart_client(client, mart_paths):
     """Depends on `client` so the app's lifespan has already run its own analytics_db.init()
     before the swap — otherwise it would overwrite it."""
-    with _swapped(mart_paths["new"]):
+    with serving(mart_paths["new"]):
         yield client
 
 
 @pytest.fixture
 def old_mart_client(client, mart_paths):
-    with _swapped(mart_paths["old"]):
+    with serving(mart_paths["old"]):
         yield client
 
 

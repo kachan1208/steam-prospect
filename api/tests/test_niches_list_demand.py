@@ -24,15 +24,13 @@ population rule are all checkable on paper — see the comments on ROWS below.
 from __future__ import annotations
 
 import tempfile
-from contextlib import contextmanager
 from pathlib import Path
 
 import duckdb
 import pytest
 
-from app import analytics_db
-from app.config import settings
 from app.routers import niches
+from conftest import serving
 
 # dimension, key, win, min_reviews, n_games, tier, opportunity_v2, saturation_yoy, p90_rev,
 # total_players_now, players_trend_7d_pct, reviews_24m, reviews_prev_24m,
@@ -145,41 +143,12 @@ def mart_paths() -> dict[str, Path]:
     return paths
 
 
-_GATES = (
-    niches._has_demand24m,
-    niches._has_p90,
-    niches._has_p90_trend,
-    niches._has_players,
-    niches._has_players_dist,
-    niches._has_lifetime,
-    niches._has_no_floor_cut,
-    niches._has_solo_evidence,
-    niches._has_v2_parts,
-)
-
-
-@contextmanager
-def _swapped(path: Path):
-    """Mount `path` as the analytics DB for one test, then restore the shared fixture mart.
-    Every capability probe here is lru_cached per process, so each one is cleared on the way
-    in AND out — otherwise the first test to run would pin its answer for every test after it."""
-    analytics_db.close()
-    analytics_db.init(str(path), 2)
-    for gate in _GATES:
-        gate.cache_clear()
-    try:
-        yield
-    finally:
-        analytics_db.close()
-        analytics_db.init(settings.analytics_db_path, settings.analytics_pool_size)
-        for gate in _GATES:
-            gate.cache_clear()
-
-
 @pytest.fixture
 def demand_client(client, mart_paths):
-    """The full gated-on mart (demand_trend_24m_pct + p90 + players + solo evidence)."""
-    with _swapped(mart_paths["full"]):
+    """The full gated-on mart (demand_trend_24m_pct + p90 + players + solo evidence).
+    Swapped in per test with conftest.serving(): the capability probes answer from the
+    served mart's schema snapshot, so the swap alone re-answers every gate."""
+    with serving(mart_paths["full"]):
         yield client
 
 
@@ -187,7 +156,7 @@ def demand_client(client, mart_paths):
 def demand_client_no_evidence(client, mart_paths):
     """Everything gated-on EXCEPT the solo-evidence trio — the mart state production runs
     for hours after the evidence deploy. Rows must carry null, never 500."""
-    with _swapped(mart_paths["no_evidence"]):
+    with serving(mart_paths["no_evidence"]):
         yield client
 
 

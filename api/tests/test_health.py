@@ -12,6 +12,21 @@ def test_health_reports_ready_against_the_fixture_mart(client):
     assert body["mart_version"] == "test-fixture"
 
 
+def test_health_reports_loaded_vs_published_mart(client):
+    """Hot reload bookkeeping, without touching DuckDB: which file is served, which file
+    the watched path points at now, and whether they differ. The fixture mart is a plain
+    file (no prospect_YYYYMMDD name), so there is no version token to parse."""
+    body = client.get("/api/health").json()
+    assert body["loaded_file"] == "fixture_mart.duckdb"
+    assert body["link_target"] == "fixture_mart.duckdb"
+    assert body["link_target_exists"] is True
+    assert body["link_target_version"] is None
+    assert body["target_differs"] is False
+    assert body["reload_error"] is None
+    assert body["reload_interval_s"] == 30.0
+    assert body["loaded_at"]
+
+
 def test_ready_200_when_db_open(client):
     r = client.get("/api/health/ready")
     assert r.status_code == 200
@@ -40,15 +55,11 @@ def test_health_stays_200_when_the_cursor_pool_is_saturated(client, monkeypatch)
     restarted the container under exactly the load that saturated it."""
     from app import analytics_db
 
+    from conftest import drain_pool
+
     monkeypatch.setattr(analytics_db, "_ACQUIRE_TIMEOUT_S", 0.05)  # don't wait it out
-    pool = analytics_db._pool
-    assert pool is not None
-    held = []
-    while True:  # drain every cursor: nothing can acquire one until we put them back
-        try:
-            held.append(pool.get_nowait())
-        except Exception:
-            break
+    # drain every cursor: nothing can acquire one until we put them back
+    pool, held = drain_pool()
     try:
         r = client.get("/api/health")
         assert r.status_code == 200

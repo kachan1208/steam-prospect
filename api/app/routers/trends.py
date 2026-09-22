@@ -25,8 +25,6 @@ Data caveats (surfaced so the UI can caption the chart honestly):
 """
 from __future__ import annotations
 
-from functools import lru_cache
-
 from fastapi import APIRouter, HTTPException, Query
 
 from pydantic import BaseModel
@@ -149,26 +147,18 @@ def _build_comps(requested: list[int]) -> GameTrendsComps:
 # ------------------------------------------------------------------------------------------
 # Daily live-player (CCU) series — GET /api/games/{appid}/players
 # ------------------------------------------------------------------------------------------
-@lru_cache(maxsize=1)
 def _has_players_daily() -> bool:
-    """Whether the current mart carries the daily CCU marts (mart_players.sql). Gated so
+    """Whether the served mart carries the daily CCU marts (mart_players.sql). Gated so
     the endpoint degrades to available=False (not a 500) when the app boots against an
-    older mart — same capability idiom as games.py::_has_name_lower. Cached: the DB is
-    swapped + app restarted on each ETL build."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.tables WHERE table_name = 'mart_game_players_daily'"
-    )
-    return bool(rows)
+    older mart — same capability idiom as games.py::_has_name_lower (the per-mart schema
+    snapshot, so a hot-reloaded mart re-answers it)."""
+    return analytics_db.has_table("mart_game_players_daily")
 
 
-@lru_cache(maxsize=1)
 def _has_players_history() -> bool:
     """mart_game_players_history (all-sources history incl. steamcharts monthly) — landed
     after the daily marts, so it gets its own gate."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.tables WHERE table_name = 'mart_game_players_history'"
-    )
-    return bool(rows)
+    return analytics_db.has_table("mart_game_players_history")
 
 
 class GamePlayersPoint(BaseModel):

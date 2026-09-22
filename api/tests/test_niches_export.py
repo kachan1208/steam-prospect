@@ -15,9 +15,8 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from app import analytics_db
-from app.config import settings
 from app.routers import niches
+from conftest import serving
 
 # Every _BASE_COLS column, in order (the CREATE TABLE below zips against this).
 _COLS = niches._BASE_COLS
@@ -81,19 +80,6 @@ def _build(path: Path) -> None:
         con.close()  # must be closed before analytics_db opens it read_only
 
 
-_PROBES = (
-    niches._has_players, niches._has_players_dist, niches._has_lifetime,
-    niches._has_no_floor_cut, niches._has_p90, niches._has_p90_trend,
-    niches._has_demand24m, niches._has_solo_evidence, niches._has_v2_parts,
-    niches._has_niche_games, niches._niche_game_cuts,
-)
-
-
-def _clear_probes() -> None:
-    for probe in _PROBES:
-        probe.cache_clear()
-
-
 @pytest.fixture(scope="module")
 def export_client(client):
     """Swap analytics_db onto the v2 mart, then put the shared fixture mart back. Depends
@@ -101,16 +87,8 @@ def export_client(client):
     tmp = Path(tempfile.mkdtemp(prefix="prospect_niche_export_"))
     db = tmp / "niche_export.duckdb"
     _build(db)
-
-    analytics_db.close()
-    analytics_db.init(str(db), 2)
-    _clear_probes()
-    try:
+    with serving(db):
         yield client
-    finally:
-        analytics_db.close()
-        analytics_db.init(settings.analytics_db_path, settings.analytics_pool_size)
-        _clear_probes()
 
 
 # ---- the export itself ------------------------------------------------------------------

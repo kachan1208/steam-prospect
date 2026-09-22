@@ -16,9 +16,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from app import analytics_db
-from app.config import settings
-from app.routers import niches
+from conftest import serving
 
 # appid, name, release_year, price_initial, est_rev_reviews, total_reviews, owners_mid.
 # Prices are spread one per $2.50 bin, and TWO games are free ($0) so the free-vs-paid
@@ -113,29 +111,17 @@ def _build(path: Path) -> None:
         con.close()  # must be closed before analytics_db opens it read_only
 
 
-_PROBES = (niches._has_niche_games, niches._niche_game_cuts)
-
-
 @pytest.fixture(scope="module")
 def niche_games_client(client):
     """Swap analytics_db onto a mart that has mart_niche_game, then put the shared fixture
     mart back. Depends on `client` so the app's lifespan has already run its own
-    analytics_db.init() before we swap — otherwise it would overwrite the swap."""
+    analytics_db.init() before we swap — otherwise it would overwrite the swap. The swap
+    alone re-answers _has_niche_games() / _niche_game_cuts(): both live on the served mart."""
     tmp = Path(tempfile.mkdtemp(prefix="prospect_niche_games_"))
     db = tmp / "niche_games.duckdb"
     _build(db)
-
-    analytics_db.close()
-    analytics_db.init(str(db), 2)
-    for probe in _PROBES:
-        probe.cache_clear()  # the capability answers are per-process; this DB has new ones
-    try:
+    with serving(db):
         yield client
-    finally:
-        analytics_db.close()
-        analytics_db.init(settings.analytics_db_path, settings.analytics_pool_size)
-        for probe in _PROBES:
-            probe.cache_clear()
 
 
 def _appids(body) -> list[int]:

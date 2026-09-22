@@ -80,36 +80,15 @@ _SEARCH_COLS = (
 )
 
 
-# Capability probes, cached manually rather than via lru_cache: these can be evaluated
-# BEFORE the analytics DB is up (the _entity_cols() f-string argument runs ahead of _q's
-# own is_ready() check), and an lru_cache would freeze that pre-init False for the whole
-# process lifetime — permanently hiding p90_rev/x_handle even after init. Compute-and-
-# don't-cache while not ready; only a real probe against a live DB is remembered.
-_p90_cache: bool | None = None
-_x_handle_cache: bool | None = None
-
-
-def _reset_capability_cache() -> None:
-    """Test hook — mirrors the cache_clear() the lru_cache idiom offered."""
-    global _p90_cache, _x_handle_cache
-    _p90_cache = None
-    _x_handle_cache = None
-
-
+# Capability probes, answered from analytics_db's per-mart schema snapshot. They can be
+# evaluated BEFORE the analytics DB is up (the _entity_cols() f-string argument runs ahead
+# of _q's own is_ready() check): with no mart open the answer is False, and — unlike the
+# manual caches these replaced (which existed because an lru_cache froze that pre-init False
+# for the whole process) — nothing is remembered past the moment a mart appears or reloads.
 def _has_p90() -> bool:
     """Whether the mart carries p90_rev (added 2026-08-14). Gated so the app still boots
     against an older mart — same capability idiom as games.py::_has_name_lower."""
-    global _p90_cache
-    if _p90_cache is None:
-        if not analytics_db.is_ready():
-            return False  # pre-init answer: usable, but never cached
-        _p90_cache = bool(
-            analytics_db.query(
-                "SELECT 1 FROM information_schema.columns "
-                "WHERE table_name = 'mart_entity' AND column_name = 'p90_rev'"
-            )
-        )
-    return _p90_cache
+    return analytics_db.has_column("mart_entity", "p90_rev")
 
 
 def _has_x_handle() -> bool:
@@ -118,17 +97,7 @@ def _has_x_handle() -> bool:
     pages / dev websites, so it may be a game's, the studio's, or the dev's personal
     account). Gated so the app still boots against an older mart — same capability idiom
     as _has_p90."""
-    global _x_handle_cache
-    if _x_handle_cache is None:
-        if not analytics_db.is_ready():
-            return False  # pre-init answer: usable, but never cached
-        _x_handle_cache = bool(
-            analytics_db.query(
-                "SELECT 1 FROM information_schema.columns "
-                "WHERE table_name = 'mart_entity' AND column_name = 'x_handle'"
-            )
-        )
-    return _x_handle_cache
+    return analytics_db.has_column("mart_entity", "x_handle")
 
 
 def _entity_cols() -> str:

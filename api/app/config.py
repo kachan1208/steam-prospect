@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     # Read-only DuckDB cursor pool size — how many analytics queries can run concurrently
     # before requests queue (env: PROSPECT_ANALYTICS_POOL_SIZE). ~2x vCPUs is a good default.
     analytics_pool_size: int = 4
+    # Hot reload (api/app/analytics_db.py): at most this often a request os.stat()s the
+    # analytics DB path, and when the file it resolves to has changed (the nightly repointed
+    # the current.duckdb symlink, or a same-day rebuild replaced the file) the new mart is
+    # opened and swapped in without a restart. Seconds; 0 disables hot reload entirely
+    # (env: PROSPECT_MART_RELOAD_INTERVAL_S).
+    mart_reload_interval_s: float = 30.0
 
     # Hosted mode: point at the built Vite frontend (web/dist) so the API serves the SPA
     # from its own origin — one deployable, no CORS. Empty in local dev (Vite serves it).
