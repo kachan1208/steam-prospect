@@ -59,7 +59,7 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Callable, TypeVar
 
 import duckdb
@@ -518,6 +518,38 @@ def built_at() -> str | None:
     after a fix) share it — caches that must not mix them key on both."""
     gen = _view()
     return gen.meta.get("built_at") if gen is not None else None
+
+
+def as_of_date() -> date | None:
+    """The served mart's as-of DATE: the UTC date of mart_meta.built_at, or None when the
+    mart doesn't say. What a "within the last N days" window must be anchored to — the mart
+    can be days old (a held build, a failed nightly), and CURRENT_DATE against a stale mart
+    silently shrinks every such window by the mart's age."""
+    raw = built_at()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.date()
+
+
+def age_hours() -> float | None:
+    """Hours since the served mart was built (mart_meta.built_at), 1 decimal; None when
+    the mart doesn't say."""
+    raw = built_at()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return round((datetime.now(timezone.utc) - parsed).total_seconds() / 3600.0, 1)
 
 
 def has_table(table: str) -> bool:

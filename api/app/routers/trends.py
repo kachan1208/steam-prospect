@@ -25,6 +25,8 @@ Data caveats (surfaced so the UI can caption the chart honestly):
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, HTTPException, Query
 
 from pydantic import BaseModel
@@ -161,6 +163,17 @@ def _has_players_history() -> bool:
     return analytics_db.has_table("mart_game_players_history")
 
 
+def _players_daily_as_of() -> str | None:
+    """The last capture day in mart_game_players_daily ('YYYY-MM-DD'), memoized per mart —
+    the as-of date of the daily player series."""
+    return analytics_db.memo(
+        "trends.players_daily_as_of",
+        lambda: analytics_db.scalar(
+            "SELECT CAST(MAX(date) AS VARCHAR) FROM mart_game_players_daily"
+        ),
+    )
+
+
 class GamePlayersPoint(BaseModel):
     date: str  # 'YYYY-MM-DD' (UTC capture date)
     players: int  # LAST capture of that date — a ~21-22:00 UTC point sample, NOT a daily peak
@@ -193,6 +206,9 @@ class GamePlayersResponse(BaseModel):
     # Deep monthly history (top-8k games only; empty when the mart predates it or the game
     # has no external coverage). Source: steamcharts.com monthly averages/peaks.
     monthly: list[GamePlayersMonthlyPoint] = []
+    # The day the `days` window ends on: the last capture day in the daily mart (the data's
+    # own as-of), not today. None when the series is unavailable.
+    data_as_of: str | None = None
 
 
 @router.get("/{appid}/players", response_model=GamePlayersResponse)
@@ -206,11 +222,18 @@ def game_players(
     if not _has_players_daily():
         return GamePlayersResponse(appid=appid, days=days, available=False, summary=None, points=[])
 
+    # The window ends at the DATA's last capture day (the whole panel's, not this game's —
+    # a game rotated out of the panel must show its gap, not a shifted window), NOT at
+    # CURRENT_DATE: against a mart that is days old the wall-clock window silently lost
+    # its most recent days. Echoed back as data_as_of.
+    as_of = _players_daily_as_of()
+    anchor = as_of or datetime.now(timezone.utc).date().isoformat()
     # days is Query-validated (7-365), safe to interpolate into the INTERVAL literal.
     rows = analytics_db.query(
         f"SELECT CAST(date AS VARCHAR) AS date, players FROM mart_game_players_daily "
-        f"WHERE appid = ? AND date >= CURRENT_DATE - INTERVAL {days} DAY ORDER BY date ASC",
-        [appid],
+        f"WHERE appid = ? AND date >= CAST(? AS DATE) - INTERVAL {days} DAY "
+        f"AND date <= CAST(? AS DATE) ORDER BY date ASC",
+        [appid, anchor, anchor],
     )
     game = analytics_db.query_one(
         "SELECT live_players, players_7d_avg, players_trend_7d_pct FROM mart_game WHERE appid = ?",
@@ -239,6 +262,7 @@ def game_players(
         summary=GamePlayersSummary(**(game or {}), **(bounds or {})),
         points=[GamePlayersPoint(**r) for r in rows],
         monthly=monthly,
+        data_as_of=anchor,
     )
 
 

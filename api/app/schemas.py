@@ -14,6 +14,8 @@ class Health(BaseModel):
     # The mart THIS process serves (mart_meta of the loaded generation).
     mart_version: Optional[str] = None
     built_at: Optional[str] = None
+    age_hours: Optional[float] = None  # now - built_at, hours (1dp); None when unknown
+    owners_as_of: Optional[str] = None  # mart_meta.owners_as_of, when the mart carries it
     source_db: Optional[str] = None
     # Loaded vs published (analytics_db hot reload). loaded_file is the file the served mart
     # was opened from; link_target is what the watched path (current.duckdb) points at NOW,
@@ -218,6 +220,10 @@ class GameSearchList(BaseModel):
     total: int
     limit: int
     offset: int
+    # The date a `released_within_days` window was anchored to — the mart's as-of date
+    # (mart_meta.built_at), NOT today: caption it "released in the N days to <data_as_of>".
+    # None when no date window was applied.
+    data_as_of: Optional[str] = None
 
 
 class TagSuggestion(BaseModel):

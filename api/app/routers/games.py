@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Literal
 
 import duckdb
@@ -253,15 +254,22 @@ def search_games(
     if tag:
         where.append("list_contains(top_tags, ?)")
         params.append(tag)
+    data_as_of: str | None = None
     if released_within_days is not None:
-        # "New releases": released in the recent PAST. Upper-bounded to today so upcoming/announced
-        # titles — and the garbage far-future placeholder dates in the source (e.g. 9998-12-31) —
-        # are excluded; NULL / unparseable release dates drop out via TRY_CAST.
+        # "New releases": released in the recent PAST. Upper-bounded to the anchor so
+        # upcoming/announced titles — and the garbage far-future placeholder dates in the
+        # source (e.g. 9998-12-31) — are excluded; NULL / unparseable release dates drop out
+        # via TRY_CAST. ANCHORED ON THE MART'S AS-OF DATE, not CURRENT_DATE: the catalog is
+        # a snapshot, and against a mart that is days old (a held or failed nightly) a
+        # wall-clock window silently shrank by the mart's age. The anchor is echoed back
+        # as data_as_of so the UI can say "released in the 30 days to <date>".
+        anchor = (analytics_db.as_of_date() or datetime.now(timezone.utc).date()).isoformat()
         where.append(
-            "TRY_CAST(release_date AS DATE) >= CURRENT_DATE - CAST(? AS INTEGER) "
-            "AND TRY_CAST(release_date AS DATE) <= CURRENT_DATE"
+            "TRY_CAST(release_date AS DATE) >= CAST(? AS DATE) - CAST(? AS INTEGER) "
+            "AND TRY_CAST(release_date AS DATE) <= CAST(? AS DATE)"
         )
-        params.append(released_within_days)
+        params.extend([anchor, released_within_days, anchor])
+        data_as_of = anchor
     # Price band, in USD. Comparisons on price_initial drop NULL-priced rows naturally —
     # a game with an unknown price can't be shown to satisfy a price constraint. Free games
     # (price_initial = 0, incl. is_free titles) stay in as long as the floor allows 0: a
@@ -325,6 +333,7 @@ def search_games(
         total=int(total or 0),
         limit=limit,
         offset=offset,
+        data_as_of=data_as_of,
     )
 
 

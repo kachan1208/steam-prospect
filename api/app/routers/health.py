@@ -31,6 +31,10 @@ def health() -> Health:
         detail=None if ready else (analytics_db.unavailable_reason() or _NOT_OPEN),
         mart_version=meta.get("mart_version"),
         built_at=meta.get("built_at"),
+        age_hours=analytics_db.age_hours(),
+        # When the owners estimates (a frozen SteamSpy-era snapshot) were taken — present
+        # only once the ETL stamps it into mart_meta.
+        owners_as_of=meta.get("owners_as_of"),
         source_db=meta.get("source_db"),
         loaded_file=watch["loaded_file"],
         loaded_at=watch["loaded_at"],
