@@ -40,10 +40,17 @@ export default defineConfig(({ mode }) => {
           // depends on the 406KB recharts chunk and index.html modulepreloads it. That
           // silently defeats the route-level code splitting: /radar draws hand-rolled
           // SVG and imports no chart at all. Keep clsx out of the recharts chunk.
+          //
+          // @tanstack/react-table has its OWN chunk (2026-09-22). It used to share
+          // vendor-query with react-query, which the entry needs — so index.html
+          // modulepreloaded the table library on every first paint although only the
+          // lazily-loaded NicheFinder route imports it. As a separate chunk it downloads
+          // with that route and still caches independently of app code.
           manualChunks: {
             "vendor-react": ["react", "react-dom", "react-router-dom", "clsx"],
             "vendor-recharts": ["recharts"],
-            "vendor-query": ["@tanstack/react-query", "@tanstack/react-table"],
+            "vendor-query": ["@tanstack/react-query"],
+            "vendor-table": ["@tanstack/react-table"],
           },
         },
       },
