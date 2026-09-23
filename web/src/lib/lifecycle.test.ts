@@ -40,6 +40,16 @@ describe("releaseCaption", () => {
     expect(releaseCaption({ release_date: "2015-06-01", release_date_source: "first_review_month" })).toBe("~Jun 2015");
     expect(releaseCaption({ release_date: "2015-06-14", release_date_source: "first_review" })).toBe("~Jun 2015");
     expect(releaseCaption({ release_date: "2015-06-14", release_date_source: "store" })).toBe("Jun 2015");
+    // GET /api/games/646570 on the 2026-09-23 mart: the EA start is inferred, the 1.0 is not.
+    expect(
+      releaseCaption({
+        release_date: "2017-11-17",
+        first_public_date: "2017-11-17",
+        release_date_1_0: "2019-01-23",
+        is_ea_graduate: true,
+        release_date_source: "first_review",
+      }),
+    ).toBe("EA ~Nov 2017 → 1.0 Jan 2019");
   });
 });
 

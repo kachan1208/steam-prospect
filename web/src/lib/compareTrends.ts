@@ -157,10 +157,18 @@ export interface TakeawayGame {
   revenue: number | null;
   /** 7-day players trend in PERCENT (−0.55 = −0.55%), null when not measured. */
   trend7d: number | null;
+  /** The same trend net of the whole Steam panel's, in percentage points — null when the
+   * data doesn't carry the market baseline. Read INSTEAD of trend7d whenever present: a +0.4%
+   * week in a +0.8% market is an underperformance. */
+  rel7d?: number | null;
   /** Reviews in the first 3 months (histogram), null when unknown. */
   first3: number | null;
   /** True when the first-3-month window is complete. */
   first3Complete: boolean;
+}
+
+function signedPts(v: number): string {
+  return `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(1)} pts`;
 }
 
 function signedPct(v: number): string {
@@ -182,7 +190,28 @@ export function compareTakeaway(games: readonly TakeawayGame[]): string | null {
   if (games.length < 2) return null;
   const parts: string[] = [];
 
-  const measured = games.filter((g) => g.trend7d !== null);
+  // Against the market when the data carries it: a Steam-wide week (a sale, a holiday)
+  // moves every game at once, so "losing players" alone would be the calendar talking.
+  const relative = games.filter((g) => g.rel7d != null);
+  if (relative.length >= 2) {
+    const trailing = relative.filter((g) => (g.rel7d as number) < 0);
+    const ahead = relative.filter((g) => (g.rel7d as number) > 0);
+    if (trailing.length === relative.length) {
+      parts.push(
+        `${relative.length === games.length ? `All ${games.length}` : `All ${relative.length} measured`} are trailing Steam's players trend this week (${trailing
+          .map((g) => `${g.name} ${signedPts(g.rel7d as number)}`)
+          .join(", ")}).`,
+      );
+    } else if (trailing.length > 0) {
+      parts.push(
+        `${listNames(trailing.map((g) => g.name))} ${trailing.length === 1 ? "is" : "are"} trailing Steam's players trend this week (${trailing
+          .map((g) => signedPts(g.rel7d as number))
+          .join(", ")})${ahead.length > 0 ? `; ${listNames(ahead.map((g) => g.name))} ${ahead.length === 1 ? "is" : "are"} ahead of it` : ""}.`,
+      );
+    }
+  }
+
+  const measured = relative.length >= 2 ? [] : games.filter((g) => g.trend7d !== null);
   const falling = measured.filter((g) => (g.trend7d as number) < 0);
   const rising = measured.filter((g) => (g.trend7d as number) > 0);
   if (measured.length >= 2 && falling.length === measured.length) {

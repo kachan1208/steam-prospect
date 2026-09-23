@@ -153,6 +153,17 @@ const PROFILES: Record<number, GameProfile> = {
     players_trend_7d_pct: -5.35,
     top_tags: ["Action Roguelike", "Hack and Slash", "Mythology"],
   }),
+  // The 2026-09-23 mart's market-relative trend: Hades +0.36% in a +0.75% Steam week.
+  11: {
+    ...profile({ appid: 11, name: "Market Laggard", players_trend_7d_pct: 0.36 }),
+    players_trend_7d_market_pct: 0.75,
+    players_trend_7d_rel_pct: -0.39,
+  } as GameProfile,
+  12: {
+    ...profile({ appid: 12, name: "Market Leader", players_trend_7d_pct: 1.75 }),
+    players_trend_7d_market_pct: 0.75,
+    players_trend_7d_rel_pct: 1.0,
+  } as GameProfile,
   // Grand Theft Auto V Legacy: $0 with is_free 0 — a price we don't know, not a free game.
   271590: profile({
     appid: 271590,
@@ -324,6 +335,19 @@ describe("Compare metric grid", () => {
     // Both are "up" — neither should carry the best-in-row bold treatment.
     expect(up1.className).not.toContain("font-semibold");
     expect(up2.className).not.toContain("font-semibold");
+  });
+
+  it("reads the week against Steam when the market baseline is there — an up week can still trail", async () => {
+    renderCompare("/compare?ids=11,12");
+    await screen.findByLabelText("Remove Market Laggard from comparison");
+    const row = rowOf("players_7d");
+    // +0.36% is UP, but 0.39 pts behind Steam's +0.75%: the arrow says ▼ and it isn't accented.
+    const laggard = within(row).getByText("▼ +0.4%");
+    expect(laggard.className).toContain("text-ink-muted");
+    expect(within(row).getByText("vs Steam +0.8%: −0.4 pts")).toBeTruthy();
+    expect(within(row).getByText("▲ +1.8%").className).toContain("text-brand");
+    fireEvent.click(within(row).getByRole("button", { name: "About 7-day players trend" }));
+    expect((await screen.findByRole("tooltip")).textContent).toContain("Market Laggard: +0.4% − Steam +0.8% = −0.4 pts");
   });
 
   it("hides the add-game affordance once the compare cap is reached", async () => {

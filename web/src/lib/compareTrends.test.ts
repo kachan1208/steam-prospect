@@ -122,6 +122,19 @@ describe("compareTakeaway — bearish reading first", () => {
     expect(line).toContain("about level with the rest");
   });
 
+  it("reads the week against Steam when the data carries the market baseline", () => {
+    // 2026-09-23 mart: Steam's panel +0.75%; Balatro +1.75% (+1.0 pts), Slay the Spire −0.30%
+    // (−1.05 pts), Hades +0.36% — UP, but −0.39 pts behind the market.
+    const line = compareTakeaway([
+      { ...G("Balatro", 89_426_892, 1.75), rel7d: 1.0 },
+      { ...G("Slay the Spire", 163_964_638, -0.3), rel7d: -1.05 },
+      { ...G("Hades", 231_400_153, 0.36), rel7d: -0.39 },
+    ])!;
+    expect(line.startsWith("Slay the Spire and Hades are trailing Steam's players trend this week (−1.1 pts, −0.4 pts); Balatro is ahead of it.")).toBe(true);
+    // The raw-trend reading is not ALSO given — Hades "growing" would contradict it.
+    expect(line).not.toContain("losing players");
+  });
+
   it("says nothing it can't back: free games have no revenue to rank, and one game is no comparison", () => {
     expect(compareTakeaway([G("Solo", 1, 1)])).toBeNull();
     expect(compareTakeaway([G("Free A", null, null), G("Free B", null, null)])).toBeNull();

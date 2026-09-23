@@ -181,6 +181,10 @@ function signedPct(v: number): string {
   return `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(1)}%`;
 }
 
+function signedPts(v: number): string {
+  return `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(1)} pts`;
+}
+
 function windowCell(w: LaunchWindow | undefined, ctx: RowCtx): Cell {
   if (!ctx.trendsReady) return { node: "…", shown: null, num: null };
   if (!w) return tagged("no monthly data");
@@ -277,19 +281,22 @@ const STAT_ROWS: StatRowDef[] = [
     label: glossary("players_trend_7d_pct").label,
     term: "players_trend_7d_pct",
     verdict: true,
+    // The arrow and its colour follow the MARKET-RELATIVE reading when the data carries it
+    // (a +0.4% week in a +0.8% Steam week is an underperformance); the raw % stays printed.
     cell: (p) => {
       const v = p.players_trend_7d_pct;
       if (v == null) return tagged("not measured");
       const rel = p.players_trend_7d_rel_pct;
+      const market = p.players_trend_7d_market_pct;
+      const dir = rel ?? v;
       return {
-        node: `${v > 0 ? "▲" : v < 0 ? "▼" : "■"} ${signedPct(v)}`,
+        node: `${dir > 0 ? "▲" : dir < 0 ? "▼" : "■"} ${signedPct(v)}`,
         shown: signedPct(v),
-        num: v,
+        num: dir,
         note:
-          rel != null && p.players_trend_7d_market_pct != null ? (
+          rel != null && market != null ? (
             <span className="text-[11px] text-ink-muted">
-              Steam {signedPct(p.players_trend_7d_market_pct)} → {rel > 0 ? "+" : rel < 0 ? "−" : ""}
-              {Math.abs(rel).toFixed(1)} pts
+              vs Steam {signedPct(market)}: {signedPts(rel)}
             </span>
           ) : undefined,
       };
@@ -298,9 +305,9 @@ const STAT_ROWS: StatRowDef[] = [
       const v = p.players_trend_7d_pct;
       if (v == null) return null;
       if (p.players_trend_7d_market_pct != null && p.players_trend_7d_rel_pct != null) {
-        return `${name}: ${signedPct(v)} vs Steam ${signedPct(p.players_trend_7d_market_pct)} = ${p.players_trend_7d_rel_pct.toFixed(1)} pts`;
+        return `${name}: ${signedPct(v)} − Steam ${signedPct(p.players_trend_7d_market_pct)} = ${signedPts(p.players_trend_7d_rel_pct)}`;
       }
-      return `${name}: ${signedPct(v)} (Steam-wide week not in this data build — a sale or a holiday moves every game)`;
+      return `${name}: ${signedPct(v)} (the Steam-wide week isn't in this data build — a sale or a holiday moves every game)`;
     },
   },
   {
@@ -550,6 +557,7 @@ export default function Compare() {
           name: names.get(id)!,
           revenue: priceKind(p) === "paid" ? p.est_rev_reviews : null,
           trend7d: p.players_trend_7d_pct ?? null,
+          rel7d: p.players_trend_7d_market_pct != null ? p.players_trend_7d_rel_pct ?? null : null,
           first3: w?.total ?? null,
           first3Complete: !!w && w.monthsCovered >= w.months,
         };

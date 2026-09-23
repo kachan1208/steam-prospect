@@ -59,9 +59,10 @@ export function releaseCaption(g: LifecycleFields): string | null {
   const approx = isApproxReleaseDate(g);
   const plain = monthOf(g.release_date, approx) ?? (g.release_year != null ? String(g.release_year) : null);
   if (!g.is_ea_graduate) return plain;
-  // The first public (EA) date: its own column on the transitional API, else release_date
-  // itself on a lifecycle mart.
-  const ea = g.first_public_date ? monthOf(g.first_public_date) : monthOf(g.release_date, approx);
+  // The first public (EA) date — the API maps it into first_public_date; release_date itself
+  // on a lifecycle mart. release_date_source says how THAT date was established, so an
+  // inferred one keeps its "~".
+  const ea = monthOf(g.first_public_date ?? g.release_date, approx);
   const full = monthOf(g.release_date_1_0);
   if (ea && full) return `EA ${ea} → 1.0 ${full}`;
   if (ea) return `EA ${ea} → 1.0`;
