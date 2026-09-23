@@ -12,7 +12,7 @@
 
 import { nichePath, request, type Dimension, type NicheGameRow, type NicheGamesList, type NicheGamesParams, type NicheScope } from "./api";
 import { estimatedUnits } from "./estimates";
-import { isFreeTitle } from "./format";
+import { priceKind } from "./format";
 
 /** The /games endpoint's maximum page size. */
 export const CSV_PAGE_SIZE = 200;
@@ -74,7 +74,7 @@ export const CSV_COLUMNS = [
   "name",
   "release_year",
   "price_usd",
-  "is_free",
+  "price_kind",
   "est_revenue_usd",
   "est_units",
   "total_reviews",
@@ -90,17 +90,20 @@ function roundOrNull(v: number | null): number | null {
 export function nicheGamesCsv(rows: readonly NicheGameRow[]): string {
   const lines = [CSV_COLUMNS.join(",")];
   for (const g of rows) {
-    const free = isFreeTitle(g);
+    // The one price reading every page shares (lib/format.ts priceKind): a $0 price Steam
+    // doesn't flag free is "unknown", not free — its price cell stays EMPTY rather than a
+    // fabricated 0, and so does its revenue (the table prints "Price unknown" there).
+    const kind = priceKind(g);
     lines.push(
       [
         g.appid,
         g.name ?? "",
         g.release_year,
-        g.price_initial,
-        free ? 1 : 0,
+        kind === "unknown" ? null : g.price_initial,
+        kind,
         // Free titles carry no box revenue — an empty cell, never a fabricated $0 (the table
         // prints "Free" there). Units come from the table's own helper, so the two agree.
-        free ? null : g.est_revenue,
+        kind === "paid" ? g.est_revenue : null,
         roundOrNull(estimatedUnits(g.est_revenue, g.price_initial, g.total_reviews)),
         g.total_reviews,
         g.positive_ratio ?? null,

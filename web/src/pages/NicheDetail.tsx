@@ -23,6 +23,7 @@ import { KpiCell } from "../components/ui/KpiCell";
 import { Loading } from "../components/ui/Loading";
 import { BulletMeter } from "../components/ui/Meter";
 import { SentinelTag } from "../components/ui/SentinelTag";
+import { hasRevenueFigure, PriceText, RevenueText } from "../components/ui/GameMoney";
 import { StatTile } from "../components/ui/StatTile";
 import { TableScroll } from "../components/ui/TableScroll";
 import { ViewToggle } from "../components/ui/ViewToggle";
@@ -60,13 +61,13 @@ import {
   fmtMonths,
   fmtPct,
   fmtPrice,
-  fmtRevenue,
   fmtUsd,
   isFiniteNumber,
   titleCase,
-  isFreeTitle,
+  priceKind,
+  PRICE_UNKNOWN_NOTE,
 } from "../lib/format";
-import type { GlossaryKey } from "../lib/glossary";
+import { glossary, type GlossaryKey } from "../lib/glossary";
 import { heatDomain, heatStyle } from "../lib/heat";
 import { fillMonthGaps, partialMonth } from "../lib/monthSeries";
 import { downloadCsv, exportNicheGamesCsv } from "../lib/nicheCsv";
@@ -74,7 +75,7 @@ import { paidCount, paidOnlyNote, paidStatSentinel, paidWithheld } from "../lib/
 import { CSS_VAR } from "../lib/palette";
 import { noMarketNote, readPlayersTrend } from "../lib/playersTrend";
 import { usePageTitle } from "../lib/usePageTitle";
-import { useMinWidth } from "../lib/useMediaQuery";
+import { useMinWidth } from "../lib/useMinWidth";
 import { useDetailView } from "../lib/viewMode";
 import { DEFAULT_NICHE_CUT, findNicheVariant, formatNicheRef, nicheCombinedPath } from "../lib/nicheSelection";
 // The headline is the Radar's dossier — same evaluation, same strings, same colour tokens
@@ -272,6 +273,10 @@ const TIER_BADGE: Record<string, string> = {
   meta: "review tag",
   genre: "Steam genre",
 };
+
+/** The Est. revenue ⓘ, plus what its "Price unknown" sentinel means — the same note every
+ * other games table carries (lib/format.ts PRICE_UNKNOWN_NOTE). */
+const EST_REVENUE_NOTES = `${glossary("est_revenue").notes ?? ""} ${PRICE_UNKNOWN_NOTE}`.trim();
 
 /** The falsification rules from the growth-gate work, rendered as read-this-first flags:
  * a niche that LOOKS open can be a market in decline, a hits-only market, or not solo-
@@ -1755,13 +1760,17 @@ export default function NicheDetail() {
                               </Link>
                             </td>
                             <td className="tabular px-2 py-1.5">{g.release_year ?? "—"}</td>
-                            <td className="tabular px-2 py-1.5">{fmtPrice(g.price_initial)}</td>
+                            <td className="tabular px-2 py-1.5">
+                              <PriceText row={g} />
+                            </td>
                             <td className="tabular px-2 py-1.5">
                               {fmtCompact(estimatedUnits(g.est_rev_reviews, g.price_initial, g.total_reviews))}
                             </td>
                             <td className="tabular px-2 py-1.5">{fmtInt(g.total_reviews)}</td>
                             <td className="tabular px-2 py-1.5">{fmtPct(g.positive_ratio)}</td>
-                            <td className="tabular px-2 py-1.5">{fmtRevenue(g.est_rev_reviews, isFreeTitle(g))}</td>
+                            <td className="tabular px-2 py-1.5">
+                              <RevenueText row={g} value={g.est_rev_reviews} />
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -1837,7 +1846,14 @@ export default function NicheDetail() {
                           <GamesHeader label="Est. units" term="units" params={gamesParams} onSort={onGameSort} />
                         </th>
                         <th className="px-2 py-1.5">
-                          <GamesHeader label="Est. revenue" term="est_revenue" col="revenue" params={gamesParams} onSort={onGameSort} />
+                          <GamesHeader
+                            label="Est. revenue"
+                            term="est_revenue"
+                            notes={EST_REVENUE_NOTES}
+                            col="revenue"
+                            params={gamesParams}
+                            onSort={onGameSort}
+                          />
                         </th>
                       </tr>
                     </thead>
@@ -1860,18 +1876,24 @@ export default function NicheDetail() {
                             </Link>
                           </td>
                           <td className="tabular px-2 py-1.5">{g.release_year ?? "—"}</td>
-                          <td className="tabular px-2 py-1.5">{fmtPrice(g.price_initial)}</td>
+                          <td className="tabular px-2 py-1.5">
+                            <PriceText row={g} />
+                          </td>
                           <td className="tabular px-2 py-1.5">{fmtInt(g.total_reviews)}</td>
                           <td className="tabular px-2 py-1.5">
                             {fmtCompact(estimatedUnits(g.est_revenue, g.price_initial, g.total_reviews))}
                           </td>
                           <td className="tabular px-2 py-1.5">
-                            <span
-                              className="rounded px-1.5 py-0.5"
-                              style={heatStyle(g.est_revenue, ...heatDomain(all, (x) => x.est_revenue))}
-                            >
-                              {fmtRevenue(g.est_revenue, isFreeTitle(g))}
-                            </span>
+                            {hasRevenueFigure(g, g.est_revenue) ? (
+                              <span
+                                className="rounded px-1.5 py-0.5"
+                                style={heatStyle(g.est_revenue, ...heatDomain(all, (x) => x.est_revenue))}
+                              >
+                                <RevenueText row={g} value={g.est_revenue} />
+                              </span>
+                            ) : (
+                              <RevenueText row={g} value={g.est_revenue} />
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -1914,12 +1936,16 @@ export default function NicheDetail() {
 function GamesHeader({
   label,
   term,
+  notes,
   col,
   params,
   onSort,
 }: {
   label: string;
   term?: GlossaryKey;
+  /** Replaces the glossary's notes paragraph (the Est. revenue column adds the price-unknown
+   * sentinel's meaning). */
+  notes?: string;
   col?: NicheGameSortKey;
   params: NicheGamesParams;
   onSort: (col: NicheGameSortKey) => void;
@@ -1928,6 +1954,7 @@ function GamesHeader({
     <HeaderLabel
       label={label}
       term={term}
+      info={notes ? { notes } : undefined}
       sort={col ? { col, active: params.sort === col, order: params.order, onSort } : undefined}
       style={{ fontFamily: CONDENSED, fontSize: 11, letterSpacing: ".06em", fontWeight: 600 }}
     />
@@ -2051,7 +2078,7 @@ function TopGamesTable({ games }: { games: NicheGameRow[] }) {
           <span className="kicker text-[11px] text-ink-primary/55">Game</span>
           <span className="kicker text-[11px] text-ink-primary/55">Released</span>
           <span className="kicker inline-flex items-center gap-1 text-[11px] text-ink-primary/55">
-            Est. revenue <InfoTip term="est_revenue" />
+            Est. revenue <InfoTip term="est_revenue" notes={EST_REVENUE_NOTES} />
           </span>
           <span className="kicker inline-flex items-center gap-1 text-[11px] text-ink-primary/55">
             Reviews <InfoTip term="positive_ratio" />
@@ -2069,11 +2096,15 @@ function TopGamesTable({ games }: { games: NicheGameRow[] }) {
             <GameThumb src={g.header_image} />
             <span className="truncate font-medium text-ink-primary">{g.name ?? `App ${g.appid}`}</span>
             <span className="tabular text-ink-primary/70">{g.release_year ?? "—"}</span>
-            <span className="tabular text-ink-primary/70">{fmtRevenue(g.est_revenue, isFreeTitle(g))}</span>
+            <span className="tabular text-ink-primary/70">
+              <RevenueText row={g} value={g.est_revenue} />
+            </span>
             <span className="tabular text-ink-primary/70">{reviewsText(g)}</span>
             {/* Per-row live CCU from the games list — the same column /api/games/{appid}
-                serves, not a rank-8 leaderboard join. */}
-            <span className="tabular text-brand">{g.live_players != null ? fmtCompact(g.live_players) : "—"}</span>
+                serves, not a rank-8 leaderboard join. A game outside the capture says so. */}
+            <span className="tabular text-brand">
+              {g.live_players != null ? fmtCompact(g.live_players) : <SentinelTag>not measured</SentinelTag>}
+            </span>
           </Link>
         ))}
       </div>
@@ -2093,7 +2124,8 @@ function TopGamesCards({ games }: { games: NicheGameRow[] }) {
             <span className="flex min-w-0 flex-col gap-0.5">
               <span className="truncate text-sm font-medium text-ink-primary">{g.name ?? `App ${g.appid}`}</span>
               <span className="tabular text-[12px] text-ink-secondary">
-                {g.release_year ?? "—"} · {fmtRevenue(g.est_revenue, isFreeTitle(g))} est. revenue
+                {g.release_year ?? "—"} · <RevenueText row={g} value={g.est_revenue} />
+                {priceKind(g) === "paid" && g.est_revenue != null ? " est. revenue" : ""}
               </span>
               <span className="tabular text-[12px] text-ink-muted">
                 {reviewsText(g)}

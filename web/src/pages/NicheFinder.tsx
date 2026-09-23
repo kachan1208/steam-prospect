@@ -39,7 +39,7 @@ import {
   releasesYoyWorked,
 } from "../lib/radarVerdict";
 import { useDebounced } from "../lib/useDebounced";
-import { useMinWidth } from "../lib/useMediaQuery";
+import { useMinWidth } from "../lib/useMinWidth";
 import { usePageTitle } from "../lib/usePageTitle";
 // From the leaf module, NEVER from pages/NicheCombined (which is where these lived until
 // 2026-08-29): a static import of a page module drags that page — and NicheDetail, and

@@ -145,12 +145,20 @@ describe("the niche page's CSV — THIS cut's games", () => {
   });
 
   it("writes one row per game with units that multiply out and free games left blank", () => {
-    const csv = nicheGamesCsv([game({}), game({ appid: 2, name: "Free One", price_initial: 0, is_free: 1, est_revenue: 0 })]);
-    const [head, a, b] = csv.trim().split("\n");
+    const csv = nicheGamesCsv([
+      game({}),
+      game({ appid: 2, name: "Free One", price_initial: 0, is_free: 1, est_revenue: 0 }),
+      // A $0 price Steam doesn't flag free (a delisted paid game): price UNKNOWN, not free.
+      game({ appid: 3, name: "Delisted", price_initial: 0, is_free: 0, est_revenue: null }),
+    ]);
+    const [head, a, b, c] = csv.trim().split("\n");
     expect(head).toBe(CSV_COLUMNS.join(","));
-    expect(a).toBe("1,A,2025,19.99,0,199900,10000,333,0.91,12,https://store.steampowered.com/app/1/");
+    expect(head).toContain(",price_usd,price_kind,est_revenue_usd,");
+    expect(a).toBe("1,A,2025,19.99,paid,199900,10000,333,0.91,12,https://store.steampowered.com/app/1/");
     // Free: no box revenue cell (never a fabricated $0); units from reviews × 30.
-    expect(b).toBe("2,Free One,2025,0,1,,9990,333,0.91,12,https://store.steampowered.com/app/2/");
+    expect(b).toBe("2,Free One,2025,0,free,,9990,333,0.91,12,https://store.steampowered.com/app/2/");
+    // Unknown: neither a $0 price nor a revenue figure is written.
+    expect(c).toBe("3,Delisted,2025,,unknown,,9990,333,0.91,12,https://store.steampowered.com/app/3/");
   });
 
   it("names the file after the slice it holds", () => {

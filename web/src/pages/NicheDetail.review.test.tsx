@@ -364,6 +364,48 @@ describe("hit rates — matching benchmarks, flagged fallbacks", () => {
   });
 });
 
+describe("prices — the same reading every other page uses (priceKind)", () => {
+  it("a $0 price Steam doesn't flag free reads 'Price unknown', flagged; a free game reads 'Free'", async () => {
+    const row = (over: Json) => ({
+      release_year: 2025,
+      owners_est: null,
+      positive_ratio: 0.9,
+      live_players: null,
+      header_image: null,
+      total_reviews: 333,
+      ...over,
+    });
+    stub({
+      detail: detailOf([SOULS]),
+      games: (url) => ({
+        total: 3,
+        items: [
+          row({ appid: 1, name: "Paid One", price_initial: 9.99, is_free: 0, est_revenue: 99_900 }),
+          row({ appid: 2, name: "Gratis", price_initial: 0, is_free: 1, est_revenue: 0 }),
+          // GTA V Legacy's shape: delisted, $0 on the store feed, not flagged free.
+          row({ appid: 3, name: "Delisted", price_initial: 0, is_free: 0, est_revenue: null }),
+        ],
+        limit: Number(url.searchParams.get("limit")),
+        offset: 0,
+        scope: url.searchParams.get("scope"),
+        n_scope_unknown: 0,
+      }),
+    });
+    renderAt("/niches/tag/Souls-like?tab=games");
+    const rowOf = async (name: string) => (await screen.findByRole("link", { name })).closest("tr")!;
+    const delisted = await rowOf("Delisted");
+    const unknown = within(delisted).getAllByText("Price unknown");
+    expect(unknown).toHaveLength(2); // the price cell AND the revenue cell
+    for (const el of unknown) expect(el.hasAttribute("data-sentinel")).toBe(true);
+    expect(delisted.textContent).not.toMatch(/Free|\$0/);
+    const gratis = await rowOf("Gratis");
+    expect(within(gratis).getAllByText("Free")).toHaveLength(2);
+    const paid = await rowOf("Paid One");
+    expect(paid.textContent).toContain("$9.99");
+    expect(paid.textContent).toContain("$99.9K");
+  });
+});
+
 describe("small helpers", () => {
   it("labels both numbers of a reviews cell", () => {
     expect(reviewsText({ positive_ratio: 0.611, total_reviews: 201_684 })).toBe("61.1% positive · 201,684 reviews");

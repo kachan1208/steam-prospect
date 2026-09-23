@@ -21,7 +21,10 @@ import {
   type Window,
 } from "../lib/api";
 import { estimatedUnits } from "../lib/estimates";
-import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd, isFreeTitle } from "../lib/format";
+import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtUsd, PRICE_UNKNOWN_NOTE } from "../lib/format";
+import { glossary } from "../lib/glossary";
+import { PriceText, RevenueText } from "../components/ui/GameMoney";
+import { HeaderLabel } from "../components/ui/HeaderLabel";
 // The §4b KPI-cell primitive (condensed numeral, 1px-gap blueprint grid) is shared with the
 // deep-dive page — from components/ui, so neither page has to import the other.
 import { KpiCell } from "../components/ui/KpiCell";
@@ -626,14 +629,15 @@ export default function NicheCombined() {
                           next to `est_revenue` (est_rev_reviews, Boxleiter) — two estimators
                           in one row, so revenue ÷ copies fought the price column. Derived from
                           the revenue actually printed, via the one helper (lib/estimates.ts). */}
-                      <th
-                        className="px-4 py-2.5 font-semibold"
-                        title="Estimated copies sold on the same reviews-based (Boxleiter) estimator as Est. revenue — est. revenue ÷ launch price, exactly."
-                      >
-                        Est. units
+                      <th className="px-4 py-2.5 font-semibold">
+                        <HeaderLabel label="Est. units" term="units" />
                       </th>
-                      <th className="px-4 py-2.5 font-semibold" title="Estimated lifetime gross: reviews × 30 owners-per-review × launch price">
-                        Est. revenue
+                      <th className="px-4 py-2.5 font-semibold">
+                        <HeaderLabel
+                          label="Est. revenue"
+                          term="est_revenue"
+                          info={{ notes: `${glossary("est_revenue").notes ?? ""} ${PRICE_UNKNOWN_NOTE}`.trim() }}
+                        />
                       </th>
                     </tr>
                   </thead>
@@ -646,13 +650,15 @@ export default function NicheCombined() {
                           </Link>
                         </td>
                         <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">{g.release_year ?? "—"}</td>
-                        <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">{fmtPrice(g.price_initial)}</td>
+                        <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">
+                          <PriceText row={g} />
+                        </td>
                         <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">{fmtCompact(g.total_reviews)}</td>
                         <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">
                           {fmtCompact(estimatedUnits(g.est_revenue, g.price_initial, g.total_reviews))}
                         </td>
                         <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">
-                          {fmtRevenue(g.est_revenue, isFreeTitle(g))}
+                          <RevenueText row={g} value={g.est_revenue} />
                         </td>
                       </tr>
                     ))}

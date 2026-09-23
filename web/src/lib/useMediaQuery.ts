@@ -2,16 +2,15 @@ import { useSyncExternalStore } from "react";
 
 /**
  * A reactive CSS media query — for the few layouts that must render DIFFERENT MARKUP per
- * breakpoint, not just restyle it: the Niche Finder's table becomes cards below 640px, the
- * niche page's top-games table likewise, and the Radar widens its dot hit areas on a coarse
- * (touch) pointer. Rendering both variants and hiding one with CSS would double every link,
- * label and checkbox in the accessibility tree (and in every test query), so the switch is
- * made in JS.
+ * condition, not just restyle it: the Radar widens its dot hit areas on a coarse (touch)
+ * pointer. Rendering both variants and hiding one with CSS would double every link, label
+ * and checkbox in the accessibility tree (and in every test query), so the switch is made in
+ * JS. Viewport WIDTH switches (the Niche Finder's cards, the niche page's top-games cards)
+ * use the shared lib/useMinWidth.ts.
  *
  * `fallback` is what a non-browser environment (or one without matchMedia) answers. Under
- * jsdom the test setup installs a matchMedia that evaluates (min-width: Npx) against
- * window.innerWidth and answers false for anything else — so `useMinWidth(640)` is true at
- * jsdom's default 1024px and a test flips it with `window.innerWidth = 390` + a resize event.
+ * jsdom the test setup's matchMedia answers false for (pointer: coarse); a test swaps
+ * window.matchMedia to play a finger.
  */
 export function useMediaQuery(query: string, fallback = false): boolean {
   return useSyncExternalStore(
@@ -45,12 +44,6 @@ function mediaQueryList(query: string): MediaQueryList | null {
     lists.set(query, mql);
   }
   return mql;
-}
-
-/** True at or above `px` CSS pixels of viewport width (Tailwind's `sm` is 640). Defaults to
- * the wide layout where the query cannot be evaluated. */
-export function useMinWidth(px: number): boolean {
-  return useMediaQuery(`(min-width: ${px}px)`, true);
 }
 
 /** True when the primary pointer is coarse (a finger): hit areas grow to ≥ 24px there. */
