@@ -64,10 +64,21 @@ import {
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
 import { addMonths, fmtDay, fmtMonth, launchFacts, partialMonth } from "../lib/dates";
-import { fmtListPrice, priceStatus } from "../lib/priceStatus";
 import { glossary } from "../lib/glossary";
 import { DEFAULT_NICHE_CUT, findNicheVariant } from "../lib/nicheSelection";
-import { axisScale, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtUsd } from "../lib/format";
+import {
+  axisScale,
+  fmtCompact,
+  fmtInt,
+  fmtMinutes,
+  fmtMonths,
+  fmtPct,
+  fmtPrice,
+  fmtPriceFor,
+  fmtRevenueFor,
+  fmtUsd,
+  priceKind,
+} from "../lib/format";
 import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { layoutPlumbLabels, markerReasons } from "../lib/notable";
 import { CSS_VAR, MONO} from "../lib/palette";
@@ -790,7 +801,7 @@ export default function GameProfile() {
     }
     return { tag: "not ranked", detail: `no ${what} rank in this data build` };
   };
-  const status = profile ? priceStatus(profile) : "paid";
+  const status = profile ? priceKind(profile) : "paid";
   const rankRows = profile
     ? [
         {
@@ -977,8 +988,8 @@ export default function GameProfile() {
                 </span>
                 <span aria-hidden="true">·</span>
                 <span className="inline-flex items-center gap-1">
-                  {fmtListPrice(profile)}
-                  {priceStatus(profile) === "unknown" && (
+                  {fmtPriceFor(profile)}
+                  {priceKind(profile) === "unknown" && (
                     <InfoTip
                       label="Price unknown"
                       meaning="Steam gives no price for this game and doesn't mark it free — delisted, region-locked or not yet priced. Every revenue figure needs a list price, so none is estimated."
@@ -1484,7 +1495,7 @@ export default function GameProfile() {
                               term="est_revenue"
                               style={COMPARABLE_HEADER}
                               worked={(() => {
-                                const top = comparablesQ.data.items.find((c) => priceStatus(c) === "paid" && c.total_reviews != null);
+                                const top = comparablesQ.data.items.find((c) => priceKind(c) === "paid" && c.total_reviews != null);
                                 return top && top.est_rev_reviews != null
                                   ? `${top.name ?? `App ${top.appid}`}: ${fmtInt(top.total_reviews)} reviews × 30 × ${fmtPrice(top.price_initial)} = ${fmtUsd(top.est_rev_reviews)}`
                                   : undefined;
@@ -1515,13 +1526,13 @@ export default function GameProfile() {
                               </Link>
                             </td>
                             <td className="tabular px-2 py-1.5">{c.release_year ?? "—"}</td>
-                            <td className="tabular px-2 py-1.5">{fmtListPrice(c)}</td>
+                            <td className="tabular px-2 py-1.5">{fmtPriceFor(c)}</td>
                             <td className="tabular px-2 py-1.5">{fmtInt(c.total_reviews)}</td>
                             <td className={clsx("tabular px-2 py-1.5", positiveRatioClass(c.positive_ratio))}>
                               {fmtPct(c.positive_ratio)}
                             </td>
                             <td className="tabular px-2 py-1.5">
-                              {priceStatus(c) === "paid" && c.est_rev_reviews != null ? (
+                              {priceKind(c) === "paid" && c.est_rev_reviews != null ? (
                                 <span
                                   className="px-1.5 py-0.5"
                                   style={heatStyle(c.est_rev_reviews, ...heatDomain(all, (x) => x.est_rev_reviews))}
@@ -1531,7 +1542,7 @@ export default function GameProfile() {
                               ) : (
                                 // Free and unknown-price games have no estimate (NULL in the
                                 // rebuilt mart) — flagged, never a bare dash or a "$0".
-                                <SentinelTag>{priceStatus(c) === "free" ? "free to play" : "no price"}</SentinelTag>
+                                <SentinelTag>{fmtRevenueFor(c, null)}</SentinelTag>
                               )}
                             </td>
                             <td className="px-2 py-1.5">

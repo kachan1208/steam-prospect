@@ -636,12 +636,14 @@ describe("GameProfile — comparables explain their columns", () => {
   it("marks free and unknown-price comparables instead of a bare dash, and never calls $0 'Free' without the flag", async () => {
     serve(/\/comparables/, COMPARABLES);
     renderProfile();
+    // The words every page uses (lib/format priceKind / fmtPriceFor / fmtRevenueFor), and the
+    // revenue cell flagged as a sentinel rather than printed as a figure.
     const free = (await screen.findByRole("link", { name: "Free Cards" })).closest("tr") as HTMLElement;
     expect(free.textContent).toContain("Free");
-    expect(free.textContent).toContain("free to play");
+    expect(free.querySelector("[data-sentinel]")?.textContent).toBe("Free");
     const delisted = screen.getByRole("link", { name: "Delisted Deck" }).closest("tr") as HTMLElement;
     expect(delisted.textContent).toContain("Price unknown");
-    expect(delisted.textContent).toContain("no price");
+    expect(delisted.querySelector("[data-sentinel]")?.textContent).toBe("Price unknown");
     expect(delisted.textContent).not.toMatch(/Free/);
   });
 });

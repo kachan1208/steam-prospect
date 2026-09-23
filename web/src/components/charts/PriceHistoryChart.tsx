@@ -12,9 +12,8 @@ import {
 import { useGamePriceHistory, type PriceHistoryStatus, type PricePoint } from "../../lib/api";
 import { useDataAge } from "../../lib/dataAge";
 import { fmtDay } from "../../lib/dates";
-import { axisScale, fmtPrice, monthName } from "../../lib/format";
+import { axisScale, fmtPrice, fmtPriceFor, monthName } from "../../lib/format";
 import { CSS_VAR } from "../../lib/palette";
-import { fmtListPrice } from "../../lib/priceStatus";
 import { useDragZoom } from "../../lib/useDragZoom";
 import { InfoTip } from "../ui/InfoTip";
 import { InlineError } from "../ui/InlineError";
@@ -217,7 +216,7 @@ export function PriceHistoryChart({
   const steps = priceSteps(points, asOfIso);
   // Rows keep their record DAY for the page-wide zoom window; the axis itself is `t`.
   const zoom = useDragZoom(steps, "t", { dateOf: (s) => s.captured_on });
-  const listPrice = fmtListPrice({ price_initial: priceInitial, is_free: isFree });
+  const listPrice = fmtPriceFor({ price_initial: priceInitial, is_free: isFree });
 
   if (historyQ.isLoading) {
     return <div className="flex h-[60px] items-center justify-center text-xs text-ink-muted">Loading…</div>;

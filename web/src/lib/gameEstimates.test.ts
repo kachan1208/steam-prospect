@@ -9,7 +9,7 @@ import {
   missingEstimateText,
   playersTrendRead,
 } from "./gameEstimates";
-import { fmtListPrice, priceStatus } from "./priceStatus";
+import { fmtPriceFor, priceKind } from "./format";
 
 /** GET /api/games/{appid} on the 2026-09-23 mart, the fields the estimate reads. */
 const BALATRO = { total_reviews: 198_859, price_initial: 14.99, is_free: 0, price_status: "paid" as const, est_rev_reviews: 89_426_892.3 };
@@ -59,19 +59,19 @@ describe("gameEstimate — one estimator, with its reasons", () => {
   });
 });
 
-describe("priceStatus — the served verdict wins", () => {
+describe("priceKind — the page reads price the way every page does", () => {
   it("prefers the mart's price_status over the price/flag heuristic", () => {
-    expect(priceStatus({ price_initial: 19.99, is_free: 1 })).toBe("paid"); // Rainbow Six Siege
-    expect(priceStatus({ price_initial: 0, is_free: 0 })).toBe("unknown");
-    expect(priceStatus({ price_initial: null, is_free: 1 })).toBe("free");
-    expect(priceStatus({ price_initial: 0, is_free: 1, price_status: "unknown" })).toBe("unknown");
+    expect(priceKind({ price_initial: 19.99, is_free: 1 })).toBe("paid"); // Rainbow Six Siege
+    expect(priceKind({ price_initial: 0, is_free: 0 })).toBe("unknown");
+    expect(priceKind({ price_initial: null, is_free: 1 })).toBe("free");
+    expect(priceKind({ price_initial: 0, is_free: 1, price_status: "unknown" })).toBe("unknown");
   });
 
   it("prints the price a reader should see", () => {
-    expect(fmtListPrice({ price_initial: 14.99, is_free: 0 })).toBe("$14.99");
-    expect(fmtListPrice({ price_initial: 0, is_free: 1 })).toBe("Free");
-    expect(fmtListPrice({ price_initial: 0, is_free: 0 })).toBe("Price unknown");
-    expect(fmtListPrice({ price_initial: null, is_free: null })).toBe("Price unknown");
+    expect(fmtPriceFor({ price_initial: 14.99, is_free: 0 })).toBe("$14.99");
+    expect(fmtPriceFor({ price_initial: 0, is_free: 1 })).toBe("Free");
+    expect(fmtPriceFor({ price_initial: 0, is_free: 0 })).toBe("Price unknown");
+    expect(fmtPriceFor({ price_initial: null, is_free: null })).toBe("Price unknown");
   });
 });
 

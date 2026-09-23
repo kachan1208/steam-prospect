@@ -1,5 +1,4 @@
-import { fmtCompact, fmtInt, fmtPrice, fmtSigned, fmtUsd } from "./format";
-import { priceStatus, type PricedRow } from "./priceStatus";
+import { fmtCompact, fmtInt, fmtPrice, fmtSigned, fmtUsd, priceKind, type PricedRow } from "./format";
 
 /**
  * THE GAME PAGE'S ESTIMATES, WITH THEIR REASONS (2026-09-23).
@@ -56,7 +55,7 @@ export interface EstimateInput extends PricedRow {
 }
 
 export function gameEstimate(row: EstimateInput, band: OwnersPerReviewBand = BOXLEITER_BAND): GameEstimate {
-  const status0 = priceStatus(row);
+  const status0 = priceKind(row);
   const reviews = typeof row.total_reviews === "number" && Number.isFinite(row.total_reviews) ? row.total_reviews : null;
   const price = typeof row.price_initial === "number" && row.price_initial > 0 ? row.price_initial : null;
   const empty = {

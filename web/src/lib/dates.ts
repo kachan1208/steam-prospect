@@ -1,4 +1,4 @@
-import { monthName } from "./format";
+import { fmtIsoDate, fmtIsoMonth, MISSING } from "./format";
 
 /**
  * ONE DATE VOCABULARY for the game page and its charts (2026-09-23).
@@ -15,27 +15,20 @@ import { monthName } from "./format";
  * '2024-02-20' in any zone west of UTC.
  */
 
-const DAY_RE = /^(\d{4})-(\d{2})-(\d{2})/;
 const MONTH_RE = /^(\d{4})-(\d{2})/;
 
-/** 'YYYY-MM-DD…' -> "Feb 20, 2024"; null/unparseable -> null. */
+/** 'YYYY-MM-DD…' -> "Feb 20, 2024"; null/unparseable -> null. lib/format's fmtIsoDate (the
+ * app's one date format) with a null instead of a dash, so a caller can decide what an
+ * absent date says. */
 export function fmtDay(value: string | null | undefined): string | null {
-  if (!value) return null;
-  const m = DAY_RE.exec(value.trim());
-  if (!m) return null;
-  const month = Number(m[2]);
-  if (month < 1 || month > 12) return null;
-  return `${monthName(month)} ${Number(m[3])}, ${m[1]}`;
+  const s = fmtIsoDate(value);
+  return s === MISSING ? null : s;
 }
 
-/** 'YYYY-MM…' -> "Feb 2024"; null/unparseable -> null. */
+/** 'YYYY-MM…' -> "Feb 2024"; null/unparseable -> null (lib/format's fmtIsoMonth). */
 export function fmtMonth(value: string | null | undefined): string | null {
-  if (!value) return null;
-  const m = MONTH_RE.exec(value.trim());
-  if (!m) return null;
-  const month = Number(m[2]);
-  if (month < 1 || month > 12) return null;
-  return `${monthName(month)} ${m[1]}`;
+  const s = fmtIsoMonth(value);
+  return s === MISSING ? null : s;
 }
 
 /** 'YYYY-MM' of a date-ish string, or null. */
