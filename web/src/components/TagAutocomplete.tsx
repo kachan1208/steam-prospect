@@ -8,7 +8,8 @@ import { useDebounced } from "../lib/useDebounced";
 /**
  * Tag filter input with autocomplete over the real catalog tag universe
  * (GET /api/games/tags/suggest). Steam's tag taxonomy is case/hyphenation-sensitive
- * ("Rogue-like" vs "Roguelike" are different tags), so free-typing an exact string was a
+ * (older marts kept "Rogue-like" and "Roguelike" apart; newer ones merge such spelling
+ * twins into one canonical tag), so free-typing an exact string was a
  * guess-into-empty-results trap — this keeps the EXACT-match filter semantics but lets the
  * user pick the exact string from a ranked list. Selecting a suggestion (click or Enter)
  * commits it via onSelect and clears the draft; the committed tag lives in the page's

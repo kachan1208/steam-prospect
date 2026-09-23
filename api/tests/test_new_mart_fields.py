@@ -139,3 +139,24 @@ def test_every_game_row_carries_is_free_next_to_price(modern_mart):
     assert (free["price_initial"], free["is_free"]) == (0.0, 1)
     comps = c.get("/api/games/1002/comparables").json()["items"]
     assert all("is_free" in r for r in comps)
+
+
+def test_the_etl_shipped_shape_maps_onto_the_ea_contract(client, tmp_path):
+    # The ETL shipped the lifecycle as release_date (= first public, marked by
+    # release_date_source) + store_release_date, not as first_public_date/release_date_1_0.
+    # The API maps it so the web's contract lights up on the real mart.
+    path = tmp_path / "etl_shape.duckdb"
+    build_modern_mart(path, etl_game_cols=True)
+    with serving(path):
+        game = client.get("/api/games/1001").json()
+        assert game["first_public_date"] == "2023-05-10"
+        assert game["release_date_1_0"] == "2024-03-01"
+        assert game["is_ea_graduate"] is True
+        assert game["release_date_source"] == "first_review"
+        assert game["price_status"] == "paid"
+        rows = {g["appid"]: g for g in client.get(
+            "/api/games/search", params={"min_reviews": 0, "limit": 50}).json()["items"]}
+        assert rows[1001]["first_public_date"] == "2023-05-10"
+        assert rows[1001]["release_date_1_0"] == "2024-03-01"
+        assert rows[1002]["release_date_source"] == "store"
+        assert rows[1002]["first_public_date"] == rows[1002]["release_date_1_0"]

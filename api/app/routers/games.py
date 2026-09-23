@@ -153,12 +153,27 @@ _MARKET_TREND_COLS = ("players_trend_7d_market_pct", "players_trend_7d_rel_pct")
 
 
 def _ea_cols() -> str:
+    """The EA-lifecycle + price-status fields, each gated on its own column.
+
+    The ETL (PR #178) shipped the lifecycle under different names than the contract above:
+    `release_date` itself now IS the first public date (marked by `release_date_source`:
+    store / first_review / first_review_month — the last is month-precision) and
+    `store_release_date` keeps Steam's own date (the 1.0 date for a graduate). Map those onto
+    first_public_date / release_date_1_0; explicit columns of those names win if a mart ever
+    carries them."""
+    has = lambda c: analytics_db.has_column("mart_game", c)  # noqa: E731
     cols = ""
-    for c in _EA_DATE_COLS:
-        if analytics_db.has_column("mart_game", c):
-            cols += f", CAST({c} AS VARCHAR) AS {c}"
-    if analytics_db.has_column("mart_game", "is_ea_graduate"):
-        cols += ", is_ea_graduate"
+    if has("first_public_date"):
+        cols += ", CAST(first_public_date AS VARCHAR) AS first_public_date"
+    elif has("release_date_source"):
+        cols += ", CAST(release_date AS VARCHAR) AS first_public_date"
+    if has("release_date_1_0"):
+        cols += ", CAST(release_date_1_0 AS VARCHAR) AS release_date_1_0"
+    elif has("store_release_date"):
+        cols += ", CAST(store_release_date AS VARCHAR) AS release_date_1_0"
+    for c in ("release_date_source", "is_ea_graduate", "price_status"):
+        if has(c):
+            cols += f", {c}"
     return cols
 
 
@@ -440,7 +455,8 @@ def suggest_tags(
 ) -> TagSuggestList:
     """Autocomplete for the search page's tag filter: distinct tags from mart_game.top_tags,
     case-insensitive substring match, ordered by catalog frequency — so users land on the
-    EXACT tag string ("Rogue-like" vs "Roguelike" are different tags) instead of guessing."""
+    tag string the catalog uses instead of guessing (old spellings such as "Rogue-like" resolve
+    to their canonical tag via mart_tag_alias once the mart carries it)."""
     needle = q.strip().lower()
     freqs = _tag_frequencies()
     matched = [(t, n) for t, n in freqs if needle in t.lower()] if needle else freqs

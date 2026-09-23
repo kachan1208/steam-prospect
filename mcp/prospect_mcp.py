@@ -3080,7 +3080,7 @@ def tag_suggest(
     q: Annotated[str, Field(description="Partial tag, case-insensitive (e.g. 'rogue'). Empty = the most common tags.")] = "",
     limit: Annotated[int, _limit(50, "tags")] = 10,
 ) -> dict:
-    """Resolve a partial tag to the EXACT tag strings the catalog uses, with how many games carry each. Tags are exact-match everywhere else ('Rogue-like' and 'Roguelike' are different tags), so call this before passing a tag to game_search, tag_combos or the niche tools rather than guessing the spelling."""
+    """Resolve a partial tag to the EXACT tag strings the catalog uses, with how many games carry each. Call this before passing a tag to game_search, tag_combos or the niche tools rather than guessing the spelling (spelling twins such as 'Rogue-like'/'Roguelike' are merged into one canonical tag on marts that carry mart_tag_alias)."""
     needle = (q or "").strip().lower()
     limit = max(1, min(limit, 50))
     freqs = _tag_frequencies()
