@@ -458,6 +458,81 @@ describe("GameProfile — rank vs genre", () => {
   });
 });
 
+/** GET /api/games/2379780/comparables (Balatro), first rows, plus a free and an unknown price. */
+const COMPARABLES = {
+  appid: 2379780,
+  primary_genre: "Strategy",
+  price_band: { low: 5.5, high: 31.98 },
+  items: [
+    {
+      appid: 646570,
+      name: "Slay the Spire",
+      release_year: 2019,
+      price_initial: 24.99,
+      is_free: 0,
+      owners_mid: 7_500_000,
+      total_reviews: 218_661,
+      positive_ratio: 0.975,
+      est_rev_reviews: 218_661 * 30 * 24.99,
+      header_image: null,
+      shared_tags: ["Card Game", "Roguelike Deckbuilder", "Deckbuilding", "Singleplayer", "Strategy", "Replay Value", "Rogue-lite", "Turn-Based", "Rogue-like"],
+      jaccard: 9 / 11,
+    },
+    {
+      appid: 1,
+      name: "Free Cards",
+      release_year: 2021,
+      price_initial: 0,
+      is_free: 1,
+      owners_mid: 100_000,
+      total_reviews: 4_000,
+      positive_ratio: 0.8,
+      est_rev_reviews: null,
+      header_image: null,
+      shared_tags: ["Card Game"],
+      jaccard: 0.1,
+    },
+    {
+      appid: 2,
+      name: "Delisted Deck",
+      release_year: 2018,
+      price_initial: 0,
+      is_free: 0,
+      owners_mid: 50_000,
+      total_reviews: 900,
+      positive_ratio: 0.7,
+      est_rev_reviews: null,
+      header_image: null,
+      shared_tags: ["Deckbuilding"],
+      jaccard: 0.1,
+    },
+  ],
+};
+
+describe("GameProfile — comparables explain their columns", () => {
+  it("works the tag overlap through the top row's own tags", async () => {
+    serve(/\/comparables/, COMPARABLES);
+    renderProfile();
+    await screen.findByRole("link", { name: "Slay the Spire" });
+    fireEvent.click(screen.getByRole("button", { name: "About Tag overlap" }));
+    const tip = screen.getByRole("tooltip");
+    expect(tip.textContent).toContain("Jaccard");
+    expect(tip.textContent).toContain("Slay the Spire: 9 shared ÷ 11 distinct = 82%");
+  });
+
+  it("marks free and unknown-price comparables instead of a bare dash, and never calls $0 'Free' without the flag", async () => {
+    serve(/\/comparables/, COMPARABLES);
+    renderProfile();
+    const free = (await screen.findByRole("link", { name: "Free Cards" })).closest("tr") as HTMLElement;
+    expect(free.textContent).toContain("Free");
+    expect(free.textContent).toContain("free to play");
+    const delisted = screen.getByRole("link", { name: "Delisted Deck" }).closest("tr") as HTMLElement;
+    expect(delisted.textContent).toContain("Price unknown");
+    expect(delisted.textContent).toContain("no price");
+    expect(delisted.textContent).not.toMatch(/Free/);
+  });
+});
+
 /**
  * Est. revenue and Est. units used to open their own "growth over time" charts — the reviews
  * curve × 30, then × the price: the same shape three times. Only Reviews and Players now open

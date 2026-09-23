@@ -33,6 +33,8 @@ import { OpportunityBreakdown } from "../components/OpportunityBreakdown";
 import { Badge } from "../components/ui/Badge";
 import { InfoTip } from "../components/ui/InfoTip";
 import { EmptyState } from "../components/ui/EmptyState";
+import { HeaderLabel } from "../components/ui/HeaderLabel";
+import { SentinelTag } from "../components/ui/SentinelTag";
 import { ErrorState } from "../components/ui/ErrorState";
 import { InlineError } from "../components/ui/InlineError";
 import { Loading } from "../components/ui/Loading";
@@ -54,6 +56,7 @@ import {
   useLaunchCurve,
   useMarketBenchmarks,
   useNicheDetail,
+  type GameComparable,
   type GameEvent,
   type NicheRow,
   type ReviewTimelinePoint,
@@ -64,7 +67,7 @@ import { addMonths, fmtDay, fmtMonth, launchFacts, partialMonth } from "../lib/d
 import { fmtListPrice, priceStatus } from "../lib/priceStatus";
 import { glossary } from "../lib/glossary";
 import { DEFAULT_NICHE_CUT, findNicheVariant } from "../lib/nicheSelection";
-import { axisScale, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, monthName, isFreeTitle } from "../lib/format";
+import { axisScale, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtUsd, monthName } from "../lib/format";
 import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { layoutPlumbLabels, markerReasons } from "../lib/notable";
 import { CSS_VAR, MONO} from "../lib/palette";
@@ -83,6 +86,21 @@ const CONDENSED: CSSProperties = { fontFamily: '"Barlow Condensed", "Barlow", sy
 const BAR_MUTED = "color-mix(in srgb, var(--accent-400) 55%, transparent)";
 /** The same hue at full strength — the partial month's hatch lines and dashed outline. */
 const BAR_MUTED_SOLID = "var(--accent-400)";
+
+/** Comparables header type: the table's own 11px muted weight, in the HeaderLabel's shape. */
+const COMPARABLE_HEADER: CSSProperties = { fontSize: 11, letterSpacing: "0.02em", textTransform: "none", fontWeight: 500 };
+
+/**
+ * The Tag overlap ⓘ's worked line from one comparable: shared tags ÷ all distinct tags across
+ * the two games' top 10 (Jaccard), e.g. "Slay the Spire: 9 shared ÷ 11 distinct = 82%". The
+ * API sends the shared list and the ratio; the distinct count is shared ÷ ratio.
+ */
+function tagOverlapWorked(c: GameComparable | undefined): string | undefined {
+  if (!c || !(c.jaccard > 0)) return undefined;
+  const shared = c.shared_tags.length;
+  const distinct = Math.round(shared / c.jaccard);
+  return `${c.name ?? `App ${c.appid}`}: ${shared} shared ÷ ${distinct} distinct = ${Math.round(c.jaccard * 100)}% (${c.shared_tags.join(", ")})`;
+}
 
 /** The teardown's caveats minus the ones about things this page no longer shows: the press
  * TONE caveat (the API still sends it) describes a coverage-tone read that was removed
@@ -1290,9 +1308,9 @@ export default function GameProfile() {
           title="Comparables"
           subtitle={
             comparablesQ.data
-              ? `Same genre (${comparablesQ.data.primary_genre ?? "—"}) · price band ${fmtPrice(
+              ? `Same genre (${comparablesQ.data.primary_genre ?? "no genre"}) · list price ${fmtPrice(
                   comparablesQ.data.price_band.low,
-                )}–${fmtPrice(comparablesQ.data.price_band.high)} · ranked by tag overlap (on-demand, not precomputed)`
+                )}–${fmtPrice(comparablesQ.data.price_band.high)} · most alike first, by tag overlap`
               : undefined
           }
         >
@@ -1310,15 +1328,40 @@ export default function GameProfile() {
           {comparablesQ.data && comparablesQ.data.items.length > 0 && (
             <TableScroll className="border border-chartborder">
               <table className="w-full min-w-[640px] text-xs">
+                      {/* Every metric header explains itself (HeaderLabel + the glossary), and Tag
+                          overlap works the TOP row's own tags through the Jaccard formula. */}
                       <thead>
                         <tr className="border-b border-chartborder text-left text-ink-muted">
-                          <th className="px-2 py-1.5 font-medium">Game</th>
-                          <th className="px-2 py-1.5 font-medium">Year</th>
-                          <th className="px-2 py-1.5 font-medium">Price</th>
-                          <th className="px-2 py-1.5 font-medium">Reviews</th>
-                          <th className="px-2 py-1.5 font-medium">Positive</th>
-                          <th className="px-2 py-1.5 font-medium">Est. revenue</th>
-                          <th className="px-2 py-1.5 font-medium">Tag overlap</th>
+                          <th className="px-2 py-1.5 font-medium">
+                            <HeaderLabel label="Game" style={COMPARABLE_HEADER} />
+                          </th>
+                          <th className="px-2 py-1.5 font-medium">
+                            <HeaderLabel label="Year" style={COMPARABLE_HEADER} />
+                          </th>
+                          <th className="px-2 py-1.5 font-medium">
+                            <HeaderLabel term="launch_price" label="Price" style={COMPARABLE_HEADER} />
+                          </th>
+                          <th className="px-2 py-1.5 font-medium">
+                            <HeaderLabel term="reviews" style={COMPARABLE_HEADER} />
+                          </th>
+                          <th className="px-2 py-1.5 font-medium">
+                            <HeaderLabel term="positive_ratio" label="Positive" style={COMPARABLE_HEADER} />
+                          </th>
+                          <th className="px-2 py-1.5 font-medium">
+                            <HeaderLabel
+                              term="est_revenue"
+                              style={COMPARABLE_HEADER}
+                              worked={(() => {
+                                const top = comparablesQ.data.items.find((c) => priceStatus(c) === "paid" && c.total_reviews != null);
+                                return top && top.est_rev_reviews != null
+                                  ? `${top.name ?? `App ${top.appid}`}: ${fmtInt(top.total_reviews)} reviews × 30 × ${fmtPrice(top.price_initial)} = ${fmtUsd(top.est_rev_reviews)}`
+                                  : undefined;
+                              })()}
+                            />
+                          </th>
+                          <th className="px-2 py-1.5 font-medium">
+                            <HeaderLabel term="tag_overlap" style={COMPARABLE_HEADER} worked={tagOverlapWorked(comparablesQ.data.items[0])} />
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1340,21 +1383,27 @@ export default function GameProfile() {
                               </Link>
                             </td>
                             <td className="tabular px-2 py-1.5">{c.release_year ?? "—"}</td>
-                            <td className="tabular px-2 py-1.5">{fmtPrice(c.price_initial)}</td>
+                            <td className="tabular px-2 py-1.5">{fmtListPrice(c)}</td>
                             <td className="tabular px-2 py-1.5">{fmtInt(c.total_reviews)}</td>
                             <td className={clsx("tabular px-2 py-1.5", positiveRatioClass(c.positive_ratio))}>
                               {fmtPct(c.positive_ratio)}
                             </td>
                             <td className="tabular px-2 py-1.5">
-                              <span
-                                className="px-1.5 py-0.5"
-                                style={heatStyle(c.est_rev_reviews, ...heatDomain(all, (x) => x.est_rev_reviews))}
-                              >
-                                {fmtRevenue(c.est_rev_reviews, isFreeTitle(c))}
-                              </span>
+                              {priceStatus(c) === "paid" && c.est_rev_reviews != null ? (
+                                <span
+                                  className="px-1.5 py-0.5"
+                                  style={heatStyle(c.est_rev_reviews, ...heatDomain(all, (x) => x.est_rev_reviews))}
+                                >
+                                  {fmtUsd(c.est_rev_reviews)}
+                                </span>
+                              ) : (
+                                // Free and unknown-price games have no estimate (NULL in the
+                                // rebuilt mart) — flagged, never a bare dash or a "$0".
+                                <SentinelTag>{priceStatus(c) === "free" ? "free to play" : "no price"}</SentinelTag>
+                              )}
                             </td>
                             <td className="px-2 py-1.5">
-                              <div className="flex items-center gap-1.5" title={c.shared_tags.join(", ")}>
+                              <div className="flex items-center gap-1.5" title={`Shared tags: ${c.shared_tags.join(", ")}`}>
                                 <Meter value={c.jaccard * 100} color={CSS_VAR.competition} />
                                 <span className="tabular w-9 shrink-0 text-ink-secondary">{Math.round(c.jaccard * 100)}%</span>
                               </div>
