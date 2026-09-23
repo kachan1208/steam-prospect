@@ -4,15 +4,27 @@ import clsx from "clsx";
 
 import { FilterBar } from "../components/search/FilterChip";
 import { ResultChipRow, topValues } from "../components/search/ResultChipRow";
-import { ResultHeader, ResultList, ResultRow, ResultTitle, RevenueCell } from "../components/search/ResultList";
+import {
+  MetricCell,
+  ResultHeader,
+  ResultList,
+  ResultRow,
+  ResultTitle,
+  RevenueCell,
+  type StackBelow,
+} from "../components/search/ResultList";
 import { MAX_OFFSET, PAGE_LIMIT, ResultsFooter } from "../components/search/ResultsFooter";
+import { ScopeNote } from "../components/search/ScopeNote";
 import { SearchBar } from "../components/search/SearchBar";
 import { Segmented } from "../components/search/Segmented";
 import { SortControl, sortPatch } from "../components/search/SortControl";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ErrorState } from "../components/ui/ErrorState";
+import { HeaderLabel } from "../components/ui/HeaderLabel";
 import { Loading } from "../components/ui/Loading";
-import { ApiError, useEntitySearch, type EntityRole, type EntitySortKey } from "../lib/api";
+import { SentinelTag } from "../components/ui/SentinelTag";
+import { ApiError, useEntitySearch, type EntityRole, type EntitySortKey, type Scope } from "../lib/api";
+import { ENTITY_MIN_FOR_ANY_RATE } from "../lib/entities";
 import { fmtInt, fmtPct, fmtUsd } from "../lib/format";
 import { genreTintStyles } from "../lib/heat";
 import { useDebounced } from "../lib/useDebounced";
@@ -20,12 +32,17 @@ import { usePageTitle } from "../lib/usePageTitle";
 
 const LIMIT = PAGE_LIMIT;
 
+// Seven columns, each with its ⓘ, leave a studio name room to read only from `xl`: at 1024px
+// "Facepunch Studios" truncated to "Facepunch…". Below it the rows stack, labelled per cell.
+const STACK: StackBelow = "xl";
+
 // Browse floor: without a search term, only studios with 3+ scored games rank — a lone
 // hit (or a lone flop) isn't a track record. Searching drops the floor to 1 so any credit
-// in the catalog is findable. The Games column's tooltip and the empty state say so.
+// in the catalog is findable. The Games column's ⓘ and the empty state say so.
 const BROWSE_MIN_GAMES = 3;
-// Below this many games a hit rate is a coin toss, not a rate: the cell prints "—".
-const HIT_RATE_MIN_GAMES = 3;
+// Below this many games a hit rate — or a top-10% line — is a coin toss, not a rate: the
+// cell is withheld and TAGGED with why (lib/entities.ts ENTITY_MIN_FOR_ANY_RATE).
+const THIN_RECORD_GAMES = ENTITY_MIN_FOR_ANY_RATE;
 
 // Publishers first — publisher scouting (who ships games like mine, and how do those
 // releases do?) is the page's reason to exist.
@@ -34,20 +51,30 @@ const ROLES: readonly { value: EntityRole; label: string; title: string }[] = [
   { value: "developer", label: "Developers", title: "Who built the games" },
 ];
 
+// Which studios (2026-09-23): the API's default is every studio, which opened this page on
+// Electronic Arts, Bandai Namco and Ubisoft — not a solo developer's peers or pitch list. The
+// PAGE defaults to the indie scope (studios at least half of whose flagged games are Steam
+// Indie) and says so; "All studios" rides the URL as ?scope=all.
+const SCOPES: readonly { value: Scope; label: string; title: string }[] = [
+  { value: "indie", label: "Indie", title: "Studios whose games are mostly Indie-flagged — the default" },
+  { value: "all", label: "All studios", title: "Every studio, the biggest publishers included" },
+];
+
 // Mirrors the allow-list in api/app/routers/entities.py; anything else falls back to the
 // default in readFilters rather than reaching the API as a 422.
 const SORT_KEYS: readonly EntitySortKey[] = [
   "total_rev", "median_rev", "p90_rev", "n_games", "n_recent_24m", "hit_rate_200k", "last_release_year", "name",
 ] as const;
 
-// Friendly labels for the "sorted by …" control — the same control /games renders.
+// Friendly labels for the "sorted by …" control — the same control /games renders, in the
+// glossary's names (lib/glossary.ts): one revenue name, no "P90".
 const SORT_LABELS: Record<EntitySortKey, string> = {
-  total_rev: "total est. revenue",
-  median_rev: "median est. revenue",
-  p90_rev: "P90 est. revenue",
+  total_rev: "est. revenue, all games",
+  median_rev: "median revenue",
+  p90_rev: "top-10% revenue",
   n_games: "games",
-  n_recent_24m: "recent releases (24m)",
-  hit_rate_200k: "hit rate",
+  n_recent_24m: "releases, last 24 months",
+  hit_rate_200k: "games earning $200K+",
   last_release_year: "last release year",
   name: "name",
 };
@@ -55,13 +82,14 @@ const SORT_LABELS: Record<EntitySortKey, string> = {
 // ---- URL-backed state ---------------------------------------------------------------------
 // Same contract as /games: the URL is the single source of truth, so a research view is
 // shareable and the back button walks it. DEFAULTS ARE OMITTED (a pristine /studios stays a
-// clean URL), unknown values fall back to the default, discrete controls (role, sort, paging)
-// PUSH so back undoes them, and the debounced search box writes with `replace` so typing
-// doesn't spam history. ?role= and ?q= predate sort/order/offset and keep their exact
+// clean URL), unknown values fall back to the default, discrete controls (role, scope, sort,
+// paging) PUSH so back undoes them, and the debounced search box writes with `replace` so
+// typing doesn't spam history. ?role= and ?q= predate sort/order/offset and keep their exact
 // spelling — Studios.test.tsx pins the reload/back behaviour.
 
 interface Filters {
   role: EntityRole;
+  scope: Scope;
   q: string;
   sort: EntitySortKey;
   order: "asc" | "desc";
@@ -79,6 +107,7 @@ function readFilters(sp: URLSearchParams): Filters {
   const sortRaw = sp.get("sort") as EntitySortKey | null;
   return {
     role: sp.get("role") === "developer" ? "developer" : "publisher",
+    scope: sp.get("scope") === "all" ? "all" : "indie",
     q: sp.get("q") ?? "",
     sort: sortRaw && SORT_KEYS.includes(sortRaw) ? sortRaw : "total_rev",
     order: sp.get("order") === "asc" ? "asc" : "desc",
@@ -94,8 +123,8 @@ function entityHref(role: EntityRole, name: string): string {
   return `/entity/${role}?name=${encodeURIComponent(name)}`;
 }
 
-function fmtYears(first: number | null, last: number | null): string {
-  if (first == null && last == null) return "—";
+function fmtYears(first: number | null, last: number | null): string | null {
+  if (first == null && last == null) return null;
   if (first != null && last != null) return first === last ? String(first) : `${first}–${last}`;
   return String(first ?? last);
 }
@@ -105,7 +134,7 @@ function fmtYears(first: number | null, last: number | null): string {
  * /entity/:role?name=. The search field, the chip row, the "sorted by" control, the result
  * rows, the "in these results" chips and the paging footer are the SAME components /games
  * renders (components/search/*), so the two pages cannot drift; this page owns only the
- * role choice and its own columns.
+ * role and scope choices and its own columns.
  */
 export default function Studios() {
   usePageTitle("Studios");
@@ -151,6 +180,7 @@ export default function Studios() {
   }, [filters.q]);
 
   const setRole = (next: EntityRole) => patchParams({ role: next === "publisher" ? null : next });
+  const setScope = (next: Scope) => patchParams({ scope: next === "all" ? "all" : null });
   // Same toggle-on-reselect contract as /games: the same key again flips the direction.
   const toggleSort = (key: EntitySortKey) => patchParams(sortPatch(filters.sort, filters.order, key, ["name"]));
 
@@ -160,6 +190,7 @@ export default function Studios() {
     q: committedQ || undefined,
     role,
     min_games: browsing ? BROWSE_MIN_GAMES : 1,
+    scope: filters.scope,
     sort: filters.sort,
     order: filters.order,
     limit: LIMIT,
@@ -169,13 +200,15 @@ export default function Studios() {
   const is503 = error instanceof ApiError && error.status === 503;
   const total = data?.total ?? 0;
   const roleNoun = role === "publisher" ? "publishers" : "developers";
+  const scopeNoun = filters.scope === "indie" ? `indie ${roleNoun}` : roleNoun;
 
   // Genre chips sourced from the current page's own top_genres — the exact strings present
   // in these results. The entity search has no genre filter, so each one pivots to /games.
   const genreChips = useMemo(() => topValues(data?.items ?? [], (e) => e.top_genres, 3, 12), [data?.items]);
 
-  // Active non-default filters as removable chips. The role is a view, not a filter — it
-  // has its own segmented control in the same row — so the search term is the only chip.
+  // Active non-default filters as removable chips. The role and the scope are views, not
+  // filters — each has its own segmented control in the same row — so the search term is
+  // the only chip.
   const chips = useMemo(
     () => (filters.q ? [{ key: "q", label: `“${filters.q}”`, clear: { q: null } }] : []),
     [filters.q],
@@ -195,16 +228,36 @@ export default function Studios() {
         loading={isLoading}
       />
 
-      {/* Filter chip row: the role choice leads, the search-term chip (+ Clear all) follows,
-          "sorted by …" is right-aligned — /games' row with a Segmented in its leading slot. */}
+      {/* Filter chip row: the role and scope choices lead, the search-term chip (+ Clear all)
+          follows, "sorted by …" is right-aligned — /games' row with Segmenteds in its
+          leading slot. */}
       <FilterBar
-        leading={<Segmented options={ROLES} value={role} onChange={setRole} ariaLabel="Role" />}
+        leading={
+          <>
+            <Segmented options={ROLES} value={role} onChange={setRole} ariaLabel="Role" />
+            <Segmented options={SCOPES} value={filters.scope} onChange={setScope} ariaLabel="Which studios" />
+          </>
+        }
         chips={chips.map((c) => ({ key: c.key, label: c.label, onClear: () => patchParams(c.clear) }))}
         onClearAll={() => patchParams({ q: null })}
         trailing={
           <SortControl keys={SORT_KEYS} labels={SORT_LABELS} sort={filters.sort} order={filters.order} onSort={toggleSort} />
         }
       />
+
+      {/* Height held while the first page loads, so the rows don't jump when it appears. */}
+      <div className="min-h-[18px]">
+        {data && (
+          <ScopeNote
+            requested={filters.scope}
+            applied={data.scope}
+            unknown={data.n_scope_unknown}
+            noun={roleNoun}
+            definition={`${role === "publisher" ? "Publishers" : "Developers"} at least half of whose games — among those with a known flag — carry Steam's Indie flag. It keeps Devolver, Team17, Klei and Supergiant; it drops EA, Bandai Namco, Ubisoft and Capcom. A studio none of whose games has a flag yet is left out rather than guessed, and counted here.`}
+            formula="average of is_indie over the studio's flagged games ≥ 0.5; studios with no flagged game excluded and counted"
+          />
+        )}
+      </div>
 
       {/* Result rows — hairline top rules, not a table. */}
       <div className={clsx(isFetching && "opacity-90 transition-opacity")}>
@@ -229,74 +282,110 @@ export default function Studios() {
           <EmptyState
             title={
               browsing
-                ? `No ${roleNoun} with ${BROWSE_MIN_GAMES}+ scored games yet`
-                : `No ${roleNoun} match “${committedQ}”`
+                ? `No ${scopeNoun} with ${BROWSE_MIN_GAMES}+ scored games yet`
+                : `No ${scopeNoun} match “${committedQ}”`
             }
             description={
               browsing
                 ? `Browsing lists ${roleNoun} with ${BROWSE_MIN_GAMES}+ scored games. Search by name to find anyone with a credit in the catalog.`
-                : "Try a shorter spelling — names are self-reported Steam credit strings, so the same studio can appear under several."
+                : filters.scope === "indie"
+                  ? `Only indie ${roleNoun} are searched — try “All studios”, or a shorter spelling (names are self-reported Steam credit strings).`
+                  : "Try a shorter spelling — names are self-reported Steam credit strings, so the same studio can appear under several."
             }
           />
         )}
         {data && data.items.length > 0 && (
           <ResultList>
             {/* Widths/gaps mirror the metric group below EXACTLY — change one, change both.
-                Seven cells don't fit beside the title until `lg`, so the row stacks below it. */}
+                Seven cells don't fit beside the title until `xl`, so the row stacks below it,
+                where each cell prints its own label. Every header explains itself with an ⓘ
+                (P90 and Hit rate used to be explained only by a hover-only `title`). */}
             <ResultHeader
-              stackBelow="lg"
+              stackBelow={STACK}
               lead={
-                <span title="Self-reported Steam credit strings — the same studio may appear under several spellings.">
-                  Studio
-                </span>
+                <HeaderLabel
+                  label="Studio"
+                  style={{}}
+                  help="The credit string on the games' Steam pages, as the studio typed it — the same company can appear under several spellings."
+                />
               }
             >
-              <span
-                className="w-14 shrink-0"
-                title={`Released games credited to this studio in the catalog. Browsing lists studios with ${BROWSE_MIN_GAMES}+; searching by name finds anyone.`}
-              >
-                Games
+              <span className="w-14 shrink-0">
+                <HeaderLabel
+                  term="n_games"
+                  style={{}}
+                  info={{
+                    meaning: `Released games credited to this studio in the catalog. Browsing lists studios with ${BROWSE_MIN_GAMES}+; searching by name finds anyone.`,
+                    formula: `count of the studio's catalog releases (browse floor: ${BROWSE_MIN_GAMES}+)`,
+                    notes: "Counts every release — including ones with no revenue estimate, which the revenue columns leave out.",
+                  }}
+                />
               </span>
-              <span className="w-[84px] shrink-0" title="First to latest release year — the career span.">
-                Years
+              <span className="w-[84px] shrink-0">
+                <HeaderLabel label="Years" style={{}} help="First to latest release year in the catalog — the career span." />
               </span>
-              <span className="w-14 shrink-0" title="Released something in the last 24 months.">
-                Active
+              <span className="w-20 shrink-0">
+                <HeaderLabel
+                  label="Last 24 mo"
+                  style={{}}
+                  info={{
+                    label: "Releases, last 24 months",
+                    meaning:
+                      "How many games the studio released in the 24 months to the data's date — whether it is still shipping. “None” means no release in that window.",
+                    formula: "releases dated within 24 months of the data's as-of date",
+                  }}
+                />
               </span>
-              {/* Same base as the hit rate — SUM and quantile both ignore NULL estimates, so
-                  neither covers "all releases" when the Games column is larger. */}
-              <span
-                className="w-28 shrink-0"
-                title="Summed estimated lifetime gross over the releases we could estimate (Boxleiter-style estimate, not reported sales) — releases with no estimate contribute nothing."
-              >
-                Total est. revenue
+              <span className="w-28 shrink-0">
+                <HeaderLabel
+                  term="total_rev"
+                  style={{}}
+                  info={{
+                    meaning:
+                      "The studio's releases' Est. revenue added up — the size of its catalog in dollars, dominated by its hits. An estimate, not reported sales.",
+                    formula: "sum of Est. revenue (reviews × 30 × launch price) over the studio's releases that have an estimate",
+                    notes: "Releases with no estimate — free, or with no known price — add nothing.",
+                  }}
+                />
               </span>
-              <span
-                className="w-16 shrink-0"
-                title="90th-percentile est. lifetime revenue over the releases with an estimate — what the studio's successful titles earn."
-              >
-                P90
+              <span className="w-24 shrink-0">
+                <HeaderLabel
+                  term="p90_rev"
+                  style={{}}
+                  info={{
+                    meaning:
+                      "What the studio's successful titles earn: only 1 of its releases in 10 earns more. Not what a typical release makes — read the median on its profile for that.",
+                    formula: "90th percentile of Est. revenue over the studio's releases with an estimate",
+                    notes: `Over fewer than 10 releases it sits close to the studio's single best game; withheld (and tagged) under ${THIN_RECORD_GAMES} games.`,
+                  }}
+                />
               </span>
               {/* NOT "share of releases": the Games column counts every release, this
                   percentage's denominator is only the ones carrying a revenue estimate
                   (mart_entity.hit_rate_200k excludes NULL-estimate games). 41.9% of prod
                   entities differ on the two, up to 4x — Hooded Horse lists 50 and scores
                   91% off 33. The profile page prints the exact base per entity. */}
-              <span
-                className="w-14 shrink-0"
-                title={`Share of the studio's releases WITH a revenue estimate that clear $200K est. revenue — not of the Games count beside it, which includes releases we could not estimate. Withheld under ${HIT_RATE_MIN_GAMES} games; open the profile for the exact base.`}
-              >
-                Hit rate
+              <span className="w-24 shrink-0">
+                <HeaderLabel
+                  term="hit_rate_200k"
+                  style={{}}
+                  info={{
+                    meaning:
+                      "The odds a release of this studio “works”: the share of its releases WITH a revenue estimate that clear $200K — not a share of the Games count beside it, which includes releases with no estimate.",
+                    formula: "releases with Est. revenue > $200K ÷ releases with an Est. revenue",
+                    notes: `Withheld (and tagged) under ${THIN_RECORD_GAMES} games — a rate over one or two releases can only read 0%, 50% or 100%. Open the profile for the exact base.`,
+                  }}
+                />
               </span>
-              <span className="w-[220px] shrink-0" title="The genres this studio ships most.">
-                Top genres
+              <span className="w-[220px] shrink-0">
+                <HeaderLabel label="Top genres" style={{}} help="The genres this studio ships most, most frequent first." />
               </span>
             </ResultHeader>
             {data.items.map((e, i) => {
               const isTop = i === 0 && filters.offset === 0;
               const href = entityHref(e.role, e.name);
-              const active = (e.n_recent_24m ?? 0) > 0;
-              const thinRecord = e.n_games < HIT_RATE_MIN_GAMES;
+              const recent = e.n_recent_24m ?? 0;
+              const thinRecord = e.n_games < THIN_RECORD_GAMES;
               const genres = e.top_genres.slice(0, 3);
               const tints = genreTintStyles(genres);
               const meta = [
@@ -304,57 +393,52 @@ export default function Studios() {
                 fmtYears(e.first_release_year, e.last_release_year),
                 e.top_genres[0],
               ]
-                .filter((p): p is string => !!p && p !== "—")
+                .filter((p): p is string => !!p)
                 .join(" · ");
+              const thinTag = <SentinelTag>under {THIN_RECORD_GAMES} games</SentinelTag>;
               return (
                 <ResultRow
                   key={`${e.role}:${e.name}`}
-                  stackBelow="lg"
+                  stackBelow={STACK}
                   onOpen={() => navigate(href)}
                   lead={<ResultTitle to={href} name={e.name} meta={meta} />}
                   metrics={
-                    // Cell titles repeat the column names: below `lg` the header is hidden
-                    // and the group stacks under the title, so hover is the only label.
+                    // Below `xl` the header is hidden and the group stacks under the title,
+                    // so each MetricCell prints its column name above its value.
                     <>
-                      <span className="w-14 shrink-0 text-[13px] text-ink-primary" title="Games">
+                      <MetricCell label="Games" width="w-14" stackBelow={STACK} className="text-ink-primary">
                         {fmtInt(e.n_games)}
-                      </span>
-                      <span
-                        className="w-[84px] shrink-0 whitespace-nowrap text-[13px] text-ink-secondary"
-                        title="Years — first to latest release"
+                      </MetricCell>
+                      <MetricCell label="Years" width="w-[84px]" stackBelow={STACK} className="whitespace-nowrap text-ink-secondary">
+                        {fmtYears(e.first_release_year, e.last_release_year) ?? <SentinelTag>no dates</SentinelTag>}
+                      </MetricCell>
+                      {/* Was "Active" or a bare "—": the dash now says what it meant. */}
+                      <MetricCell
+                        label="Last 24 mo"
+                        width="w-20"
+                        stackBelow={STACK}
+                        className={recent > 0 ? "text-ink-primary" : "text-ink-muted"}
                       >
-                        {fmtYears(e.first_release_year, e.last_release_year)}
-                      </span>
-                      <span
-                        className={clsx("w-14 shrink-0 text-[13px]", active ? "text-ink-primary" : "text-ink-muted")}
-                        title={
-                          active
-                            ? `${fmtInt(e.n_recent_24m)} release${e.n_recent_24m === 1 ? "" : "s"} in the last 24 months`
-                            : "No release in the last 24 months"
-                        }
-                      >
-                        {active ? "Active" : "—"}
-                      </span>
-                      <RevenueCell top={isTop} width="w-28" title="Total est. revenue — an estimate, not reported sales">
-                        {fmtUsd(e.total_rev)}
+                        {recent > 0 ? `${fmtInt(recent)} ${recent === 1 ? "release" : "releases"}` : "none"}
+                      </MetricCell>
+                      <RevenueCell top={isTop} width="w-28" stackBelow={STACK} label="Est. revenue, all games">
+                        {e.total_rev != null ? fmtUsd(e.total_rev) : <SentinelTag>no estimate</SentinelTag>}
                       </RevenueCell>
-                      <span className="w-16 shrink-0 text-[13px] text-ink-primary" title="P90 est. revenue">
-                        {fmtUsd(e.p90_rev)}
-                      </span>
-                      {/* Under HIT_RATE_MIN_GAMES games the "rate" is one or two coin tosses,
-                          so it is withheld rather than printed as a confident 0% or 100%. */}
-                      <span
-                        className={clsx("w-14 shrink-0 text-[13px]", thinRecord ? "text-ink-muted" : "text-ink-primary")}
-                        title={thinRecord ? `needs ${HIT_RATE_MIN_GAMES}+ games` : undefined}
-                      >
-                        {thinRecord ? "—" : fmtPct(e.hit_rate_200k, 0)}
-                      </span>
+                      <MetricCell label="Top-10% revenue" width="w-24" stackBelow={STACK} className="text-ink-primary">
+                        {thinRecord ? thinTag : e.p90_rev != null ? fmtUsd(e.p90_rev) : <SentinelTag>no estimate</SentinelTag>}
+                      </MetricCell>
+                      {/* Under THIN_RECORD_GAMES games the "rate" is one or two coin tosses, so
+                          it is withheld — and tagged with why — rather than printed as a
+                          confident 0% or 100%. */}
+                      <MetricCell label="Earning $200K+" width="w-24" stackBelow={STACK} className="text-ink-primary">
+                        {thinRecord ? thinTag : e.hit_rate_200k != null ? fmtPct(e.hit_rate_200k, 0) : <SentinelTag>no estimate</SentinelTag>}
+                      </MetricCell>
                       {/* genreTintStyles (plural) tints the row as a GROUP: the hash alone put
                           Action and Racing, and RPG and Simulation, on the same slot, so rows
                           like "Action · Simulation · RPG" printed two identical chips. See
                           lib/heat.ts. Clipped, not wrapped: a wrapped chip group would drag the
                           whole row taller; the full list is on hover. */}
-                      <span className="flex w-[220px] shrink-0 gap-1 overflow-hidden" title={e.top_genres.join(" · ")}>
+                      <span className="flex w-full shrink-0 gap-1 overflow-hidden xl:w-[220px]" title={e.top_genres.join(" · ")}>
                         {genres.map((g, gi) => (
                           <span
                             key={g}
@@ -379,7 +463,9 @@ export default function Studios() {
       <ResultChipRow
         label="Genres in these results:"
         items={genreChips}
-        href={(g) => `/games?genre=${encodeURIComponent(g)}`}
+        // The pivot keeps the scope the reader is on: /games defaults to indie too, so only
+        // "All studios" has anything to carry over.
+        href={(g) => `/games?genre=${encodeURIComponent(g)}${filters.scope === "all" ? "&scope=all" : ""}`}
       />
 
       {data && (

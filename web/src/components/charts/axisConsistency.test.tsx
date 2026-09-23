@@ -95,26 +95,25 @@ describe("percent axes speak one vocabulary across the whole /timing page", () =
     expect(ticks).toContain("0");
   });
 
-  it("keeps the crowding chart's counts unabbreviated rather than printing 0.5K", () => {
-    const congestion = [1_540, 1_210, 980, 1_100, 1_320, 760, 640, 890, 1_450, 1_600, 1_180, 1_020].map((v, i) => ({
-      label: String(i + 1),
-      value: v,
-      secondary: Math.round(v / 13),
-    }));
-    const { container } = render(
-      <TimingBars
-        data={congestion}
-        valueLabel="Releases / yr"
-        formatValue={(v) => v.toFixed(0)}
-        formatSecondary={(v) => v.toFixed(0)}
-        axisKind="count"
-      />,
-    );
-    const left = axisTicks(container, "y", 0);
-    const right = axisTicks(container, "y", 1);
-    expect(vocabulary(left).suffixes).toEqual(new Set([""]));
-    expect(vocabulary(right).suffixes).toEqual(new Set([""]));
-    for (const t of [...left, ...right]) expect(t).not.toMatch(/^0\.\d/);
+  it("keeps the crowding charts' counts unabbreviated rather than printing 0.5K — on ONE axis each", () => {
+    // The crowding card was one dual-axis chart (all releases left, $200K+ right). It is two
+    // aligned single-axis charts now: TimingBars draws exactly one y-axis, always.
+    const all = [1_540, 1_210, 980, 1_100, 1_320, 760, 640, 890, 1_450, 1_600, 1_180, 1_020];
+    for (const values of [all, all.map((v) => Math.round(v / 13))]) {
+      const { container, unmount } = render(
+        <TimingBars
+          data={values.map((v, i) => ({ label: String(i + 1), value: v }))}
+          valueLabel="Releases a year"
+          formatValue={(v) => v.toFixed(0)}
+          axisKind="count"
+        />,
+      );
+      expect(container.querySelectorAll(".recharts-yAxis")).toHaveLength(1);
+      const ticks = axisTicks(container, "y", 0);
+      expect(vocabulary(ticks).suffixes).toEqual(new Set([""]));
+      for (const t of ticks) expect(t).not.toMatch(/^0\.\d/);
+      unmount();
+    }
   });
 });
 

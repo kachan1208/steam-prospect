@@ -222,20 +222,94 @@ describe("release-year bounds", () => {
 // ---- B3: the unlabelled metric columns --------------------------------------------------------
 
 describe("result columns explain themselves", () => {
-  it("labels each metric column above the rows", async () => {
+  it("labels each metric column above the rows — in the glossary's names", async () => {
     renderAt("/games?q=witch");
-    // The three numbers a cold visitor could not name: 86% · 9.8M, $464.6M, 841.9K live.
-    expect(await screen.findByText("Rating · reviews")).toBeTruthy();
-    expect(screen.getByText("Est. gross")).toBeTruthy();
-    expect(screen.getByText("Live players")).toBeTruthy();
+    // The numbers a cold visitor could not name: 86%, 9.8M, $464.6M, 841.9K. Each header
+    // carries an accessible ⓘ, named after the glossary's plain label.
+    expect(await screen.findByRole("button", { name: "About Positive reviews" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "About Reviews" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "About Est. revenue" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "About Players now" })).toBeTruthy();
+    // One revenue name: the retired "Est. gross" is gone.
+    expect(screen.queryByText("Est. gross")).toBeNull();
   });
 
-  it("carries the same explanatory tooltips /studios and /niches do", async () => {
+  it("explains Est. revenue as the flat 30 every other page uses — never 'genre-fitted'", async () => {
     renderAt("/games?q=witch");
-    const gross = await screen.findByText("Est. gross");
-    // The estimator has to be disclosed wherever the number is: it is not reported sales.
-    expect(gross.getAttribute("title")).toMatch(/estimate, not reported sales/i);
-    expect(screen.getByText("Rating · reviews").getAttribute("title")).toMatch(/positive/i);
-    expect(screen.getByText("Live players").getAttribute("title")).toMatch(/not a daily peak/i);
+    fireEvent.click(await screen.findByRole("button", { name: "About Est. revenue" }));
+    const tip = await screen.findByRole("tooltip");
+    // The estimator has to be disclosed wherever the number is: it is not reported sales…
+    expect(tip.textContent).toMatch(/not reported sales/i);
+    expect(tip.textContent).toContain("reviews × 30 owners-per-review × launch price");
+    // …and it is the SAME estimator the game page and the Finder describe.
+    expect(tip.textContent).toMatch(/not fitted per genre/);
+    expect(tip.textContent).not.toMatch(/genre-fitted/);
+    // The new sentinel is explained where it can appear.
+    expect(tip.textContent).toContain("Price unknown");
+  });
+});
+
+// ---- 2026-09-23: indie scope, price kinds, EA captions -------------------------------------
+
+describe("the indie scope — the page's default, stated and counted", () => {
+  it("asks for scope=indie by default without writing it into the URL", async () => {
+    renderAt("/games");
+    await screen.findByText("Counter-Strike: Global Offensive");
+    const sp = new URL(searchUrls[searchUrls.length - 1], "http://x").searchParams;
+    expect(sp.get("scope")).toBe("indie");
+    expect(sp.get("indie")).toBeNull();
+    expect(committedUrls[committedUrls.length - 1]).toBe("");
+    expect(screen.getByRole("button", { name: "Indie" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("'All games' rides the URL as ?scope=all and the request carries it", async () => {
+    renderAt("/games");
+    await screen.findByText("Counter-Strike: Global Offensive");
+    fireEvent.click(screen.getByRole("button", { name: "All games" }));
+    await waitFor(() => expect(committedUrls[committedUrls.length - 1]).toBe("?scope=all"));
+    await waitFor(() =>
+      expect(new URL(searchUrls[searchUrls.length - 1], "http://x").searchParams.get("scope")).toBe("all"),
+    );
+  });
+
+  it("keeps an old ?indie=0 link working — as 'Non-indie only' on the All games view", async () => {
+    renderAt("/games?indie=0");
+    await screen.findByText("Counter-Strike: Global Offensive");
+    const sp = new URL(searchUrls[searchUrls.length - 1], "http://x").searchParams;
+    // scope=indie with indie=false is a 422 — the page never sends that pair.
+    expect(sp.get("scope")).toBe("all");
+    expect(sp.get("indie")).toBe("false");
+    expect(screen.getByRole("button", { name: /Non-indie only/ })).toBeTruthy();
+  });
+});
+
+describe("price kinds on the result rows", () => {
+  it("prints 'Price unknown' for a $0 row Steam doesn't flag free, and 'Free' for one it does", async () => {
+    const gta = {
+      ...PAGE.items[0],
+      appid: 271590,
+      name: "Grand Theft Auto V Legacy",
+      price_initial: 0,
+      is_free: 0,
+      est_rev_reviews: 0,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/games/search")) searchUrls.push(url);
+        const body = url.includes("/market/benchmarks")
+          ? { boxleiter_by_genre: [] }
+          : { ...PAGE, items: [PAGE.items[0], gta], scope: "indie", n_scope_unknown: 12 };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    renderAt("/games");
+    await screen.findByText("Grand Theft Auto V Legacy");
+    // CS:GO is flagged free; GTA V Legacy is $0 with is_free 0 — a price we don't know.
+    expect(screen.getByText("Free")).toBeTruthy();
+    expect(screen.getByText("Price unknown").hasAttribute("data-sentinel")).toBe(true);
+    // …and the scope note counts the games the default left out.
+    expect(screen.getByTestId("scope-note").textContent).toContain("12 games with no indie flag yet aren't counted");
   });
 });

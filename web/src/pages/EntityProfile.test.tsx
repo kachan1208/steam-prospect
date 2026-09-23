@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -115,6 +115,32 @@ const ZEEKERSS = {
   games: [357633.3, null, 812786.4, 152971974.9, null].map((rev, i) => game(rev, i + 1)),
 };
 
+// LocalThunk (developer) — the one-game case, from the 2026-09-21 mart: Balatro is the whole
+// record, and the page printed "100%" and a top-10% figure off it with no warning.
+const LOCALTHUNK = {
+  entity: {
+    ...HOODED_HORSE.entity,
+    role: "developer",
+    name: "LocalThunk",
+    n_games: 1,
+    first_release_year: 2024,
+    last_release_year: 2024,
+    n_recent_24m: 0,
+    total_rev: 89_409_345,
+    median_rev: 89_409_345,
+    p90_rev: 89_409_345,
+    hit_rate_200k: 1.0,
+    median_reviews: 198_820,
+    median_positive_ratio: 0.978,
+    self_published_share: 0,
+    top_genres: ["Strategy"],
+    n_partners: null,
+  },
+  games: [{ ...game(89_409_345, 1), name: "Balatro", release_date: "2024-02-20", release_year: 2024, price_initial: 14.99 }],
+};
+
+let requested: string[] = [];
+
 function renderProfile(role: string, name: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   return render(
@@ -131,15 +157,37 @@ function renderProfile(role: string, name: string) {
 }
 
 beforeEach(() => {
+  requested = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      requested.push(url);
       const json = (body: unknown, status = 200) =>
         new Response(JSON.stringify(body), {
           status,
           headers: { "Content-Type": "application/json" },
         });
+      // The other-role probe: a 200 with the matching names (none of these studios has a
+      // counterpart except Hooded Horse's fake developer twin below).
+      if (url.startsWith("/api/entities/search")) {
+        const sp = new URL(url, "http://x").searchParams;
+        // A substring search: "Hooded Horse" also matches a differently-named studio, which
+        // must NOT be taken for the twin — only the exact name is.
+        const items =
+          sp.get("q") === "Hooded Horse" && sp.get("role") === "developer"
+            ? [
+                { ...HOODED_HORSE.entity, role: "developer", name: "Hooded Horse Games", n_games: 7 },
+                { ...HOODED_HORSE.entity, role: "developer", name: "Hooded Horse", n_games: 2 },
+              ]
+            : [];
+        return json({ items, total: items.length, limit: 100, offset: 0, scope: "all", n_scope_unknown: null });
+      }
+      if (url.includes("name=LocalThunk")) {
+        return url.includes("role=developer")
+          ? json(LOCALTHUNK)
+          : json({ detail: { error: "not found", suggestions: [] } }, 404);
+      }
       if (url.includes("name=Hooded")) {
         // The page also probes the OTHER role; only the publisher exists.
         return url.includes("role=publisher")
@@ -169,7 +217,7 @@ afterEach(() => {
 describe("EntityProfile revenue tiles", () => {
   it("never labels a rate 'share of releases' when releases sit outside its base", async () => {
     renderProfile("publisher", "Hooded Horse");
-    await waitFor(() => expect(screen.getByText("Hit rate ≥ $200K")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Games earning $200K+")).toBeTruthy());
 
     // The rate itself is untouched — this is a disclosure fix, not a recomputation.
     expect(screen.getByText("91%")).toBeTruthy();
@@ -183,11 +231,9 @@ describe("EntityProfile revenue tiles", () => {
     expect(
       screen.getByText("median $3.9M — both over the 33 of 50 releases with an estimate"),
     ).toBeTruthy();
-    expect(
-      screen.getByText("Boxleiter gross over the 33 of 50 releases with an estimate"),
-    ).toBeTruthy();
+    expect(screen.getByText("Summed over the 33 of 50 releases with an estimate")).toBeTruthy();
     expect(screen.queryByText("median $3.9M per release")).toBeNull();
-    expect(screen.queryByText("Boxleiter gross across the catalog")).toBeNull();
+    expect(screen.queryByText(/Boxleiter/)).toBeNull();
 
     // The Games tile still counts all 50 — the fix discloses, it does not restate the count —
     // and now says how many of those 50 every tile beside it excludes.
@@ -195,16 +241,55 @@ describe("EntityProfile revenue tiles", () => {
     expect(gamesTile?.textContent).toBe("Games5017 with no revenue estimate");
   });
 
-  it("withholds the strong-hit-rate colour when the base is under the floor", async () => {
+  it("prints a small record's hit rate as the COUNT it is, flagged, with no verdict colour", async () => {
     renderProfile("publisher", "Zeekerss");
-    await waitFor(() => expect(screen.getByText("100%")).toBeTruthy());
-    // The number and its base are both printed — nothing is hidden...
-    expect(
-      screen.getByText("Share of the 3 releases with a revenue estimate — 2 of 5 have none"),
-    ).toBeTruthy();
-    // ...but 3 estimated releases is under ENTITY_MIN_ESTIMATED_FOR_VERDICT, so the tile does
-    // not also assert that this is a strong hit rate.
-    expect(screen.getByText("100%").className).not.toContain("accent-300");
+    // 3 of 3 estimated releases: a "100%" that could only ever read 0% or 100%.
+    await waitFor(() => expect(screen.getByText("3 of 3 releases")).toBeTruthy());
+    expect(screen.queryByText("100%")).toBeNull();
+    expect(screen.getByText("small sample").hasAttribute("data-sentinel")).toBe(true);
+    // The base — and what sits outside it — is still printed.
+    expect(screen.getByText("cleared $200K est. revenue — 2 of 5 releases have no estimate")).toBeTruthy();
+    // 3 is under ENTITY_MIN_ESTIMATED_FOR_VERDICT, so no claim of a strong hit rate.
+    expect(screen.getByText("3 of 3 releases").className).not.toContain("accent-300");
+    // And no top-10% line off three games — withheld, with the n that withheld it.
+    expect(screen.getByText("too few releases")).toBeTruthy();
+    expect(screen.getByText("needs 10+ releases")).toBeTruthy();
+  });
+
+  it("LocalThunk: one game is 'tiny sample', never '100%' and never a top-10% figure", async () => {
+    renderProfile("developer", "LocalThunk");
+    await waitFor(() => expect(screen.getByText("1 of 1 release")).toBeTruthy());
+    expect(screen.getByText("tiny sample")).toBeTruthy();
+    expect(screen.queryByText("100%")).toBeNull();
+    expect(screen.getByText("needs 10+ releases")).toBeTruthy();
+    expect(screen.getByText("median $89.4M over 1 release")).toBeTruthy();
+    expect(screen.getByText("Its one release")).toBeTruthy();
+    // The tile explains itself — the ⓘ carries the formula and why the value is flagged.
+    fireEvent.click(screen.getByRole("button", { name: "About Games earning $200K+" }));
+    const tip = await screen.findByRole("tooltip");
+    expect(tip.textContent).toContain("releases with Est. revenue > $200K ÷ releases with an Est. revenue");
+    expect(tip.textContent).toContain("Only 1 release with an estimate");
+  });
+
+  it("finds the other-role twin through the search endpoint — no 404 probe on every page", async () => {
+    renderProfile("developer", "LocalThunk");
+    await screen.findByText("1 of 1 release");
+    await waitFor(() => expect(requested.some((u) => u.startsWith("/api/entities/search"))).toBe(true));
+    // The old probe asked /entities/profile?role=publisher and got a 404 (a console error)
+    // for every developer without a publisher record — i.e. most of them.
+    expect(requested.some((u) => u.includes("/entities/profile") && u.includes("role=publisher"))).toBe(false);
+    expect(screen.queryByText(/is also a publisher/)).toBeNull();
+  });
+
+  it("still shows the twin when the search finds it — the EXACT name, not a substring hit", async () => {
+    renderProfile("publisher", "Hooded Horse");
+    await screen.findByText("91%");
+    const banner = await screen.findByText(/is also a developer/);
+    // 2 games (the exact "Hooded Horse"), not 7 ("Hooded Horse Games" merely contains it).
+    expect(banner.parentElement!.textContent).toContain("is also a developer — 2 games");
+    expect(screen.getByRole("link", { name: "View developer profile →" }).getAttribute("href")).toBe(
+      "/entity/developer?name=Hooded%20Horse",
+    );
   });
 
   it("keeps the colour when the base clears the floor", async () => {
@@ -216,7 +301,7 @@ describe("EntityProfile revenue tiles", () => {
 
   it("REGRESSION CONTROL: FromSoftware's page is unchanged, because it was already right", async () => {
     renderProfile("developer", "FromSoftware, Inc.");
-    await waitFor(() => expect(screen.getByText("Hit rate ≥ $200K")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Games earning $200K+")).toBeTruthy());
 
     // 8/12 over all 12 listed releases: no hedge, no "of the N with an estimate", and the
     // verdict colour stays because a 12-release estimated career clears the floor.
@@ -224,7 +309,9 @@ describe("EntityProfile revenue tiles", () => {
     expect(screen.getByText("Share of all 12 releases clearing $200K est.")).toBeTruthy();
     expect(screen.getByText("67%").className).toContain("accent-300");
     expect(screen.getByText("median $155.9M per release")).toBeTruthy();
-    expect(screen.getByText("Boxleiter gross across the catalog")).toBeTruthy();
+    expect(screen.getByText("Summed over all 12 releases")).toBeTruthy();
+    // 12 estimated releases clear the floor: no sample flag at all.
+    expect(screen.queryByText(/sample/)).toBeNull();
     // Nothing is excluded, so the Games tile keeps its bare count with no sub-label at all.
     expect(screen.queryByText(/with no revenue estimate/)).toBeNull();
     expect(screen.queryByText(/have none/)).toBeNull();

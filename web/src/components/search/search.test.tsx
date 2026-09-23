@@ -4,7 +4,8 @@ import { MemoryRouter } from "react-router-dom";
 
 import { FilterBar } from "./FilterChip";
 import { ResultChipRow, topValues } from "./ResultChipRow";
-import { ResultHeader, ResultList, ResultRow, ResultTitle, RevenueCell } from "./ResultList";
+import { MetricCell, ResultHeader, ResultList, ResultRow, ResultTitle, RevenueCell } from "./ResultList";
+import { ScopeNote } from "./ScopeNote";
 import { MAX_OFFSET, PAGE_LIMIT, ResultsFooter, pagingState } from "./ResultsFooter";
 import { SearchBar } from "./SearchBar";
 import { Segmented } from "./Segmented";
@@ -277,17 +278,89 @@ describe("ResultList", () => {
     render(
       <>
         <RevenueCell top>$1.0M</RevenueCell>
-        <RevenueCell top={false} width="w-28">
+        <RevenueCell top={false} width="w-28" stackBelow="xl" label="Est. revenue, all games">
           $2.0M
         </RevenueCell>
       </>,
     );
     const top = screen.getByText("$1.0M");
     expect(top.className).toContain("text-brand");
-    expect(top.className).toContain("w-20");
+    // The width applies from the stacking breakpoint up — where the header it mirrors shows.
+    expect(top.closest("[data-metric-cell]")!.className).toContain("sm:w-24");
     const rest = screen.getByText("$2.0M");
     expect(rest.className).toContain("text-ink-primary");
-    expect(rest.className).toContain("w-28");
-    expect(rest.className).not.toContain("w-20");
+    expect(rest.closest("[data-metric-cell]")!.className).toContain("xl:w-28");
+    expect(rest.closest("[data-metric-cell]")!.className).not.toContain("w-24");
+  });
+
+  it("labels every stacked cell — the header row that names it is hidden below the breakpoint", () => {
+    render(
+      <>
+        <MetricCell label="Players now" width="w-[84px]" stackBelow="md">
+          26.9K
+        </MetricCell>
+        <RevenueCell top={false}>$466.5M</RevenueCell>
+      </>,
+    );
+    const label = screen.getByText("Players now");
+    expect(label.className).toContain("md:hidden"); // shown only while the header is
+    expect(label.closest("[data-metric-cell]")!.textContent).toBe("Players now26.9K");
+    // The revenue cell carries the one revenue name the whole app uses.
+    expect(screen.getByText("Est. revenue").className).toContain("sm:hidden");
+  });
+
+  it("stacks /studios below xl, wrapping the group so a phone row never scrolls sideways", () => {
+    render(
+      <MemoryRouter>
+        <ResultList>
+          <ResultHeader lead="Studio" stackBelow="xl">
+            <span>Games</span>
+          </ResultHeader>
+          <ResultRow stackBelow="xl" onOpen={() => {}} lead={<span>lead</span>} metrics={<span>metric</span>} />
+        </ResultList>
+      </MemoryRouter>,
+    );
+    expect(screen.getByText("Studio").parentElement!.className).toContain("xl:flex");
+    const group = screen.getByText("metric").parentElement!;
+    expect(group.className).toContain("flex-wrap");
+    expect(group.className).toContain("xl:flex-nowrap");
+  });
+});
+
+describe("ScopeNote", () => {
+  const props = {
+    noun: "games",
+    definition: "Steam's own Indie flag.",
+    formula: "is_indie = 1",
+  } as const;
+
+  it("states the indie scope and COUNTS what it leaves out — never a silent exclusion", () => {
+    render(<ScopeNote requested="indie" applied="indie" unknown={39_468} {...props} />);
+    const note = screen.getByTestId("scope-note");
+    expect(note.textContent).toContain("indie games only");
+    expect(note.textContent).toContain("39,468 games with no indie flag yet aren't counted");
+    // The definition is one accessible ⓘ away.
+    expect(screen.getByRole("button", { name: "About Indie scope" })).toBeTruthy();
+  });
+
+  it("reads the scope the API APPLIED, not the one the page asked for", () => {
+    // An API that predates scopes ignores ?scope=indie and serves everything: saying "indie
+    // only" over those rows would be a false claim about the data on screen.
+    render(<ScopeNote requested="indie" applied={undefined} unknown={undefined} {...props} />);
+    const note = screen.getByTestId("scope-note");
+    expect(note.textContent).toContain("indie filter unavailable");
+    expect(note.textContent).toContain("showing all games");
+    expect(note.textContent).not.toContain("indie games only");
+  });
+
+  it("says when the view is everything, big studios included", () => {
+    render(<ScopeNote requested="all" applied="all" unknown={null} {...props} />);
+    expect(screen.getByTestId("scope-note").textContent).toContain("all games");
+    expect(screen.getByTestId("scope-note").textContent).not.toContain("aren't counted");
+  });
+
+  it("uses the singular for one unknown", () => {
+    render(<ScopeNote requested="indie" applied="indie" unknown={1} {...props} noun="publishers" />);
+    expect(screen.getByTestId("scope-note").textContent).toContain("1 publisher with no indie flag yet isn't counted");
   });
 });

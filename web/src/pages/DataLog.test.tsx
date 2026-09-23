@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -88,18 +88,29 @@ const SKIPPED_RUN = {
 
 const NOTHING_RAN = "Nothing ran — the previous mart stayed in service.";
 
-function mockHistory(runs: unknown[]) {
+/** /api/health as the API serves it (data-age fields since PR #177). null = no health answer. */
+const HEALTH = {
+  status: "ok",
+  mart_version: "20260903",
+  built_at: "2026-09-03T02:41:10+00:00",
+  data_as_of: "2026-09-03",
+  age_hours: 30.2,
+  source_db: null,
+};
+
+function mockHistory(runs: unknown[], health: unknown = HEALTH) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     const json = (body: unknown, status = 200) =>
       new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
     if (url.startsWith("/api/refresh/history")) return json({ runs, total: runs.length, limit: 60 });
+    if (url.startsWith("/api/health") && health) return json(health);
     return json({ detail: `unexpected request: ${url}` }, 404);
   });
 }
 
-function renderDataLog(runs: unknown[]) {
-  vi.stubGlobal("fetch", mockHistory(runs));
+function renderDataLog(runs: unknown[], health: unknown = HEALTH) {
+  vi.stubGlobal("fetch", mockHistory(runs, health));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   return render(
     <QueryClientProvider client={client}>
@@ -204,21 +215,31 @@ describe("run verdicts", () => {
   });
 });
 
-describe("schedule copy", () => {
-  it("says when the nightly really runs: starts 21:00 UTC, usually done 00:45–03:30 — never the old 04:00", async () => {
+describe("freshness copy — what the page can KNOW, never a clock schedule", () => {
+  // The header used to promise "starts at 21:00 UTC and usually finishes between 00:45 and
+  // 03:30 UTC": the old droplet's cron, false the moment the pipeline ran anywhere else.
+  const SCHEDULE = /21:00|00:45|03:30|04:00|\bUTC\b|every night|nightly/;
+
+  it("states the served data's age from /api/health and the latest run from the ledger", async () => {
     renderDataLog([OK_RUN]);
     await screen.findByText("success");
-    const body = document.body.textContent ?? "";
-    expect(body).toContain("starts at 21:00");
-    expect(body).toContain("between 00:45 and 03:30");
-    expect(body).not.toContain("04:00");
+    const line = await screen.findByTestId("datalog-freshness");
+    await waitFor(() => expect(line.textContent).toContain("Every page is showing data as of Sep 3, 2026 — 1 day old."));
+    expect(line.textContent).toMatch(/Latest recorded run: success, /);
+    expect(document.body.textContent).not.toMatch(SCHEDULE);
   });
 
-  it("and so does the empty state", async () => {
+  it("flags an unknown data date instead of guessing one", async () => {
+    renderDataLog([HELD_RUN], { status: "ok", mart_version: null, built_at: null, source_db: null });
+    const line = await screen.findByTestId("datalog-freshness");
+    await waitFor(() => expect(line.textContent).toContain("data date unknown"));
+    expect(line.textContent).toMatch(/Latest recorded run: held, /);
+  });
+
+  it("and the empty state promises no schedule either", async () => {
     renderDataLog([]);
     await screen.findByText("No refreshes recorded yet");
-    const body = document.body.textContent ?? "";
-    expect(body).toContain("starts at 21:00");
-    expect(body).not.toContain("04:00");
+    expect(document.body.textContent).not.toMatch(SCHEDULE);
+    expect(screen.getByText(/Once a refresh completes, every run shows up here/)).toBeTruthy();
   });
 });

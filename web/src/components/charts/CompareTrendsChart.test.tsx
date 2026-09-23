@@ -124,6 +124,53 @@ describe("CompareTrendsChart — three games are three distinguishable series", 
   });
 });
 
+describe("CompareTrendsChart — what the series is, and how it lines up (2026-09-23)", () => {
+  function renderWith(props: Partial<Parameters<typeof CompareTrendsChart>[0]>) {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    return render(
+      <QueryClientProvider client={client}>
+        <CompareTrendsChart ids={IDS} names={NAMES} {...props} />
+      </QueryClientProvider>,
+    );
+  }
+
+  it("names the series for what it is — Steam's full histogram, never 'SAMPLED'", () => {
+    const { container } = renderWith({});
+    expect(container.textContent).toContain("Steam's own review histogram");
+    expect(container.textContent).toContain("full history, not a sample");
+    expect(container.textContent).not.toMatch(/SAMPLED|undercount/);
+  });
+
+  it("leaves the running month out of every line, and says so", () => {
+    // MONTHS runs 2024-01..2025-12; with Dec 2025 still running each line loses its last point.
+    const full = renderWith({});
+    const pointsFull = full.container.querySelectorAll('path[data-testid^="compare-marker-"]').length;
+    full.unmount();
+    const { container } = renderWith({ partialPeriod: "2025-12" });
+    expect(container.textContent).toContain("Dec 2025 is still running, so it isn't drawn");
+    expect(axisTicks(container, "x")).not.toContain("2025-12");
+    expect(container.querySelectorAll('path[data-testid^="compare-marker-"]').length).toBeLessThanOrEqual(pointsFull);
+  });
+
+  it("aligned by launch: x is months since each game's launch month, with month 0 marked", () => {
+    const anchors = new Map([
+      [730, { iso: "2024-01-15", source: "release" as const }],
+      [1962700, { iso: "2024-06-01", source: "first_public" as const }],
+      [2393160, null],
+    ]);
+    const { container } = renderWith({ align: "launch", anchors });
+    const ticks = axisTicks(container, "x");
+    expect(ticks).toContain("0");
+    // Subnautica 2 launched in Jun 2024, so its Jan–May points sit at negative months…
+    expect(ticks.some((t) => t.startsWith("-"))).toBe(true);
+    expect(container.textContent).toContain("launch");
+    // …and a game with no launch date is named, not silently dropped.
+    expect(container.textContent).toContain("Not drawn: Nice Day for Fishing — no release date to line up on.");
+    expect(lines(container)).toHaveLength(2);
+    expect(container.textContent).toContain("X = months since each game's launch month");
+  });
+});
+
 describe("seriesShapePath", () => {
   it("emits a closed path for every shape in the ramp, and no two are the same", () => {
     const paths = COMPARE_SERIES.map((s) => seriesShapePath(s.shape, 10, 10, 3));

@@ -66,6 +66,8 @@ function rowsFor(url: string): EntitySearchRow[] {
   if (q === "larian") return [studioRow("Larian Studios", role)];
   // A two-game record: enough to list, not enough for a hit rate.
   if (q === "thin") return [studioRow("Two Hit Wonder", role, { n_games: 2, hit_rate_200k: 1 })];
+  // Nothing released in the last 24 months.
+  if (q === "dormant") return [studioRow("Quiet Studio", role, { n_recent_24m: 0 })];
   return (role === "developer" ? DEVELOPERS : PUBLISHERS).map((n, i) => studioRow(n, role, { top_genres: GENRES[i] }));
 }
 
@@ -137,11 +139,16 @@ beforeEach(() => {
       requests.push(u);
       const items = rowsFor(u);
       const sp = params(u);
+      // The API echoes the scope it applied and, under indie, counts the studios whose flag
+      // is unknown (api/app/routers/entities.py).
+      const scope = sp.get("scope") === "indie" ? "indie" : "all";
       const body = {
         items,
         total: totalOverride ?? items.length,
         limit: Number(sp.get("limit") ?? 25),
         offset: Number(sp.get("offset") ?? 0),
+        scope,
+        n_scope_unknown: scope === "indie" ? 133 : null,
       };
       return new Response(JSON.stringify(body), {
         status: 200,
@@ -162,9 +169,11 @@ describe("Studios — shareable URL state", () => {
     await screen.findByText("Electronic Arts");
     // Defaults omitted — a pristine /studios stays a clean URL…
     expect(url()).toBe("/studios");
-    // …while the request spells every default out, so the API contract is explicit.
+    // …while the request spells every default out, so the API contract is explicit —
+    // including the page's own default scope, which the API's default ("all") is not.
     const req = lastSearchRequest();
     expect(req.get("role")).toBe("publisher");
+    expect(req.get("scope")).toBe("indie");
     expect(req.get("sort")).toBe("total_rev");
     expect(req.get("order")).toBe("desc");
     expect(req.get("limit")).toBe("25");
@@ -336,6 +345,35 @@ describe("Studios — sort and paging ride the URL like /games", () => {
   });
 });
 
+describe("Studios — the indie scope", () => {
+  it("defaults to indie studios, says so, and counts the ones it can't classify", async () => {
+    renderStudios();
+    await screen.findByText("Electronic Arts");
+    const note = screen.getByTestId("scope-note");
+    expect(note.textContent).toContain("indie publishers only");
+    expect(note.textContent).toContain("133 publishers with no indie flag yet aren't counted");
+    expect(screen.getByRole("button", { name: "Indie" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("'All studios' writes ?scope=all, pushes, and the request carries it", async () => {
+    renderStudios();
+    await screen.findByText("Electronic Arts");
+    fireEvent.click(screen.getByRole("button", { name: "All studios" }));
+    expect(url()).toBe("/studios?scope=all");
+    await waitFor(() => expect(lastSearchRequest().get("scope")).toBe("all"));
+    await waitFor(() => expect(screen.getByTestId("scope-note").textContent).toContain("all publishers"));
+    goBack();
+    await waitFor(() => expect(url()).toBe("/studios"));
+  });
+
+  it("the genre pivots keep the All studios view when that is the one on screen", async () => {
+    renderStudios("/studios?scope=all");
+    await screen.findByText("Genres in these results:");
+    const rpg = screen.getAllByRole("link").find((a) => a.textContent === "RPG")!;
+    expect(rpg.getAttribute("href")).toBe("/games?genre=RPG&scope=all");
+  });
+});
+
 describe("Studios — the rows", () => {
   it("opens the profile from a two-line title: name, then games · years · top genre", async () => {
     renderStudios();
@@ -343,22 +381,46 @@ describe("Studios — the rows", () => {
     const link = screen.getByRole("link", { name: /Electronic Arts/ });
     expect(link.getAttribute("href")).toBe("/entity/publisher?name=Electronic%20Arts");
     expect(link.textContent).toContain("12 games · 2010–2025 · RPG");
-    // Every metric column is labelled and explained on hover, as on /games.
-    expect(screen.getByText("Total est. revenue").getAttribute("title")).toMatch(/estimate, not reported sales/i);
-    expect(screen.getByText("Hit rate").getAttribute("title")).toMatch(/\$200K/);
-    expect(screen.getByText("Games").getAttribute("title")).toMatch(/3\+/);
+    // Every metric column is labelled and explained by an accessible ⓘ, in the glossary's
+    // names — "P90" and "Hit rate" were explained only by a hover-only title.
+    for (const name of [
+      "About Games",
+      "About Releases, last 24 months",
+      "About Est. revenue, all games",
+      "About Top-10% revenue",
+      "About Games earning $200K+",
+    ]) {
+      expect(screen.getByRole("button", { name })).toBeTruthy();
+    }
+    fireEvent.click(screen.getByRole("button", { name: "About Games earning $200K+" }));
+    const tip = await screen.findByRole("tooltip");
+    expect(tip.textContent).toContain("releases with Est. revenue > $200K ÷ releases with an Est. revenue");
+    expect(tip.textContent).toMatch(/under 3 games/);
   });
 
-  it("withholds the hit rate under three games, and says why", async () => {
+  it("says a dormant studio released nothing in 24 months instead of printing a bare dash", async () => {
+    renderStudios("/studios?q=larian");
+    await screen.findByText("Larian Studios");
+    expect(screen.getByText("2 releases")).toBeTruthy();
+    cleanup();
+    renderStudios("/studios?q=dormant");
+    await screen.findByText("Quiet Studio");
+    expect(screen.getByText("none")).toBeTruthy();
+    expect(screen.queryByText("—")).toBeNull();
+  });
+
+  it("withholds the hit rate and top-10% line under three games, and tags why", async () => {
     renderStudios("/studios?q=thin");
     await screen.findByText("Two Hit Wonder");
-    const cell = screen.getByTitle("needs 3+ games");
-    expect(cell.textContent).toBe("—");
-    // …while a real record prints it.
+    const tags = screen.getAllByText("under 3 games");
+    expect(tags).toHaveLength(2); // top-10% revenue and the hit rate
+    for (const t of tags) expect(t.hasAttribute("data-sentinel")).toBe(true);
+    expect(screen.queryByText("100%")).toBeNull();
+    // …while a real record prints both.
     cleanup();
     renderStudios();
     await screen.findByText("Electronic Arts");
-    expect(screen.queryByTitle("needs 3+ games")).toBeNull();
+    expect(screen.queryByText("under 3 games")).toBeNull();
     expect(screen.getAllByText("50%").length).toBe(3);
   });
 

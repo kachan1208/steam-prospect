@@ -1003,13 +1003,41 @@ export interface GameSearchRow {
   has_demo?: boolean | null;
   /** Metacritic critic score where Steam links a page (~2.6% of games); null = no linked page. */
   metacritic_score?: number | null;
+  /** Early-access lifecycle (absent until the mart carries the columns). On the rebuilt mart
+   * `release_date` itself MEANS the first public date (the EA start, or the release when it
+   * never was EA) and `release_date_1_0` is Steam's store (1.0) date; the transitional API
+   * sent the first public date as `first_public_date` instead. See lib/lifecycle.ts. */
+  first_public_date?: string | null;
+  release_date_1_0?: string | null;
+  is_ea_graduate?: boolean | null;
+  /** Where release_date came from: "store", or inferred from the first review
+   * ("first_review", "first_review_month" — month precision, printed "~Feb 2024"). */
+  release_date_source?: "store" | "first_review" | "first_review_month" | null;
+  /** The mart's own price verdict — preferred over the is_free/price heuristic (lib/format
+   * priceKind). Absent on older marts. */
+  price_status?: "paid" | "free" | "unknown" | null;
 }
+
+/** Population scope for the search endpoints (api/app/scope.py). `indie` = Steam's own
+ * Indie flag (mart_game.is_indie = 1); unknown flags are excluded AND counted. The API
+ * default is `all` — the pages pick `indie` as theirs. */
+export type Scope = "all" | "indie";
 
 export interface GameSearchList {
   items: GameSearchRow[];
   total: number;
   limit: number;
   offset: number;
+  /** The scope the API applied. Absent on an API that predates scopes — then it was "all",
+   * whatever was asked for. */
+  scope?: Scope;
+  /** Under scope=indie: games that matched every other filter but carry no indie flag, so
+   * were left out (unknown ≠ indie). null under scope=all. */
+  n_scope_unknown?: number | null;
+  /** The as-of date a `released_within_days` window was anchored to (the mart's date). */
+  data_as_of?: string | null;
+  /** When the owners estimates were taken (the SteamSpy snapshot). */
+  owners_as_of?: string | null;
 }
 
 // Mirrors the API's SORTABLE whitelist in api/app/routers/games.py.
@@ -1058,6 +1086,8 @@ export interface GameSearchParams {
   has_demo?: boolean;
   /** Floor on the Metacritic critic score. Only ~2.6% of games have one, so this drops the rest. */
   min_metacritic?: number;
+  /** Population scope — see Scope. The API 422s scope=indie together with indie=false. */
+  scope?: Scope;
   sort: GameSortKey;
   order: "asc" | "desc";
   limit: number;
@@ -1574,6 +1604,9 @@ export interface EntitySearchRow {
   p90_rev?: number | null; // absent on marts that predate 2026-08-14
   hit_rate_200k: number | null;
   top_genres: string[];
+  /** Share of the entity's FLAGGED games that are Steam Indie-flagged — the measure the indie
+   * scope keeps on (≥ 0.5). Only computed under scope=indie; absent/null otherwise. */
+  indie_share?: number | null;
 }
 
 export interface EntitySearchList {
@@ -1581,6 +1614,11 @@ export interface EntitySearchList {
   total: number;
   limit: number;
   offset: number;
+  /** The scope the API applied; absent on an API that predates scopes (= "all"). */
+  scope?: Scope;
+  /** Under scope=indie: entities that matched everything else but have no flagged game at
+   * all (unknown ≠ indie), so were left out. null under scope=all. */
+  n_scope_unknown?: number | null;
 }
 
 // Mirrors the allow-list in api/app/routers/entities.py (EntitySortKey) — anything else is a 422.
@@ -1601,6 +1639,8 @@ export interface EntitySearchParams {
   role?: EntityRole;
   /** Floor on n_games — browse views pass e.g. 3 so single-release credits don't drown the ranking. */
   min_games?: number;
+  /** Population scope: indie = entities at least half of whose flagged games are Indie-flagged. */
+  scope?: Scope;
   sort: EntitySortKey;
   order: "asc" | "desc";
   limit: number;
@@ -1610,12 +1650,15 @@ export interface EntitySearchParams {
 
 /**
  * Search OR browse entities. An empty/absent `q` is the API's BROWSE mode, so the query is
- * always enabled. `total` counts the whole match set (not the page), so the caller can page.
+ * enabled by default. `total` counts the whole match set (not the page), so the caller can
+ * page. `enabled: false` holds a lookup until its inputs exist (the entity profile's
+ * other-role probe).
  */
-export function useEntitySearch(params: EntitySearchParams) {
+export function useEntitySearch(params: EntitySearchParams, opts: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: ["entity-search", params],
     queryFn: ({ signal }) => request<EntitySearchList>(`/entities/search${qs(params)}`, { signal }),
+    enabled: opts.enabled ?? true,
     placeholderData: keepPreviousData,
     staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
     // 503 means "marts not built yet" — a stable answer; surface the refreshing state

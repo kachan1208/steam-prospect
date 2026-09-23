@@ -90,6 +90,48 @@ export function revenueEstimateBase(
  */
 export const ENTITY_MIN_ESTIMATED_FOR_VERDICT = 10;
 
+/**
+ * THE SMALL-SAMPLE RULE for a studio's hit rate and top-10% revenue (2026-09-23).
+ *
+ * The profile printed "100%" and a top-10% figure for LocalThunk, whose whole estimated record
+ * is one game (Balatro): a "rate" over one release can only be 0% or 100%, and the 90th
+ * percentile of one number is that number. Neither was marked. So, over the releases WITH an
+ * estimate (the base both are computed over):
+ *
+ *   - under ENTITY_MIN_ESTIMATED_FOR_VERDICT (10): the hit rate prints as the COUNT it is —
+ *     "1 of 1" — never as a percent, and the top-10% figure is withheld: "only 1 game in 10
+ *     earns more" needs ten games to mean anything;
+ *   - under ENTITY_MIN_FOR_ANY_RATE (3): the same, flagged "tiny sample" instead of "small
+ *     sample" — the same 3-game floor /studios' list withholds its hit rate below.
+ *
+ * The numbers are never hidden without the n that hid them: every withheld value says how
+ * many releases the studio has and how many the figure needs.
+ */
+export const ENTITY_MIN_FOR_ANY_RATE = 3;
+
+export type SampleSize = "ok" | "small" | "tiny" | "none";
+
+/** How much weight a studio's estimated base can carry. */
+export function sampleSize(estimated: number): SampleSize {
+  if (estimated <= 0) return "none";
+  if (estimated < ENTITY_MIN_FOR_ANY_RATE) return "tiny";
+  if (estimated < ENTITY_MIN_ESTIMATED_FOR_VERDICT) return "small";
+  return "ok";
+}
+
+/** The hit rate's COUNT — releases over $200K — recovered from the rate and its base. The
+ * mart stores only the ratio; with the base known exactly (revenueEstimateBase) the count is
+ * the ratio × base, rounded (Hooded Horse: 0.909… × 33 = 30). */
+export function hitCount(hitRate: number | null | undefined, base: RevenueEstimateBase): number | null {
+  if (hitRate == null || !Number.isFinite(hitRate) || base.estimated <= 0) return null;
+  return Math.round(hitRate * base.estimated);
+}
+
+/** "1 of 1 release" / "3 of 5 releases" — the hit rate as the count it is. */
+export function hitCountLabel(hits: number, base: RevenueEstimateBase): string {
+  return `${hits} of ${base.estimated} ${base.estimated === 1 ? "release" : "releases"}`;
+}
+
 /** Sub-label for the "Hit rate >= $200K" tile — always names the denominator, and says how many
  * releases sit outside it, so dividing the two numbers the page shows can only land on the
  * number the page printed (the rule pressToneSummary established for press tone). */
@@ -111,12 +153,16 @@ export function medianRevSub(medianText: string, base: RevenueEstimateBase): str
   return `median ${medianText} — both over the ${base.estimated} of ${base.listed} releases with an estimate`;
 }
 
-/** Sub-label for the "Total est. revenue" tile — a SUM, but still over the estimated subset
- * only (SUM ignores NULLs), so "across the catalog" was overstating its coverage too. */
+/** Sub-label for the "Est. revenue, all games" tile — a SUM, but still over the estimated
+ * subset only (SUM ignores NULLs), so "across the catalog" was overstating its coverage too.
+ * (It used to read "Boxleiter gross …" — the estimator's jargon name; the tile's ⓘ now
+ * carries the formula instead.) */
 export function totalRevSub(base: RevenueEstimateBase): string {
   if (base.estimated === 0) return "No release has a revenue estimate";
-  if (base.estimated === base.listed) return "Boxleiter gross across the catalog";
-  return `Boxleiter gross over the ${base.estimated} of ${base.listed} releases with an estimate`;
+  if (base.estimated === base.listed) {
+    return base.listed === 1 ? "Its one release" : `Summed over all ${base.listed} releases`;
+  }
+  return `Summed over the ${base.estimated} of ${base.listed} releases with an estimate`;
 }
 
 /** Sub-label for the "Games" tile — undefined at full coverage, so an entity whose whole

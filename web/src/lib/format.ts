@@ -151,6 +151,73 @@ export function fmtRevenue(value: number | null | undefined, isFree: boolean): s
   return fmtUsd(value);
 }
 
+/* ─────────────────────────────────────────────────────────────────────────────────────
+ * PRICE KIND — "Free" is a claim about the business model, not a reading of $0 (2026-09-23).
+ *
+ * Since the API's robustness pass (PR #177) `is_free` rides EVERY priced row, which is what
+ * lets a $0 list price be told apart: price_initial 0 with is_free = 1 is a free game;
+ * price_initial 0 with is_free = 0 is a price we DON'T KNOW. Grand Theft Auto V Legacy
+ * (271590) is the live example — delisted, $0 on the store feed, is_free 0, 2.08M reviews —
+ * and /games printed "Free" beside it, telling a dev that one of Steam's best-selling paid
+ * games is free-to-play. The rebuilt marts also stop pricing those rows at $0 revenue (they
+ * are NULL, and excluded from every revenue statistic), so a cell has to say WHY there is no
+ * number rather than print a bare "—".
+ *
+ * isFreeTitle() above keeps its original contract (a $0 price reads as free) for the pages
+ * that still call it; priceKind() is the reading that honours the flag.
+ * ───────────────────────────────────────────────────────────────────────────────────── */
+
+export type PriceKind = "paid" | "free" | "unknown";
+
+/** The row shape priceKind reads. `price_status` is the rebuilt mart's own verdict (ETL
+ * PR #178) and wins whenever it is present; the rest is the fallback heuristic. */
+export interface PricedRow {
+  price_initial?: number | null;
+  is_free?: number | boolean | null;
+  price_status?: PriceKind | string | null;
+}
+
+/** What a row's price is: a real price, free-to-play, or unknown. The mart's own
+ * `price_status` decides when the row carries it. Without it: a known positive price wins
+ * (Rainbow Six Siege carries is_free AND $19.99 — it is priced), and a row with no
+ * `is_free` at all (an API or table that predates the flag) keeps the old reading — $0 is
+ * free, no price is unknown. */
+export function priceKind(row: PricedRow): PriceKind {
+  if (row.price_status === "paid" || row.price_status === "free" || row.price_status === "unknown") {
+    return row.price_status;
+  }
+  const p = row.price_initial;
+  if (isFiniteNumber(p) && p > 0) return "paid";
+  if (row.is_free === undefined || row.is_free === null) return p === 0 ? "free" : "unknown";
+  return row.is_free ? "free" : "unknown";
+}
+
+/** The words a cell prints when the price (and so every revenue estimate) is unknown. */
+export const PRICE_UNKNOWN = "Price unknown";
+
+/** The sentence an Est. revenue explanation adds about that sentinel. */
+export const PRICE_UNKNOWN_NOTE =
+  "A $0 or missing price that Steam doesn't flag free reads “Price unknown”: there is no price to multiply, so no estimate is made, and the game is left out of every revenue statistic.";
+
+/** List price for display: "$14.99", "Free" or "Price unknown" — never a bare dash, never
+ * "Free" for a $0 row Steam doesn't flag free. */
+export function fmtPriceFor(row: PricedRow): string {
+  const kind = priceKind(row);
+  if (kind === "free") return "Free";
+  if (kind === "unknown") return PRICE_UNKNOWN;
+  return fmtPrice(row.price_initial);
+}
+
+/** Est. revenue for display, reading the row's own price kind: "Free" (no box revenue to
+ * estimate), "Price unknown" (the estimate multiplies a price we don't have), else the
+ * compact dollar figure. */
+export function fmtRevenueFor(row: PricedRow, value: number | null | undefined): string {
+  const kind = priceKind(row);
+  if (kind === "free") return "Free";
+  if (kind === "unknown") return PRICE_UNKNOWN;
+  return fmtUsd(value);
+}
+
 const COMPACT_RUNGS: readonly Rung[] = [
   { min: 0, div: 1, digits: 0, suffix: "", group: true },
   { min: 10_000, div: 1_000, digits: 1, suffix: "K" },
@@ -442,12 +509,15 @@ export function monthName(m: number): string {
   return MONTH_NAMES[(m - 1 + 12) % 12] ?? String(m);
 }
 
-// SQLite/DuckDB dayofweek-style convention verified against the API: weekday 0 =
-// Monday .. 6 = Sunday (median_rev peaks on weekday 1/2, matching the cited
-// "Tuesday" launch-day benchmark).
-const WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+// DuckDB's dayofweek(): 0 = SUNDAY .. 6 = Saturday — what etl/marts/mart_seasonality.sql
+// computes and says in its header. This table used to read 0 = Monday (on the strength of
+// a median-revenue peak that fits either reading), which shifted every /timing heatmap
+// column one day: the release-count data settles it — weekdays 0 and 6 are the two quiet
+// days (6,013 and 6,124 releases on the 2026-09-23 mart, against 19K–28K on the other
+// five), and Steam's quiet days are the weekend, not Sunday-and-Monday.
+const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 export function weekdayName(w: number): string {
-  return WEEKDAY_NAMES[w % 7] ?? String(w);
+  return WEEKDAY_NAMES[((w % 7) + 7) % 7] ?? String(w);
 }
 
 export function titleCase(s: string): string {
@@ -464,6 +534,35 @@ const MONTH_RUNGS: readonly Rung[] = [
 export function fmtMonths(value: number | null | undefined): string {
   if (!isFiniteNumber(value)) return MISSING;
   return signedLadder(value, MONTH_RUNGS);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────────────
+ * ONE DATE FORMAT (2026-09-23): "Feb 20, 2024" / "Feb 2024" — the footer's "Data as of
+ * Sep 21, 2026" style (lib/dataAge.ts fmtDataDate), everywhere a page prints a date. /games
+ * printed toLocaleDateString(undefined, …), which is the VIEWER's locale ("févr. 2024",
+ * "2024年2月") and parsed ISO dates as local midnight, so a 1st-of-the-month release read as
+ * the previous month west of UTC. These read the ISO digits directly — no Date, no timezone.
+ * ───────────────────────────────────────────────────────────────────────────────────── */
+
+const ISO_DATE = /^(\d{4})-(\d{2})(?:-(\d{2}))?/;
+
+/** "2024-02-20" (or a longer ISO timestamp) → "Feb 20, 2024"; "2024-02" → "Feb 2024";
+ * anything unparseable → MISSING. */
+export function fmtIsoDate(iso: string | null | undefined): string {
+  const m = iso ? ISO_DATE.exec(iso.trim()) : null;
+  if (!m) return MISSING;
+  const month = Number(m[2]);
+  if (month < 1 || month > 12) return MISSING;
+  return m[3] ? `${monthName(month)} ${Number(m[3])}, ${m[1]}` : `${monthName(month)} ${m[1]}`;
+}
+
+/** "2024-02-20" → "Feb 2024" — the short form a row caption has room for. */
+export function fmtIsoMonth(iso: string | null | undefined): string {
+  const m = iso ? ISO_DATE.exec(iso.trim()) : null;
+  if (!m) return MISSING;
+  const month = Number(m[2]);
+  if (month < 1 || month > 12) return MISSING;
+  return `${monthName(month)} ${m[1]}`;
 }
 
 const MINUTE_RUNGS: readonly Rung[] = [
