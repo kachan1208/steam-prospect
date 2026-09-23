@@ -3,7 +3,9 @@ import { useQuery } from "@tanstack/react-query";
 import { Card } from "../components/ui/Card";
 import { ErrorState } from "../components/ui/ErrorState";
 import { Loading } from "../components/ui/Loading";
+import { SentinelTag } from "../components/ui/SentinelTag";
 import { request } from "../lib/api";
+import { useDataAge } from "../lib/dataAge";
 import { usePageTitle } from "../lib/usePageTitle";
 
 type Counts = { games?: number; reviews?: number; players?: number };
@@ -124,6 +126,15 @@ function DeltaSummary({ deltas }: { deltas?: Counts }) {
   );
 }
 
+/**
+ * What each data refresh changed, newest first.
+ *
+ * NO SCHEDULE IN THE COPY (2026-09-23). The header used to promise "starts at 21:00 UTC and
+ * usually finishes between 00:45 and 03:30 UTC" — the old droplet's cron, true for exactly
+ * one deployment and silently false the moment the pipeline ran anywhere else or skipped a
+ * night. The page now states what it can KNOW: how old the served data is (/api/health, the
+ * same readout as the footer) and when the latest recorded run finished, from this ledger.
+ */
 export default function DataLog() {
   usePageTitle("Data log");
   const { data, isLoading, isError, error, refetch } = useQuery({
@@ -131,15 +142,35 @@ export default function DataLog() {
     queryFn: ({ signal }) => request<{ runs: Run[] }>("/refresh/history", { signal }),
   });
   const runs = data?.runs ?? [];
+  const age = useDataAge();
+  const latest = runs[0];
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4 pb-10">
       <div>
         <h1 className="text-lg font-semibold text-ink-primary">Data log</h1>
         <p className="mt-1 text-sm text-ink-muted">
-          What each nightly refresh changed. The pipeline re-scrapes Steam, rebuilds the marts, and
-          reloads the app every night — it starts at 21:00&nbsp;UTC and usually finishes between
-          00:45 and 03:30&nbsp;UTC.
+          What each data refresh changed. A refresh re-scrapes Steam, rebuilds the analytics and reloads the app; a
+          run that was held or skipped leaves the previous data in service.
+        </p>
+        <p className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm text-ink-secondary" data-testid="datalog-freshness">
+          {age.asOfLabel ? (
+            <span>
+              Every page is showing data as of <span className="text-ink-primary">{age.asOfLabel}</span>
+              {age.ageLabel ? ` — ${age.ageLabel}` : ""}.
+            </span>
+          ) : age.apiState === "checking" ? (
+            <span>Checking how old the data is…</span>
+          ) : (
+            <span className="flex items-center gap-1.5">
+              <SentinelTag>data date unknown</SentinelTag> The API didn&apos;t report when its data was built.
+            </span>
+          )}
+          {latest && (
+            <span>
+              Latest recorded run: {labelOf(latest.result)}, {relTime(latest.finished_at)}.
+            </span>
+          )}
         </p>
       </div>
 
@@ -157,8 +188,7 @@ export default function DataLog() {
         <Card className="flex flex-col items-center gap-2 py-12 text-center">
           <p className="text-sm font-medium text-ink-primary">No refreshes recorded yet</p>
           <p className="max-w-sm text-xs text-ink-muted">
-            The nightly run starts at 21:00&nbsp;UTC. Once one completes, every run shows up here
-            with the data it added.
+            Once a refresh completes, every run shows up here with the data it added.
           </p>
         </Card>
       ) : (
