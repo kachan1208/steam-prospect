@@ -1470,6 +1470,19 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         -- this fixes, which is exactly the bug. est_rev_owners is untouched here; see the
         -- owners floor in stg_game below, which only overwrites the true SteamSpy zeros.
         --
+        -- FREE AND UNKNOWN-PRICE GAMES GET NO REVENUE ESTIMATE (2026-09-22). They used to get
+        -- $0: 5,951 of the 42,869 games with >= 50 reviews sat at exactly $0 inside every
+        -- percent_rank, niche median and hit rate. A free game's box revenue is not $0 — it
+        -- is not what this formula measures at all (MMORPG's 24m median read $60K with them,
+        -- $271K paid-only), and the $0 ties lifted every paid game's rev_pct_in_genre. So
+        -- price_status says which case a game is in and est_rev_* is NULL unless it is 'paid':
+        --   'free'     Steam flags it free-to-play (is_free), whatever price is on file
+        --   'paid'     a positive price
+        --   'unknown'  no price, or a $0 price on a game Steam does NOT flag free (delisted,
+        --              region-locked, never captured) — "we don't know", not "free"
+        -- NULL revenue drops a game out of revenue statistics only; it still counts in n_games,
+        -- demand and every non-revenue read (see mart_niche.sql's n_free / n_price_unknown).
+        --
         -- RELEASE DATES — FIRST PUBLIC, NOT THE STORE DATE (2026-09-22). See EA_PUBLIC_MIN_DAYS.
         -- Evidence that a game was public, earliest first:
         --   first_review_month  Steam's review histogram: the first month with >= 1 review.
@@ -1594,6 +1607,13 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
                           WHEN first_review_date <= CURRENT_DATE THEN first_review_date
                           ELSE store_release_date END AS DATE) AS release_date
             FROM dated
+        ),
+        priced AS (
+            SELECT *,
+                CASE WHEN COALESCE(TRY_CAST(is_free AS INTEGER), 0) <> 0 THEN 'free'
+                     WHEN price_initial > 0 THEN 'paid'
+                     ELSE 'unknown' END AS price_status
+            FROM public
         )
         SELECT
             appid, name,
@@ -1605,7 +1625,7 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
                                 ELSE 'first_review' END
                  ELSE 'store' END AS release_date_source,
             is_ea_graduate,
-            price_initial, is_free, developers, publishers,
+            price_initial, is_free, price_status, developers, publishers,
             self_published, dev_game_count, is_indie,
             metacritic_score, achievements_count,
             owners_mid_steamspy, est_rev_owners_steamspy,
@@ -1632,8 +1652,11 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
                                THEN reviews_table_positive * 1.0 / (reviews_table_positive + reviews_table_negative)
                                ELSE NULL END
                 ELSE ss_positive_ratio END AS positive_ratio,
-            COALESCE(api_total_reviews, GREATEST(ss_total_reviews, reviews_table_count)) * 30 * price_initial AS est_rev_reviews
-        FROM public;
+            CASE WHEN price_status = 'paid'
+                 THEN COALESCE(api_total_reviews, GREATEST(ss_total_reviews, reviews_table_count))
+                      * 30 * price_initial
+            END AS est_rev_reviews
+        FROM priced;
 
         -- =====================================================================================
         -- CANONICAL NICHE NAMES. One display name per twin key, per dimension: the spelling
@@ -1848,7 +1871,7 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
             (g.release_date IS NOT NULL
                 AND g.release_date <= CURRENT_DATE
                 AND g.release_date >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH) AS is_recent,
-            g.price_initial, g.is_free, g.developers, g.publishers,
+            g.price_initial, g.is_free, g.price_status, g.developers, g.publishers,
             g.self_published, g.dev_game_count, g.is_indie,
             g.metacritic_score, g.achievements_count,
             g.total_reviews, g.positive_reviews, g.negative_reviews, g.positive_ratio,
@@ -1858,7 +1881,10 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
             -- estimate; SteamSpy-resolved rows (>20k) keep their measured owners. Lower bound.
             CASE WHEN gp.owners_is_floor_estimate THEN gp.reviews_owner_est
                  ELSE g.owners_mid_steamspy END AS owners_mid,
-            CASE WHEN gp.owners_is_floor_estimate THEN gp.reviews_owner_est * g.price_initial
+            -- Same price gate as est_rev_reviews: no owners-based revenue for a free or
+            -- unknown-price game either (SteamSpy's own figure is owners x $0 for those).
+            CASE WHEN g.price_status <> 'paid' THEN NULL
+                 WHEN gp.owners_is_floor_estimate THEN gp.reviews_owner_est * g.price_initial
                  ELSE g.est_rev_owners_steamspy END AS est_rev_owners,
             g.est_rev_reviews,
             g.avg_playtime_forever, g.ccu, g.tag_count,
@@ -4419,6 +4445,16 @@ def compute_press_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path) -> i
     return n
 
 
+def _optional_meta(con: duckdb.DuckDBPyConnection, sql: str) -> tuple | None:
+    """One row from an OPTIONAL provenance query, or None when a table/column it reads does
+    not exist (a staging layer that predates it, or a unit test's minimal fixture). Only
+    catalog/binder errors are swallowed — anything else is a real bug and still raises."""
+    try:
+        return con.execute(sql).fetchone()
+    except (duckdb.CatalogException, duckdb.BinderException):
+        return None
+
+
 def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str,
                build_mode: str = "full", absent_sources: list[str] | tuple[str, ...] = (),
                classifier_absent: bool = False, fulltext_mode: str = "build",
@@ -4456,7 +4492,12 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
       etl_git_sha          the ETL code's git SHA (best-effort `git rev-parse HEAD` from the
                            repo root; '' when not in a git checkout or git is unavailable).
       duckdb_version       the duckdb library version that built the file.
+      n_games_scored_free  the >= min_reviews_default games that global_median_revenue /
+      n_games_scored_price_unknown   pct_over_100k / n_games_scored EXCLUDE, by reason (a free
+                           game has no box-revenue estimate — price_status in stg_game).
     """
+    # est_rev_reviews is NULL for free and unknown-price games since 2026-09-22, so this
+    # "scored" population is the PAID games at the floor — the free ones used to sit in it at $0.
     med_rev = con.execute(
         "SELECT median(est_rev_reviews) FROM stg_game WHERE total_reviews >= ? AND est_rev_reviews IS NOT NULL",
         [MIN_REVIEWS_DEFAULT],
@@ -4488,6 +4529,17 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
     ccu_history_days = con.execute(
         "SELECT COUNT(DISTINCT date) FROM mart_game_players_daily"
     ).fetchone()[0]
+
+    # Data-vintage / population keys (2026-09-22). Read through _optional_meta: they come from
+    # staging that a minimal caller (the write_meta unit tests' hand-built stg_game) does not
+    # have, and a provenance row must never be the thing that fails a finished build.
+    excluded = _optional_meta(
+        con,
+        "SELECT COUNT(*) FILTER (WHERE price_status = 'free'), "
+        "COUNT(*) FILTER (WHERE price_status = 'unknown') "
+        f"FROM stg_game WHERE total_reviews >= {int(MIN_REVIEWS_DEFAULT)}",
+    )
+    n_scored_free, n_scored_unknown = excluded if excluded else (None, None)
 
     # Provenance (2026-09-01): best-effort on purpose — a failure here empties a row, it
     # never fails a build that otherwise succeeded.
@@ -4541,6 +4593,8 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
         ),
         "ccu_panel_games": str(ccu_panel_games),
         "ccu_history_days": str(ccu_history_days),
+        "n_games_scored_free": "" if n_scored_free is None else str(n_scored_free),
+        "n_games_scored_price_unknown": "" if n_scored_unknown is None else str(n_scored_unknown),
         "build_mode": build_mode,
         "fulltext_mode": fulltext_mode,
         "fulltext_built_at": fulltext_built_at,

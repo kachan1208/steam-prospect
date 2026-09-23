@@ -1,6 +1,6 @@
-"""First-public release dates — through the real staging.
+"""First-public release dates and price status — through the real staging.
 
-The 2026-09-22 regression, pinned on the rows that exposed it:
+Two 2026-09-22 regressions, each pinned on the rows that exposed it:
 
   1. EARLY ACCESS GRADUATES COUNTED AS NEW RELEASES. Steam's store date is the 1.0 date for a
      graduate, so SCUM (reviewed since 2018-08, 1.0 in 2025-06), My Summer Car (2016 -> 2025)
@@ -10,6 +10,8 @@ The 2026-09-22 regression, pinned on the rows that exposed it:
      when the review provably precedes the store date by EA_PUBLIC_MIN_DAYS — with the store
      date kept as store_release_date, a precision-carrying release_date_source, and
      is_ea_graduate. Games with no usable store date but real reviews are dated from them.
+  2. FREE GAMES COUNTED AS $0 REVENUE. price_status 'free' | 'paid' | 'unknown'; only 'paid'
+     carries est_rev_reviews / est_rev_owners.
 
 Runs the REAL build_marts.create_staging() over a synthetic src schema. No network needed.
 """
@@ -217,3 +219,62 @@ def test_corrupt_review_timestamps_and_still_in_ea_games(con):
 def test_the_live_store_date_beats_the_frozen_snapshot(con):
     r = _row(con, LIVE_WINS)
     assert r["store"] == "2025-08-14" and r["release_date"] == "2025-08-14", r
+
+
+def test_only_paid_games_carry_revenue(con):
+    got = {a: (s, rev, rev_o) for a, s, rev, rev_o in con.execute(
+        "SELECT appid, price_status, est_rev_reviews, est_rev_owners FROM stg_game "
+        "WHERE appid BETWEEN 20 AND 25").fetchall()}
+    assert got[FREE][0] == "free" and got[FREE_PRICED][0] == "free", got
+    assert got[ZERO_NOT_FREE][0] == "unknown" and got[NO_PRICE][0] == "unknown", got
+    assert got[PAID][0] == "paid" and got[FLOORED][0] == "paid", got
+    for appid in (FREE, FREE_PRICED, ZERO_NOT_FREE, NO_PRICE):
+        assert got[appid][1] is None and got[appid][2] is None, (
+            f"appid {appid} ({got[appid][0]}) must have NO revenue estimate, not $0: {got[appid]}")
+    assert got[PAID][1] == pytest.approx(300 * 30 * 9.99), got[PAID]
+    assert got[PAID][2] == pytest.approx(50000 * 9.99), "SteamSpy owners x price for a paid game"
+
+
+def _meta_fixture(with_new_staging: bool) -> duckdb.DuckDBPyConnection:
+    c = duckdb.connect(":memory:")
+    cols = "appid INTEGER, total_reviews INTEGER, est_rev_reviews DOUBLE, price_initial DOUBLE"
+    if with_new_staging:
+        cols += ", price_status VARCHAR"
+    c.execute(f"CREATE TABLE stg_game({cols})")
+    if with_new_staging:
+        c.execute("INSERT INTO stg_game VALUES (1, 100, 5000.0, 9.99, 'paid'), "
+                  "(2, 100, NULL, 0.0, 'free'), (3, 80, NULL, NULL, 'unknown'), "
+                  "(4, 10, NULL, 0.0, 'free')")
+    else:
+        c.execute("INSERT INTO stg_game VALUES (1, 100, 5000.0, 9.99)")
+    c.execute("CREATE TABLE stg_genre_boxleiter(genre VARCHAR, slope DOUBLE)")
+    c.execute("INSERT INTO stg_genre_boxleiter VALUES ('__all__', 31.5)")
+    c.execute("CREATE TABLE _pl_panel(appid INTEGER)")
+    c.execute("CREATE TABLE mart_game_players_daily(appid INTEGER, date DATE)")
+    return c
+
+
+def test_write_meta_publishes_the_revenue_exclusions():
+    c = _meta_fixture(with_new_staging=True)
+    try:
+        bm.write_meta(c, "src.db", "20260922")
+        meta = dict(c.execute("SELECT key, value FROM mart_meta").fetchall())
+    finally:
+        c.close()
+    # the free/unknown games at the floor are what global_median_revenue now EXCLUDES
+    assert (meta["n_games_scored"], meta["n_games_scored_free"],
+            meta["n_games_scored_price_unknown"]) == ("1", "1", "1"), meta
+    assert meta["global_median_revenue"] == "5000.00", "the median is over the paid game only"
+
+
+def test_write_meta_leaves_the_new_keys_blank_on_an_older_staging_layer():
+    """Provenance must never be what fails a finished build: a staging layer without the new
+    tables/columns (or a minimal caller) gets blank values, not an exception."""
+    c = _meta_fixture(with_new_staging=False)
+    try:
+        bm.write_meta(c, "src.db", "20260922")
+        meta = dict(c.execute("SELECT key, value FROM mart_meta").fetchall())
+    finally:
+        c.close()
+    for k in ("n_games_scored_free", "n_games_scored_price_unknown"):
+        assert meta[k] == "", (k, meta[k])

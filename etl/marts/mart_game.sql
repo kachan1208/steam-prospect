@@ -20,13 +20,24 @@ DROP TABLE IF EXISTS mart_game;
 
 CREATE TABLE mart_game AS
 WITH pct_ranks AS (
+    -- Each percentile over its OWN population among the genre's >= @MIN_REVIEWS_DEFAULT@-review
+    -- games (2026-09-22). Revenue ranks the PAID games only — free and unknown-price games
+    -- have no estimate (price_status), and entering them as $0 ties used to lift every paid
+    -- game's rev_pct_in_genre (the extra partition key walls the NULLs off; their rank is
+    -- discarded). Reviews and owners mean the same thing paid or free, so they rank everyone.
     SELECT g.appid,
-        100.0 * percent_rank() OVER (PARTITION BY pg.primary_genre ORDER BY g.est_rev_reviews) AS rev_pct_in_genre,
+        CASE WHEN g.est_rev_reviews IS NOT NULL THEN
+            100.0 * percent_rank() OVER (PARTITION BY pg.primary_genre, g.est_rev_reviews IS NULL
+                                         ORDER BY g.est_rev_reviews)
+        END AS rev_pct_in_genre,
         100.0 * percent_rank() OVER (PARTITION BY pg.primary_genre ORDER BY g.total_reviews) AS reviews_pct_in_genre,
-        100.0 * percent_rank() OVER (PARTITION BY pg.primary_genre ORDER BY g.owners_mid) AS owners_pct_in_genre
+        CASE WHEN g.owners_mid IS NOT NULL THEN
+            100.0 * percent_rank() OVER (PARTITION BY pg.primary_genre, g.owners_mid IS NULL
+                                         ORDER BY g.owners_mid)
+        END AS owners_pct_in_genre
     FROM stg_game g
     JOIN stg_primary_genre pg ON pg.appid = g.appid
-    WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@ AND g.est_rev_reviews IS NOT NULL
+    WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@
 ),
 tag_ranked AS (
     -- stg_game_tags, NOT src.game_tags: HTML-entity phantom-twin tags fake niche demand
@@ -100,7 +111,10 @@ SELECT
     CAST(g.store_release_date AS VARCHAR) AS store_release_date,
     g.release_date_source,
     g.is_ea_graduate,
-    g.price_initial, g.is_free,
+    -- price_status 'paid' | 'free' | 'unknown' (no price, or $0 without Steam's free flag)
+    -- says WHY est_rev_reviews / est_rev_owners / rev_pct_in_genre are NULL: only a paid game
+    -- gets a revenue estimate.
+    g.price_initial, g.is_free, g.price_status,
     pg.primary_genre,
     g.developers, g.publishers, g.self_published, g.is_indie,
     g.owners_mid, g.total_reviews, g.positive_ratio, g.review_count_source,

@@ -146,10 +146,17 @@ def expected_score(row: dict) -> tuple[float, dict]:
 
     momentum = None if dem_g is None else 50.0 + 50.0 * math.tanh(dem_g / g_enter)
     flood_room = flood_room_of(dem_g, sup_g)
-    entrant_room = (
-        None if (er is None or emerging)
-        else 100.0 * clamp01((er - bm.OPP_ENTRANT_FULL) / (bm.OPP_ENTRANT_NORM - bm.OPP_ENTRANT_FULL))
-    )
+    # Entrant economics that EXIST but cannot be verified (a published cut of this key whose
+    # paid sample is under the revenue floor, so its median is withheld) score 0 — failed,
+    # not absent (mart_niche.sql, 2026-09-22). `_n_paid_by_win` is the key's sibling rows.
+    thin = any(n is not None and n < bm.MIN_NICHE_GAMES
+               for n in row.get("_n_paid_by_win", {}).values())
+    if emerging:
+        entrant_room = None
+    elif er is not None:
+        entrant_room = 100.0 * clamp01((er - bm.OPP_ENTRANT_FULL) / (bm.OPP_ENTRANT_NORM - bm.OPP_ENTRANT_FULL))
+    else:
+        entrant_room = 0.0 if thin else None
     if flood_room is None:
         supply_room = entrant_room
     elif entrant_room is None:
@@ -312,14 +319,17 @@ def main() -> int:
         """
         CREATE TEMP TABLE stg_game(
             appid INTEGER, name VARCHAR, release_year INTEGER, release_date DATE,
-            release_valid BOOLEAN, price_initial DOUBLE, positive_ratio DOUBLE,
+            release_valid BOOLEAN, price_initial DOUBLE, price_status VARCHAR,
+            positive_ratio DOUBLE,
             owners_mid DOUBLE, total_reviews BIGINT, est_rev_reviews DOUBLE,
             self_published BOOLEAN, is_singleplayer BOOLEAN, is_indie BOOLEAN,
             review_count_source VARCHAR)
         """
     )
+    # Every fixture game is priced, so every one is 'paid' (carries a revenue estimate) —
+    # the free/unknown-price population rules are pinned in test_mart_niche_game.py.
     con.executemany(
-        "INSERT INTO stg_game VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO stg_game VALUES (?,?,?,?,?,?,'paid',?,?,?,?,?,?,?,?)",
         [(g["appid"], g["name"], g["release_year"], g["release_date"], g["release_valid"],
           g["price_initial"], g["positive_ratio"], g["owners_mid"], g["total_reviews"],
           g["est_rev_reviews"], g["self_published"], g["is_singleplayer"], g["is_indie"],
@@ -368,15 +378,22 @@ def main() -> int:
         "key", "win", "min_reviews", "demand_trend_24m_pct", "saturation_yoy",
         "entrant_ratio", "winner_concentration", "demand", "market_size", "quality_gap",
         "demand_emerging", "momentum", "supply_room", "revenue_spread", "market_pull",
-        "supply_brake", "opportunity_v2", "solo_viability", "solo_tier",
+        "supply_brake", "opportunity_v2", "solo_viability", "solo_tier", "n_paid",
     ]
     rows = [dict(zip(cols, r)) for r in con.execute(
         f"SELECT {', '.join(cols)} FROM mart_niche WHERE dimension = 'tag'"
     ).fetchall()]
     rows = [{k: (float(v) if isinstance(v, (int,)) and k not in
-                 ("min_reviews",) and not isinstance(v, bool) else v)
+                 ("min_reviews", "n_paid") and not isinstance(v, bool) else v)
              for k, v in r.items()} for r in rows]
     assert rows, "fixture produced no tag rows"
+    # Each row's sibling cuts' paid-sample sizes (same key + floor, both windows) — the input
+    # the entrant check's "failed, not absent" rule reads.
+    by_key: dict[tuple, dict] = {}
+    for r in rows:
+        by_key.setdefault((r["key"], r["min_reviews"]), {})[r["win"]] = r["n_paid"]
+    for r in rows:
+        r["_n_paid_by_win"] = by_key[(r["key"], r["min_reviews"])]
 
     # ---- 1. the ORDERING invariant, on the cut every consumer defaults to --------------
     cut = [r for r in rows if r["win"] == "24m" and r["min_reviews"] == 50]

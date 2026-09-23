@@ -232,6 +232,25 @@
 --                         in BOTH windows count, so coverage growth can't fake a trend.
 --   players_coverage      share of total_players_now measured fresh (<= 2 days); low
 --                         values mean the total leans on carried tail values.
+--
+-- REVENUE POPULATION vs NICHE POPULATION (2026-09-22). A niche's population is its RELEASED
+-- member games (release_valid) — free and unknown-price games included: they count in
+-- n_games, n_recent, demand, owners, reviews, solo/indie shares and beatable_share. Revenue
+-- statistics — median/p25/p75/p90_rev, total_rev, winner_concentration, hit rates, and the
+-- price quantiles — are over the PAID games alone (stg_game.est_rev_reviews is NULL for the
+-- rest; see price_status in build_marts.py), so a free game no longer drags a median toward $0
+-- or pads a percent_rank with $0 ties. The split is published beside every row so a reader can
+-- be told what a median excludes:
+--   n_paid            games with a revenue estimate (the revenue statistics' denominator)
+--   n_free            games Steam flags free-to-play
+--   n_price_unknown   no price on file, or $0 without the free-to-play flag
+--   (n_paid + n_free + n_price_unknown = n_games)
+-- ...and a revenue/price SAMPLE statistic is only published when n_paid itself reaches
+-- @MIN_NICHE_GAMES@ — the same bar the niche needs to publish at all (see the `agg` CTE:
+-- REVENUE SAMPLE FLOOR). Below it those columns are NULL and rank lowest, never highest.
+-- Before this, the population filter was `est_rev_reviews IS NOT NULL`, which ALSO kept most
+-- unreleased coming-soon pages (no price yet) out of the min_reviews=0 cut by accident; the
+-- explicit release_valid test now does that job on purpose.
 
 DROP TABLE IF EXISTS mart_niche;
 DROP TABLE IF EXISTS mart_niche_top;
@@ -260,7 +279,10 @@ mr AS ( SELECT * FROM (VALUES @MR_VALUES@) AS t(min_reviews) ),
 wins AS ( SELECT * FROM (VALUES ('all'),('24m')) AS t(win) )
 SELECT
     m.dimension, m.key, w.win, mr.min_reviews,
-    g.appid, g.est_rev_reviews, g.total_reviews, g.price_initial,
+    g.appid, g.est_rev_reviews, g.total_reviews, g.price_status,
+    -- Price is a paid-game statistic too: a free game's $0 is its business model, not a
+    -- price point, and it would drag median_price exactly as it dragged median_rev.
+    CASE WHEN g.price_status = 'paid' THEN g.price_initial END AS price_initial,
     g.positive_ratio, g.owners_mid, g.self_published, g.is_singleplayer,
     -- Solo-evidence inputs (see header): is_indie from staging; playtime_p50 from
     -- mart_game (built earlier in MART_FILES — same cross-mart read mart_entity.sql
@@ -272,11 +294,13 @@ JOIN stg_game g ON g.appid = m.appid
 LEFT JOIN mart_game mg ON mg.appid = m.appid
 CROSS JOIN wins w
 CROSS JOIN mr
-WHERE g.total_reviews >= mr.min_reviews
-  AND g.est_rev_reviews IS NOT NULL
+-- RELEASED games (release_date = first public, see build_marts.py), paid or not — see the
+-- REVENUE POPULATION header block for why revenue is no longer the gate.
+WHERE g.release_valid
+  AND g.total_reviews >= mr.min_reviews
   AND (
         w.win = 'all'
-        OR (g.release_valid AND g.release_date >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH)
+        OR g.release_date >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH
       );
 
 -- DEMAND OVER 24 MONTHS — the metric the Radar surfaces ring and rank on. Nothing else in
@@ -402,16 +426,27 @@ WITH membership AS (
     SELECT 'genre' AS dimension, genre AS key, appid FROM stg_genre_membership
 ),
 ranked AS (
+    -- The revenue rank is taken among the PAID games only: the extra partition key puts the
+    -- NULL-revenue rows in a partition of their own (whose rank is then discarded), where
+    -- ordering them with the rest would have ranked every NULL above the real top earners
+    -- and emptied the top-5% slice winner_concentration reads.
     SELECT *,
-        percent_rank() OVER (PARTITION BY dimension, key, win, min_reviews
-                             ORDER BY est_rev_reviews) AS rev_pr
+        CASE WHEN est_rev_reviews IS NOT NULL THEN
+            percent_rank() OVER (PARTITION BY dimension, key, win, min_reviews,
+                                              est_rev_reviews IS NULL
+                                 ORDER BY est_rev_reviews)
+        END AS rev_pr
     FROM _niche_pop
 ),
-agg AS (
+agg_raw AS (
     SELECT
         dimension, key, win, min_reviews,
         COUNT(*) AS n_games,
         COUNT(*) FILTER (WHERE is_recent) AS n_recent,
+        -- The revenue population's composition (header: REVENUE POPULATION).
+        COUNT(*) FILTER (WHERE price_status = 'paid') AS n_paid,
+        COUNT(*) FILTER (WHERE price_status = 'free') AS n_free,
+        COUNT(*) FILTER (WHERE price_status = 'unknown') AS n_price_unknown,
         median(est_rev_reviews) AS median_rev,
         quantile_cont(est_rev_reviews, 0.25) AS p25_rev,
         quantile_cont(est_rev_reviews, 0.75) AS p75_rev,
@@ -443,13 +478,42 @@ agg AS (
         median(playtime_p50) AS med_playtime_min,
         SUM(est_rev_reviews) FILTER (WHERE rev_pr >= @WINNER_TOP_PCT@)
             / NULLIF(SUM(est_rev_reviews), 0) AS winner_concentration,
-        AVG(CASE WHEN est_rev_reviews > @TIMING_BIG_REV@ THEN 1.0 ELSE 0.0 END) AS hit_rate_200k,
-        AVG(CASE WHEN est_rev_reviews > 500000 THEN 1.0 ELSE 0.0 END) AS hit_rate_500k,
+        -- Hit rates are shares of the PAID games (a free game is neither a hit nor a miss
+        -- on box revenue): the FILTER keeps NULL revenue out of the denominator, where the
+        -- CASE alone would have counted it as a miss.
+        AVG(CASE WHEN est_rev_reviews > @TIMING_BIG_REV@ THEN 1.0 ELSE 0.0 END)
+            FILTER (WHERE est_rev_reviews IS NOT NULL) AS hit_rate_200k,
+        AVG(CASE WHEN est_rev_reviews > 500000 THEN 1.0 ELSE 0.0 END)
+            FILTER (WHERE est_rev_reviews IS NOT NULL) AS hit_rate_500k,
         AVG(CASE WHEN positive_ratio IS NULL OR positive_ratio < @BEATABLE_RATIO_BAR@
                       OR total_reviews < @THIN_REVIEWS_BAR@ THEN 1.0 ELSE 0.0 END) AS beatable_share
     FROM ranked
     GROUP BY dimension, key, win, min_reviews
     HAVING COUNT(*) >= @MIN_NICHE_GAMES@
+),
+-- REVENUE SAMPLE FLOOR. The niche publishes at @MIN_NICHE_GAMES@ games, but its revenue and
+-- price statistics are over the PAID games only, and a free-to-play niche can have very few:
+-- MOBA's 24m/min50 cut is 33 games of which 12 are paid, and those 12's median ($472K) made it
+-- the #1 opportunity_v2 on the board (85.8) — a verdict about a genre whose typical game has no
+-- box price at all, built from a sample the publication gate would refuse anywhere else. So a
+-- sample statistic needs the same @MIN_NICHE_GAMES@ PAID games the niche needs members; below
+-- it the statistic is NULL ("too few paid games to estimate" — n_paid says how few) and every
+-- score reading it treats unknown bearishly (see pr_rev). total_rev is a sum, not a sample
+-- statistic, and stays: the paid games' known total, a floor on the real one.
+agg AS (
+    SELECT * REPLACE (
+        CASE WHEN n_paid >= @MIN_NICHE_GAMES@ THEN median_rev END AS median_rev,
+        CASE WHEN n_paid >= @MIN_NICHE_GAMES@ THEN p25_rev END AS p25_rev,
+        CASE WHEN n_paid >= @MIN_NICHE_GAMES@ THEN p75_rev END AS p75_rev,
+        CASE WHEN n_paid >= @MIN_NICHE_GAMES@ THEN p90_rev END AS p90_rev,
+        CASE WHEN n_paid >= @MIN_NICHE_GAMES@ THEN median_price END AS median_price,
+        CASE WHEN n_paid >= @MIN_NICHE_GAMES@ THEN p25_price END AS p25_price,
+        CASE WHEN n_paid >= @MIN_NICHE_GAMES@ THEN p75_price END AS p75_price,
+        CASE WHEN n_paid >= @MIN_NICHE_GAMES@ THEN winner_concentration END AS winner_concentration,
+        CASE WHEN n_paid >= @MIN_NICHE_GAMES@ THEN hit_rate_200k END AS hit_rate_200k,
+        CASE WHEN n_paid >= @MIN_NICHE_GAMES@ THEN hit_rate_500k END AS hit_rate_500k
+    )
+    FROM agg_raw
 ),
 sat AS (
     -- Supply by FIRST-PUBLIC year (an Early Access game entered the market at its EA launch,
@@ -465,7 +529,10 @@ sat AS (
 ),
 opp AS (
     SELECT *,
-        100.0 * percent_rank() OVER (PARTITION BY dimension, win, min_reviews ORDER BY median_rev) AS pr_rev,
+        -- NULLS FIRST: a median_rev withheld under the revenue sample floor ranks LOWEST, never
+        -- highest (DuckDB's default NULLS LAST would have handed every such niche the top
+        -- revenue percentile) — an unestimable median is not evidence of a rich niche.
+        100.0 * percent_rank() OVER (PARTITION BY dimension, win, min_reviews ORDER BY median_rev NULLS FIRST) AS pr_rev,
         100.0 * percent_rank() OVER (PARTITION BY dimension, win, min_reviews ORDER BY COALESCE(median_owners,0)) AS pr_own,
         100.0 * percent_rank() OVER (PARTITION BY dimension, win, min_reviews ORDER BY COALESCE(total_owners,0)) AS pr_size,
         100.0 * percent_rank() OVER (PARTITION BY dimension, win, min_reviews ORDER BY COALESCE(recent_velocity,0)) AS pr_vel,
@@ -503,7 +570,12 @@ enriched AS (
           / NULLIF(MAX(CASE WHEN win = 'all' THEN median_rev END)
             OVER (PARTITION BY dimension, key, min_reviews), 0) AS entrant_ratio,
         MAX(CASE WHEN win = 'all' AND min_reviews = @MIN_REVIEWS_DEFAULT@ THEN n_games END)
-            OVER (PARTITION BY dimension, key) AS n_games_alltime
+            OVER (PARTITION BY dimension, key) AS n_games_alltime,
+        -- The paid-sample sizes behind entrant_ratio's two medians (entrant_room below).
+        MAX(CASE WHEN win = '24m' THEN n_paid END)
+            OVER (PARTITION BY dimension, key, min_reviews) AS n_paid_24m,
+        MAX(CASE WHEN win = 'all' THEN n_paid END)
+            OVER (PARTITION BY dimension, key, min_reviews) AS n_paid_all
     FROM scored
 ),
 -- decline gate — a FALSIFICATION TELL, no longer a score factor (full rationale in the
@@ -582,10 +654,22 @@ subscores AS (
                     / (2.0 * ln(1.0 + @OPP_FLOOD_YOY@)))))
         END AS flood_room,
         -- Read against the CATALOG NORM and capped there (see header).
-        CASE WHEN r.entrant_ratio IS NULL OR r.demand_emerging THEN NULL
-             ELSE 100.0 * LEAST(1.0, GREATEST(0.0,
-                    (r.entrant_ratio - @OPP_ENTRANT_FULL@)
-                    / (@OPP_ENTRANT_NORM@ - @OPP_ENTRANT_FULL@)))
+        -- FAILED, NOT ABSENT (2026-09-22): when the niche HAS a cut whose paid sample is under
+        -- the revenue sample floor, its entrant economics exist but cannot be verified — a
+        -- recent cohort that is mostly free-to-play is itself the answer for a paid game — so
+        -- the check scores 0 (full supply brake) instead of dropping out. Dropping out is what
+        -- the renormalisation does with a missing input, and here it would have REWARDED the
+        -- withheld median: MMORPG (24 paid of 124 recent) went 58.6 -> 72.1 and MOBA (12 of
+        -- 33) scored 75.7 on the brake they escaped. A key with no 24m cut at all (too few
+        -- recent games of any kind) keeps the old reading: no cohort, no entrant read.
+        CASE WHEN r.demand_emerging THEN NULL
+             WHEN r.entrant_ratio IS NOT NULL
+                  THEN 100.0 * LEAST(1.0, GREATEST(0.0,
+                        (r.entrant_ratio - @OPP_ENTRANT_FULL@)
+                        / (@OPP_ENTRANT_NORM@ - @OPP_ENTRANT_FULL@)))
+             WHEN COALESCE(r.n_paid_24m, @MIN_NICHE_GAMES@) < @MIN_NICHE_GAMES@
+               OR COALESCE(r.n_paid_all, @MIN_NICHE_GAMES@) < @MIN_NICHE_GAMES@
+                  THEN 0.0
         END AS entrant_room,
         -- 50 sits exactly on the winner-take-most bar.
         CASE WHEN r.winner_concentration IS NULL THEN NULL
@@ -634,6 +718,9 @@ scored_v2 AS (
 SELECT
     g.dimension, g.key, g.win, g.min_reviews,
     g.n_games, g.n_recent,
+    -- Revenue-population composition (header: REVENUE POPULATION): the revenue and price
+    -- statistics below are over n_paid games; n_free + n_price_unknown more are in n_games.
+    g.n_paid, g.n_free, g.n_price_unknown,
     g.median_rev, g.p25_rev, g.p75_rev, g.p90_rev,
     g.median_reviews, g.p25_reviews, g.p75_reviews,
     g.median_price, g.p25_price, g.p75_price,
@@ -723,6 +810,7 @@ WITH membership AS (
     SELECT 'genre' AS dimension, genre AS key, appid FROM stg_genre_membership
 ),
 scoped AS (
+    -- Ranked by revenue, so paid games only: a free game has no revenue estimate to rank on.
     SELECT m.dimension, m.key, g.appid, g.name, g.release_year,
         g.price_initial, g.owners_mid, g.total_reviews, g.positive_ratio,
         g.review_count_source,
@@ -746,6 +834,8 @@ WITH membership AS (
     SELECT 'genre' AS dimension, genre AS key, appid FROM stg_genre_membership
 ),
 scoped AS (
+    -- Paid games only. Free games used to enter at $0 and pile into the lowest bucket
+    -- (log10(GREATEST(0, 1)) = 0), drawing a spike of "$1-$3 revenue" games that never sold.
     SELECT m.dimension, m.key, g.est_rev_reviews AS v
     FROM membership m
     JOIN stg_game g ON g.appid = m.appid

@@ -85,10 +85,13 @@ WITH membership AS (
     SELECT 'genre' AS dimension, genre AS key, appid FROM stg_genre_membership
 ),
 scored_floor AS (
+    -- mart_niche's (win='all', min_reviews=@MIN_REVIEWS_DEFAULT@) population: every game at
+    -- the floor, paid or not (a free game's players are as real as a paid one's — the
+    -- est_rev_reviews IS NOT NULL test this used to carry went with mart_niche's, 2026-09-22).
     SELECT m.dimension, m.key
     FROM membership m
     JOIN stg_game g ON g.appid = m.appid
-    WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@ AND g.est_rev_reviews IS NOT NULL
+    WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@
     GROUP BY 1, 2
     HAVING COUNT(*) >= @MIN_NICHE_GAMES@
 ),
@@ -162,10 +165,13 @@ WITH membership AS (
     SELECT 'genre' AS dimension, genre AS key, appid FROM stg_genre_membership
 ),
 scored_floor AS (
+    -- mart_niche's (win='all', min_reviews=@MIN_REVIEWS_DEFAULT@) population: every game at
+    -- the floor, paid or not (a free game's players are as real as a paid one's — the
+    -- est_rev_reviews IS NOT NULL test this used to carry went with mart_niche's, 2026-09-22).
     SELECT m.dimension, m.key
     FROM membership m
     JOIN stg_game g ON g.appid = m.appid
-    WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@ AND g.est_rev_reviews IS NOT NULL
+    WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@
     GROUP BY 1, 2
     HAVING COUNT(*) >= @MIN_NICHE_GAMES@
 ),
