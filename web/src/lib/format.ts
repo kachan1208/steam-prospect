@@ -183,6 +183,10 @@ export function priceKind(row: { price_initial?: number | null; is_free?: number
 /** The words a cell prints when the price (and so every revenue estimate) is unknown. */
 export const PRICE_UNKNOWN = "Price unknown";
 
+/** The sentence an Est. revenue explanation adds about that sentinel. */
+export const PRICE_UNKNOWN_NOTE =
+  "A $0 or missing price that Steam doesn't flag free reads “Price unknown”: there is no price to multiply, so no estimate is made, and the game is left out of every revenue statistic.";
+
 /** List price for display: "$14.99", "Free" or "Price unknown" — never a bare dash, never
  * "Free" for a $0 row Steam doesn't flag free. */
 export function fmtPriceFor(row: { price_initial?: number | null; is_free?: number | boolean | null }): string {

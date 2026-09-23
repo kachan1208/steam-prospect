@@ -4,21 +4,47 @@ import clsx from "clsx";
 
 import { TagAutocomplete } from "../components/TagAutocomplete";
 import { FilterBar } from "../components/search/FilterChip";
-import { ResultHeader, ResultList, ResultRow, ResultTitle, RevenueCell } from "../components/search/ResultList";
+import {
+  MetricCell,
+  ResultHeader,
+  ResultList,
+  ResultRow,
+  ResultTitle,
+  RevenueCell,
+} from "../components/search/ResultList";
 import { ResultChipRow, topValues } from "../components/search/ResultChipRow";
 import { MAX_OFFSET, PAGE_LIMIT, ResultsFooter } from "../components/search/ResultsFooter";
+import { ScopeNote } from "../components/search/ScopeNote";
 import { SearchBar } from "../components/search/SearchBar";
+import { Segmented } from "../components/search/Segmented";
 import { SortControl, sortPatch } from "../components/search/SortControl";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ErrorState } from "../components/ui/ErrorState";
+import { HeaderLabel } from "../components/ui/HeaderLabel";
 import { Loading } from "../components/ui/Loading";
-import { useGameSearch, useGenres, type GameSearchRow, type GameSortKey } from "../lib/api";
+import { SentinelTag } from "../components/ui/SentinelTag";
+import { useGameSearch, useGenres, type GameSearchRow, type GameSortKey, type Scope } from "../lib/api";
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
-import { fmtCompact, fmtInt, fmtPct, fmtRevenue, fmtUsd, isFreeTitle } from "../lib/format";
+import {
+  fmtCompact,
+  fmtInt,
+  fmtIsoDate,
+  fmtPct,
+  fmtRevenueFor,
+  fmtUsd,
+  PRICE_UNKNOWN,
+  PRICE_UNKNOWN_NOTE,
+  priceKind,
+} from "../lib/format";
+import { glossary } from "../lib/glossary";
+import { releaseCaption } from "../lib/lifecycle";
 import { useDebounced } from "../lib/useDebounced";
 import { usePageTitle } from "../lib/usePageTitle";
 
 const LIMIT = PAGE_LIMIT;
+
+/** The glossary's Est. revenue caveats plus the "Price unknown" sentinel this page prints. */
+const EST_REVENUE_NOTES = `${glossary("est_revenue").notes ?? ""} ${PRICE_UNKNOWN_NOTE}`;
 
 // The paging cliff (MAX_OFFSET) and the footer that stops at it live in
 // components/search/ResultsFooter — shared with /studios, whose API caps offset the same way.
@@ -29,8 +55,18 @@ const LIMIT = PAGE_LIMIT;
 const MIN_YEAR = 1970;
 const MAX_YEAR = 2100;
 
+// Which games the page shows (2026-09-23). The API default is every game, which opened this
+// page on Counter-Strike and Dota 2 — nothing a solo developer can benchmark against — so the
+// PAGE defaults to Steam's Indie flag and says so (ScopeNote). "All games" is one click and
+// rides the URL as ?scope=all; the default is omitted, like every other default here.
+const SCOPES: readonly { value: Scope; label: string; title: string }[] = [
+  { value: "indie", label: "Indie", title: "Games Steam flags Indie — the default" },
+  { value: "all", label: "All games", title: "Every game, big studios included" },
+];
+
 // "New releases" windows for the release-date filter. `days` is sent as released_within_days;
-// the API bounds the match to <= today, so upcoming / placeholder-dated titles are excluded.
+// the API anchors the window on the data's own as-of date (not today's) and bounds it there,
+// so upcoming / placeholder-dated titles are excluded — the response echoes that date.
 const RELEASE_WINDOWS: { label: string; days: number | undefined }[] = [
   { label: "Any release date", days: undefined },
   { label: "New · last 30 days", days: 30 },
@@ -46,22 +82,24 @@ const SORT_KEYS: readonly GameSortKey[] = [
 ] as const;
 
 // Friendly labels for the "sorted by …" control (mockup 4e's caption, made interactive).
+// The metric names are the glossary's (lib/glossary.ts) — "Est. revenue", "Positive
+// reviews", "Players now", "rank vs genre" — so the sort control and the columns agree.
 const SORT_LABELS: Record<GameSortKey, string> = {
   name: "name",
   release_year: "release year",
   release_date: "release date",
-  price_initial: "price",
-  owners_mid: "owners",
-  total_reviews: "review count",
-  positive_ratio: "rating",
+  price_initial: "launch price",
+  owners_mid: "owners (SteamSpy)",
+  total_reviews: "reviews",
+  positive_ratio: "positive reviews",
   est_rev_reviews: "est. revenue",
-  rev_pct_in_genre: "revenue percentile",
-  reviews_pct_in_genre: "review percentile",
-  owners_pct_in_genre: "owner percentile",
-  n_reviews_trailing_30d: "review velocity (30d)",
-  live_players: "live players",
+  rev_pct_in_genre: "revenue rank vs genre",
+  reviews_pct_in_genre: "reviews rank vs genre",
+  owners_pct_in_genre: "owners rank vs genre",
+  n_reviews_trailing_30d: "reviews, last 30 days",
+  live_players: "players now",
   lifetime_months: "lifetime",
-  metacritic_score: "metacritic",
+  metacritic_score: "Metacritic score",
 };
 
 // ---- URL-backed filter state ---------------------------------------------------------------
@@ -85,7 +123,11 @@ interface Filters {
   after: number | undefined; // release_year >=
   before: number | undefined; // release_year <=
   selfPub: boolean | undefined;
-  indie: boolean | undefined;
+  /** Which population: Steam's Indie-flagged games (the default) or all of them. */
+  scope: Scope;
+  /** Legacy ?indie=0 ("non-indie only") — kept working for old links; forces scope=all,
+   * since the API rejects scope=indie together with indie=false. */
+  nonIndie: boolean;
   sort: GameSortKey;
   order: "asc" | "desc";
   offset: number;
@@ -107,6 +149,9 @@ function bool(sp: URLSearchParams, key: string): boolean | undefined {
 
 function readFilters(sp: URLSearchParams): Filters {
   const sortRaw = sp.get("sort") as GameSortKey | null;
+  // The old Any/Indie/Non-indie toggle wrote ?indie=1|0. Its "Indie" is now the page's
+  // default scope; its "Non-indie" still works, as an explicit filter on the all-games scope.
+  const legacyIndie = bool(sp, "indie");
   return {
     q: sp.get("q") ?? "",
     genre: sp.get("genre") ?? "__all__",
@@ -125,7 +170,8 @@ function readFilters(sp: URLSearchParams): Filters {
     after: yearOrUndefined(num(sp, "after")),
     before: yearOrUndefined(num(sp, "before")),
     selfPub: bool(sp, "self_pub"),
-    indie: bool(sp, "indie"),
+    scope: legacyIndie === true ? "indie" : legacyIndie === false || sp.get("scope") === "all" ? "all" : "indie",
+    nonIndie: legacyIndie === false,
     sort: sortRaw && SORT_KEYS.includes(sortRaw) ? sortRaw : "total_reviews",
     order: sp.get("order") === "asc" ? "asc" : "desc",
     offset: Math.min(MAX_OFFSET, Math.max(0, num(sp, "offset") ?? 0)),
@@ -229,7 +275,7 @@ function hasAdvanced(f: Filters): boolean {
   return (
     f.priceMin !== undefined || f.priceMax !== undefined || f.minPositive !== undefined ||
     f.minMetacritic !== undefined || f.minRevenue !== undefined || f.after !== undefined || f.before !== undefined ||
-    f.selfPub !== undefined || f.indie !== undefined
+    f.selfPub !== undefined || f.nonIndie
   );
 }
 
@@ -257,17 +303,6 @@ const placeholderStripeStyle: React.CSSProperties = {
     "repeating-linear-gradient(45deg, color-mix(in srgb, var(--text-primary) 12%, transparent) 0 4px, transparent 4px 8px)",
 };
 
-/** Format an ISO YYYY-MM-DD (fall back to the year, then em dash) without a UTC→local off-by-one.
- * Month+year only — the row caption has room for a short date, not the full one. */
-function fmtReleaseMonthYear(iso: string | null, year: number | null): string {
-  if (iso) {
-    const d = new Date(`${iso}T00:00:00`);
-    if (!Number.isNaN(d.getTime())) {
-      return d.toLocaleDateString(undefined, { year: "numeric", month: "short" });
-    }
-  }
-  return year != null ? String(year) : "—";
-}
 
 const inputCls =
   "border border-chartborder bg-page px-2.5 py-1.5 text-xs text-ink-primary outline-none placeholder:text-ink-muted focus:border-brand";
@@ -431,12 +466,19 @@ export default function GameSearch() {
     released_after: filters.after,
     released_before: filters.before,
     self_published: filters.selfPub,
-    indie: filters.indie,
+    // Only the legacy "non-indie" link sends the flag; the scope carries "indie" itself.
+    indie: filters.nonIndie ? false : undefined,
+    scope: filters.scope,
     sort: filters.sort,
     order: filters.order,
     limit: LIMIT,
     offset: filters.offset,
   });
+
+  // The scope is a VIEW of the catalog, like /studios' role — not a filter chip, and not
+  // something "Clear all" resets. Switching it drops the legacy ?indie= so the two can't
+  // contradict each other (the API 422s scope=indie with indie=false).
+  const setScope = (next: Scope) => patchParams({ scope: next === "all" ? "all" : null, indie: null });
 
   // Tag chips sourced from the current page's own top_tags — quick pivots into the exact
   // tag strings present in these results (complements the autocomplete).
@@ -454,7 +496,10 @@ export default function GameSearch() {
       out.push({ key: "min_reviews", label: `≥ ${fmtInt(f.minReviews)} reviews`, clear: { min_reviews: null } });
     if (f.window !== undefined) {
       const w = RELEASE_WINDOWS.find((x) => x.days === f.window);
-      out.push({ key: "window", label: w?.label ?? `Last ${f.window} days`, clear: { window: null } });
+      // The API anchors the window on the data's as-of date and echoes it: say which days
+      // "the last 30" are, since the data can be a few days behind the calendar.
+      const asOf = data?.data_as_of ? ` to ${fmtIsoDate(data.data_as_of)}` : "";
+      out.push({ key: "window", label: `${w?.label ?? `Last ${f.window} days`}${asOf}`, clear: { window: null } });
     }
     if (f.priceMin !== undefined || f.priceMax !== undefined) {
       const label =
@@ -482,10 +527,10 @@ export default function GameSearch() {
     }
     if (f.selfPub !== undefined)
       out.push({ key: "self_pub", label: f.selfPub ? "Self-published" : "Publisher-backed", clear: { self_pub: null } });
-    if (f.indie !== undefined)
-      out.push({ key: "indie", label: f.indie ? "Indie" : "Non-indie", clear: { indie: null } });
+    // Removing it stays on "All games" — the view it was taken from.
+    if (f.nonIndie) out.push({ key: "indie", label: "Non-indie only", clear: { indie: null, scope: "all" } });
     return out;
-  }, [filters]);
+  }, [filters, data?.data_as_of]);
 
   // Badge on "More filters" — every chip except the search box itself, since q has its own
   // field and everything else now lives behind this one control.
@@ -517,6 +562,7 @@ export default function GameSearch() {
           Rather than sit those controls in an unpictured row between the search field and this
           one, they're collapsed into the panel directly below, off by default. */}
       <FilterBar
+        leading={<Segmented options={SCOPES} value={filters.scope} onChange={setScope} ariaLabel="Which games" />}
         chips={chips.map((c) => ({ key: c.key, label: c.label, onClear: () => patchParams(c.clear) }))}
         onClearAll={() =>
           patchParams({
@@ -524,6 +570,8 @@ export default function GameSearch() {
             price_min: null, price_max: null, min_positive: null, min_revenue: null,
             min_metacritic: null,
             after: null, before: null, self_pub: null, indie: null,
+            // Clearing filters keeps the view the reader is on.
+            scope: filters.scope === "all" ? "all" : null,
           })
         }
         trailing={
@@ -549,6 +597,22 @@ export default function GameSearch() {
           </>
         }
       />
+
+      {/* Which population these results are, and what the default leaves out — stated where
+          the results are, from the scope the API actually APPLIED. The line's height is held
+          while the first page loads, so the rows don't jump down when it appears. */}
+      <div className="min-h-[18px]">
+        {data && (
+          <ScopeNote
+            requested={filters.scope}
+            applied={data.scope}
+            unknown={data.n_scope_unknown}
+            noun="games"
+            definition="Games the developer flagged Indie on their Steam store page (Steam's own Indie genre). Games whose flag we haven't read yet — mostly very recent releases — are left out rather than guessed, and counted here."
+            formula="is_indie = 1 on the game's Steam record; unknown flags excluded and counted"
+          />
+        )}
+      </div>
 
       {/* Every filter not pictured in 4e, quick or advanced, behind the one explicit control
           above — off by default so the page opens on exactly what the mock draws. */}
@@ -629,13 +693,10 @@ export default function GameSearch() {
             noLabel="Publisher"
             onChange={(v) => patchParams({ self_pub: v === undefined ? null : v ? "1" : "0" })}
           />
-          <TriToggle
-            label="Indie"
-            value={filters.indie}
-            yesLabel="Indie"
-            noLabel="Non-indie"
-            onChange={(v) => patchParams({ indie: v === undefined ? null : v ? "1" : "0" })}
-          />
+          {/* The old Any / Indie / Non-indie toggle is gone: "Indie" is the page's scope now
+              (the Indie | All games control above), and a second indie control beside it
+              could only contradict it. A shared ?indie=0 link still works — as the removable
+              "Non-indie only" chip on the All games view. */}
         </div>
       )}
 
@@ -657,28 +718,25 @@ export default function GameSearch() {
         {data && data.items.length > 0 && (
           <ResultList>
             {/* Column headers (see ResultHeader for why 4e's header-less rows grew them).
-                Widths/gaps mirror the metric group below EXACTLY — change one, change both. */}
-            <ResultHeader lead="Game">
-              <span
-                className="w-[90px] shrink-0"
-                title="Share of reviews that are positive, then the total review count backing it."
-              >
-                Rating · reviews
+                Widths/gaps mirror the metric group below EXACTLY — change one, change both.
+                Each explains itself with the glossary's ⓘ — which is also what fixed the
+                revenue header contradicting every other page: it said the owners-per-review
+                ratio was "genre-fitted"; the estimate every page prints uses a flat 30. */}
+            <ResultHeader lead="Game" stackBelow="md">
+              <span className="w-[72px] shrink-0">
+                <HeaderLabel term="positive_ratio" label="Positive" style={{}} />
               </span>
-              <span
-                className="w-20 shrink-0"
-                title="Estimated gross lifetime revenue: review count × a genre-fitted owners-per-review ratio × launch price. An estimate, not reported sales."
-              >
-                Est. gross
+              <span className="w-16 shrink-0">
+                <HeaderLabel term="reviews" style={{}} />
               </span>
-              <span
-                className="w-[70px] shrink-0"
-                title="Concurrent players at the latest nightly sample — a point reading, not a daily peak."
-              >
-                Live players
+              <span className="w-24 shrink-0">
+                <HeaderLabel term="est_revenue" info={{ notes: EST_REVENUE_NOTES }} style={{}} />
               </span>
-              <span className="w-6 shrink-0 text-center" title="Add to the compare tray.">
-                <span className="sr-only">Compare</span>
+              <span className="w-[84px] shrink-0">
+                <HeaderLabel term="players_now" style={{}} />
+              </span>
+              <span className="w-6 shrink-0 text-center">
+                <span className="sr-only">Add to compare</span>
                 <span aria-hidden>+</span>
               </span>
             </ResultHeader>
@@ -686,11 +744,13 @@ export default function GameSearch() {
               const isTop = i === 0 && filters.offset === 0;
               const metaParts = [
                 ...(g.top_tags.length > 0 ? g.top_tags.slice(0, 2) : g.primary_genre ? [g.primary_genre] : []),
-                fmtReleaseMonthYear(g.release_date, g.release_year),
-              ].filter((p) => p && p !== "—");
+                releaseCaption(g),
+              ].filter((p): p is string => !!p);
+              const kind = priceKind(g);
               return (
                 <ResultRow
                   key={g.appid}
+                  stackBelow="md"
                   onOpen={() => navigate(`/games/${g.appid}`)}
                   lead={
                     <>
@@ -707,25 +767,34 @@ export default function GameSearch() {
                       <ResultTitle
                         to={`/games/${g.appid}`}
                         name={g.name ?? `App ${g.appid}`}
-                        meta={metaParts.length > 0 ? metaParts.join(" · ") : "—"}
+                        meta={metaParts.length > 0 ? metaParts.join(" · ") : "no tags or release date yet"}
                       />
                     </>
                   }
                   metrics={
                     <>
-                      <span className="w-[90px] shrink-0 text-[13px] text-ink-primary">
-                        {fmtPct(g.positive_ratio, 0)} · {fmtCompact(g.total_reviews)}
-                      </span>
-                      <RevenueCell top={isTop}>{fmtRevenue(g.est_rev_reviews, isFreeTitle(g))}</RevenueCell>
+                      <MetricCell label="Positive" width="w-[72px]" stackBelow="md" className="text-ink-primary">
+                        {g.positive_ratio != null ? fmtPct(g.positive_ratio, 0) : <SentinelTag>no reviews</SentinelTag>}
+                      </MetricCell>
+                      <MetricCell label="Reviews" width="w-16" stackBelow="md" className="text-ink-primary">
+                        {g.total_reviews != null ? fmtCompact(g.total_reviews) : <SentinelTag>no data</SentinelTag>}
+                      </MetricCell>
+                      <RevenueCell top={isTop} stackBelow="md">
+                        {kind === "unknown" ? (
+                          <SentinelTag>{PRICE_UNKNOWN}</SentinelTag>
+                        ) : kind === "free" || g.est_rev_reviews != null ? (
+                          fmtRevenueFor(g, g.est_rev_reviews)
+                        ) : (
+                          <SentinelTag>no estimate</SentinelTag>
+                        )}
+                      </RevenueCell>
                       {/* The 4e mock shows a "players 7d ▲/▼" verdict; the search API doesn't
-                          expose a 7-day trend (only a point-in-time live count), so this shows
-                          the real current count instead of fabricating a change figure. */}
-                      <span
-                        className="w-[70px] shrink-0 text-[13px] text-ink-muted"
-                        title="Live players right now — a 7-day trend isn't available from this endpoint."
-                      >
-                        {g.live_players != null ? `${fmtCompact(g.live_players)} live` : "—"}
-                      </span>
+                          expose a 7-day trend (only a point-in-time count), so this shows the
+                          real current count instead of fabricating a change figure. A game
+                          outside the nightly capture says so rather than printing a dash. */}
+                      <MetricCell label="Players now" width="w-[84px]" stackBelow="md" className="text-ink-secondary">
+                        {g.live_players != null ? fmtCompact(g.live_players) : <SentinelTag>not measured</SentinelTag>}
+                      </MetricCell>
                       <CompareCell g={g} />
                     </>
                   }
