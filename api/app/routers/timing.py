@@ -30,7 +30,7 @@ from __future__ import annotations
 import calendar
 
 import duckdb
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from .. import analytics_db, response_cache
@@ -212,15 +212,17 @@ def _decay_summary(decay: list[DecayPoint]) -> DecaySummary | None:
 
 @router.get("/overview", response_model=TimingOverview)
 def timing_overview(
+    request: Request,
     response: Response,
     genre: str = Query("__all__", description="Exact Steam genre label, or '__all__'."),
 ) -> TimingOverview:
     """Three mart reads plus the 12-month scoring pass — a pure function of the mart for a
-    given genre, so it is cached in-process keyed by the mart version and sent with an hour
-    of public cache (see response_cache). The 404 for an unknown genre is NOT cached: only
-    successful answers are stored."""
-    response.headers["Cache-Control"] = response_cache.CACHE_CONTROL
-    return response_cache.get_or_compute("timing_overview", (genre,), lambda: _overview(genre))
+    given genre, so it is cached in-process keyed by the mart version and sent with 5
+    minutes of public cache + a mart-identity ETag (see response_cache.serve()). The 404
+    for an unknown genre is NOT cached: only successful answers are stored."""
+    return response_cache.serve(
+        request, response, "timing_overview", (genre,), lambda: _overview(genre)
+    )
 
 
 def _overview(genre: str) -> TimingOverview:

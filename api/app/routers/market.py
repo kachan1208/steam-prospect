@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Query, Request, Response
 
 from .. import analytics_db, benchmarks, histograms, response_cache
 from ..schemas import (
@@ -78,12 +78,11 @@ def distribution(
 
 
 @router.get("/benchmarks", response_model=MarketBenchmarks)
-def market_benchmarks(response: Response) -> MarketBenchmarks:
+def market_benchmarks(request: Request, response: Response) -> MarketBenchmarks:
     """Cited benchmark constants + our catalog's own figures. A pure function of the mart
     (no parameters at all), so it is cached in-process keyed by the mart version and sent
-    with an hour of public cache — see response_cache."""
-    response.headers["Cache-Control"] = response_cache.CACHE_CONTROL
-    return response_cache.get_or_compute("market_benchmarks", (), _market_benchmarks)
+    with 5 minutes of public cache + a mart-identity ETag — see response_cache.serve()."""
+    return response_cache.serve(request, response, "market_benchmarks", (), _market_benchmarks)
 
 
 def _market_benchmarks() -> MarketBenchmarks:

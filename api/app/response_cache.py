@@ -27,20 +27,26 @@ a time rather than the table being cleared wholesale. A hit moves its entry to t
 end (OrderedDict.move_to_end), so a hot genre can't be evicted by a burst of one-shot
 enumeration keys, and eviction still costs O(1) on the read path.
 
-These same handlers send `Cache-Control: public, max-age=3600` (see CACHE_CONTROL): the
-data is public, identical for everyone, and at most a day old — an hour of browser/CDN
-caching costs nothing and takes the repeat traffic off the box entirely.
+These same handlers go through serve(): `Cache-Control: public, max-age=300` plus an ETag
+that IS the mart identity + handler + params, so a browser revalidates every 5 minutes and
+gets a body-less 304 while the mart is unchanged (computed before any DB work — the ETag
+needs no data). It used to be `max-age=3600` with no validator: once the app hot-reloads a
+new mart, a browser kept serving the old mart's seasonality/timing/benchmarks for up to
+an hour next to fresh answers from every other endpoint — two marts on one screen. Five
+minutes bounds that window; the 304s keep the repeat traffic nearly free.
 """
 from __future__ import annotations
 
+import hashlib
 from collections import OrderedDict
 from typing import Any, Callable, TypeVar
 
+from fastapi import Request, Response
+
 from . import analytics_db
 
-# One hour: comfortably shorter than the nightly rebuild cadence, so a client can never
-# hold yesterday's numbers past the next morning's ETL by more than an hour.
-CACHE_CONTROL = "public, max-age=3600"
+# Five minutes of freshness, then a cheap revalidation (see serve()).
+CACHE_CONTROL = "public, max-age=300"
 
 _MAX_ENTRIES = 256
 
@@ -111,4 +117,45 @@ def get_or_compute(
         except KeyError:  # emptied under us — nothing to do
             break
     _cache[key] = value
+    return value
+
+
+def etag_for(name: str, params: tuple) -> str | None:
+    """A validator for a mart-pure response: a hash of the served mart's identity + the
+    handler + its params — the same things the in-process cache keys on, so equal ETags
+    mean byte-identical bodies. None for an unversioned mart (nothing safe to key on)."""
+    version = analytics_db.mart_version()
+    if version is None:
+        return None
+    raw = f"{version}|{analytics_db.built_at()}|{name}|{params!r}"
+    return 'W/"' + hashlib.sha256(raw.encode()).hexdigest()[:24] + '"'
+
+
+def _matches(if_none_match: str | None, etag: str) -> bool:
+    if not if_none_match:
+        return False
+    tags = [t.strip() for t in if_none_match.split(",")]
+    return "*" in tags or etag in tags
+
+
+def serve(
+    request: Request,
+    response: Response,
+    name: str,
+    params: tuple,
+    compute: Callable[[], T],
+    cache_if: Callable[[T], bool] | None = None,
+) -> T | Response:
+    """get_or_compute() plus the HTTP caching contract: Cache-Control + ETag on every
+    successful answer, and a body-less 304 — decided BEFORE any DB work — when the client
+    already holds this mart's answer. Errors (a 404 for an unknown genre, a 503) carry
+    neither header, so they are never cached or revalidated."""
+    headers = {"Cache-Control": CACHE_CONTROL}
+    etag = etag_for(name, params)
+    if etag is not None:
+        headers["ETag"] = etag
+        if _matches(request.headers.get("if-none-match"), etag):
+            return Response(status_code=304, headers=headers)
+    value = get_or_compute(name, params, compute, cache_if=cache_if)
+    response.headers.update(headers)
     return value

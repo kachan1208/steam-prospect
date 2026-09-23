@@ -1,10 +1,11 @@
 """The mart-pure handlers: schema contract, in-process caching and Cache-Control.
 
 /api/market/benchmarks, /api/seasonality, /api/launch-curve and /api/timing/overview read
-precomputed marts and do arithmetic — within one process (the DB is swapped + the app
-restarted on each ETL) their answers are constants. These tests pin that the caching is
-keyed by the MART VERSION (never serving one mart's numbers for another), that failures
-are not cached, and that the responses advertise an hour of public caching.
+precomputed marts and do arithmetic — for one served mart their answers are constants (a
+hot reload swaps the mart and clears the cache). These tests pin that the caching is keyed
+by the MART VERSION (never serving one mart's numbers for another), that failures are not
+cached, and that the responses advertise 5 minutes of public caching plus a mart-identity
+ETag that revalidates as a body-less 304.
 """
 from __future__ import annotations
 
@@ -21,10 +22,51 @@ _CACHED_PATHS = [
 
 
 @pytest.mark.parametrize("path", _CACHED_PATHS)
-def test_cache_control_is_an_hour_of_public_caching(client, path):
+def test_cache_control_is_five_minutes_plus_a_validator(client, path):
+    """Was max-age=3600 with no validator: after a hot-reloaded mart, a browser kept these
+    four answers from the OLD mart for up to an hour next to fresh data everywhere else.
+    Now 5 minutes, then a cheap revalidation against a mart-identity ETag."""
     r = client.get(path)
     assert r.status_code == 200, path
-    assert r.headers["Cache-Control"] == "public, max-age=3600", path
+    assert r.headers["Cache-Control"] == "public, max-age=300", path
+    assert r.headers["ETag"].startswith('W/"'), path
+
+
+@pytest.mark.parametrize("path", _CACHED_PATHS)
+def test_revalidation_is_a_bodyless_304_without_touching_the_mart(client, path, monkeypatch):
+    etag = client.get(path).headers["ETag"]
+
+    def _boom(sql, params=None):
+        raise AssertionError(f"{path} queried the mart to answer a 304")
+
+    monkeypatch.setattr(analytics_db, "query", _boom)
+    r = client.get(path, headers={"If-None-Match": etag})
+    assert r.status_code == 304, path
+    assert r.content == b""
+    assert r.headers["ETag"] == etag
+    assert r.headers["Cache-Control"] == "public, max-age=300"
+
+
+def test_a_new_mart_changes_the_etag(client, monkeypatch):
+    """The ETag IS the mart identity: after a swap the old validator no longer matches, so
+    the browser gets the new mart's body instead of a 304."""
+    old = client.get("/api/market/benchmarks").headers["ETag"]
+    monkeypatch.setattr(analytics_db, "built_at", lambda: "2026-01-02T00:00:00+00:00")
+    r = client.get("/api/market/benchmarks", headers={"If-None-Match": old})
+    assert r.status_code == 200
+    assert r.headers["ETag"] != old
+
+
+def test_etag_is_per_parameter(client):
+    a = client.get("/api/seasonality").headers["ETag"]
+    b = client.get("/api/seasonality", params={"genre": "Roguelike"}).headers["ETag"]
+    assert a != b
+
+
+def test_errors_carry_no_validator(client):
+    r = client.get("/api/timing/overview", params={"genre": "Sports"})
+    assert r.status_code == 404
+    assert "etag" not in r.headers
 
 
 @pytest.mark.parametrize("path", _CACHED_PATHS)
