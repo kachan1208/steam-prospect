@@ -26,6 +26,7 @@ import {
   type VerdictCheck,
 } from "../lib/radarVerdict";
 import { useCoarsePointer } from "../lib/useMediaQuery";
+import { PAID_MIN } from "../lib/nichePaid";
 import { TooltipPanel } from "./charts/TooltipPanel";
 import { InfoTipBase } from "./ui/InfoTipBase";
 import { nicheDetailPath } from "../lib/nichePath";
@@ -230,6 +231,9 @@ export interface RadarBoardBlip {
   opp?: OpportunityInputs;
   /** The population `n_games` counts, e.g. "last 24 months · ≥50 reviews". */
   population?: string;
+  /** Paid games in the cut (rebuilt mart): below 30 the revenue figures are withheld, and the
+   * tooltip says so instead of printing a bare dash. */
+  n_paid?: number | null;
 }
 
 /**
@@ -265,6 +269,7 @@ export function radarBlipFromRow(row: NicheRow): RadarBoardBlip | null {
     n_recent_year: row.n_recent_year ?? null,
     n_prior_year: row.n_prior_year ?? null,
     n_games: row.n_games,
+    n_paid: row.n_paid ?? null,
   });
   return {
     dimension: row.dimension,
@@ -284,7 +289,15 @@ export function radarBlipFromRow(row: NicheRow): RadarBoardBlip | null {
     trace: checks,
     opp: row,
     population: row.window != null ? cutPopulationLabel(row.window, row.min_reviews) : undefined,
+    n_paid: row.n_paid ?? null,
   };
+}
+
+/** A revenue figure for the board: the amount, or — when it is NULL — WHY ("withheld: only
+ * 12 paid games" on the rebuilt mart, else "no data"), never a bare dash. */
+function revenueOrWhy(value: number | null | undefined, nPaid: number | null | undefined): string {
+  if (value != null && Number.isFinite(value)) return fmtUsd(value);
+  return nPaid != null && nPaid < PAID_MIN ? `withheld: only ${fmtInt(nPaid)} paid games` : "no data";
 }
 
 // ---- the glossary-backed explanations, loaded after first paint ------------------------
@@ -721,7 +734,7 @@ function DossierBody({ blip, plotCap }: { blip: RailBlip; plotCap: number }) {
           blip.reviewsPrev24m != null ? ` vs ${fmtInt(blip.reviewsPrev24m)} in the 24 before` : ""
         }`
       : null,
-    `top-10% revenue ${fmtUsd(blip.p90_rev)}`,
+    `top-10% revenue ${revenueOrWhy(blip.p90_rev, blip.n_paid)}`,
     `${fmtInt(blip.n_games)} games${blip.population ? ` (${blip.population})` : ""}`,
   ]
     .filter(Boolean)
@@ -1757,7 +1770,7 @@ export function RadarBoard({
                   label: DOSSIER_LABEL.releases,
                   value: hovered.saturationYoy != null ? fmtSigned(hovered.saturationYoy, 0) : "unknown",
                 },
-                { label: DOSSIER_LABEL.p90, value: fmtUsd(hovered.p90_rev) },
+                { label: DOSSIER_LABEL.p90, value: revenueOrWhy(hovered.p90_rev, hovered.n_paid) },
                 {
                   label: DOSSIER_LABEL.games,
                   value: `${fmtInt(hovered.n_games)}${hovered.population ? ` · ${hovered.population}` : ""}`,

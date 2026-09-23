@@ -369,6 +369,9 @@ export interface RadarVerdictInput {
   n_prior_year?: number | null;
   /** The cut's scored games — the singleplayer row's worked count. */
   n_games?: number | null;
+  /** The cut's PAID games (rebuilt mart): winner_concentration is withheld (NULL) below 30 of
+   * them, and the concentration row then says so instead of a bare "unknown". */
+  n_paid?: number | null;
 }
 
 export interface RadarVerdict {
@@ -493,6 +496,9 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
   const nGames = num(input.n_games);
   const nRecentYear = num(input.n_recent_year);
   const nPriorYear = num(input.n_prior_year);
+  const nPaid = num(input.n_paid);
+  // The rebuilt mart withholds paid-only stats below 30 paid games (lib/nichePaid.ts).
+  const paidTooFew = nPaid !== null && nPaid < 30;
 
   // The solo LENS row — shared by both trace shapes. decides:false: see module doc.
   // The pass bar stays on the SINGLEPLAYER SHARE alone; the evidence trio is inlined into
@@ -642,12 +648,14 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
     {
       id: "concentration",
       label: "Top-5% revenue share",
-      value: wc === null ? "unknown" : fmtPct(wc, 1),
+      value: wc === null ? (paidTooFew ? "withheld" : "unknown") : fmtPct(wc, 1),
       threshold: `≤ ${fmtPct(WC_WINNER_TAKE_MOST, 0)}; above is winner-take-most`,
       pass: wc === null ? null : !winnerTakeMost,
       note:
         wc === null
-          ? "unknown — the winner-take-most read is unreachable"
+          ? paidTooFew
+            ? `withheld — only ${fmtInt(nPaid!)} paid games, too few to read how revenue splits (not a pass)`
+            : "unknown — the winner-take-most read is unreachable"
           : winnerTakeMost
             ? "winner-take-most revenue — vetoes enter; judge by the median, not the hits"
             : wc > WC_WINNER_TAKE_MOST - 0.05

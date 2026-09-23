@@ -357,9 +357,10 @@ export interface NicheRow {
   reviews_24m_new_share?: number | null; // share of reviews_24m from games released in the last 24 months
   demand_emerging?: boolean | null;
   // Gated on the ETL rebuild (absent/null until the mart carries each column):
-  // how many of the cut's n_games are free-to-play / have no known price — free and
-  // unknown-price revenue is NULL (not $0) in that mart, so the revenue medians/percentiles
-  // describe the PRICED games only and these say how many were left out.
+  // n_paid + n_free + n_price_unknown = n_games. Revenue, price, winner_concentration and
+  // hit-rate columns count the PAID games only, and are NULL when n_paid < 30 — render that
+  // NULL as "withheld: only N paid games" (lib/nichePaid.ts), never as 0 or a blank.
+  n_paid?: number | null;
   n_free?: number | null;
   n_price_unknown?: number | null;
   // The whole Steam panel's 7-day player change over the same days, and the niche's
