@@ -27,7 +27,7 @@ import {
   type GameTrendPoint,
 } from "../../lib/api";
 import { fillMonthlyGaps, fmtDay, fmtMonth, partialMonth } from "../../lib/dates";
-import { fmtAxisCompact, fmtCompact, fmtInt } from "../../lib/format";
+import { axisScale, fmtAxisCompact, fmtCompact, fmtInt } from "../../lib/format";
 import { fmtTrendPct, playersTrendRead } from "../../lib/gameEstimates";
 import { CSS_VAR } from "../../lib/palette";
 import { RetryButton } from "../ui/ErrorState";
@@ -130,6 +130,10 @@ function GrowthPanels({
   const hatchId = useHatchId("drill-hatch");
   const partial = partialMonth(data[data.length - 1]?.period, asOf);
   const periods = zoom.data.map((d) => d.period);
+  // One unit per axis ("0 / 80K / 160K", never "80.0K" beside "320K" or "9,000" beside
+  // "18.0K") — lib/format axisScale, sized to the visible rows.
+  const cumAxis = axisScale(Math.max(1, ...zoom.data.map((d) => d.cumulative ?? 0)), "count");
+  const monthAxis = axisScale(Math.max(1, ...zoom.data.map((d) => d.monthly ?? 0)), "count");
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
       <div>
@@ -141,7 +145,10 @@ function GrowthPanels({
               <XAxis {...XAXIS_PROPS} />
               <YAxis
                 tick={{ fontSize: 10 }}
-                tickFormatter={(v: number) => fmtAxisCompact(v)}
+                ticks={cumAxis.ticks}
+                interval={0}
+                domain={cumAxis.domain}
+                tickFormatter={(v: number) => cumAxis.format(v)}
                 tickLine={false}
                 axisLine={false}
                 width={44}
@@ -185,7 +192,10 @@ function GrowthPanels({
               <XAxis {...XAXIS_PROPS} />
               <YAxis
                 tick={{ fontSize: 10 }}
-                tickFormatter={(v: number) => fmtAxisCompact(v)}
+                ticks={monthAxis.ticks}
+                interval={0}
+                domain={monthAxis.domain}
+                tickFormatter={(v: number) => monthAxis.format(v)}
                 tickLine={false}
                 axisLine={false}
                 width={44}

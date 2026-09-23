@@ -1,4 +1,4 @@
-import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useMemo, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
@@ -101,6 +101,26 @@ function withOneZero(
   const list = events ?? [];
   if (list.some((e) => e.kind === "update" && /^1\.0 release/i.test(e.title))) return list;
   return [...list, { event_date: p.release_date_1_0.slice(0, 10), kind: "update", title: "1.0 release", url: null }];
+}
+
+/** Tailwind's lg breakpoint — where the page is two columns. Must match the lg: utilities on
+ * the body grid. Defaults to desktop when matchMedia is unavailable. */
+const LG_QUERY = "(min-width: 1024px)";
+
+function subscribeLg(cb: () => void): () => void {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return () => {};
+  const mql = window.matchMedia(LG_QUERY);
+  mql.addEventListener("change", cb);
+  return () => mql.removeEventListener("change", cb);
+}
+
+function isLgNow(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return true;
+  return window.matchMedia(LG_QUERY).matches;
+}
+
+function useIsLg(): boolean {
+  return useSyncExternalStore(subscribeLg, isLgNow, () => true);
 }
 
 /** Comparables header type: the table's own 11px muted weight, in the HeaderLabel's shape. */
@@ -643,6 +663,7 @@ export default function GameProfile() {
   const validAppid = Number.isFinite(appid);
   const [selectedMetric, setSelectedMetric] = useState<DrilldownMetric | null>(null);
   const [view, setView] = useDetailView();
+  const isLg = useIsLg();
 
   const profileQ = useGameProfile(validAppid ? appid : null);
   const comparablesQ = useGameComparables(validAppid ? appid : null);
@@ -807,6 +828,33 @@ export default function GameProfile() {
       </BlueprintPanel>
     );
   }
+
+  const drilldown = selectedMetric ? (
+    <BlueprintPanel
+      className="order-2 min-w-0 lg:order-none"
+      title={DRILLDOWN_META[selectedMetric].title}
+      subtitle={DRILLDOWN_META[selectedMetric].subtitle}
+      action={
+        <button
+          type="button"
+          onClick={() => setSelectedMetric(null)}
+          aria-label="Close drilldown"
+          className="flex h-7 w-7 shrink-0 items-center justify-center text-ink-secondary hover:bg-page hover:text-ink-primary"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+      }
+    >
+      <GameMetricDrilldown
+        appid={profile.appid}
+        metric={selectedMetric}
+        profile={{ total_reviews: profile.total_reviews, live_players: profile.live_players }}
+        asOf={dataAge.asOf}
+      />
+    </BlueprintPanel>
+  ) : null;
 
   return (
     <div className="flex flex-col gap-5">
@@ -1148,33 +1196,14 @@ export default function GameProfile() {
           )}
         </div>
 
-        {selectedMetric && (
-          <BlueprintPanel
-            className="order-2 min-w-0 lg:order-none lg:col-span-2"
-            title={DRILLDOWN_META[selectedMetric].title}
-            subtitle={DRILLDOWN_META[selectedMetric].subtitle}
-            action={
-              <button
-                type="button"
-                onClick={() => setSelectedMetric(null)}
-                aria-label="Close drilldown"
-                className="flex h-7 w-7 shrink-0 items-center justify-center text-ink-secondary hover:bg-page hover:text-ink-primary"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M6 6l12 12M18 6L6 18" />
-                </svg>
-              </button>
-            }
-          >
-            <GameMetricDrilldown
-              appid={profile.appid}
-              metric={selectedMetric}
-              profile={{ total_reviews: profile.total_reviews, live_players: profile.live_players }}
-              asOf={dataAge.asOf}
-            />
-          </BlueprintPanel>
-        )}
+        {/* Phone: the opened drilldown sits right under the Estimates card that opened it. */}
+        {!isLg && drilldown}
       </div>
+
+      {/* Desktop: full width under both columns — OUTSIDE the grid, because the sticky sidebar
+          is constrained by the whole grid container, and a drilldown in a second grid row slid
+          under it. */}
+      {isLg && drilldown}
 
       {/* Below the mockup composition: every section this page already had that §4c doesn't
           draw — percentile, comparables, the Detailed-only deep charts, and (folded in from
