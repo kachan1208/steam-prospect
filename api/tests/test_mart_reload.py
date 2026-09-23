@@ -89,10 +89,11 @@ def test_repointed_link_is_served_after_the_check_interval(client, published):
     link, _ = published
     assert _game_name(client) == f"Rogue Cellar {A_VERSION}"
     health = client.get("/api/health").json()
-    assert health["mart_version"] == A_VERSION
+    assert health["mart_version"] == health["loaded_mart_version"] == A_VERSION
     assert health["loaded_file"] == f"prospect_{A_VERSION}.duckdb"
-    assert health["link_target_version"] == A_VERSION
+    assert health["target_mart_version"] == A_VERSION
     assert health["target_differs"] is False
+    assert health["data_as_of"] == "2026-01-01"
 
     # Prime every kind of mart-derived state on A.
     assert games._has_name_lower() is False  # schema snapshot
@@ -105,14 +106,16 @@ def test_repointed_link_is_served_after_the_check_interval(client, published):
 
     # Within the check interval the process may still serve A — and health says so.
     health = client.get("/api/health").json()
-    if health["mart_version"] == A_VERSION:
+    if health["loaded_mart_version"] == A_VERSION:
         assert health["target_differs"] is True
-        assert health["link_target_version"] == B_VERSION
+        assert health["target_mart_version"] == B_VERSION
 
     time.sleep(0.06)  # past the check interval: the next request serves B
     assert _game_name(client) == f"Rogue Cellar {B_VERSION}"
     health = client.get("/api/health").json()
-    assert health["mart_version"] == B_VERSION
+    assert health["mart_version"] == health["loaded_mart_version"] == B_VERSION
+    assert health["target_mart_version"] == B_VERSION
+    assert health["data_as_of"] == "2026-01-02"
     assert health["loaded_file"] == f"prospect_{B_VERSION}.duckdb"
     assert health["target_differs"] is False
     assert health["reload_error"] is None
@@ -219,7 +222,7 @@ def test_a_broken_new_mart_keeps_the_old_one_serving(client, published):
     assert health["status"] == "ok"
     assert health["mart_version"] == A_VERSION
     assert health["target_differs"] is True
-    assert health["link_target_version"] == "20260103"
+    assert health["target_mart_version"] == "20260103"
     assert "unusable" in health["reload_error"]
 
     # The same broken file is not re-opened every interval — only a change retries.

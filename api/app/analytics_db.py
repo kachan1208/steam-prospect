@@ -609,11 +609,11 @@ def watch_status() -> dict[str, Any]:
     loaded = gen.key if gen is not None else None
     return {
         "loaded_file": os.path.basename(loaded.target) if loaded else None,
-        "loaded_version": gen.meta.get("mart_version") if gen is not None else None,
+        "loaded_mart_version": gen.meta.get("mart_version") if gen is not None else None,
         "loaded_at": _iso(gen.opened_at) if gen is not None else None,
         "link_target": os.path.basename(link_target) if link_target else None,
         "link_target_exists": now_key is not None,
-        "link_target_version": _version_from_name(link_target),
+        "target_mart_version": _version_from_name(link_target),
         "target_differs": bool(loaded is not None and now_key is not None and now_key != loaded),
         "reload_error": _reload_error if gen is not None else None,
         "reload_interval_s": _reload_interval_s if path else None,

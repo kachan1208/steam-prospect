@@ -11,23 +11,30 @@ class Health(BaseModel):
     status: str  # "ok" | "degraded"
     # Why the API is degraded (missing mart, corrupt/truncated file, ...). None when ok.
     detail: Optional[str] = None
-    # The mart THIS process serves (mart_meta of the loaded generation).
+    # The mart THIS process serves (mart_meta of the loaded generation). mart_version is
+    # kept for existing readers (web/src/lib/api.ts); loaded_mart_version is the same value
+    # under the name the data-age contract uses.
     mart_version: Optional[str] = None
+    loaded_mart_version: Optional[str] = None
     built_at: Optional[str] = None
+    # The served data's as-of DATE (UTC date of built_at, 'YYYY-MM-DD') — the date every
+    # "last N days" window is anchored to.
+    data_as_of: Optional[str] = None
     age_hours: Optional[float] = None  # now - built_at, hours (1dp); None when unknown
     owners_as_of: Optional[str] = None  # mart_meta.owners_as_of, when the mart carries it
     source_db: Optional[str] = None
     # Loaded vs published (analytics_db hot reload). loaded_file is the file the served mart
     # was opened from; link_target is what the watched path (current.duckdb) points at NOW,
-    # and link_target_version the YYYYMMDD token in its name. target_differs=true means a
+    # and target_mart_version the YYYYMMDD token in its name. target_differs=true means a
     # new mart is published but not yet served — normal for up to reload_interval_s after a
     # nightly swap; with reload_error set it means the new file could not be opened and the
-    # previous mart is still being served.
+    # previous mart is still being served. (A same-day rebuild keeps the same version token
+    # — target_differs, which compares the file itself, still flips.)
     loaded_file: Optional[str] = None
     loaded_at: Optional[str] = None  # when this process opened it (UTC ISO)
     link_target: Optional[str] = None
     link_target_exists: bool = False
-    link_target_version: Optional[str] = None
+    target_mart_version: Optional[str] = None
     target_differs: bool = False
     reload_error: Optional[str] = None
     reload_interval_s: Optional[float] = None  # 0 = hot reload disabled

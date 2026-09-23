@@ -96,9 +96,9 @@ npm run preview    # serve the built bundle locally
   (`PROSPECT_MART_RELOAD_INTERVAL_S`, `0` disables) a request checks whether
   `current.duckdb` now points at a different file and, if so, the API opens it
   and swaps it in; in-flight requests finish on the mart they started with.
-  `GET /api/health` reports the served mart (`mart_version`, `built_at`,
-  `age_hours`, `loaded_file`) next to what the link points at now
-  (`link_target`, `link_target_version`, `target_differs`, `reload_error`).
+  `GET /api/health` reports the served mart (`loaded_mart_version`, `built_at`,
+  `data_as_of`, `age_hours`, `loaded_file`) next to what the link points at now
+  (`link_target`, `target_mart_version`, `target_differs`, `reload_error`).
 - If the mart is missing, empty or unreadable the API still starts: data
   endpoints answer 503 and `/api/health` says `degraded`, with the reason in
   `detail`. It picks the mart up on its own once a usable one is published.

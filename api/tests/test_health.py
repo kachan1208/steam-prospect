@@ -17,10 +17,12 @@ def test_health_reports_loaded_vs_published_mart(client):
     the watched path points at now, and whether they differ. The fixture mart is a plain
     file (no prospect_YYYYMMDD name), so there is no version token to parse."""
     body = client.get("/api/health").json()
+    assert body["loaded_mart_version"] == body["mart_version"] == "test-fixture"
+    assert body["data_as_of"] == "2026-01-01"  # UTC date of the fixture's built_at
     assert body["loaded_file"] == "fixture_mart.duckdb"
     assert body["link_target"] == "fixture_mart.duckdb"
     assert body["link_target_exists"] is True
-    assert body["link_target_version"] is None
+    assert body["target_mart_version"] is None
     assert body["target_differs"] is False
     assert body["reload_error"] is None
     assert body["reload_interval_s"] == 30.0

@@ -30,7 +30,9 @@ def health() -> Health:
         # different fixes, and both used to look identical from the outside.
         detail=None if ready else (analytics_db.unavailable_reason() or _NOT_OPEN),
         mart_version=meta.get("mart_version"),
+        loaded_mart_version=watch["loaded_mart_version"],
         built_at=meta.get("built_at"),
+        data_as_of=as_of.isoformat() if (as_of := analytics_db.as_of_date()) else None,
         age_hours=analytics_db.age_hours(),
         # When the owners estimates (a frozen SteamSpy-era snapshot) were taken — present
         # only once the ETL stamps it into mart_meta.
@@ -40,7 +42,7 @@ def health() -> Health:
         loaded_at=watch["loaded_at"],
         link_target=watch["link_target"],
         link_target_exists=watch["link_target_exists"],
-        link_target_version=watch["link_target_version"],
+        target_mart_version=watch["target_mart_version"],
         target_differs=watch["target_differs"],
         reload_error=watch["reload_error"],
         reload_interval_s=watch["reload_interval_s"],
