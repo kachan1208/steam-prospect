@@ -153,6 +153,15 @@ describe("the verdict names what it failed, and the red flags come before the nu
     expect(flags.textContent).toContain("Winner-take-most");
   });
 
+  it("names the tag's tier in plain words — never 'micro tier'", async () => {
+    stub({ detail: detailOf([SOULS]) });
+    renderAt("/niches/tag/Souls-like");
+    await screen.findByTestId("radar-dossier");
+    const badge = screen.getByText("game type");
+    expect(badge.getAttribute("title")).toBe("buildable game concept");
+    expect(screen.queryByText(/micro tier/)).toBeNull();
+  });
+
   it("works the demand and release tiles through this niche's own counts", async () => {
     stub({ detail: detailOf([SOULS]) });
     renderAt("/niches/tag/Souls-like");

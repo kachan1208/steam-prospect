@@ -1866,7 +1866,7 @@ export function RadarBoard({
               <span className="w-6 shrink-0 text-right">#</span>
               <span className="min-w-0">
                 Niche ·{" "}
-                <span title="M = micro-genre tag · T = theme tag · G = Steam genre">
+                <span title="M = micro-genre: a specific game type you can build (e.g. Colony Sim) · T = theme: a setting or look (e.g. Cyberpunk) · G = one of Steam's own broad genres (e.g. Strategy)">
                   class: <b className="font-medium text-ink-secondary">M</b> micro-genre ·{" "}
                   <b className="font-medium text-ink-secondary">T</b> theme · <b className="font-medium text-ink-secondary">G</b>{" "}
                   genre

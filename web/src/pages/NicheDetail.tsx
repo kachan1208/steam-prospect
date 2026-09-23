@@ -257,9 +257,19 @@ function variantLabel(v: Pick<NicheRow, "window" | "min_reviews">): string {
 
 const TIER_HINT: Record<string, string> = {
   micro: "buildable game concept",
-  theme: "setting/aesthetic — attach it to a micro-genre",
+  theme: "setting/aesthetic — attach it to a game type",
   umbrella: "genre container, not a buildable niche",
   meta: "reception tag, never buildable",
+  genre: "Steam genre",
+};
+
+/** The tier badge in plain words (2026-09-23 review: "micro tier" / "umbrella" were jargon).
+ * Same vocabulary as the Niche Finder's tier chips. */
+const TIER_BADGE: Record<string, string> = {
+  micro: "game type",
+  theme: "theme",
+  umbrella: "broad genre",
+  meta: "review tag",
   genre: "Steam genre",
 };
 
@@ -840,7 +850,7 @@ export default function NicheDetail() {
                   title={TIER_HINT[tier] ?? tier}
                   className="border border-brand px-2 py-0.5 text-[11px] font-medium text-brand"
                 >
-                  {tier} tier
+                  {TIER_BADGE[tier] ?? tier}
                 </span>
               )}
               <span className="border border-ink-primary/30 px-2 py-0.5 text-[11px] font-medium text-ink-primary/65">
@@ -1149,7 +1159,9 @@ export default function NicheDetail() {
         {/* NEVER A LONE SCORE (owner rule): the score above is one click from this, the
             blend the mart actually computes — each part, its weight, its points, the supply
             brake — worked through with this niche's own numbers. */}
-        <div id="opportunity-breakdown" className="scroll-mt-20 border border-ink-primary/20 px-4 py-3">
+        {/* px-2 below sm: at 390px the breakdown's four columns need every pixel, and the
+            wider padding pushed its Points column behind the scroller's fade. */}
+        <div id="opportunity-breakdown" className="scroll-mt-20 border border-ink-primary/20 px-2 py-3 sm:px-4">
           <OpportunityBreakdown row={dossierVariant} title={`How the Opportunity score adds up — ${dossierCutLabel}`} />
           <p className="mt-2 text-[11px] text-ink-muted">
             The score ranks niches; the verdict above is the call. A high score never overrides a failed check.
