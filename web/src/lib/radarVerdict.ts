@@ -187,10 +187,12 @@
  * answers "is this market worth entering", which holds regardless of team size, while
  * solo-buildability is a property of the READER, not the market. Folding it into the
  * verdict would move dots between rings when the market itself did not change. Since
- * 2026-08-26 the radar POPULATION is solo-friendly-by-default — but server-side (the
- * API's solo_only param filters on the same 0.8 bar), never by moving rings: with the
- * board's "Solo-friendly only" toggle off, team-scale dots return, drawn hollow via
- * soloBucket() below, in exactly the ring the market evidence puts them.
+ * 2026-08-26 the radar POPULATION is singleplayer-by-default — a population rule (the
+ * same 0.8 bar as the API's solo_only param; applied client-side since 2026-09-23 so the
+ * legend can count what it removed), never a moved ring: with the board's "Singleplayer
+ * only" lens off (SOLO_LENS_LABEL — it was "Solo-friendly only", a buildability promise the
+ * share can't keep), the multiplayer-dependent dots return, drawn hollow via soloBucket()
+ * below, in exactly the ring the market evidence puts them.
  *
  * SOLO EVIDENCE (2026-08-27): because the share alone over-claims, the dossier's solo
  * row renders the member profile behind it when the mart carries the evidence trio
@@ -215,7 +217,8 @@
  * volume + new-game share + "no comparable base") because no %-check is honest there.
  */
 
-import { fmtCompact, fmtInt, fmtSigned, fmtUsd } from "./format";
+import { fmtCompact, fmtInt, fmtPct, fmtSigned, fmtUsd } from "./format";
+import type { GlossaryKey } from "./glossary";
 import { MONO } from "./palette";
 
 // ---- thresholds -------------------------------------------------------------------------
@@ -360,6 +363,12 @@ export interface RadarVerdictInput {
   reviews_prev_24m?: number | null;
   /** Share of reviews_24m from games released in the last 24 months (emerging tell 2). */
   reviews_24m_new_share?: number | null;
+  /** The two full-year release counts saturation_yoy divides — the release row's worked
+   * numbers ("(346 − 341) ÷ 341 = +1.5%"). */
+  n_recent_year?: number | null;
+  n_prior_year?: number | null;
+  /** The cut's scored games — the singleplayer row's worked count. */
+  n_games?: number | null;
 }
 
 export interface RadarVerdict {
@@ -391,6 +400,12 @@ export interface VerdictCheck {
    * solo lens are decides:false BY CONSTRUCTION — the trace is built by the same
    * evaluation that picks the ring, so a tell cannot leak into the decision. */
   decides: boolean;
+  /** The glossary entry that explains this check in place (its ⓘ). A type-only import:
+   * this module rides the entry chunk with the Radar, the glossary does not. */
+  term: GlossaryKey;
+  /** This niche's own numbers worked through the check's formula — only when the inputs
+   * are on the row AND reproduce the served value; null otherwise (never a guess). */
+  worked: string | null;
 }
 
 export interface RadarVerdictTrace extends RadarVerdict {
@@ -406,6 +421,53 @@ function num(v: number | null | undefined): number | null {
  * (fmtSigned takes fractions; this one exists for the columns that arrive as percent.) */
 function fmtPctUnits(v: number, digits = 1): string {
   return `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(digits)}%`;
+}
+
+/**
+ * "(3,251,623 − 2,174,576) ÷ 2,174,576 = +49.5%" — the demand trend worked through the row's
+ * own review counts. Shown ONLY when those counts reproduce the served percentage (to its one
+ * decimal): a worked line that disagrees with the number above it is worse than none.
+ */
+export function demandTrendWorked(
+  reviews24m: number | null | undefined,
+  reviewsPrev24m: number | null | undefined,
+  trendPct: number | null | undefined,
+): string | null {
+  const [cur, prev, pct] = [num(reviews24m), num(reviewsPrev24m), num(trendPct)];
+  if (cur === null || prev === null || prev <= 0 || pct === null) return null;
+  const rec = ((cur - prev) / prev) * 100;
+  if (Math.abs(rec - pct) > 0.051) return null;
+  return `(${fmtInt(cur)} − ${fmtInt(prev)}) ÷ ${fmtInt(prev)} = ${fmtPctUnits(rec)}`;
+}
+
+/** "(346 − 341) ÷ 341 = +1.5%" — releases year over year from the two full-year counts the
+ * mart divides, when they reproduce the served fraction. */
+export function releasesYoyWorked(
+  nRecentYear: number | null | undefined,
+  nPriorYear: number | null | undefined,
+  saturationYoy: number | null | undefined,
+): string | null {
+  const [recent, prior, sat] = [num(nRecentYear), num(nPriorYear), num(saturationYoy)];
+  if (recent === null || prior === null || prior <= 0 || sat === null) return null;
+  const rec = (recent - prior) / prior;
+  if (Math.abs(rec - sat) > 0.0006) return null;
+  return `(${fmtInt(recent)} − ${fmtInt(prior)}) ÷ ${fmtInt(prior)} = ${fmtSigned(rec, 1)}`;
+}
+
+/**
+ * The checks a verdict line must NAME: every failed one, deciding checks first (owner rule —
+ * never a bullish verdict over a failing deciding check, and never a failure left for the
+ * reader to find). Context rows (newcomer earnings, singleplayer share) are included after
+ * them: they never move the ring, but a failing one still argues against the niche.
+ */
+export function failedChecks(checks: readonly VerdictCheck[]): VerdictCheck[] {
+  const failed = checks.filter((c) => c.pass === false);
+  return [...failed.filter((c) => c.decides), ...failed.filter((c) => !c.decides)];
+}
+
+/** "Top-5% revenue share 88.4% (bar ≤ 85%)" — one failed check as a clause. */
+export function failedCheckClause(c: VerdictCheck): string {
+  return `${c.label} ${c.value} (bar ${c.threshold})`;
 }
 
 /**
@@ -428,6 +490,10 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
   const indie = num(input.indie_share);
   const medH = num(input.med_playtime_h);
 
+  const nGames = num(input.n_games);
+  const nRecentYear = num(input.n_recent_year);
+  const nPriorYear = num(input.n_prior_year);
+
   // The solo LENS row — shared by both trace shapes. decides:false: see module doc.
   // The pass bar stays on the SINGLEPLAYER SHARE alone; the evidence trio is inlined into
   // the value ("0.98 singleplayer · 50% self-pub · 71% indie · median 5.7h content") so
@@ -448,21 +514,28 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
   const soloMixed = solo !== null && soloPass === true && solo < SOLO_MIXED_MIN;
   const soloNote =
     soloPass === null
-      ? "share unknown — never counted as solo-friendly (lens, not a ring input)"
+      ? "share unknown — never counted as singleplayer (a lens: never moves the ring)"
       : soloPass
         ? soloMixed
-          ? "clears the bar, but a real multiplayer minority — bottom decile of the catalog (lens — never moves a ring)"
-          : "mostly singleplayer members — a no-netcode proxy, not a scope claim (lens — never moves a ring)"
-        : "leans multiplayer/team-scale (lens — never moves a ring)";
+          ? "clears the bar, but a real multiplayer minority — bottom tenth of the catalog (a lens: never moves the ring)"
+          : "mostly singleplayer games — says they skip netcode, not that they are small builds (a lens: never moves the ring)"
+        : "leans multiplayer — netcode, servers and a live player base come with it (a lens: never moves the ring)";
   const soloCheck: VerdictCheck = {
     id: "solo",
-    label: "Solo evidence",
+    // "Singleplayer share", not "Solo evidence" (2026-09-23): the number IS the share of the
+    // cut's games playable single-player, and the old name promised more than it measures.
+    label: "Singleplayer share",
     value: [solo === null ? "unknown" : `${solo.toFixed(2)} singleplayer`, ...evidence].join(" · "),
-    threshold: `≥ ${SOLO_FRIENDLY_MIN} singleplayer share`,
+    threshold: `≥ ${SOLO_FRIENDLY_MIN}; below is multiplayer-dependent`,
     pass: soloPass,
     // The heavy-content caution is NEUTRAL: it rides the note, never the pass/fail.
     note: heavyContent ? `${soloNote} — heavy content scope for a solo build` : soloNote,
     decides: false,
+    term: "singleplayer_share",
+    worked:
+      solo !== null && nGames !== null && nGames > 0
+        ? `≈ ${fmtInt(Math.round(solo * nGames))} of ${fmtInt(nGames)} games playable single-player = ${solo.toFixed(2)}`
+        : null,
   };
 
   // 0. emerging — pre-empts EVERYTHING (see precedence doc): an emerging niche's trend %
@@ -483,8 +556,8 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
       checks: [
         {
           id: "volume",
-          label: "Review volume",
-          value: vol === null ? "unknown" : `${fmtCompact(vol)} reviews / 24m`,
+          label: "Reviews, last 24 months",
+          value: vol === null ? "unknown" : `${fmtCompact(vol)} reviews`,
           threshold: "judged on absolute volume",
           pass: null,
           note: youngLabel
@@ -493,17 +566,21 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
             : "prior 24-month window under the comparability floor — base too small for a " +
               "% read in either direction",
           decides: true, // the mart's emerging flag IS the ring decision
+          term: "reviews_24m",
+          worked: null,
         },
         {
           id: "new_share",
-          label: "New-game share",
-          value: newShare === null ? "unknown" : `${Math.round(newShare * 100)}% from games ≤ 24m old`,
+          label: "Reviews from new games",
+          value: newShare === null ? "unknown" : `${Math.round(newShare * 100)}% from games ≤ 24 months old`,
           threshold: `≥ ${Math.round(EMERGING_NEW_MASS_SHARE * 100)}% marks a young label`,
           pass: null,
           note: youngLabel
             ? "the review mass IS the newest games — the young-label tell"
             : "below the young-label bar — a small stable niche, not a new label",
           decides: false,
+          term: "demand_emerging",
+          worked: null,
         },
         soloCheck,
       ],
@@ -522,9 +599,9 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
   const checks: VerdictCheck[] = [
     {
       id: "demand",
-      label: "Demand",
-      value: demand === null ? "unknown" : `${fmtPctUnits(demand)} / 24m`,
-      threshold: `≥ ${fmtPctUnits(DEMAND_ENTER_PCT)} / 24m to enter`,
+      label: "Demand trend, 24 months",
+      value: demand === null ? "unknown" : fmtPctUnits(demand),
+      threshold: `≥ ${fmtPctUnits(DEMAND_ENTER_PCT)} to enter`,
       pass: demand === null ? null : demandEnter,
       note:
         demand === null
@@ -532,27 +609,25 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
           : demandEnter
             ? `structural growth — clears the enter bar${baseClause}`
             : demandDecline
-              ? `sustained decline (≤ ${fmtPctUnits(DEMAND_DECLINE_PCT, 0)} / 24m)${baseClause}`
+              ? `sustained decline (≤ ${fmtPctUnits(DEMAND_DECLINE_PCT, 0)} over 24 months)${baseClause}`
               : demandHolding
                 ? `holding — real demand, below the enter bar${baseClause}`
                 : `softening — mild multi-year drift${baseClause}`,
       decides: true,
+      term: "demand_trend_24m_pct",
+      worked: demandTrendWorked(vol, prev, demand),
     },
     {
       id: "supply",
-      // "Release pipeline", not "Supply" (2026-09-01). This row and the opp v2 score printed
-      // beside it answer two different questions about supply, and the bare word "Supply"
-      // implied one answer: readers took the passing row as a promise the score would not
-      // brake. This row is the ABSOLUTE read — how fast the pipeline is growing, the same
-      // +15%/yr line the ring is decided on (RadarBoard.tsx drew it as a quadrant divider
-      // until the 2026-09-10 dial; it is now the boundary between bands). The brake is the
-      // RELATIVE read (pipeline growth NET of demand growth) and additionally brakes on
-      // entrant_ratio. They contradict on 59 of 211 comparable niches (28.0%) on the default
-      // cut — deliberately; see the ONE MODEL, TWO VIEWS block. value/pass/decides are
-      // untouched here on purpose: this is a naming fix, and no ring may move.
-      label: "Release pipeline",
-      value: sat === null ? "unknown" : `${fmtSigned(sat, 1)} releases YoY`,
-      threshold: `≤ ${fmtSigned(SAT_FLOOD_YOY, 0)} YoY, absolute — the opp v2 score reads it against demand`,
+      // The ABSOLUTE read of supply — how fast the release pipeline grows, the +15%/yr line
+      // the ring is decided on. The Opportunity score's brake is the RELATIVE read (pipeline
+      // growth NET of demand growth, plus newcomer earnings); the two contradict on ~28% of
+      // the default cut, deliberately — see the ONE MODEL, TWO VIEWS block. Labelled with the
+      // glossary's plain name since 2026-09-23 ("Release pipeline" before, "Supply" before
+      // that); value/pass/decides untouched — no ring may move for a naming fix.
+      label: "Releases, year over year",
+      value: sat === null ? "unknown" : fmtSigned(sat, 1),
+      threshold: `≤ ${fmtSigned(SAT_FLOOD_YOY, 0)}; above is flooding`,
       pass: sat === null ? null : !flooding,
       note:
         sat === null
@@ -561,12 +636,14 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
             ? "supply flooding — vetoes enter"
             : "pipeline calm",
       decides: true,
+      term: "saturation_yoy",
+      worked: releasesYoyWorked(nRecentYear, nPriorYear, sat),
     },
     {
       id: "concentration",
-      label: "Concentration",
-      value: wc === null ? "unknown" : wc.toFixed(2),
-      threshold: `≤ ${WC_WINNER_TAKE_MOST} (winner-take-most above)`,
+      label: "Top-5% revenue share",
+      value: wc === null ? "unknown" : fmtPct(wc, 1),
+      threshold: `≤ ${fmtPct(WC_WINNER_TAKE_MOST, 0)}; above is winner-take-most`,
       pass: wc === null ? null : !winnerTakeMost,
       note:
         wc === null
@@ -577,12 +654,14 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
               ? "a hair under the winner-take-most bar"
               : "revenue spread across the field",
       decides: true,
+      term: "winner_concentration",
+      worked: wc === null ? null : `the top 5% of games hold ${fmtPct(wc, 1)} of the cut's Est. revenue`,
     },
     {
       id: "entrants",
-      label: "Newcomer economics",
-      value: er === null ? "unknown" : er.toFixed(2),
-      threshold: `≥ ${ENTRANT_RATIO_PAR.toFixed(1)} (catalog norm ~${ENTRANT_RATIO_CATALOG_NORM})`,
+      label: "Newcomer earnings",
+      value: er === null ? "unknown" : `${er.toFixed(2)}×`,
+      threshold: `≥ ${ENTRANT_RATIO_PAR.toFixed(2)}×; catalog norm ~${ENTRANT_RATIO_CATALOG_NORM}×`,
       pass: er === null ? null : er >= ENTRANT_RATIO_PAR,
       // "never moves the ring" is still true and still the point — but it was reading as
       // "this number changes nothing", which is false about the OTHER number on the same
@@ -596,8 +675,10 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
           ? "unknown — no read on how recent entrants earn"
           : er >= ENTRANT_RATIO_PAR
             ? "recent entrants earn at or above the niche median"
-            : `recent entrants earn ${Math.round((1 - er) * 100)}% below the niche median — falsification tell, never moves the ring, but it does brake the opp v2 score shown alongside`,
+            : `recent entrants earn ${Math.round((1 - er) * 100)}% below the niche median — a warning sign: it never moves the ring, but it brakes the Opportunity score`,
       decides: false,
+      term: "entrant_ratio",
+      worked: null,
     },
     soloCheck,
   ];
@@ -662,14 +743,30 @@ export function radarVerdict(input: RadarVerdictInput): RadarVerdict {
 // after supply brake ×1.00 is still visible on niches page, it's not consistent with radar,
 // use radar numbers in niches"). The numbers never disagreed — at the board's pinned cut the
 // niche page's tile equalled the board's row (Action RTS 87 vs 86.69, Clicker 52 vs 51.71,
-// Auto Battler 80 ×0.98 vs 79.91 ×0.984). The PRESENTATION did: the board leads with a
-// verdict and its two axes and prints the score as a small rank number in its tooltip; the
-// niche page led with the score, a supply-brake line and a weighted "Why" blend. One model
-// in two vocabularies reads as two models. So the strings below ARE the board tooltip's
-// rows — Verdict, Demand 24m, Releases YoY, P90 revenue, Games, Opp v2, Singleplayer share
-// — formatted exactly as components/RadarBoard.tsx formats them (its fmtTrendPct,
-// fmtSigned(sat, 0), fmtUsd, fmtInt, toFixed(1), toFixed(2)); pages/NicheDetail.test.tsx
+// Auto Battler 80 ×0.98 vs 79.91 ×0.984). The PRESENTATION did: one model in two
+// vocabularies reads as two models. So the strings below ARE the board tooltip's rows,
+// formatted exactly as components/RadarBoard.tsx formats them; pages/NicheDetail.test.tsx
 // pins the equality by hovering a real board dot and comparing the tooltip to the page.
+//
+// PLAIN NAMES, ONE SPELLING (2026-09-23 review: "no jargon — not 'Opp v2', 'P90'"). The row
+// labels are the glossary's canonical labels (lib/glossary.ts), held here as plain strings so
+// the Radar — the eagerly loaded index route — can print them without shipping the whole
+// glossary on first paint; glossary.test.ts-style parity is pinned in radarDossier.test.ts.
+// And the score is never alone any more: wherever it prints, its parts are one hover or one
+// click away (components/OpportunityBreakdown).
+
+/** The row labels the board's tooltip, the niche page's headline and the Finder share —
+ * each one the glossary's canonical label for that metric. */
+export const DOSSIER_LABEL = {
+  verdict: "Verdict",
+  demand: "Demand trend, 24 months",
+  reviews24m: "Reviews, last 24 months",
+  releases: "Releases, year over year",
+  p90: "Top-10% revenue",
+  games: "Games",
+  opportunity: "Opportunity score",
+  singleplayer: "Singleplayer share",
+} as const;
 
 /** Verdict colour vocabulary — the SAME tokens RadarBoard.tsx's RING_FILL draws with (the
  * index.css --verdict-* hues; watch stays neutral steel). Exported so a verdict chip off the
@@ -683,7 +780,7 @@ export const RING_COLOR: Record<RadarRing, string> = {
   declining: "var(--verdict-declining)",
 };
 
-/** The board tooltip's Demand 24m value for a non-emerging niche — "▲ +74.1%", "▼ −16.0%",
+/** The board tooltip's demand value for a non-emerging niche — "▲ +74.1%", "▼ −16.0%",
  * or "no demand data". Verbatim RadarBoard.tsx's fmtTrendPct. */
 export function fmtDemandTrend24m(v: number | null | undefined): string {
   const n = num(v);
@@ -691,16 +788,27 @@ export function fmtDemandTrend24m(v: number | null | undefined): string {
   return `${n >= 0 ? "▲ +" : "▼ −"}${Math.abs(n).toFixed(1)}%`;
 }
 
-/** The board tooltip's Demand 24m value for an EMERGING niche: the trend % never headlines a
+/** The board tooltip's demand value for an EMERGING niche: the trend % never headlines a
  * young tag (its prior window is near zero by construction), so the honest number is the
  * absolute volume, carried separately as `reviews24m`. */
 export const EMERGING_DEMAND_LABEL = "emerging — no comparable % base";
 
-/** Structural, so lib/api's NicheRow satisfies it: the verdict inputs plus the two context
+/** "last 24 months · ≥50 reviews" / "all time · every game" — the population a count
+ * describes. Every count the niche surfaces print says which games it counts (2026-09-23:
+ * Roguelike Deckbuilder read 210 / 459 / 431 on three views with nothing saying why). */
+export function cutPopulationLabel(win: string | null | undefined, minReviews: number | null | undefined): string {
+  const w = win === "all" ? "all time" : "last 24 months";
+  const floor = minReviews == null || minReviews <= 0 ? "every game" : `≥${minReviews} reviews`;
+  return `${w} · ${floor}`;
+}
+
+/** Structural, so lib/api's NicheRow satisfies it: the verdict inputs plus the context
  * numbers the tooltip prints beside them. */
 export interface RadarDossierInput extends RadarVerdictInput {
-  n_games?: number | null;
   p90_rev?: number | null;
+  /** The row's cut — names the population behind `games`. */
+  window?: string | null;
+  min_reviews?: number | null;
 }
 
 export interface RadarDossier {
@@ -710,29 +818,32 @@ export interface RadarDossier {
   verdictLabel: string;
   /** RING_COLOR[verdict.ring] — the swatch beside the word. */
   color: string;
-  /** The tooltip's Demand 24m value (fmtDemandTrend24m, or EMERGING_DEMAND_LABEL). */
+  /** The tooltip's demand value (fmtDemandTrend24m, or EMERGING_DEMAND_LABEL). */
   demand24m: string;
   emerging: boolean;
-  /** The tooltip's Releases YoY value: fmtSigned(saturation_yoy, 0), or "unknown". */
+  /** The tooltip's releases value: fmtSigned(saturation_yoy, 0), or "unknown". */
   releasesYoy: string;
   /** fmtUsd(p90_rev) — "—" when unknown. */
   p90Revenue: string;
   /** fmtInt(n_games). */
   games: string;
-  /** The tooltip's Opp v2 value — one decimal, or "—". The ONLY form the score takes on
-   * the niche pages now: a small rank number, never a headline with a brake behind it. */
-  oppV2: string;
+  /** The population `games` counts ("last 24 months · ≥50 reviews"), when the row names its
+   * cut; null otherwise. */
+  population: string | null;
+  /** The Opportunity score, one decimal, or "—". Never printed alone: its parts ride with it
+   * (OpportunityBreakdown on the pages, the parts rows in the board's tooltip). */
+  opportunity: string;
   /** The tooltip's Singleplayer share value — two decimals, or "unknown". */
   singleplayerShare: string;
-  /** fmtInt(reviews_24m), or null — the tooltip's extra "Reviews 24m" row on emerging
-   * niches, and the demand tile's footnote there. */
+  /** fmtInt(reviews_24m), or null — the tooltip's extra reviews row on emerging niches, and
+   * the demand tile's footnote there. */
   reviews24m: string | null;
 }
 
-/** One row -> the seven strings the Radar tooltip prints for it, through the same
+/** One row -> the strings the Radar tooltip prints for it, through the same
  * radarVerdictTrace evaluation the board rings with. Pure; cut-agnostic — the CALLER picks
- * the row (the board's pinned 24m x ≥50 cut on the niche page, the table's own cut in the
- * finder), and says so. */
+ * the row (always the board's pinned 24m x ≥50 cut for a verdict — see DEFAULT_NICHE_CUT),
+ * and says so. */
 export function radarDossier(row: RadarDossierInput): RadarDossier {
   const verdict = radarVerdictTrace(row);
   const emerging = row.demand_emerging === true;
@@ -749,7 +860,8 @@ export function radarDossier(row: RadarDossierInput): RadarDossier {
     releasesYoy: sat === null ? "unknown" : fmtSigned(sat, 0),
     p90Revenue: fmtUsd(row.p90_rev),
     games: fmtInt(row.n_games),
-    oppV2: opp === null ? "—" : opp.toFixed(1),
+    population: row.window != null ? cutPopulationLabel(row.window, row.min_reviews) : null,
+    opportunity: opp === null ? "—" : opp.toFixed(1),
     singleplayerShare: solo === null ? "unknown" : solo.toFixed(2),
     reviews24m: vol === null ? null : fmtInt(vol),
   };
@@ -805,8 +917,8 @@ export function tierSector(tier: string | null | undefined): RadarTierSector {
 /**
  * Why a niche has no dot on the DEFAULT Radar board — one muted sentence — or null when the
  * board's population includes it. Mirrors the two population rules the board applies: the
- * class rule above (pages/Radar.tsx) and the API's solo_only filter (singleplayer share >=
- * SOLO_FRIENDLY_MIN, unknown excluded — the board's default-on "Solo-friendly only" toggle).
+ * class rule above (pages/Radar.tsx) and the singleplayer filter (singleplayer share >=
+ * SOLO_FRIENDLY_MIN, unknown excluded — the board's default-on "Singleplayer only" lens).
  * Neither rule touches the verdict: a niche off the board is judged by the same checks, it
  * just isn't drawn — which is why the niche page still prints its dossier and adds this
  * line under it, rather than inventing a "not rated" state.
@@ -823,13 +935,22 @@ export function radarBoardAbsence(row: {
   }
   const solo = num(row.solo_viability);
   if (solo === null) {
-    return "Not on the Radar board by default: its singleplayer share is unknown, and the board's solo-friendly filter excludes unknowns.";
+    return `Not on the Radar board by default: its singleplayer share is unknown, and the board's “${SOLO_LENS_LABEL}” filter leaves unknowns out.`;
   }
   if (solo < SOLO_FRIENDLY_MIN) {
-    return `Not on the Radar board by default: singleplayer share ${solo.toFixed(2)} is under the ${SOLO_FRIENDLY_MIN} solo-friendly bar — it appears, drawn hollow, with the board's “Solo-friendly only” toggle off.`;
+    return `Not on the Radar board by default: singleplayer share ${solo.toFixed(2)} is under the ${SOLO_FRIENDLY_MIN} bar of the board's “${SOLO_LENS_LABEL}” filter — it appears, drawn hollow, with that filter off.`;
   }
   return null;
 }
+
+/**
+ * The Radar's population lens, named for exactly what it does (2026-09-23). It was "Solo-
+ * friendly only", which promised a judgement about buildability; what it actually does is
+ * keep niches whose singleplayer share is ≥ SOLO_FRIENDLY_MIN — and since the catalog median
+ * is 0.975, that removes only the handful of multiplayer-dependent niches (7 of 218 tags on
+ * the 2026-09-21 default cut).
+ */
+export const SOLO_LENS_LABEL = "Singleplayer only";
 
 // ---- solo-viability lens (NOT part of the verdict — see module doc) ---------------------
 
@@ -839,9 +960,9 @@ export function radarBoardAbsence(row: {
  * said "the catalog norm is ~0.9"; 0.9 is the 10th percentile, not the norm. See the
  * module doc's SOLO VIABILITY IS A FLAG block.)
  * MUST stay in lockstep with RADAR_SOLO_FRIENDLY_MIN in api/app/routers/niches.py — the
- * server filters the radar population (`solo_only`, the board's default-on toggle) on the
- * SAME bar this module renders in the legend, tooltip and dossier; a drift would make the
- * legend lie about what the server filtered. */
+ * API's `solo_only` filter and this board's "Singleplayer only" lens (applied client-side
+ * on this bar) must mean the same population; a drift would make the Radar and every other
+ * solo_only consumer disagree about which niches are singleplayer. */
 export const SOLO_FRIENDLY_MIN = 0.8;
 
 /** solo_viability at or above which a niche is unremarkably solo-buildable — the catalog's

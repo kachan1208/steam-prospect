@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { MemoryRouter, Route, Routes, useParams, useSearchParams } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-import { EMERGING_DEMAND_LABEL, RING_COLOR, type RadarRing } from "../lib/radarVerdict";
+import { DOSSIER_LABEL, EMERGING_DEMAND_LABEL, RING_COLOR, type RadarRing } from "../lib/radarVerdict";
 import { radarListRow, readRadarTooltip } from "../test/radarTooltip";
 
 import NicheDetail, {
@@ -1185,25 +1185,36 @@ describe("NicheDetail — the headline is the Radar's dossier", () => {
   it("renders the verdict and every axis string exactly as the board's tooltip renders them for the same row", async () => {
     // The oracle first (it unmounts itself), then the page.
     const tip = readRadarTooltip(RADAR_ROW);
-    expect(tip.rows["Verdict"]).toBe("Enter now"); // the legend word, read off the real board
+    expect(tip.rows[DOSSIER_LABEL.verdict]).toBe("Enter now"); // the legend word, read off the real board
     stub(detailOf([RADAR_ROW, OTHER_ROW]));
     renderNiche();
 
     const dossier = await screen.findByTestId("radar-dossier");
     const chip = within(dossier).getByTestId("radar-verdict-chip");
-    expect(chip.textContent).toBe(tip.rows["Verdict"]);
+    expect(chip.textContent).toBe(tip.rows[DOSSIER_LABEL.verdict]);
     // The chip paints with the board's dot colour — the same token, read off the real dot.
     const ring = chip.getAttribute("data-verdict") as RadarRing;
     expect(ring).toBe("enter");
     expect(RING_COLOR[ring]).toBe(tip.dotFill);
-    // The two axes, P90, games, the small score and the solo share — label for label.
-    for (const label of ["Demand 24m", "Releases YoY", "P90 revenue", "Games", "Opp v2", "Singleplayer share"]) {
+    // The two axes, the top-10% revenue, the score and the singleplayer share — label for
+    // label, under the glossary's plain names.
+    for (const label of [
+      DOSSIER_LABEL.demand,
+      DOSSIER_LABEL.releases,
+      DOSSIER_LABEL.p90,
+      DOSSIER_LABEL.opportunity,
+      DOSSIER_LABEL.singleplayer,
+    ]) {
       expect(tip.rows[label], label).toBeTruthy();
-      expect(within(dossier).getByText(tip.rows[label]!), label).toBeTruthy();
+      expect(within(dossier).getAllByText(tip.rows[label]!).length, label).toBeGreaterThan(0);
     }
-    expect(tip.rows["Demand 24m"]).toBe("▲ +74.1%");
-    expect(tip.rows["Releases YoY"]).toBe("-7%");
-    expect(tip.rows["Opp v2"]).toBe("86.7");
+    // Games: the tooltip names the population ("86 · last 24 months · ≥50 reviews"); the tile
+    // prints the count and names the same population beside it.
+    expect(tip.rows[DOSSIER_LABEL.games]).toBe("86 · last 24 months · ≥50 reviews");
+    expect(within(dossier).getByText("86")).toBeTruthy();
+    expect(tip.rows[DOSSIER_LABEL.demand]).toBe("▲ +74.1%");
+    expect(tip.rows[DOSSIER_LABEL.releases]).toBe("-7%");
+    expect(tip.rows[DOSSIER_LABEL.opportunity]).toBe("86.7");
     // ...and the verdict's reason, in the board's words.
     expect(within(dossier).getByText("demand in structural growth, supply not flooding")).toBeTruthy();
     // On the board, so no absence line; and the link back selects this niche there.
@@ -1248,7 +1259,7 @@ describe("NicheDetail — the headline is the Radar's dossier", () => {
     stub(detailOf([radarListRow({ key: "Action RTS", solo_viability: 0.353 })]));
     renderNiche();
     const dossier = await screen.findByTestId("radar-dossier");
-    expect(within(dossier).getByText(/singleplayer share 0\.35 is under the 0\.8 solo-friendly bar/)).toBeTruthy();
+    expect(within(dossier).getByText(/singleplayer share 0\.35 is under the 0\.8 bar of the board's “Singleplayer only” filter/)).toBeTruthy();
     expect(within(dossier).getByText("0.35")).toBeTruthy(); // the tooltip's Singleplayer share row
     expect(within(dossier).getByRole("link", { name: "See on the Radar →" }).getAttribute("href")).toBe(
       "/radar?solo=off&niche=tag%3AAction+RTS",
@@ -1277,12 +1288,12 @@ describe("NicheDetail — the headline is the Radar's dossier", () => {
       reviews_24m_new_share: 0.9,
     });
     const tip = readRadarTooltip(row);
-    expect(tip.rows["Verdict"]).toBe("Emerging");
-    expect(tip.rows["Demand 24m"]).toBe(EMERGING_DEMAND_LABEL);
+    expect(tip.rows[DOSSIER_LABEL.verdict]).toBe("Emerging");
+    expect(tip.rows[DOSSIER_LABEL.demand]).toBe(EMERGING_DEMAND_LABEL);
     stub(detailOf([row]));
     renderNiche();
     const dossier = await screen.findByTestId("radar-dossier");
-    expect(within(dossier).getByTestId("radar-verdict-chip").textContent).toBe(tip.rows["Verdict"]);
+    expect(within(dossier).getByTestId("radar-verdict-chip").textContent).toBe(tip.rows[DOSSIER_LABEL.verdict]);
     expect(within(dossier).getByTitle(EMERGING_DEMAND_LABEL).textContent).toBe("emerging");
     expect(within(dossier).queryByText(/4775/)).toBeNull();
     expect(within(dossier).getByText(/120,000 reviews \/ 24m/)).toBeTruthy();

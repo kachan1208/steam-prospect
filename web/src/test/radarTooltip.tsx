@@ -2,9 +2,8 @@ import { useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
-import { RadarBoard, type RadarBoardBlip, type RadarRegion } from "../components/RadarBoard";
+import { RadarBoard, radarBlipFromRow, type RadarBoardBlip, type RadarRegion } from "../components/RadarBoard";
 import type { NicheRow } from "../lib/api";
-import { radarSector, radarVerdictTrace } from "../lib/radarVerdict";
 
 /**
  * THE PARITY ORACLE for the niche pages (2026-09-09). The user's complaint was that the
@@ -64,45 +63,12 @@ export function radarListRow(over: Partial<NicheRow> & { key: string }): NicheRo
   };
 }
 
-/** pages/Radar.tsx's `pool` mapping for one row — the same radarVerdictTrace call with the
- * same inputs, so the blip carries the ring the board would draw. */
+/** pages/Radar.tsx's `pool` mapping for one row — the SAME function (radarBlipFromRow), not
+ * a transcription of it, so the blip carries exactly the ring the board would draw. */
 export function radarBlipFor(row: NicheRow): RadarBoardBlip {
-  const sector = radarSector(row.dimension, row.tier);
-  if (!sector) throw new Error(`${row.dimension}:${row.key} has no Radar class — not a board row`);
-  const demandTrendPct = row.demand_trend_24m_pct ?? null;
-  const demandEmerging = row.demand_emerging === true;
-  const { checks, ...verdict } = radarVerdictTrace({
-    demand_trend_24m_pct: demandTrendPct,
-    demand_emerging: demandEmerging,
-    saturation_yoy: row.saturation_yoy,
-    winner_concentration: row.winner_concentration,
-    opportunity_v2: row.opportunity_v2,
-    entrant_ratio: row.entrant_ratio,
-    solo_viability: row.solo_viability ?? null,
-    self_published_share: row.self_published_share ?? null,
-    indie_share: row.indie_share ?? null,
-    med_playtime_h: row.med_playtime_h ?? null,
-    reviews_24m: row.reviews_24m ?? null,
-    reviews_prev_24m: row.reviews_prev_24m ?? null,
-    reviews_24m_new_share: row.reviews_24m_new_share ?? null,
-  });
-  return {
-    dimension: row.dimension,
-    key: row.key,
-    tier: row.tier,
-    sector,
-    n_games: row.n_games,
-    p90_rev: row.p90_rev ?? null,
-    opportunity_v2: row.opportunity_v2,
-    demandTrendPct,
-    saturationYoy: row.saturation_yoy,
-    demandEmerging,
-    reviews24m: row.reviews_24m ?? null,
-    reviewsPrev24m: row.reviews_prev_24m ?? null,
-    solo_viability: row.solo_viability ?? null,
-    verdict,
-    trace: checks,
-  };
+  const blip = radarBlipFromRow(row);
+  if (!blip) throw new Error(`${row.dimension}:${row.key} has no Radar class — not a board row`);
+  return blip;
 }
 
 function Harness({ blips }: { blips: RadarBoardBlip[] }) {

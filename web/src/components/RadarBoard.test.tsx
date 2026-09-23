@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import {
@@ -156,22 +156,44 @@ function renderBoard(
 afterEach(cleanup);
 
 describe("RadarBoard — population legend", () => {
-  it("soloOnly states the population rule with the honest metric name, and drops the lens samples", () => {
+  it("under the singleplayer lens it states the rule by its real name — and no hollow sample", () => {
     renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
-    const rule = screen.getByText(
-      new RegExp(`population: solo-friendly only · singleplayer share ≥ ${SOLO_FRIENDLY_MIN}`),
-    );
+    const rule = screen.getByTestId("radar-solo-population");
+    expect(rule.textContent).toContain("Singleplayer only");
+    expect(rule.textContent).toContain(`singleplayer share ≥ ${SOLO_FRIENDLY_MIN}`);
     expect(rule.textContent).toContain("unknown");
-    expect(rule.textContent).toContain("excluded");
-    // No hollow/team sample may imply team-scale niches could be present.
-    expect(screen.queryByText(/team-scale/)).toBeNull();
+    // No hollow sample may imply multiplayer-dependent niches could be present.
+    expect(screen.queryByText(/hollow = multiplayer-dependent/)).toBeNull();
+    // The old, over-promising name is gone.
+    expect(document.body.textContent).not.toMatch(/solo-friendly/i);
   });
 
-  it("with the toggle off the lens samples return (hollow = team-scale), still named honestly", () => {
+  it("states what the lens removed, in numbers, when the page passes the counts", () => {
+    render(
+      <MemoryRouter>
+        <RadarBoard
+          blips={[makeBlip("Roguelike Deckbuilder", REFERENCE)]}
+          pool={[makeBlip("Roguelike Deckbuilder", REFERENCE)]}
+          plotCap={1}
+          soloOnly
+          soloCounts={{ shown: 220, total: 228 }}
+          emphasis={null}
+          selectedId={null}
+          onSelect={() => {}}
+          zoom={null}
+          onZoom={() => {}}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("radar-solo-population").textContent).toBe(
+      "Singleplayer only: 220 of 228 niches kept — the other 8 have a singleplayer share under 0.8 (or unknown)",
+    );
+  });
+
+  it("with the lens off the hollow sample returns, named for what it marks", () => {
     renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], false);
-    expect(screen.getByText(new RegExp(`team-scale \\(< ${SOLO_FRIENDLY_MIN}\\)`))).toBeTruthy();
-    expect(screen.getByText(new RegExp(`singleplayer share ≥ ${SOLO_FRIENDLY_MIN}`))).toBeTruthy();
-    expect(screen.queryByText(/population: solo-friendly only/)).toBeNull();
+    expect(screen.getByText(new RegExp(`hollow = multiplayer-dependent \\(singleplayer share < ${SOLO_FRIENDLY_MIN}\\)`))).toBeTruthy();
+    expect(screen.queryByTestId("radar-solo-population")).toBeNull();
   });
 
   it("the metric is never labeled with the dishonest bare name", () => {
@@ -179,12 +201,25 @@ describe("RadarBoard — population legend", () => {
     expect(container.textContent).not.toMatch(/solo viability/i);
   });
 
-  it("the empty state names the population when solo-only", () => {
+  it("the empty state names the population when the lens is on", () => {
     renderBoard([], true);
-    expect(screen.getByText("No solo-friendly niches match this cut.")).toBeTruthy();
+    expect(screen.getByText("No singleplayer niches match this cut.")).toBeTruthy();
     cleanup();
     renderBoard([], false);
     expect(screen.getByText("No niches match this cut.")).toBeTruthy();
+  });
+
+  it("the legend is two short lines; the long reading guide sits behind an ⓘ", () => {
+    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    const legend = screen.getByTestId("radar-legend");
+    expect(legend.textContent).toContain("dot size = top-10% revenue");
+    expect(legend.textContent).toContain("number = the niche’s row in the list");
+    // The old paragraph ("nothing clamps here…", "the Class control emphasises…") is not
+    // printed under the dial any more — it is one tap away.
+    expect(legend.textContent).not.toContain("nothing clamps here");
+    const tip = screen.getByRole("button", { name: "How to read the board" });
+    fireEvent.click(tip);
+    expect(screen.getByRole("tooltip").textContent).toContain("Nothing clamps");
   });
 });
 
@@ -198,25 +233,63 @@ describe("RadarBoard — verdict dossier (rail selection mode)", () => {
     // The one-line verdict sentence — the ring is explained, not just asserted.
     expect(dossier.textContent).toContain("Watch");
     expect(dossier.textContent).toContain("demand surging, but supply flooding");
-    // The trace rows: the niche's own numbers next to the bars they were judged against.
-    expect(dossier.textContent).toContain("Demand");
-    expect(dossier.textContent).toContain("+196.0% / 24m");
-    expect(dossier.textContent).toContain("bar ≥ +40.0% / 24m to enter");
-    expect(dossier.textContent).toContain("+40.9% releases YoY");
+    // The trace rows: the niche's own numbers next to the bars they were judged against,
+    // under the glossary's plain names.
+    expect(dossier.textContent).toContain("Demand trend, 24 months");
+    expect(dossier.textContent).toContain("+196.0%");
+    expect(dossier.textContent).toContain("bar ≥ +40.0% to enter");
+    expect(dossier.textContent).toContain("Releases, year over year");
+    expect(dossier.textContent).toContain("+40.9%");
     expect(dossier.textContent).toContain("supply flooding — vetoes enter");
     // The falsification tells, labeled as context (they never move the ring).
-    expect(dossier.textContent).toContain("Newcomer economics · context");
+    expect(dossier.textContent).toContain("Newcomer earnings · context");
     expect(dossier.textContent).toContain("16% below the niche median");
     expect(dossier.textContent).toContain("a hair under the winner-take-most bar");
-    // The solo lens row keeps the raw score visible, under the honest metric name.
-    expect(dossier.textContent).toContain("Solo evidence · context");
+    // The singleplayer lens row keeps the raw share visible, under its honest name.
+    expect(dossier.textContent).toContain("Singleplayer share · context");
     expect(dossier.textContent).toContain("0.99 singleplayer");
-    expect(dossier.textContent).toContain(`bar ≥ ${SOLO_FRIENDLY_MIN} singleplayer share`);
-    // Raw context numbers + the deep-dive link.
-    expect(dossier.textContent).toContain("reviews 24m 604,000");
-    expect(dossier.textContent).toContain("prior 24m 204,700");
+    expect(dossier.textContent).toContain(`bar ≥ ${SOLO_FRIENDLY_MIN}; below is multiplayer-dependent`);
+    // No retired jargon anywhere in the panel.
+    expect(dossier.textContent).not.toMatch(/opp v2|P90|Newcomer economics|Solo evidence/i);
+    // Plain-worded context numbers, each count with its population, + the deep-dive link.
+    expect(dossier.textContent).toContain("604,000 reviews in the last 24 months vs 204,700 in the 24 before");
     const link = screen.getByRole("link", { name: /open deep dive/i });
     expect(link.getAttribute("href")).toContain("Roguelike");
+  });
+
+  it("every check carries an ⓘ with its formula and this niche's own numbers", async () => {
+    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    fireEvent.click(screen.getByTestId("radar-blip-tag:Roguelike Deckbuilder"));
+    // Lazily loaded (the glossary stays out of the entry chunk) — so find, not get.
+    const tip = await screen.findByRole("button", { name: "About Demand trend, 24 months" });
+    fireEvent.click(tip);
+    const panel = screen.getByRole("tooltip");
+    expect(panel.textContent).toContain("Formula");
+    // (604,000 − 204,700) ÷ 204,700 = +195.1% ≠ the served +196.0% — the fixture's rounded
+    // counts don't reproduce it, so NO worked line is printed rather than a wrong one.
+    expect(panel.textContent).not.toContain("With these numbers");
+  });
+
+  it("shows the Opportunity score WITH its parts in the dossier — never alone", async () => {
+    const row = makeBlip("Roguelike Deckbuilder", REFERENCE, {
+      opp: {
+        opportunity_v2: 71.2,
+        momentum: 96.4,
+        market_pull: 60.1,
+        revenue_spread: 54.7,
+        quality_gap: 44.1,
+        supply_room: 60,
+        supply_brake: 0.74,
+      },
+    });
+    renderBoard([row], true);
+    fireEvent.click(screen.getByTestId("radar-blip-tag:Roguelike Deckbuilder"));
+    const block = screen.getByTestId("dossier-opportunity");
+    expect(block.textContent).toContain("Opportunity score");
+    const compact = await within(block).findByTestId("opportunity-breakdown-compact");
+    expect(compact.textContent).toContain("Opportunity score 71.2");
+    expect(compact.textContent).toContain("Momentum 96.4");
+    expect(compact.textContent).toContain("supply brake ×0.74");
   });
 
   it("clicking a rail row opens the same dossier (rows and dots share the selection)", () => {
@@ -282,8 +355,9 @@ describe("RadarBoard — verdict dossier (rail selection mode)", () => {
     fireEvent.click(screen.getByTestId("radar-blip-tag:Organizing"));
     const dossier = screen.getByTestId("verdict-dossier");
     expect(dossier.textContent).toContain("Emerging");
-    expect(dossier.textContent).toContain("39.6K reviews / 24m");
-    expect(dossier.textContent).toContain("94% from games ≤ 24m old");
+    expect(dossier.textContent).toContain("Reviews, last 24 months");
+    expect(dossier.textContent).toContain("39.6K reviews");
+    expect(dossier.textContent).toContain("94% from games ≤ 24 months old");
     // A young tag's % has no comparable base — it must not appear anywhere in the panel.
     expect(dossier.textContent).not.toContain("4850");
     expect(dossier.textContent).not.toContain("4,850");
@@ -305,7 +379,8 @@ describe("RadarBoard — click-target hygiene (A4)", () => {
   it("the legend sample circles are aria-hidden glyphs, not click targets", () => {
     const { container } = renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], false);
     const sampleSvgs = Array.from(container.querySelectorAll("div svg[aria-hidden]")).filter(
-      (s) => s.getAttribute("width") !== null, // the tiny inline legend glyphs
+      // The tiny inline legend glyphs — not the ⓘ triggers' icons, which are buttons by design.
+      (s) => s.getAttribute("width") !== null && s.closest("button") === null,
     );
     expect(sampleSvgs.length).toBeGreaterThan(0);
     for (const svg of sampleSvgs) {
@@ -608,16 +683,57 @@ describe("RadarBoard — the concentric-ring dial", () => {
 
   it("the legend states the ring reading honestly and keeps the verdict hue key", () => {
     renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
-    expect(screen.getByText(/ring = the verdict, best in the middle/)).toBeTruthy();
-    expect(screen.getByText(/nearer the centre = higher opportunity v2/)).toBeTruthy();
-    expect(screen.getByText(/nothing clamps here: a ring board has no axis to fall off/)).toBeTruthy();
-    // The two new claims of the three-sector rebuild, said where the reader is looking.
-    expect(screen.getByText(/the three sectors are the niche classes/)).toBeTruthy();
-    expect(screen.getByText(/emphasises a sector, it never empties the board/)).toBeTruthy();
-    // Every hue is still doubled by its word, inner ring named as such.
+    // Every hue is still doubled by its word, inner ring named as such, read centre-out.
     const key = screen.getByTestId("verdict-color-key");
+    expect(key.textContent).toContain("Rings, from the centre out:");
     expect(key.textContent).toContain("Enter now (inner ring)");
     expect(key.textContent).toContain("Declining (outer)");
+    // The rest of the reading — sectors, rank inside a band, no clamping, the emphasis
+    // control — is one tap away behind the legend's ⓘ, in plain words.
+    fireEvent.click(screen.getByRole("button", { name: "How to read the board" }));
+    const guide = screen.getByRole("tooltip").textContent ?? "";
+    expect(guide).toContain("The RING is the verdict, best in the middle");
+    expect(guide).toContain("The three SECTORS are the niche classes");
+    expect(guide).toContain("it never empties the board");
+    expect(guide).toContain("nearer the centre = a higher Opportunity score");
+    expect(guide).toContain("Nothing clamps: a ring board has no axis to fall off");
+    expect(guide).not.toMatch(/opp v2|P90/i);
+  });
+
+  it("names the list's columns: the demand figure and the M / T / G class letters", () => {
+    renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+    const cols = screen.getByTestId("radar-rail-columns");
+    expect(cols.textContent).toContain("Demand, 24 months");
+    expect(cols.textContent).toContain("M micro-genre");
+    expect(cols.textContent).toContain("T theme");
+    expect(cols.textContent).toContain("G genre");
+  });
+
+  it("gives every dot a ≥ 24px tap target on a touch screen — and none with a mouse", () => {
+    const original = window.matchMedia;
+    try {
+      // Mouse (the setup's matchMedia answers false for (pointer: coarse)): exact dot edges.
+      renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+      expect(screen.queryByTestId("radar-touch-targets")).toBeNull();
+      cleanup();
+      // A finger.
+      window.matchMedia = ((q: string) => {
+        const mql = original(q);
+        if (!q.includes("pointer: coarse")) return mql;
+        return { ...mql, matches: true, media: q, addEventListener: () => {}, removeEventListener: () => {} } as MediaQueryList;
+      }) as typeof window.matchMedia;
+      renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
+      const hit = screen.getByTestId("radar-blip-touch-tag:Roguelike Deckbuilder");
+      expect(Number(hit.getAttribute("r"))).toBeGreaterThanOrEqual(12); // 1 viewBox unit = 1 CSS px
+      // Below the visible dots, above the ring hit areas: a tap beside a dot opens the dot.
+      const dot = screen.getByTestId("radar-blip-tag:Roguelike Deckbuilder");
+      expect(hit.compareDocumentPosition(dot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(screen.getByTestId("radar-regions").compareDocumentPosition(hit) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      fireEvent.click(hit);
+      expect(screen.getByTestId("verdict-dossier")).toBeTruthy();
+    } finally {
+      window.matchMedia = original;
+    }
   });
 });
 
@@ -819,7 +935,7 @@ describe("RadarBoard — dossier stays in view at every width (drawer below lg)"
     expect(drawer.getAttribute("aria-modal")).toBe("true");
     // Same DossierBody as the rail pane — verdict sentence, a trace row, the deep dive.
     expect(drawer.textContent).toContain("demand surging, but supply flooding");
-    expect(drawer.textContent).toContain("Solo evidence · context");
+    expect(drawer.textContent).toContain("Singleplayer share · context");
     expect(screen.getByRole("link", { name: /open deep dive/i })).toBeTruthy();
     // The rail list stays where it was (behind the backdrop) — the drawer replaces
     // nothing, so closing lands the user exactly where they were.
@@ -1253,7 +1369,7 @@ describe("RadarBoard — the deep dive is a primary button", () => {
     const cta = open();
     const dossier = screen.getByTestId("verdict-dossier");
     const context = Array.from(dossier.querySelectorAll("span")).find((s) =>
-      (s.textContent ?? "").startsWith("reviews 24m"),
+      (s.textContent ?? "").startsWith("604,000 reviews in the last 24 months"),
     )!;
     expect(cta.compareDocumentPosition(context) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });

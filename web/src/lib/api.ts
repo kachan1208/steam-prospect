@@ -232,6 +232,11 @@ export interface HistBucket {
   x_min: number;
   x_max: number;
   count: number;
+  /** The lowest bucket of a LOG histogram, whose lower edge is a floor sentinel: the marts
+   * bin GREATEST(v, 1), so everything under 1 — $0 revenue, 0 players — is clamped into it
+   * and x_min is served as 0. Read it as "< x_max (incl. 0)", never as "x_min – x_max".
+   * Absent on APIs older than the flag. */
+  floored?: boolean;
 }
 
 // ---- health -----------------------------------------------------------------------------
@@ -351,6 +356,16 @@ export interface NicheRow {
   // instead; see lib/radarVerdict.ts). The trend itself stays served un-suppressed.
   reviews_24m_new_share?: number | null; // share of reviews_24m from games released in the last 24 months
   demand_emerging?: boolean | null;
+  // Gated on the ETL rebuild (absent/null until the mart carries each column):
+  // how many of the cut's n_games are free-to-play / have no known price — free and
+  // unknown-price revenue is NULL (not $0) in that mart, so the revenue medians/percentiles
+  // describe the PRICED games only and these say how many were left out.
+  n_free?: number | null;
+  n_price_unknown?: number | null;
+  // The whole Steam panel's 7-day player change over the same days, and the niche's
+  // players_trend_7d_pct minus it, in percentage points — read the trend against the market.
+  players_trend_7d_market_pct?: number | null;
+  players_trend_7d_rel_pct?: number | null;
 }
 
 export interface NicheList {
@@ -358,7 +373,14 @@ export interface NicheList {
   total: number;
   limit: number;
   offset: number;
+  /** When the owners estimates were taken (SteamSpy snapshot); absent/null until the mart
+   * stamps it. */
+  owners_as_of?: string | null;
 }
+
+/** Population scope for the niche game lists (API `scope`): "indie" = Steam's Indie-flagged
+ * games only (unknown flags are left out and counted in n_scope_unknown). */
+export type NicheScope = "all" | "indie";
 
 export interface NicheListParams {
   dimension: Dimension;
@@ -377,12 +399,13 @@ export interface NicheListParams {
   offset: number;
 }
 
-export function useNiches(params: NicheListParams) {
+export function useNiches(params: NicheListParams, opts: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: ["niches", params],
     queryFn: ({ signal }) => request<NicheList>(`/niches${qs(params)}`, { signal }),
     placeholderData: keepPreviousData,
     staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
+    enabled: opts.enabled ?? true,
   });
 }
 
@@ -441,6 +464,10 @@ export interface NichePlayersDistribution {
 export interface NichePlayers {
   total_players_now: number | null;
   players_trend_7d_pct: number | null;
+  /** Market-relative reading of players_trend_7d_pct (see NicheRow) — null until the mart
+   * carries it. */
+  players_trend_7d_market_pct?: number | null;
+  players_trend_7d_rel_pct?: number | null;
   players_coverage: number | null;
   n_games_panel: number | null;
   series: NichePlayersPoint[];
@@ -486,9 +513,28 @@ export interface NicheHitRates {
   winner_concentration: number | null;
 }
 
+/** Which cut NicheDetail's `hit_rates` were read from. The headline cut is all-time × ≥50
+ * reviews; a niche too small to have it falls back (all/100, then all/0 …) and `fallback`
+ * says so — the numbers then describe a different population and must be labelled so. */
+export interface NicheHeadlineCut {
+  window: string;
+  min_reviews: number;
+  fallback: boolean;
+}
+
 export interface NicheDetail {
   dimension: string;
+  /** The key SERVED — the canonical one when the URL used an old tag spelling. */
   key: string;
+  /** Tag aliases (optional: APIs older than the alias table don't send them). alias_of is
+   * non-null ONLY when the URL's key was an alias; the page then replaces its URL with the
+   * canonical key. */
+  canonical_key?: string;
+  requested_key?: string;
+  alias_of?: string | null;
+  hit_rates_cut?: NicheHeadlineCut;
+  /** When the owners figures were taken (SteamSpy snapshot), when the mart stamps it. */
+  owners_as_of?: string | null;
   tier: string | null;
   variants: NicheRow[];
   saturation_trend: TrendPoint[];
@@ -564,6 +610,16 @@ export interface NicheGamesList {
   items: NicheGameRow[];
   limit: number;
   offset: number;
+  /** The scope the API APPLIED. Absent on an API that predates `scope` — it then ignored the
+   * param and served every game, which the page must say instead of calling them indie. */
+  scope?: NicheScope;
+  /** Under scope=indie: members matching everything else whose indie flag is UNKNOWN, left
+   * out (unknown is not indie). null under scope=all. */
+  n_scope_unknown?: number | null;
+  canonical_key?: string;
+  requested_key?: string;
+  alias_of?: string | null;
+  owners_as_of?: string | null;
 }
 
 /** Mirrors the API's sortable whitelist (routers/niches.py `_GAME_SORT`). These are the
@@ -584,6 +640,8 @@ export interface NicheGamesParams {
   rev_max?: number;
   price_min?: number;
   price_max?: number;
+  /** Population scope; omitted = the API default (all). */
+  scope?: NicheScope;
 }
 
 /** A fetch aborted by react-query's cancellation signal. It is not a failure: the query has
@@ -678,6 +736,8 @@ export interface NicheDistributionResponse {
   /** "mart" = served from the precomputed mart_niche_hist (the only cut that works before a
    * rebuild), "computed" = derived from mart_niche_game. Informational. */
   source?: "mart" | "computed";
+  /** The scope applied; absent on an API that predates `scope` (it served all games). */
+  scope?: NicheScope;
 }
 
 /** One bucketed distribution (revenue or price) over the niche's games — the source for the
@@ -687,7 +747,7 @@ export function useNicheDistribution(
   dimension: Dimension,
   key: string | null,
   metric: NicheDistributionMetric,
-  params: { win: Window; min_reviews: number },
+  params: { win: Window; min_reviews: number; scope?: NicheScope },
 ) {
   return useQuery({
     queryKey: ["niche-distribution", dimension, key, metric, params],
@@ -1796,11 +1856,15 @@ export function useAspectReviews(
 export type NicheCombineMode = "intersect" | "union";
 
 /** Per-niche input echo: the niche's OWN size in the same cut, so the UI can show the
- * drop (8,000 and 3,000 → 40) that is the whole point of combining. */
+ * drop (8,000 and 3,000 → 40) that is the whole point of combining. `key` is the CANONICAL
+ * key served; `requested_key` is the key as sent and `alias_of` is set only when that was an
+ * old tag spelling (both optional: older APIs don't send them). */
 export interface NicheCombinedPerNiche {
   dimension: string;
   key: string;
   n_games: number | null;
+  requested_key?: string | null;
+  alias_of?: string | null;
 }
 
 /** A member game of the combination (the API's NicheGameRow). `est_revenue` and
@@ -1827,11 +1891,10 @@ export interface NicheCombined {
   p75_rev: number | null;
   p90_rev: number | null;
   median_price: number | null;
-  /** Each requested niche's own size in the same cut. The API calls this `inputs`; the
-   * originally-specced name was `per_niche` — both are accepted so a rename on either
-   * side degrades to "sizes unknown" instead of a crash. */
+  /** Each requested niche's own size in the same cut (routers/niches.py NicheCombined
+   * `inputs`). The originally-specced `per_niche` name and the `degraded` / `note` fields
+   * were never sent by the API and are no longer read (2026-09-23). */
   inputs?: NicheCombinedPerNiche[];
-  per_niche?: NicheCombinedPerNiche[];
   items: NicheCombinedGame[];
   /** Echoed back by the API; the UI trusts its own request when absent. */
   mode?: NicheCombineMode;
@@ -1841,9 +1904,15 @@ export interface NicheCombined {
   total?: number | null;
   limit?: number | null;
   offset?: number | null;
-  /** Set by the API when it answered from an incomplete mart — the numbers above are not
-   * trustworthy yet and the UI must say so instead of charting them. */
+  /** The scope applied (absent on an API that predates `scope`), and under scope=indie how
+   * many games of the unscoped combination were left out for an unknown indie flag. */
+  scope?: NicheScope;
+  n_scope_unknown?: number | null;
+  /** @deprecated never sent by the API — removed with NicheCombined's reads of them. */
+  per_niche?: NicheCombinedPerNiche[];
+  /** @deprecated never sent by the API. */
   degraded?: boolean;
+  /** @deprecated never sent by the API. */
   note?: string | null;
 }
 
@@ -1858,6 +1927,8 @@ export interface NicheCombinedParams {
   order?: "asc" | "desc";
   limit?: number;
   offset?: number;
+  /** Population scope; omitted = the API default (all). */
+  scope?: NicheScope;
 }
 
 /** `qs()` can't express a repeated key, so the combined query string is built here. */
@@ -1871,6 +1942,7 @@ function combinedQs(p: NicheCombinedParams): string {
   if (p.order) sp.set("order", p.order);
   if (p.limit != null) sp.set("limit", String(p.limit));
   if (p.offset) sp.set("offset", String(p.offset));
+  if (p.scope) sp.set("scope", p.scope);
   return `?${sp.toString()}`;
 }
 

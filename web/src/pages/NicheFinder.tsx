@@ -583,7 +583,7 @@ export default function NicheFinder() {
         // The small rank number and nothing else (2026-09-09): no 17px display numeral, no
         // "strong" tint, no "×0.96" brake suffix, no blend formula in the hover. The score
         // is the table's order; the verdict two cells left is the headline, as on the board.
-        cell: (info) => <span className="tabular text-ink-secondary">{radarDossier(info.row.original).oppV2}</span>,
+        cell: (info) => <span className="tabular text-ink-secondary">{radarDossier(info.row.original).opportunity}</span>,
       }),
       columnHelper.accessor("players_trend_7d_pct", {
         header: () => (

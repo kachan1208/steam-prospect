@@ -801,7 +801,7 @@ export default function NicheDetail() {
           <span className="text-[13px] text-ink-secondary">{dossier.verdict.reason}</span>
           {/* Opp v2 is the small rank number the board's tooltip shows — nothing more. */}
           <span className="tabular ml-auto text-[12px] text-ink-muted">
-            Opp v2 <span className="text-ink-primary">{dossier.oppV2}</span> · Singleplayer share{" "}
+            Opp v2 <span className="text-ink-primary">{dossier.opportunity}</span> · Singleplayer share{" "}
             <span className="text-ink-primary">{dossier.singleplayerShare}</span>
           </span>
           <Link to={radarHref} className="text-[12px] font-medium text-brand transition-colors hover:text-brand-hover">

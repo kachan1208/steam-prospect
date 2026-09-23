@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import NicheFinder from "./NicheFinder";
 import { parseCombineMode, parseNicheSelection } from "../lib/nicheSelection";
-import { RING_COLOR } from "../lib/radarVerdict";
+import { DOSSIER_LABEL, RING_COLOR } from "../lib/radarVerdict";
 import { ThemeProvider } from "../lib/theme";
 import { radarListRow, readRadarTooltip } from "../test/radarTooltip";
 
@@ -433,7 +433,7 @@ describe("NicheFinder — ranked and labelled as on the Radar", () => {
       opportunity_v2: 42.5,
     });
     const tip = readRadarTooltip(row);
-    expect(tip.rows["Verdict"]).toBe("Watch");
+    expect(tip.rows[DOSSIER_LABEL.verdict]).toBe("Watch");
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -445,15 +445,15 @@ describe("NicheFinder — ranked and labelled as on the Radar", () => {
     renderFinder();
     await screen.findByText("Massively Multiplayer");
 
-    const verdictCell = screen.getByText(tip.rows["Verdict"]!).closest("[data-verdict]")!;
+    const verdictCell = screen.getByText(tip.rows[DOSSIER_LABEL.verdict]!).closest("[data-verdict]")!;
     expect(verdictCell.getAttribute("data-verdict")).toBe("watch");
     expect(RING_COLOR.watch).toBe(tip.dotFill);
-    expect(screen.getByText(tip.rows["Demand 24m"]!)).toBeTruthy();
-    expect(tip.rows["Demand 24m"]).toBe("▼ −12.3%");
-    expect(screen.getByText(tip.rows["Releases YoY"]!)).toBeTruthy();
-    expect(tip.rows["Releases YoY"]).toBe("+2%");
-    expect(screen.getByText(tip.rows["Opp v2"]!)).toBeTruthy();
-    expect(tip.rows["Opp v2"]).toBe("42.5");
+    expect(screen.getByText(tip.rows[DOSSIER_LABEL.demand]!)).toBeTruthy();
+    expect(tip.rows[DOSSIER_LABEL.demand]).toBe("▼ −12.3%");
+    expect(screen.getByText(tip.rows[DOSSIER_LABEL.releases]!)).toBeTruthy();
+    expect(tip.rows[DOSSIER_LABEL.releases]).toBe("+2%");
+    expect(screen.getByText(tip.rows[DOSSIER_LABEL.opportunity]!)).toBeTruthy();
+    expect(tip.rows[DOSSIER_LABEL.opportunity]).toBe("42.5");
   });
 
   it("sorts by the board's axes through the URL — the same contract as every other column", async () => {

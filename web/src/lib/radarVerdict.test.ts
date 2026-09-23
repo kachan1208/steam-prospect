@@ -18,13 +18,72 @@ import {
   SOLO_MIXED_MIN,
   WC_WINNER_TAKE_MOST,
   blipRadius,
+  demandTrendWorked,
+  failedCheckClause,
+  failedChecks,
   hash01,
   hashString,
   radarVerdict,
   radarVerdictTrace,
+  releasesYoyWorked,
   soloBucket,
   type RadarVerdictInput,
 } from "./radarVerdict";
+import { isGlossaryKey } from "./glossary";
+
+describe("radarVerdictTrace — every check explains itself in place (2026-09-23)", () => {
+  // Souls-like, 24m × ≥50, 2026-09-21 mart: the review counts and release counts the served
+  // percentages were computed from.
+  const souls: RadarVerdictInput = {
+    demand_trend_24m_pct: 49.5,
+    reviews_24m: 3_251_623,
+    reviews_prev_24m: 2_174_576,
+    saturation_yoy: 0.01466275659824047,
+    n_recent_year: 346,
+    n_prior_year: 341,
+    winner_concentration: 0.8836863248263784,
+    entrant_ratio: 1.4146,
+    solo_viability: 0.9779735682819384,
+    n_games: 227,
+  };
+
+  it("every check names a real glossary entry for its ⓘ", () => {
+    for (const input of [souls, {}, { demand_emerging: true, reviews_24m: 39_600 }] as RadarVerdictInput[]) {
+      for (const c of radarVerdictTrace(input).checks) expect(isGlossaryKey(c.term), `${c.id} -> ${c.term}`).toBe(true);
+    }
+  });
+
+  it("works the row's own numbers through each formula", () => {
+    const by = Object.fromEntries(radarVerdictTrace(souls).checks.map((c) => [c.id, c]));
+    expect(by.demand.worked).toBe("(3,251,623 − 2,174,576) ÷ 2,174,576 = +49.5%");
+    expect(by.supply.worked).toBe("(346 − 341) ÷ 341 = +1.5%");
+    expect(by.concentration.worked).toBe("the top 5% of games hold 88.4% of the cut's Est. revenue");
+    expect(by.solo.worked).toBe("≈ 222 of 227 games playable single-player = 0.98");
+    // No inputs on the row for the two medians behind newcomer earnings: no worked line,
+    // never an invented one.
+    expect(by.entrants.worked).toBeNull();
+  });
+
+  it("prints a worked line only when it reproduces the served value", () => {
+    expect(demandTrendWorked(3_251_623, 2_174_576, 49.5)).not.toBeNull();
+    expect(demandTrendWorked(3_251_623, 2_174_576, 60)).toBeNull(); // inputs from another build
+    expect(demandTrendWorked(null, 2_174_576, 49.5)).toBeNull();
+    expect(demandTrendWorked(100, 0, 49.5)).toBeNull(); // no base: no division
+    expect(releasesYoyWorked(346, 341, 0.0147)).toBe("(346 − 341) ÷ 341 = +1.5%");
+    expect(releasesYoyWorked(346, 341, 0.2)).toBeNull();
+    expect(releasesYoyWorked(346, null, 0.0147)).toBeNull();
+  });
+
+  it("names every failed check, deciding ones first", () => {
+    // Winner-take-most AND underearning newcomers: the veto first, the warning sign after.
+    const t = radarVerdictTrace({ ...souls, entrant_ratio: 0.84 });
+    const failed = failedChecks(t.checks);
+    expect(failed.map((c) => c.id)).toEqual(["concentration", "entrants"]);
+    expect(failedCheckClause(failed[0])).toBe("Top-5% revenue share 88.4% (bar ≤ 85%; above is winner-take-most)");
+    // A clean enter has nothing to name.
+    expect(failedChecks(radarVerdictTrace({ demand_trend_24m_pct: 60, saturation_yoy: 0.05, winner_concentration: 0.5 }).checks)).toEqual([]);
+  });
+});
 
 describe("radarVerdict — 24-month threshold pins", () => {
   // The bars are set for a 24-MONTH read (last 24 complete months vs the prior 24) — the
@@ -317,10 +376,12 @@ describe("radarVerdictTrace — the dossier decomposition", () => {
     expect(t.reason).toBe("demand surging, but supply flooding");
     const by = Object.fromEntries(t.checks.map((c) => [c.id, c]));
     expect(by.demand.pass).toBe(true); // +196% clears the ≥ +40% bar
-    expect(by.demand.value).toBe("+196.0% / 24m");
+    expect(by.demand.value).toBe("+196.0%");
+    expect(by.demand.label).toBe("Demand trend, 24 months");
     expect(by.demand.note).toContain("204.7K"); // the base rides along
     expect(by.supply.pass).toBe(false); // +40.9% YoY > +15% — flooding
-    expect(by.supply.value).toBe("+40.9% releases YoY");
+    expect(by.supply.value).toBe("+40.9%");
+    expect(by.supply.label).toBe("Releases, year over year");
     expect(by.concentration.pass).toBe(true); // 0.836 ≤ 0.85 …
     expect(by.concentration.note).toContain("hair"); // … but only just
     expect(by.entrants.pass).toBe(false); // 0.843 < 1.0 — entrants underearn
@@ -430,9 +491,9 @@ describe("radarVerdictTrace — the solo row's member evidence", () => {
 
   it("renders the evidence inline in the exact dossier format", () => {
     const row = soloRow(soulsLike);
-    expect(row.label).toBe("Solo evidence");
+    expect(row.label).toBe("Singleplayer share");
     expect(row.value).toBe("0.98 singleplayer · 50% self-pub · 71% indie · median 5.7h content");
-    expect(row.threshold).toBe(`≥ ${SOLO_FRIENDLY_MIN} singleplayer share`);
+    expect(row.threshold).toBe(`≥ ${SOLO_FRIENDLY_MIN}; below is multiplayer-dependent`);
     // The pass bar stays on the singleplayer share alone, exactly as before.
     expect(row.pass).toBe(true);
     expect(row.decides).toBe(false);

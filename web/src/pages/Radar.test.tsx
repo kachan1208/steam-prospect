@@ -124,6 +124,75 @@ function fetchMock(genres: unknown[], tags: unknown[]) {
   );
 }
 
+describe("Radar — the first 30 seconds (2026-09-23 review)", () => {
+  it("asks the question the board answers, says how to read it, and links the guide", async () => {
+    renderRadar();
+    await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Which niches are worth building in right now?");
+    const how = screen.getByTestId("radar-how-to-read");
+    expect(how.textContent).toContain("The closer to the centre, the stronger the case");
+    expect(how.textContent).toContain("last 24 months of games with 50+ reviews");
+    expect(screen.getByRole("link", { name: "How to read the Radar →" }).getAttribute("href")).toBe("/docs#radar");
+    // The old instrument kicker is gone.
+    expect(screen.queryByText(/Verdict rings · best in the middle · three class sectors/)).toBeNull();
+  });
+
+  it("shows the Start here path above the board", async () => {
+    localStorage.removeItem("prospect.startHere.dismissed.v1");
+    renderRadar();
+    const start = await screen.findByTestId("start-here");
+    const board = await screen.findByTestId("radar-rail-list");
+    expect(start.compareDocumentPosition(board) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+describe("Radar — the singleplayer lens, named for what it does", () => {
+  // One multiplayer-dependent tag (Party Game 0.50) and one with no reading at all.
+  const TAGS_WITH_MP = [
+    ...TAGS,
+    { ...row("tag", "Party Game", "micro", 50, 0.05, 90), solo_viability: 0.5 },
+    { ...row("tag", "Unknown Share", "micro", 50, 0.05, 88), solo_viability: null },
+  ];
+
+  it("hides the multiplayer-dependent niches client-side and says how many it removed", async () => {
+    fetchMock(GENRES, TAGS_WITH_MP);
+    renderRadar();
+    await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder");
+    expect(screen.queryByTestId("radar-row-tag:Party Game")).toBeNull();
+    expect(screen.queryByTestId("radar-row-tag:Unknown Share")).toBeNull();
+    expect(screen.getByTestId("radar-solo-population").textContent).toContain("6 of 8 niches kept — the other 2");
+    // The control carries the honest name and an ⓘ with the rule and this cut's numbers.
+    expect(screen.getByText("Singleplayer only")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "About Singleplayer only" }));
+    const tip = screen.getByRole("tooltip").textContent ?? "";
+    expect(tip).toContain("singleplayer share ≥ 0.8");
+    expect(tip).toContain("6 of 8 niches kept, 2 hidden");
+  });
+
+  it("switching the lens off shows them without refetching — the whole population is already here", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const items = url.includes("dimension=genre") ? GENRES : url.includes("dimension=tag") ? TAGS_WITH_MP : [];
+      return new Response(JSON.stringify({ items, total: items.length, limit: 500, offset: 0 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    renderRadar();
+    await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder");
+    const before = fetchSpy.mock.calls.length;
+    // The population is fetched once, without the API's solo_only filter.
+    for (const [u] of fetchSpy.mock.calls) expect(String(u)).not.toContain("solo_only");
+
+    fireEvent.click(screen.getByRole("button", { name: "Off" }));
+    expect(await screen.findByTestId("radar-row-tag:Party Game")).toBeTruthy();
+    expect(screen.getByTestId("radar-row-tag:Unknown Share")).toBeTruthy();
+    expect(fetchSpy.mock.calls.length).toBe(before);
+    expect(url()).toContain("solo=off");
+  });
+});
+
 describe("Radar — class sectors and the emphasis control", () => {
   it("plots EVERY class on one board and defaults the emphasis to Micro-genres", async () => {
     renderRadar();
