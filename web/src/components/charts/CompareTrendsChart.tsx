@@ -3,6 +3,7 @@ import {
   Line,
   LineChart,
   ReferenceArea,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -10,20 +11,36 @@ import {
 } from "recharts";
 
 import { errorMessage, useGameTrendsWithComps, type GameTrendPoint } from "../../lib/api";
+import { alignByLaunch, completeMonths, periodLabel } from "../../lib/compareTrends";
 import { axisScale, fmtCompact } from "../../lib/format";
+import type { LaunchAnchor } from "../../lib/lifecycle";
 import { compareSeries, type CompareSeriesShape, type CompareSeriesStyle } from "../../lib/palette";
 import { RetryButton } from "../ui/ErrorState";
 import { useDragZoom } from "../../lib/useDragZoom";
 import { SELECTION_AREA_PROPS, ZoomFrame } from "./ZoomFrame";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
 
+/** How the x-axis lines the games up. */
+export type CompareAlign = "calendar" | "launch";
+
 /**
- * Compare-page trends overlay: monthly sampled-review velocity, one line per compared
- * game. Fetched as ONE request — game 1 is the primary and the rest ride the trends
+ * Compare-page trends overlay: MONTHLY REVIEWS from Steam's own per-game review histogram —
+ * each game's full history, uncapped, NOT our recency-biased review sample (this chart's
+ * caption said "sampled … undercounts older hits" until 2026-09-23, which was never true of
+ * this series: Hollow Knight's histogram holds 531,566 of its 562,038 reviews). One line per
+ * compared game. Fetched as ONE request — game 1 is the primary and the rest ride the trends
  * endpoint's ?comps= overlay (GET /api/games/{appid}/trends?comps=…). The single-game
  * trends chart never spoke `comps` (and is gone since 2026-09-19), so this is
  * a purpose-built multi-series line using the house chart tokens: gridline/baseline vars,
  * TooltipPanel, neutral-ink legend labels with color only on the marks.
+ *
+ * TWO ALIGNMENTS (2026-09-23): the calendar (what happened when), or "since launch" — x =
+ * months since each game's launch month (its first public date when the mart has one, else
+ * its release date), so a 2017 hit and a 2024 hit compare launch-for-launch, which is the
+ * question mockup 4d's "first 12 weeks" panel was really asking.
+ *
+ * The data's current month is left out: it is only partly over, so every line dived at the
+ * right edge — a "collapse" that was just the calendar.
  *
  * Series identity is COLOUR + DASH + MARKER SHAPE, from lib/palette.ts COMPARE_SERIES
  * (which carries the contrast arithmetic and the reason the mono ramp was withdrawn from
@@ -107,8 +124,11 @@ export function SeriesKey({ style: s, size = 22 }: { style: CompareSeriesStyle; 
   );
 }
 
+/** One chart row. `x` is the category the axis draws: a 'YYYY-MM' period on the calendar,
+ * months-since-launch when aligned by launch. `g{id}` = reviews, `p{id}` = the period the
+ * value came from (the launch-aligned tooltip names it). */
 interface MergedRow {
-  period: string;
+  x: string | number;
   [appidKey: string]: string | number | null;
 }
 
@@ -117,18 +137,28 @@ function mergeSeries(byAppid: Map<number, GameTrendPoint[]>): MergedRow[] {
   for (const pts of byAppid.values()) for (const p of pts) periods.add(p.period);
   const sorted = [...periods].sort();
   return sorted.map((period) => {
-    const row: MergedRow = { period };
+    const row: MergedRow = { x: period };
     for (const [appid, pts] of byAppid) {
       row[`g${appid}`] = pts.find((p) => p.period === period)?.n_reviews ?? null;
+      row[`p${appid}`] = period;
     }
     return row;
   });
+}
+
+function offsetTitle(offset: number): string {
+  if (offset === 0) return "Launch month";
+  if (offset > 0) return `Month ${offset} after launch`;
+  return `${-offset} month${offset === -1 ? "" : "s"} before launch`;
 }
 
 export function CompareTrendsChart({
   ids,
   names,
   hideLegend = false,
+  align = "calendar",
+  anchors,
+  partialPeriod = null,
 }: {
   ids: number[];
   names: Map<number, string>;
@@ -136,6 +166,12 @@ export function CompareTrendsChart({
    * (Compare.tsx puts the one legend inline with the panel title, per mockup 4d —
    * without this the page showed the same legend twice). */
   hideLegend?: boolean;
+  /** Line the games up on the calendar (default) or on months since each one's launch. */
+  align?: CompareAlign;
+  /** Each game's launch anchor (lib/lifecycle launchAnchor) — required for align="launch". */
+  anchors?: Map<number, LaunchAnchor | null>;
+  /** The data's still-running month ('YYYY-MM'), left out of every line. */
+  partialPeriod?: string | null;
 }) {
   const primary = ids[0] ?? null;
   const comps = ids.slice(1);
@@ -145,15 +181,27 @@ export function CompareTrendsChart({
   // after a conditional return changes hook order between the loading and loaded frames.
   // Pure map/filter work; on a loading render the inputs are simply absent.
   const byAppid = new Map<number, GameTrendPoint[]>();
-  if (trendsQ.data?.eligible && primary !== null) byAppid.set(primary, trendsQ.data.points);
-  for (const s of trendsQ.data?.comps?.series ?? []) byAppid.set(s.appid, s.points);
+  if (trendsQ.data?.eligible && primary !== null) byAppid.set(primary, completeMonths(trendsQ.data.points, partialPeriod));
+  for (const s of trendsQ.data?.comps?.series ?? []) byAppid.set(s.appid, completeMonths(s.points, partialPeriod));
   // Keep the caller's column order (and its color slots) rather than response order.
-  const chartIds = ids.filter((id) => byAppid.has(id));
-  const data = mergeSeries(new Map(chartIds.map((id) => [id, byAppid.get(id)!])));
-  const zoom = useDragZoom(data, "period");
+  const seriesIds = ids.filter((id) => byAppid.has(id));
+  const launch = align === "launch";
+  // Aligned by launch, a game with no usable launch date has no x to sit on: left out, and
+  // named under the chart.
+  const unanchored = launch ? seriesIds.filter((id) => !anchors?.get(id)) : [];
+  const chartIds = seriesIds.filter((id) => !unanchored.includes(id));
+  const series = new Map(chartIds.map((id) => [id, byAppid.get(id)!]));
+  const data: MergedRow[] = launch
+    ? alignByLaunch(series, anchors ?? new Map()).map(({ offset, ...rest }) => ({ ...rest, x: offset }))
+    : mergeSeries(series);
+  // Launch-aligned x values are month offsets, not dates, so the page's shared date window
+  // cannot apply to them — useDragZoom passes rows without a date straight through.
+  const zoom = useDragZoom(data, "x");
 
   if (trendsQ.isLoading) {
-    return <div className="flex h-40 items-center justify-center text-xs text-ink-muted">Loading trends…</div>;
+    // The loaded chart's own height (220px plot + a caption line), so nothing below jumps
+    // when it arrives.
+    return <div className="flex h-[244px] items-center justify-center text-xs text-ink-muted">Loading trends…</div>;
   }
   if (trendsQ.isError || !trendsQ.data) {
     // `error.message` here is the raw exception: with the API unreachable this read
@@ -169,12 +217,21 @@ export function CompareTrendsChart({
   if (chartIds.length === 0 || data.length === 0) {
     return (
       <div className="flex h-24 items-center justify-center text-xs text-ink-muted">
-        No monthly trend data for these games yet.
+        {launch && unanchored.length > 0
+          ? "None of these games has a launch date to line them up on."
+          : "No monthly trend data for these games yet."}
       </div>
     );
   }
 
   const nameOf = (id: number) => names.get(id) ?? `App ${id}`;
+  // Aligned on a release date, reviews BEFORE month 0 mean the game was on sale earlier
+  // (Early Access) and the mart doesn't carry its first public date yet — say which games.
+  const earlyStarters = launch
+    ? chartIds.filter(
+        (id) => anchors?.get(id)?.source === "release" && data.some((r) => Number(r.x) < 0 && r[`g${id}`] != null),
+      )
+    : [];
 
   // One unit for the whole y-axis: the ticks are computed here (not left to recharts) so
   // the formatter is sized for exactly the values that will be printed — see
@@ -196,13 +253,21 @@ export function CompareTrendsChart({
           <LineChart data={zoom.data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
           <CartesianGrid stroke="var(--gridline)" vertical={false} />
           <XAxis
-            dataKey="period"
+            dataKey="x"
             tick={{ fontSize: 10 }}
             interval="preserveStartEnd"
             minTickGap={24}
             tickLine={false}
             axisLine={{ stroke: "var(--baseline)" }}
           />
+          {launch && (
+            <ReferenceLine
+              x={0}
+              stroke="var(--text-muted)"
+              strokeDasharray="3 4"
+              label={{ value: "launch", position: "insideTopLeft", fontSize: 9, fill: "var(--text-muted)" }}
+            />
+          )}
           <YAxis
             tick={{ fontSize: 10 }}
             ticks={y.ticks}
@@ -221,12 +286,20 @@ export function CompareTrendsChart({
               const row = payload[0].payload as MergedRow;
               const rows: TooltipRow[] = chartIds
                 .filter((id) => row[`g${id}`] != null)
-                .map((id, _i) => ({
+                .map((id) => ({
                   label: nameOf(id),
-                  value: fmtCompact(row[`g${id}`] as number),
+                  // Aligned by launch, the same x is a different calendar month per game.
+                  value: launch
+                    ? `${fmtCompact(row[`g${id}`] as number)} · ${periodLabel(String(row[`p${id}`]))}`
+                    : fmtCompact(row[`g${id}`] as number),
                   color: compareSeriesColor(chartIds.indexOf(id)),
                 }));
-              return <TooltipPanel title={String(label)} rows={rows} />;
+              return (
+                <TooltipPanel
+                  title={launch ? offsetTitle(Number(label)) : periodLabel(String(label))}
+                  rows={rows}
+                />
+              );
             }}
           />
           {chartIds.map((id, i) => {
@@ -278,11 +351,26 @@ export function CompareTrendsChart({
           ))}
         </div>
       )}
-      <p className="mt-2 text-[11px] italic text-ink-muted">
-        Monthly SAMPLED review velocity (the reviews table is a per-game sample, recency-biased for older/popular
-        titles) — relative shape and momentum are comparable; absolute counts undercount older hits. Months before a
-        game's release are gaps, not zeros.
+      <p className="mt-2 text-[11px] text-ink-muted">
+        {launch
+          ? "X = months since each game's launch month (0 = the month it went on sale: its first public date when we have it, else its release date). "
+          : null}
+        Reviews per month from Steam&apos;s own review histogram — each game&apos;s full history, not a sample.
+        Months before a game was on sale are gaps, not zeros
+        {partialPeriod ? `; ${periodLabel(partialPeriod)} is still running, so it isn't drawn` : ""}.
       </p>
+      {unanchored.length > 0 && (
+        <p className="mt-1 text-[11px] text-ink-muted">
+          Not drawn: {unanchored.map(nameOf).join(", ")} — no release date to line up on.
+        </p>
+      )}
+      {earlyStarters.length > 0 && (
+        <p className="mt-1 text-[11px] text-ink-muted">
+          Reviews before month 0: {earlyStarters.map(nameOf).join(", ")} sold before{" "}
+          {earlyStarters.length === 1 ? "its" : "their"} release date (Early Access) — aligned on the 1.0 release
+          until the data carries a first public date.
+        </p>
+      )}
     </div>
   );
 }

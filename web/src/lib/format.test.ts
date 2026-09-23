@@ -656,6 +656,14 @@ describe("priceKind / fmtPriceFor / fmtRevenueFor — $0 is only free when Steam
     expect(fmtRevenueFor(SIEGE, 920_000_000)).toBe("$920.0M");
   });
 
+  it("lets the rebuilt mart's own price_status decide whenever the row carries it", () => {
+    expect(priceKind({ price_initial: 0, is_free: 1, price_status: "unknown" })).toBe("unknown");
+    expect(priceKind({ price_initial: 0, is_free: 0, price_status: "free" })).toBe("free");
+    expect(priceKind({ price_initial: 19.99, is_free: 1, price_status: "paid" })).toBe("paid");
+    // An unrecognised status is ignored, not trusted.
+    expect(priceKind({ price_initial: 0, is_free: 1, price_status: "mystery" })).toBe("free");
+  });
+
   it("falls back to the old reading when the row carries no flag at all", () => {
     expect(priceKind({ price_initial: 0 })).toBe("free");
     expect(priceKind({ price_initial: 0, is_free: null })).toBe("free");

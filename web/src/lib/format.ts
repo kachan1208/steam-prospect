@@ -169,11 +169,23 @@ export function fmtRevenue(value: number | null | undefined, isFree: boolean): s
 
 export type PriceKind = "paid" | "free" | "unknown";
 
-/** What a row's price is: a real price, free-to-play, or unknown. A known positive price
- * always wins (Rainbow Six Siege carries is_free AND $19.99 — it is priced). A row with no
- * `is_free` at all (an API or table that predates the flag) keeps the old reading: $0 is
+/** The row shape priceKind reads. `price_status` is the rebuilt mart's own verdict (ETL
+ * PR #178) and wins whenever it is present; the rest is the fallback heuristic. */
+export interface PricedRow {
+  price_initial?: number | null;
+  is_free?: number | boolean | null;
+  price_status?: PriceKind | string | null;
+}
+
+/** What a row's price is: a real price, free-to-play, or unknown. The mart's own
+ * `price_status` decides when the row carries it. Without it: a known positive price wins
+ * (Rainbow Six Siege carries is_free AND $19.99 — it is priced), and a row with no
+ * `is_free` at all (an API or table that predates the flag) keeps the old reading — $0 is
  * free, no price is unknown. */
-export function priceKind(row: { price_initial?: number | null; is_free?: number | boolean | null }): PriceKind {
+export function priceKind(row: PricedRow): PriceKind {
+  if (row.price_status === "paid" || row.price_status === "free" || row.price_status === "unknown") {
+    return row.price_status;
+  }
   const p = row.price_initial;
   if (isFiniteNumber(p) && p > 0) return "paid";
   if (row.is_free === undefined || row.is_free === null) return p === 0 ? "free" : "unknown";
@@ -189,7 +201,7 @@ export const PRICE_UNKNOWN_NOTE =
 
 /** List price for display: "$14.99", "Free" or "Price unknown" — never a bare dash, never
  * "Free" for a $0 row Steam doesn't flag free. */
-export function fmtPriceFor(row: { price_initial?: number | null; is_free?: number | boolean | null }): string {
+export function fmtPriceFor(row: PricedRow): string {
   const kind = priceKind(row);
   if (kind === "free") return "Free";
   if (kind === "unknown") return PRICE_UNKNOWN;
@@ -199,10 +211,7 @@ export function fmtPriceFor(row: { price_initial?: number | null; is_free?: numb
 /** Est. revenue for display, reading the row's own price kind: "Free" (no box revenue to
  * estimate), "Price unknown" (the estimate multiplies a price we don't have), else the
  * compact dollar figure. */
-export function fmtRevenueFor(
-  row: { price_initial?: number | null; is_free?: number | boolean | null },
-  value: number | null | undefined,
-): string {
+export function fmtRevenueFor(row: PricedRow, value: number | null | undefined): string {
   const kind = priceKind(row);
   if (kind === "free") return "Free";
   if (kind === "unknown") return PRICE_UNKNOWN;

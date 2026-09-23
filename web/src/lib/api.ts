@@ -1003,12 +1003,19 @@ export interface GameSearchRow {
   has_demo?: boolean | null;
   /** Metacritic critic score where Steam links a page (~2.6% of games); null = no linked page. */
   metacritic_score?: number | null;
-  /** Early-access lifecycle (absent until the mart carries the columns): the first day the
-   * game was buyable ('YYYY-MM-DD' — the Early Access start, or the release when it never
-   * was EA), the full 1.0 release, and whether it went EA → 1.0. */
+  /** Early-access lifecycle (absent until the mart carries the columns). On the rebuilt mart
+   * `release_date` itself MEANS the first public date (the EA start, or the release when it
+   * never was EA) and `release_date_1_0` is Steam's store (1.0) date; the transitional API
+   * sent the first public date as `first_public_date` instead. See lib/lifecycle.ts. */
   first_public_date?: string | null;
   release_date_1_0?: string | null;
   is_ea_graduate?: boolean | null;
+  /** Where release_date came from: "store", or inferred from the first review
+   * ("first_review", "first_review_month" — month precision, printed "~Feb 2024"). */
+  release_date_source?: "store" | "first_review" | "first_review_month" | null;
+  /** The mart's own price verdict — preferred over the is_free/price heuristic (lib/format
+   * priceKind). Absent on older marts. */
+  price_status?: "paid" | "free" | "unknown" | null;
 }
 
 /** Population scope for the search endpoints (api/app/scope.py). `indie` = Steam's own
