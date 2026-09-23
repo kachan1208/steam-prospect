@@ -14,7 +14,7 @@ import { StartHere } from "../components/StartHere";
 import { InfoTipBase } from "../components/ui/InfoTipBase";
 import { Loading } from "../components/ui/Loading";
 import { useNiches, type NicheRow } from "../lib/api";
-import { RING_ORDER, SOLO_FRIENDLY_MIN, SOLO_LENS_LABEL, soloBucket } from "../lib/radarVerdict";
+import { RING_ORDER, SOLO_FRIENDLY_PCT, SOLO_LENS_LABEL, soloBucket } from "../lib/radarVerdict";
 import type { RadarRing } from "../lib/radarVerdict";
 import { usePageTitle } from "../lib/usePageTitle";
 
@@ -329,10 +329,8 @@ function RadarBoardSection({
               <InfoTipBase
                 label={SOLO_LENS_LABEL}
                 ariaLabel={`About ${SOLO_LENS_LABEL}`}
-                meaning={`Keeps only niches where at least ${Math.round(
-                  SOLO_FRIENDLY_MIN * 100,
-                )}% of the games can be played single-player (singleplayer share ≥ ${SOLO_FRIENDLY_MIN}); a niche whose share is unknown is left out. Most niches pass — it removes the multiplayer-dependent few (party, MMO, battle royale), and says nothing about how big a game is to build.`}
-                formula={`keep a niche when singleplayer share ≥ ${SOLO_FRIENDLY_MIN}`}
+                meaning={`Keeps only niches where at least ${SOLO_FRIENDLY_PCT} of the games can be played single-player; a niche whose share is unknown is left out. Most niches pass — it removes the multiplayer-dependent few (party, MMO, battle royale), and says nothing about how big a game is to build.`}
+                formula={`keep a niche when singleplayer share ≥ ${SOLO_FRIENDLY_PCT}`}
                 worked={`On this cut: ${soloCounts.shown} of ${soloCounts.total} niches kept, ${
                   soloCounts.total - soloCounts.shown
                 } hidden.`}
@@ -420,8 +418,8 @@ function RadarBoardSection({
           plotted dot across all three sectors, and its search covers the whole population of the cut — past the plot
           cap (while zoomed, the search reads within the zoomed ring).{" "}
           {soloOnly
-            ? `Population: ${SOLO_LENS_LABEL} — niches whose singleplayer share is ≥ ${SOLO_FRIENDLY_MIN} (${soloCounts.shown} of ${soloCounts.total} on this cut; a niche with no reading is left out — unknown is not a claim). Singleplayer share says the games skip netcode, not that they are small builds — the dossier's singleplayer row shows the member evidence behind it. It never changes a verdict.`
-            : `Population: all niches — multiplayer-dependent ones (singleplayer share < ${SOLO_FRIENDLY_MIN}) are drawn hollow, in the same ring the market evidence puts them. Singleplayer share says the games skip netcode, not that they are small builds — the dossier's singleplayer row shows the member evidence behind it.`}
+            ? `Population: ${SOLO_LENS_LABEL} — niches whose singleplayer share is ≥ ${SOLO_FRIENDLY_PCT} (${soloCounts.shown} of ${soloCounts.total} on this cut; a niche with no reading is left out — unknown is not a claim). Singleplayer share says the games skip netcode, not that they are small builds — the dossier's singleplayer row shows the member evidence behind it. It never changes a verdict.`
+            : `Population: all niches — multiplayer-dependent ones (singleplayer share under ${SOLO_FRIENDLY_PCT}) are drawn hollow, in the same ring the market evidence puts them. Singleplayer share says the games skip netcode, not that they are small builds — the dossier's singleplayer row shows the member evidence behind it.`}
         </p>
       </details>
     </section>

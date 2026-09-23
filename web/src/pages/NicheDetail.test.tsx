@@ -1315,7 +1315,7 @@ describe("NicheDetail — the headline is the Radar's dossier", () => {
     expect(within(dossier).getByTestId("radar-verdict-chip").textContent).toBe("Enter now");
     expect(
       within(dossier).getByText(
-        /Not on the Radar board: it plots micro-genre and theme tags only, and this tag is umbrella tier\./,
+        /Not on the Radar board: of the community tags it plots only game types and themes, and this tag is a broad genre\./,
       ),
     ).toBeTruthy();
   });
@@ -1324,8 +1324,8 @@ describe("NicheDetail — the headline is the Radar's dossier", () => {
     stub(detailOf([radarListRow({ key: "Action RTS", solo_viability: 0.353 })]));
     renderNiche();
     const dossier = await screen.findByTestId("radar-dossier");
-    expect(within(dossier).getByText(/singleplayer share 0\.35 is under the 0\.8 bar of the board's “Singleplayer only” filter/)).toBeTruthy();
-    expect(within(dossier).getByText("0.35")).toBeTruthy(); // the tooltip's Singleplayer share row
+    expect(within(dossier).getByText(/singleplayer share 35% is under the 80% bar of the board's “Singleplayer only” filter/)).toBeTruthy();
+    expect(within(dossier).getByText("35%")).toBeTruthy(); // the tooltip's Singleplayer share row
     expect(within(dossier).getByRole("link", { name: "See on the Radar →" }).getAttribute("href")).toBe(
       "/radar?solo=off&niche=tag%3AAction+RTS",
     );

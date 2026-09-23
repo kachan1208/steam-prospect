@@ -14,6 +14,7 @@ import {
   RING_ORDER,
   SAT_FLOOD_YOY,
   SOLO_FRIENDLY_MIN,
+  SOLO_FRIENDLY_PCT,
   SOLO_HEAVY_CONTENT_H,
   SOLO_MIXED_MIN,
   WC_WINNER_TAKE_MOST,
@@ -26,6 +27,7 @@ import {
   radarVerdict,
   radarVerdictTrace,
   releasesYoyWorked,
+  sharePct,
   soloBucket,
   type RadarVerdictInput,
 } from "./radarVerdict";
@@ -58,7 +60,7 @@ describe("radarVerdictTrace — every check explains itself in place (2026-09-23
     expect(by.demand.worked).toBe("(3,251,623 − 2,174,576) ÷ 2,174,576 = +49.5%");
     expect(by.supply.worked).toBe("(346 − 341) ÷ 341 = +1.5%");
     expect(by.concentration.worked).toBe("the top 5% of games hold 88.4% of the cut's Est. revenue");
-    expect(by.solo.worked).toBe("≈ 222 of 227 games playable single-player = 0.98");
+    expect(by.solo.worked).toBe("≈ 222 of 227 games playable single-player = 98%");
     // No inputs on the row for the two medians behind newcomer earnings: no worked line,
     // never an invented one.
     expect(by.entrants.worked).toBeNull();
@@ -492,16 +494,16 @@ describe("radarVerdictTrace — the solo row's member evidence", () => {
   it("renders the evidence inline in the exact dossier format", () => {
     const row = soloRow(soulsLike);
     expect(row.label).toBe("Singleplayer share");
-    expect(row.value).toBe("0.98 singleplayer · 50% self-pub · 71% indie · median 5.7h content");
-    expect(row.threshold).toBe(`≥ ${SOLO_FRIENDLY_MIN}; below is multiplayer-dependent`);
+    expect(row.value).toBe("98% singleplayer · 50% self-pub · 71% indie · median 5.7h content");
+    expect(row.threshold).toBe(`≥ ${SOLO_FRIENDLY_PCT}; below is multiplayer-dependent`);
     // The pass bar stays on the singleplayer share alone, exactly as before.
     expect(row.pass).toBe(true);
     expect(row.decides).toBe(false);
   });
 
   it("omits missing evidence clauses instead of inventing them (older mart -> nulls)", () => {
-    expect(soloRow({ solo_viability: 0.98 }).value).toBe("0.98 singleplayer");
-    expect(soloRow({ solo_viability: 0.98, indie_share: 0.71 }).value).toBe("0.98 singleplayer · 71% indie");
+    expect(soloRow({ solo_viability: 0.98 }).value).toBe("98% singleplayer");
+    expect(soloRow({ solo_viability: 0.98, indie_share: 0.71 }).value).toBe("98% singleplayer · 71% indie");
     // Share unknown but evidence present: the share slot stays an honest "unknown".
     expect(soloRow({ med_playtime_h: 5.7 }).value).toBe("unknown · median 5.7h content");
     expect(soloRow({ med_playtime_h: 5.7 }).pass).toBeNull();
@@ -539,7 +541,7 @@ describe("radarVerdictTrace — the solo row's member evidence", () => {
       med_playtime_h: 2.8,
     });
     const solo = t.checks.find((c) => c.id === "solo")!;
-    expect(solo.value).toBe("0.94 singleplayer · 63% self-pub · 81% indie · median 2.8h content");
+    expect(solo.value).toBe("94% singleplayer · 63% self-pub · 81% indie · median 2.8h content");
   });
 });
 
@@ -707,6 +709,17 @@ describe("solo viability is a FLAG, not a scale", () => {
     // ...and the band's upper boundary is 'solo', its lower boundary 'mixed'.
     expect(soloRowFor(SOLO_MIXED_MIN).note).not.toContain("multiplayer minority");
     expect(soloRowFor(SOLO_FRIENDLY_MIN).note).toContain("multiplayer minority");
+  });
+
+  it("prints the share as a percent, the way the ⓘ explains it — and never rounds up to 100%", () => {
+    expect(SOLO_FRIENDLY_PCT).toBe("80%");
+    expect(sharePct(0.97)).toBe("97%");
+    expect(sharePct(0.35)).toBe("35%");
+    expect(sharePct(1)).toBe("100%");
+    // Just under 100% keeps a truncated decimal: a 0.995 is not "every game".
+    expect(sharePct(0.995)).toBe("99.5%");
+    expect(sharePct(0.9999)).toBe("99.9%");
+    expect(soloRowFor(0.97).value).toMatch(/^97% singleplayer/);
   });
 
   it("still never moves a ring — the band is display-only", () => {

@@ -14,7 +14,7 @@ import {
 import { CLASS_ORDER, ringGeom, sectorSpans } from "./radarRings";
 import {
   RING_ORDER,
-  SOLO_FRIENDLY_MIN,
+  SOLO_FRIENDLY_PCT,
   radarVerdictTrace,
   type RadarVerdictInput,
 } from "../lib/radarVerdict";
@@ -160,7 +160,7 @@ describe("RadarBoard — population legend", () => {
     renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
     const rule = screen.getByTestId("radar-solo-population");
     expect(rule.textContent).toContain("Singleplayer only");
-    expect(rule.textContent).toContain(`singleplayer share ≥ ${SOLO_FRIENDLY_MIN}`);
+    expect(rule.textContent).toContain(`singleplayer share ≥ ${SOLO_FRIENDLY_PCT}`);
     expect(rule.textContent).toContain("unknown");
     // No hollow sample may imply multiplayer-dependent niches could be present.
     expect(screen.queryByText(/hollow = multiplayer-dependent/)).toBeNull();
@@ -186,13 +186,13 @@ describe("RadarBoard — population legend", () => {
       </MemoryRouter>,
     );
     expect(screen.getByTestId("radar-solo-population").textContent).toBe(
-      "Singleplayer only: 220 of 228 niches kept — the other 8 have a singleplayer share under 0.8 (or unknown)",
+      "Singleplayer only: 220 of 228 niches kept — the other 8 have a singleplayer share under 80% (or unknown)",
     );
   });
 
   it("with the lens off the hollow sample returns, named for what it marks", () => {
     renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], false);
-    expect(screen.getByText(new RegExp(`hollow = multiplayer-dependent \\(singleplayer share < ${SOLO_FRIENDLY_MIN}\\)`))).toBeTruthy();
+    expect(screen.getByText(new RegExp(`hollow = multiplayer-dependent \\(singleplayer share under ${SOLO_FRIENDLY_PCT}\\)`))).toBeTruthy();
     expect(screen.queryByTestId("radar-solo-population")).toBeNull();
   });
 
@@ -247,8 +247,8 @@ describe("RadarBoard — verdict dossier (rail selection mode)", () => {
     expect(dossier.textContent).toContain("a hair under the winner-take-most bar");
     // The singleplayer lens row keeps the raw share visible, under its honest name.
     expect(dossier.textContent).toContain("Singleplayer share · context");
-    expect(dossier.textContent).toContain("0.99 singleplayer");
-    expect(dossier.textContent).toContain(`bar ≥ ${SOLO_FRIENDLY_MIN}; below is multiplayer-dependent`);
+    expect(dossier.textContent).toContain("99.5% singleplayer");
+    expect(dossier.textContent).toContain(`bar ≥ ${SOLO_FRIENDLY_PCT}; below is multiplayer-dependent`);
     // No retired jargon anywhere in the panel.
     expect(dossier.textContent).not.toMatch(/opp v2|P90|Newcomer economics|Solo evidence/i);
     // Plain-worded context numbers, each count with its population, + the deep-dive link.
@@ -321,7 +321,7 @@ describe("RadarBoard — verdict dossier (rail selection mode)", () => {
     renderBoard([soulsLike], true);
     fireEvent.click(screen.getByTestId("radar-blip-tag:Souls-like"));
     const dossier = screen.getByTestId("verdict-dossier");
-    expect(dossier.textContent).toContain("0.98 singleplayer · 50% self-pub · 71% indie · median 5.7h content");
+    expect(dossier.textContent).toContain("98% singleplayer · 50% self-pub · 71% indie · median 5.7h content");
     // 5.7h median is NOT heavy content — no scope caution.
     expect(dossier.textContent).not.toContain("heavy content scope");
   });

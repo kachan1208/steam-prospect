@@ -506,7 +506,7 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
 
   // The solo LENS row — shared by both trace shapes. decides:false: see module doc.
   // The pass bar stays on the SINGLEPLAYER SHARE alone; the evidence trio is inlined into
-  // the value ("0.98 singleplayer · 50% self-pub · 71% indie · median 5.7h content") so
+  // the value ("98% singleplayer · 50% self-pub · 71% indie · median 5.7h content") so
   // the row SHOWS the member profile instead of asserting a bare share. Missing evidence
   // clauses are omitted (older mart), never invented.
   const soloPass = solo === null ? null : solo >= SOLO_FRIENDLY_MIN;
@@ -535,8 +535,8 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
     // "Singleplayer share", not "Solo evidence" (2026-09-23): the number IS the share of the
     // cut's games playable single-player, and the old name promised more than it measures.
     label: "Singleplayer share",
-    value: [solo === null ? "unknown" : `${solo.toFixed(2)} singleplayer`, ...evidence].join(" · "),
-    threshold: `≥ ${SOLO_FRIENDLY_MIN}; below is multiplayer-dependent`,
+    value: [solo === null ? "unknown" : `${sharePct(solo)} singleplayer`, ...evidence].join(" · "),
+    threshold: `≥ ${SOLO_FRIENDLY_PCT}; below is multiplayer-dependent`,
     pass: soloPass,
     // The heavy-content caution is NEUTRAL: it rides the note, never the pass/fail.
     note: heavyContent ? `${soloNote} — heavy content scope for a solo build` : soloNote,
@@ -544,7 +544,7 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
     term: "singleplayer_share",
     worked:
       solo !== null && nGames !== null && nGames > 0
-        ? `≈ ${fmtInt(Math.round(solo * nGames))} of ${fmtInt(nGames)} games playable single-player = ${solo.toFixed(2)}`
+        ? `≈ ${fmtInt(Math.round(solo * nGames))} of ${fmtInt(nGames)} games playable single-player = ${sharePct(solo)}`
         : null,
   };
 
@@ -845,7 +845,7 @@ export interface RadarDossier {
   /** The Opportunity score, one decimal, or "—". Never printed alone: its parts ride with it
    * (OpportunityBreakdown on the pages, the parts rows in the board's tooltip). */
   opportunity: string;
-  /** The tooltip's Singleplayer share value — two decimals, or "unknown". */
+  /** The tooltip's Singleplayer share value — a percent (sharePct), or "unknown". */
   singleplayerShare: string;
   /** fmtInt(reviews_24m), or null — the tooltip's extra reviews row on emerging niches, and
    * the demand tile's footnote there. */
@@ -874,7 +874,7 @@ export function radarDossier(row: RadarDossierInput): RadarDossier {
     games: fmtInt(row.n_games),
     population: row.window != null ? cutPopulationLabel(row.window, row.min_reviews) : null,
     opportunity: opp === null ? "—" : opp.toFixed(1),
-    singleplayerShare: solo === null ? "unknown" : solo.toFixed(2),
+    singleplayerShare: solo === null ? "unknown" : sharePct(solo),
     reviews24m: vol === null ? null : fmtInt(vol),
   };
 }
@@ -941,8 +941,8 @@ export function radarBoardAbsence(row: {
   solo_viability?: number | null;
 }): string | null {
   if (radarSector(row.dimension, row.tier) === null) {
-    return `Not on the Radar board: it plots micro-genre and theme tags only, and this tag is ${
-      row.tier ? `${row.tier} tier` : "untiered"
+    return `Not on the Radar board: of the community tags it plots only game types and themes, and this tag is ${
+      row.tier ? (TIER_IN_WORDS[row.tier] ?? `a “${row.tier}” tag`) : "not sorted into a type yet"
     }.`;
   }
   const solo = num(row.solo_viability);
@@ -950,9 +950,30 @@ export function radarBoardAbsence(row: {
     return `Not on the Radar board by default: its singleplayer share is unknown, and the board's “${SOLO_LENS_LABEL}” filter leaves unknowns out.`;
   }
   if (solo < SOLO_FRIENDLY_MIN) {
-    return `Not on the Radar board by default: singleplayer share ${solo.toFixed(2)} is under the ${SOLO_FRIENDLY_MIN} bar of the board's “${SOLO_LENS_LABEL}” filter — it appears, drawn hollow, with that filter off.`;
+    return `Not on the Radar board by default: singleplayer share ${sharePct(solo)} is under the ${SOLO_FRIENDLY_PCT} bar of the board's “${SOLO_LENS_LABEL}” filter — it appears, drawn hollow, with that filter off.`;
   }
   return null;
+}
+
+/** A tag tier in plain words, for sentences — the same vocabulary as the Niche Finder's
+ * chips and the niche page's badge (2026-09-23 review: "micro tier" / "umbrella tier" were
+ * jargon on the page). */
+const TIER_IN_WORDS: Record<string, string> = {
+  micro: "a game type",
+  theme: "a theme",
+  umbrella: "a broad genre",
+  meta: "a review tag",
+  genre: "a Steam genre",
+};
+
+/** A 0–1 share as a percent, the way the glossary's ⓘ explains it (2026-09-23: the dossier
+ * printed "0.97 singleplayer" beside "54% self-pub"). Whole percent, except just under 100%:
+ * there it keeps one decimal, truncated, so a 0.995 never reads "100%" — every game — when
+ * some are multiplayer-only. */
+export function sharePct(x: number): string {
+  const p = x * 100;
+  if (p > 99 && p < 100) return `${(Math.floor(p * 10) / 10).toFixed(1)}%`;
+  return `${Math.round(p)}%`;
 }
 
 /**
@@ -976,6 +997,9 @@ export const SOLO_LENS_LABEL = "Singleplayer only";
  * on this bar) must mean the same population; a drift would make the Radar and every other
  * solo_only consumer disagree about which niches are singleplayer. */
 export const SOLO_FRIENDLY_MIN = 0.8;
+
+/** SOLO_FRIENDLY_MIN as the page prints it ("80%"). */
+export const SOLO_FRIENDLY_PCT = sharePct(SOLO_FRIENDLY_MIN);
 
 /** solo_viability at or above which a niche is unremarkably solo-buildable — the catalog's
  * 10th percentile (p10 = 0.913), so ~92% of niches clear it. Between this and

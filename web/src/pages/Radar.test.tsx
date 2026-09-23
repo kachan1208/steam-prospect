@@ -165,7 +165,7 @@ describe("Radar — the singleplayer lens, named for what it does", () => {
     expect(screen.getByText("Singleplayer only")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "About Singleplayer only" }));
     const tip = screen.getByRole("tooltip").textContent ?? "";
-    expect(tip).toContain("singleplayer share ≥ 0.8");
+    expect(tip).toContain("singleplayer share ≥ 80%");
     expect(tip).toContain("6 of 8 niches kept, 2 hidden");
   });
 

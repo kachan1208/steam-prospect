@@ -14,12 +14,13 @@ import {
   EMERGING_DEMAND_LABEL,
   RING_LABEL,
   RING_ORDER,
-  SOLO_FRIENDLY_MIN,
+  SOLO_FRIENDLY_PCT,
   SOLO_LENS_LABEL,
   blipRadius,
   cutPopulationLabel,
   radarSector,
   radarVerdictTrace,
+  sharePct,
   soloBucket,
   type RadarRing,
   type RadarVerdict,
@@ -1690,7 +1691,7 @@ export function RadarBoard({
                 <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="pointer-events-none shrink-0">
                   <circle cx="5" cy="5" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
                 </svg>
-                hollow = multiplayer-dependent (singleplayer share &lt; {SOLO_FRIENDLY_MIN})
+                hollow = multiplayer-dependent (singleplayer share under {SOLO_FRIENDLY_PCT})
               </span>
             )}
             <span className="inline-flex items-center gap-1">
@@ -1724,8 +1725,8 @@ export function RadarBoard({
               {soloCounts
                 ? `${fmtInt(soloCounts.shown)} of ${fmtInt(soloCounts.total)} niches kept — the other ${fmtInt(
                     soloCounts.total - soloCounts.shown,
-                  )} have a singleplayer share under ${SOLO_FRIENDLY_MIN} (or unknown)`
-                : `niches with a singleplayer share ≥ ${SOLO_FRIENDLY_MIN} (unknown left out)`}
+                  )} have a singleplayer share under ${SOLO_FRIENDLY_PCT} (or unknown)`
+                : `niches with a singleplayer share ≥ ${SOLO_FRIENDLY_PCT} (unknown left out)`}
             </span>
           )}
         </div>
@@ -1779,7 +1780,7 @@ export function RadarBoard({
                 ...opportunityRows(hovered),
                 {
                   label: DOSSIER_LABEL.singleplayer,
-                  value: hovered.solo_viability != null ? hovered.solo_viability.toFixed(2) : "unknown",
+                  value: hovered.solo_viability != null ? sharePct(hovered.solo_viability) : "unknown",
                 },
               ]}
             />

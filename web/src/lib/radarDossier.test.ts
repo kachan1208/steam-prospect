@@ -75,7 +75,7 @@ describe("radarDossier — the tooltip's rows, as strings", () => {
     expect(d.p90Revenue).toBe("$9.7M");
     expect(d.games).toBe("86");
     expect(d.opportunity).toBe("86.7");
-    expect(d.singleplayerShare).toBe("0.98");
+    expect(d.singleplayerShare).toBe("98%");
     expect(d.reviews24m).toBe("120,000");
     expect(d.emerging).toBe(false);
   });
@@ -148,14 +148,14 @@ describe("radarBoardAbsence — why a niche has no dot on the default board", ()
 
   it("names the class rule for umbrella/meta/untiered tags", () => {
     expect(radarBoardAbsence({ dimension: "tag", tier: "umbrella", solo_viability: 0.99 })).toBe(
-      "Not on the Radar board: it plots micro-genre and theme tags only, and this tag is umbrella tier.",
+      "Not on the Radar board: of the community tags it plots only game types and themes, and this tag is a broad genre.",
     );
-    expect(radarBoardAbsence({ dimension: "tag", tier: null, solo_viability: 0.99 })).toMatch(/is untiered\.$/);
+    expect(radarBoardAbsence({ dimension: "tag", tier: null, solo_viability: 0.99 })).toMatch(/is not sorted into a type yet\.$/);
   });
 
   it("names the singleplayer filter, with the share and the bar, and how to see the dot anyway", () => {
     const line = radarBoardAbsence({ dimension: "tag", tier: "micro", solo_viability: 0.353 });
-    expect(line).toMatch(/singleplayer share 0\.35 is under the 0\.8 bar of the board's “Singleplayer only” filter/);
+    expect(line).toMatch(/singleplayer share 35% is under the 80% bar of the board's “Singleplayer only” filter/);
     expect(line).toMatch(/with that filter off/);
     expect(line).not.toMatch(/solo-friendly/i); // the lens's old, over-promising name
     expect(radarBoardAbsence({ dimension: "tag", tier: "micro", solo_viability: null })).toMatch(
