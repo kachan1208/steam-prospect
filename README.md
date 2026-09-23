@@ -121,6 +121,46 @@ A run that finds its lock taken exits **3** without touching anything.
 | 1 | built, but the validation gate refused the swap — the artifact is kept as `prospect_<date>.duckdb.building` (the log prints how to inspect/ship/discard it); an unhandled crash also exits 1 |
 | 2 | refused before doing any work (missing/unset paths, missing aspect model, contradictory flags, a garbled `PROSPECT_*` knob) |
 | 3 | busy: another run holds this data dir's lock — nothing was touched; a scheduler can treat it as "skipped" |
+| 4 | refused before doing any work: less free disk in the data dir than `PROSPECT_DISK_MIN_FREE_GB`, even after sweeping dead scratch |
+
+### Running unattended: resource knobs
+
+`build_marts.py` carries its own guards — no wrapper script needed on Linux or macOS: the
+data-dir lock, a free-disk gate, a spill cap below free disk, UTC dates, and dead-scratch
+cleanup. A scheduler (cron, launchd, systemd timer) can call it directly; every knob below is
+checked before any work (a garbled value exits 2) and the DuckDB ones are logged as applied.
+
+| env var | default | what it does |
+|---|---|---|
+| `PROSPECT_SOURCE_DB`, `PROSPECT_DATA_DIR` | — (required) | stand-ins for `--source` / `--data-dir` |
+| `PROSPECT_DISK_MIN_FREE_GB` | `30` | refuse to start (exit 4) with less free space (GiB) in the data dir; `0` = off |
+| `PROSPECT_DUCKDB_MEMORY_LIMIT` | DuckDB's: 80% of RAM (warned) | DuckDB `memory_limit`, e.g. `5000MB`; spills to disk past it |
+| `PROSPECT_DUCKDB_THREADS` | DuckDB's: every core | DuckDB `threads` |
+| `PROSPECT_DUCKDB_TEMP_DIR` | `<scratch>.tmp` in the data dir | an existing dir to spill into instead (a per-data-dir subdir is created and swept) |
+| `PROSPECT_DUCKDB_TEMP_MAX` | min(40GiB, ½ of free disk where the spill lands) | the spill budget (`max_temp_directory_size`); a runaway query fails on it instead of filling the disk |
+| `PROSPECT_SCORE_WORKERS` | min(3, cores − 1) | sentiment-scoring worker processes (~0.75 GB each); `0`/`1` = inline |
+| `PROSPECT_SCORE_CONTEXT` | `fork` on Linux, `spawn` elsewhere | worker start method; `fork` is refused on macOS |
+| `PROSPECT_SENTIMENT_DEADLINE_SECONDS` | unset (no deadline) | stop starting new scoring buckets this many seconds after process start — set it when an outer wall-clock limit exists, a bucket (~16 min on the droplet) under it |
+| `PROSPECT_SENTIMENT_BUCKETS` / `PROSPECT_RESCORE_BUCKET_REVIEWS` / `PROSPECT_REPAIR_BUCKET_REVIEWS` | `8` / `125000` / `1000000` | sentiment bucketing (memory / time per bucket); see the constants in `build_marts.py` |
+| `PROSPECT_SENTIMENT_POOL_CAP` | `5000` | newest English reviews scored per game (`0` = all) |
+| `PROSPECT_SENTIMENT_CACHE` | on | `off` = rescore everything every run, cache untouched |
+| `PROSPECT_FULLTEXT_MAX_AGE_HOURS` / `PROSPECT_FULLTEXT_REBUILD_DELTA` | `44` / `500000` | when a full build rebuilds the teardown/aspect marts instead of copying them (never while the sentiment pool is only partly scored) |
+| `PROSPECT_VALIDATE_MAX_DROP_PCT` | `40` | the validation gate's per-table shrink limit |
+| `PROSPECT_ALLOW_NO_CLASSIFIER` | unset | `1` = build without the aspect model (degraded; stamped in `mart_meta`) |
+
+Starting points, derived from the droplet's measured settings (8 GB / 4 vCPU: DuckDB 5000MB,
+3 workers, 40GiB spill cap; the earlier 3.9 GB box ran 2500MB) — not benchmarks of these exact
+machines, so watch the first builds' peak memory:
+
+| knob | 18 GB / 11-core Mac (shared with desktop apps) | 8 GB Linux box | 4 GB Linux box |
+|---|---|---|---|
+| `PROSPECT_DUCKDB_MEMORY_LIMIT` | `8GB` | `5000MB` (a `--light` build: `3500MB`) | `2500MB`, plus a swapfile |
+| `PROSPECT_DUCKDB_THREADS` | `8` (leave cores for the workers) | unset (4) | unset (2) |
+| `PROSPECT_SCORE_WORKERS` | `4` | unset (3) | `1` (inline — no RAM for a worker) |
+| `PROSPECT_SCORE_CONTEXT` | unset (`spawn`) | unset (`fork`) | unset (`fork`) |
+| `PROSPECT_DUCKDB_TEMP_MAX` | unset | `40GiB` or unset | unset (½ of free disk) |
+| `PROSPECT_DISK_MIN_FREE_GB` | unset (30) | unset (30) | ~20, if the disk is small; the 45 GB source still has to fit |
+| `PROSPECT_SENTIMENT_DEADLINE_SECONDS` | unset | total budget − ~3h when run under a timeout (the droplet: 10800 under a 6h `timeout`) | same |
 
 ## Notes
 

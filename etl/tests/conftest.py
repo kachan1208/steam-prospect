@@ -20,3 +20,13 @@ def _score_inline_unless_asked(monkeypatch):
     the whole suite through a pool instead."""
     if "PROSPECT_SCORE_WORKERS" not in os.environ:
         monkeypatch.setenv("PROSPECT_SCORE_WORKERS", "1")
+
+
+@pytest.fixture(autouse=True)
+def _no_disk_floor_unless_asked(monkeypatch):
+    """build_marts refuses to start (exit 4) below PROSPECT_DISK_MIN_FREE_GB — 30 GiB by
+    default, sized for the real ~45GB corpus. The fixtures are a few MB, and a CI runner has
+    less free disk than that floor, so every test build runs with the floor off unless the
+    environment (or the test itself, see test_unattended_knobs.py) sets it."""
+    if "PROSPECT_DISK_MIN_FREE_GB" not in os.environ:
+        monkeypatch.setenv("PROSPECT_DISK_MIN_FREE_GB", "0")

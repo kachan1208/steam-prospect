@@ -12,9 +12,11 @@ Run:  python build_marts.py --source /path/to/steam_games.db --data-dir /path/to
       (or set PROSPECT_SOURCE_DB / PROSPECT_DATA_DIR; there are NO path defaults — see
       build_arg_parser for why a default here once built a stale mart in the wrong place)
 
-Safe to run beside other runs: it takes an exclusive lock on the data dir (a second run exits 3
-without touching anything), pins every date to UTC, and warns when the source DB has stopped
-being written.
+Safe to run unattended, on Linux or macOS, with no wrapper script around it: it takes an
+exclusive lock on the data dir (a second run exits 3 without touching anything), refuses to
+start below a free-disk floor (exit 4), caps DuckDB's spill below free disk, pins every date to
+UTC, and warns when the source DB has stopped being written. The PROSPECT_* knobs are listed in
+the ETL section of README.md.
 
 Exit codes (a scheduler should treat any non-zero as "keep the previous mart"):
   0  built, validated and swapped
@@ -27,6 +29,8 @@ Exit codes (a scheduler should treat any non-zero as "keep the previous mart"):
   3  BUSY: another build_marts run holds this data dir's lock (a mart build, or a
      --rescore-only/--repair-arms run for those modes) — nothing was touched. Retry later; a
      scheduler can treat it as "skipped", not "failed".
+  4  refused before doing any work: free disk on the data dir is below PROSPECT_DISK_MIN_FREE_GB
+     even after the dead-scratch sweep.
 
 DEPLOY NOTE — the first build after the model-fingerprint change (2026-08). The sentiment
 cache is keyed on a hash of the scoring config, which includes a fingerprint of
@@ -5492,7 +5496,21 @@ LOCK_GRACE_SECONDS = 15.0             # a run waits this long for its own lock b
                                       # EXIT_BUSY: long enough to ride out another run's sweep
                                       # borrowing it for a deletion, nowhere near a real build
 EXIT_BUSY = 3                         # another run holds the lock — see the module docstring
+EXIT_LOW_DISK = 4                     # below PROSPECT_DISK_MIN_FREE_GB after the sweep
 
+# UNATTENDED-RUN DEFAULTS (2026-09-22). These guards used to exist only in the droplet's shell
+# wrappers (deploy/prospect-refresh.sh exported the spill cap and ran a df gate), so a build
+# started any other way — a laptop, a new server, cron without the wrapper — ran without them.
+# They live here now, with the wrapper's own post-resize numbers as defaults; each is an env
+# knob (README, ETL section) and each is logged as applied.
+DISK_MIN_FREE_GB_DEFAULT = 30.0       # PROSPECT_DISK_MIN_FREE_GB: refuse to start (exit 4) with
+                                      # less free disk than this in the data dir, in GiB (the
+                                      # unit `df -h` shows). 30 = the droplet's floor for its
+                                      # ~2.4GB marts + a spill that has reached 18GB. 0 = off.
+DUCKDB_TEMP_MAX_DEFAULT_GIB = 40      # PROSPECT_DUCKDB_TEMP_MAX unset -> the spill budget is the
+DUCKDB_TEMP_MAX_FREE_FRACTION = 0.5   # SMALLER of 40GiB and half the free space where the spill
+                                      # lands — never DuckDB's own default of 90% of free disk,
+                                      # which is how 2026-08-30 filled the volume
 MAX_SOURCE_AGE_HOURS = 48.0           # --max-source-age-hours: warn when the source's last
                                       # write is older than this (a stalled scraper, or a copy)
 _SCRATCH_RE = re.compile(r"^prospect_(.+?)\.duckdb\.building(\.wal|\.tmp)?$")
@@ -5599,6 +5617,17 @@ def _scratch_db(data_dir: Path, version: str) -> Path:
     return data_dir / f"prospect_{version}.duckdb.building"
 
 
+def _spill_root(data_dir: Path) -> Path | None:
+    """Where DuckDB spills when PROSPECT_DUCKDB_TEMP_DIR is set: a subdirectory of it NAMED FOR
+    THIS DATA DIR, so two data dirs sharing one temp dir can never sweep each other's spill.
+    None = DuckDB's default, `<scratch db>.tmp` beside the scratch in the data dir."""
+    raw = os.environ.get("PROSPECT_DUCKDB_TEMP_DIR", "").strip()
+    if not raw:
+        return None
+    tag = hashlib.sha256(str(data_dir).encode("utf-8")).hexdigest()[:12]
+    return Path(raw).expanduser().resolve() / f"prospect-{tag}"
+
+
 def _duckdb_file_in_use(path: Path) -> bool:
     """True when another process holds DuckDB's lock on this database file. DuckDB takes a POSIX
     record lock on every database file it opens (F_SETLK: F_WRLCK read-write, F_RDLCK
@@ -5623,20 +5652,25 @@ def _duckdb_file_in_use(path: Path) -> bool:
         os.close(fd)
 
 
-def _scratch_paths(data_dir: Path) -> dict[str, list[Path]]:
-    """Every build-scratch path in data_dir, grouped by the mart version it belongs to
-    (--rescore-only's scratch groups under RESCORE_SCRATCH_VERSION). Never matches
-    prospect_*.duckdb, current.duckdb, the sentiment cache or the lock files."""
+def _scratch_paths(data_dir: Path, spill_root: Path | None = None) -> dict[str, list[Path]]:
+    """Every build-scratch path in data_dir — and in spill_root, where DuckDB spills when
+    PROSPECT_DUCKDB_TEMP_DIR is set — grouped by the mart version it belongs to (--rescore-only's
+    scratch groups under RESCORE_SCRATCH_VERSION). Never matches prospect_*.duckdb,
+    current.duckdb, the sentiment cache or the lock files."""
     groups: dict[str, list[Path]] = {}
-    for p in sorted(data_dir.glob("prospect_*.duckdb.building*")):
-        m = _SCRATCH_RE.match(p.name)
-        if m:
-            groups.setdefault(m.group(1), []).append(p)
-    # The rescore scratch, its .wal and its .tmp/ spill dir — one glob, since the name is a
-    # fixed prefix rather than a version pattern.
-    rescore = sorted(data_dir.glob(f"{RESCORE_SCRATCH_DB_NAME}*"))
-    if rescore:
-        groups[RESCORE_SCRATCH_VERSION] = rescore
+    dirs = [data_dir] + ([spill_root] if spill_root is not None and spill_root != data_dir else [])
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for p in sorted(d.glob("prospect_*.duckdb.building*")):
+            m = _SCRATCH_RE.match(p.name)
+            if m:
+                groups.setdefault(m.group(1), []).append(p)
+        # The rescore scratch, its .wal and its .tmp/ spill dir — one glob, since the name is a
+        # fixed prefix rather than a version pattern.
+        rescore = sorted(d.glob(f"{RESCORE_SCRATCH_DB_NAME}*"))
+        if rescore:
+            groups.setdefault(RESCORE_SCRATCH_VERSION, []).extend(rescore)
     return groups
 
 
@@ -5690,7 +5724,8 @@ def _remove_scratch(paths: list[Path], keep_artifact: bool = False) -> None:
             print(f"[etl] WARNING: could not remove scratch {p.name}: {e}")
 
 
-def _sweep_stale_scratch(data_dir: Path, held: set[str] | frozenset[str]) -> None:
+def _sweep_stale_scratch(data_dir: Path, held: set[str] | frozenset[str],
+                         spill_root: Path | None = None) -> None:
     """PRE-BUILD sweep, run with the caller's run lock(s) held — `held` names the families it
     holds ('build' and/or 'rescore'). Reclaims every scratch group it can PROVE dead and leaves
     everything else strictly alone:
@@ -5706,7 +5741,7 @@ def _sweep_stale_scratch(data_dir: Path, held: set[str] | frozenset[str]) -> Non
     This is what makes a SIGKILLed build's 18GB spill disappear on the very next run instead of
     after an hour, a validation-failure artifact live until the next build of any version, and
     a live build's scratch untouchable however long it goes without writing."""
-    for v, paths in sorted(_scratch_paths(data_dir).items()):
+    for v, paths in sorted(_scratch_paths(data_dir, spill_root).items()):
         family = _scratch_family(v)
         borrowed = None
         if family not in held:
@@ -5731,13 +5766,15 @@ def _sweep_stale_scratch(data_dir: Path, held: set[str] | frozenset[str]) -> Non
                 borrowed.release()
 
 
-def _sweep_own_scratch(data_dir: Path, version: str, keep_artifact: bool = False) -> None:
+def _sweep_own_scratch(data_dir: Path, version: str, keep_artifact: bool = False,
+                       spill_root: Path | None = None) -> None:
     """POST-BUILD sweep (main()'s finally): only THIS run's scratch — its own version's group,
     which the run lock proves nobody else's — and only once main()'s connect to that scratch
     has SUCCEEDED (the connect is outside the try whose finally calls this). On success only the
     `.wal`/`.tmp` leftovers still exist — the `.building` file has already been os.replace()d
     into place."""
-    _remove_scratch(_scratch_paths(data_dir).get(version, []), keep_artifact=keep_artifact)
+    _remove_scratch(_scratch_paths(data_dir, spill_root).get(version, []),
+                    keep_artifact=keep_artifact)
 
 
 def _refuse_publishing_rescore_scratch(building: Path) -> None:
@@ -5925,6 +5962,51 @@ def _env_config_errors() -> list[str]:
             errors.append(f"PROSPECT_FULLTEXT_REBUILD_DELTA={raw!r} is not a non-negative integer "
                           "(reviews scored since the published full-text marts were built beyond "
                           f"which a full build rebuilds them; unset = {FULLTEXT_REBUILD_DELTA:,})")
+    # The unattended-run knobs (2026-09-22; see DISK_MIN_FREE_GB_DEFAULT and _configure_duckdb).
+    raw = os.environ.get("PROSPECT_DISK_MIN_FREE_GB", "").strip()
+    if raw:
+        try:
+            gib = float(raw)
+        except ValueError:
+            gib = -1.0
+        if not gib >= 0.0:
+            errors.append(f"PROSPECT_DISK_MIN_FREE_GB={raw!r} is not a non-negative number (GiB "
+                          "the data dir must have free before a build starts; 0 = no floor; "
+                          f"unset = {DISK_MIN_FREE_GB_DEFAULT:g})")
+    raw = os.environ.get("PROSPECT_DUCKDB_THREADS", "").strip()
+    if raw:
+        try:
+            threads = int(raw)
+        except ValueError:
+            threads = 0
+        if threads < 1:
+            errors.append(f"PROSPECT_DUCKDB_THREADS={raw!r} is not a positive integer (DuckDB "
+                          "worker threads; unset = DuckDB's default, every core)")
+    raw = os.environ.get("PROSPECT_DUCKDB_TEMP_DIR", "").strip()
+    if raw and not Path(raw).expanduser().is_dir():
+        errors.append(f"PROSPECT_DUCKDB_TEMP_DIR={raw!r} is not an existing directory (where "
+                      "DuckDB spills; unset = beside the build's scratch file in the data dir)")
+    raw = os.environ.get("PROSPECT_DUCKDB_TEMP_MAX", "").strip()
+    if raw:
+        # DuckDB's own parser is the contract (40GiB, 10GB, 500MB ...), so ask it.
+        probe = duckdb.connect()
+        try:
+            probe.execute("SET max_temp_directory_size = '" + raw.replace("'", "''") + "'")
+        except duckdb.Error:
+            errors.append(f"PROSPECT_DUCKDB_TEMP_MAX={raw!r} is not a size DuckDB accepts for "
+                          "max_temp_directory_size (e.g. 40GiB); unset = min(40GiB, half the "
+                          "free disk where the spill lands)")
+        finally:
+            probe.close()
+    raw = os.environ.get("PROSPECT_SCORE_CONTEXT", "").strip().lower()
+    if raw == "fork" and sys.platform == "darwin":
+        # _score_context() never picks fork here on its own; this refuses asking for it. The
+        # build process runs DuckDB's threads (and macOS system frameworks that do not survive
+        # a fork of a threaded parent — CPython made spawn the macOS default for this reason),
+        # so a forked scoring worker can deadlock or abort mid-bucket.
+        errors.append("PROSPECT_SCORE_CONTEXT='fork' is unsafe on macOS: the build forks from a "
+                      "process running DuckDB's threads, and macOS does not support fork "
+                      "without exec there. Use spawn (the default on macOS) or forkserver.")
     return errors
 
 
@@ -5951,6 +6033,91 @@ def _source_snapshot(source_db: str) -> dict[str, str]:
         "source_last_write_at": iso(last),
         "source_age_hours": f"{max(0.0, time.time() - last) / 3600.0:.1f}",
     }
+
+
+def _free_gib(path: Path) -> float:
+    """Free space on the filesystem holding `path`, in GiB — the number `df -h` shows."""
+    return shutil.disk_usage(path).free / 2**30
+
+
+def _disk_min_free_gb() -> float:
+    """PROSPECT_DISK_MIN_FREE_GB, else DISK_MIN_FREE_GB_DEFAULT (0 = no floor). A garbled value is
+    refused up front by _env_config_errors; here it falls back, like every other knob."""
+    raw = os.environ.get("PROSPECT_DISK_MIN_FREE_GB", "").strip()
+    if raw:
+        try:
+            value = float(raw)
+            if value >= 0.0:
+                return value
+        except ValueError:
+            pass
+    return DISK_MIN_FREE_GB_DEFAULT
+
+
+def _default_temp_max(spill_parent: Path) -> str:
+    """The spill budget when PROSPECT_DUCKDB_TEMP_MAX is unset: the smaller of
+    DUCKDB_TEMP_MAX_DEFAULT_GIB and DUCKDB_TEMP_MAX_FREE_FRACTION of the free space where the
+    spill will land — never DuckDB's own default of 90% of free disk (see there)."""
+    free = shutil.disk_usage(spill_parent).free
+    cap = min(DUCKDB_TEMP_MAX_DEFAULT_GIB * 2**30, int(free * DUCKDB_TEMP_MAX_FREE_FRACTION))
+    return f"{max(1, cap // 2**20)}MiB"
+
+
+def _configure_duckdb(con: duckdb.DuckDBPyConnection, building: Path,
+                      spill_dir: Path | None) -> None:
+    """Every DuckDB resource knob, applied to the build connection before its first query and
+    LOGGED AS DUCKDB REPORTS IT, so the log states the limits the build actually ran under:
+
+      PROSPECT_DUCKDB_MEMORY_LIMIT  memory_limit. Unset leaves DuckDB's default — 80% of RAM —
+                                    which on a shared box leaves nothing for the scoring
+                                    workers, the app or the OS; warned about, not refused.
+      PROSPECT_DUCKDB_THREADS       threads (unset: DuckDB's default, every core).
+      PROSPECT_DUCKDB_TEMP_DIR      where the spill goes (unset: `<scratch>.tmp` beside the
+                                    scratch in the data dir). See _spill_root.
+      PROSPECT_DUCKDB_TEMP_MAX      max_temp_directory_size, i.e. the spill budget. Unset is NOT
+                                    DuckDB's default any more — see _default_temp_max.
+
+    SPILL CONTROL (2026-08-31). The 2026-08-30 nightly died with
+        OutOfMemoryException: failed to offload data block (20.6 GiB/20.6 GiB used)
+        This limit was set by the 'max_temp_directory_size' setting.
+    after 5.35h with nothing built: that setting defaults to 90% of free disk, so DuckDB spilled
+    until the volume was full. The cap keeps a runaway query failing on its own budget while the
+    box still has room, instead of taking the filesystem — and the scraper's SQLite, the app's
+    mart and the next build's scratch — down with it. The droplet exported 40GiB from its shell
+    wrapper; the default here is the same idea without the wrapper.
+
+    preserve_insertion_order=false is the other half of that incident's fix. Nothing here
+    depends on insertion order: every mart that has a meaningful order states it in an explicit
+    ORDER BY, and the pre-swap validation gate compares row COUNTS. Turning it off lets DuckDB
+    stream large materialisations instead of buffering to preserve an order nobody reads."""
+    mem = os.environ.get("PROSPECT_DUCKDB_MEMORY_LIMIT", "").strip()
+    if mem:
+        con.execute(f"SET memory_limit = '{mem}'")
+    threads = os.environ.get("PROSPECT_DUCKDB_THREADS", "").strip()
+    if threads:
+        con.execute(f"SET threads = {int(threads)}")
+    if spill_dir is not None:
+        spill_dir.parent.mkdir(parents=True, exist_ok=True)
+        con.execute("SET temp_directory = '" + str(spill_dir).replace("'", "''") + "'")
+    con.execute("SET preserve_insertion_order = false")
+    tmp_max = os.environ.get("PROSPECT_DUCKDB_TEMP_MAX", "").strip()
+    con.execute(f"SET max_temp_directory_size = "
+                f"'{tmp_max or _default_temp_max(spill_dir.parent if spill_dir else building.parent)}'")
+    eff = dict(con.execute(
+        "SELECT name, value FROM duckdb_settings() WHERE name IN ('memory_limit', 'threads', "
+        "'temp_directory', 'max_temp_directory_size')").fetchall())
+    print(f"[etl] duckdb     : memory_limit={eff.get('memory_limit')}"
+          f"{'' if mem else ' (DuckDB default)'} threads={eff.get('threads')}"
+          f"{'' if threads else ' (DuckDB default)'} max_temp_directory_size="
+          f"{eff.get('max_temp_directory_size')}"
+          f"{'' if tmp_max else ' (default: min(40GiB, 50% of free disk))'} "
+          f"temp_directory={eff.get('temp_directory') or building.name + '.tmp'} "
+          "preserve_insertion_order=false")
+    if not mem:
+        print("[etl] WARNING: PROSPECT_DUCKDB_MEMORY_LIMIT is unset, so DuckDB may take 80% of "
+              "this machine's RAM — the sentiment workers (~0.75GB each), the app and the OS "
+              "need theirs on top. Set it (README, ETL section) on any box that does anything "
+              "else.", file=sys.stderr)
 
 
 def main() -> int:
@@ -6114,7 +6281,8 @@ def main() -> int:
 
 def _build(args: argparse.Namespace, source_db: str, data_dir: Path, mart_version: str,
            source_info: dict[str, str], held: frozenset[str]) -> int:
-    """Everything main() does once it holds its run lock(s): sweep, build, validate, swap. Split out of main() only so the locks' try/finally wraps all of it."""
+    """Everything main() does once it holds its run lock(s): sweep, disk gate, build, validate,
+    swap. Split out of main() only so the locks' try/finally wraps all of it."""
     versioned = data_dir / f"prospect_{mart_version}.duckdb"
     current = data_dir / "current.duckdb"
 
@@ -6134,10 +6302,35 @@ def _build(args: argparse.Namespace, source_db: str, data_dir: Path, mart_versio
     # the build lock as well, which is what keeps it from running beside any mart build.
     cache_only = args.rescore_only or args.repair_arms
     scratch_version = RESCORE_SCRATCH_VERSION if cache_only else mart_version
-    _sweep_stale_scratch(data_dir, held)
+    spill_root = _spill_root(data_dir)
+    _sweep_stale_scratch(data_dir, held, spill_root)
+
+    # FREE-DISK GATE (2026-09-22), after the sweep — which may just have freed the headroom. It
+    # used to live in the droplet's shell wrapper (DISK_MIN_FREE_GB, deploy/prospect-refresh.sh),
+    # so a build run any other way had none: it would spill into a full disk and die hours in,
+    # taking the scraper's SQLite and the serving mart's volume with it. Checked where the
+    # scratch and the new mart land (the data dir); a separate spill volume is reported, and its
+    # budget is bounded by max_temp_directory_size instead (see _configure_duckdb).
+    floor = _disk_min_free_gb()
+    free = _free_gib(data_dir)
+    spill_note = ""
+    if spill_root is not None:
+        spill_base = Path(os.environ["PROSPECT_DUCKDB_TEMP_DIR"]).expanduser().resolve()
+        if os.stat(spill_base).st_dev != os.stat(data_dir).st_dev:
+            spill_note = f"; spill dir {spill_base}: {_free_gib(spill_base):,.1f} GiB free"
+    print(f"[etl] disk       : {free:,.1f} GiB free in the data dir (floor {floor:g} GiB, "
+          f"PROSPECT_DISK_MIN_FREE_GB){spill_note}")
+    if floor > 0 and free < floor:
+        print(f"ERROR: only {free:,.1f} GiB free in {data_dir}, below the {floor:g} GiB floor "
+              f"(PROSPECT_DISK_MIN_FREE_GB) even after sweeping dead scratch. A build needs "
+              f"room for its scratch, its spill and the new mart; below the floor it would die "
+              f"hours in on a full disk. Nothing was built (exit {EXIT_LOW_DISK}); free space, "
+              f"or lower the floor deliberately.", file=sys.stderr)
+        return EXIT_LOW_DISK
 
     building = (data_dir / RESCORE_SCRATCH_DB_NAME if cache_only
                 else data_dir / f"prospect_{mart_version}.duckdb.building")
+    spill_dir = None if spill_root is None else spill_root / f"{building.name}.tmp"
 
     params = build_params()
     if cache_only:
@@ -6169,37 +6362,7 @@ def _build(args: argparse.Namespace, source_db: str, data_dir: Path, mart_versio
         return EXIT_BUSY
     try:
       try:
-        # On memory-constrained hosts (e.g. a small Droplet) cap DuckDB's memory so it spills
-        # to its on-disk temp dir instead of being OOM-killed. Env-driven; unset = default.
-        _mem = os.environ.get("PROSPECT_DUCKDB_MEMORY_LIMIT")
-        if _mem:
-            con.execute(f"SET memory_limit='{_mem}'")
-            print(f"[etl] duckdb memory_limit={_mem}")
-
-        # SPILL CONTROL (2026-08-31). The 2026-08-30 nightly died here:
-        #   OutOfMemoryException: failed to offload data block (20.6 GiB/20.6 GiB used)
-        #   This limit was set by the 'max_temp_directory_size' setting.
-        # It defaults to ALL free disk, so DuckDB spilled until the volume was full and then
-        # failed — after 5.35h, with nothing built. Two settings, both straight out of that
-        # error's own "possible solutions":
-        #
-        # preserve_insertion_order=false is the big one. Nothing here depends on insertion
-        # order: every mart that has a meaningful order states it in an explicit ORDER BY
-        # (and mart_game_aspect_reviews' was just given a unique tiebreak, so it no longer
-        # varies at all), and the pre-swap validation gate compares row COUNTS. Turning it off
-        # lets DuckDB stream large materialisations instead of buffering to preserve an order
-        # nobody reads — which is exactly what the 15M-row rebuild of
-        # stg_aspect_mention_sentiment at compute_aspect_sentiment() was buffering.
-        #
-        # max_temp_directory_size caps the spill BELOW free disk so a runaway query fails on
-        # its own budget while the box still has room, instead of taking the filesystem — and
-        # the scraper's SQLite, the app's mart and the next build's scratch down with it.
-        con.execute("SET preserve_insertion_order=false")
-        _tmp_max = os.environ.get("PROSPECT_DUCKDB_TEMP_MAX")
-        if _tmp_max:
-            con.execute(f"SET max_temp_directory_size='{_tmp_max}'")
-        print(f"[etl] duckdb preserve_insertion_order=false"
-              f"{f' max_temp_directory_size={_tmp_max}' if _tmp_max else ''}")
+        _configure_duckdb(con, building, spill_dir)
         con.execute("INSTALL sqlite; LOAD sqlite;")
         con.execute(f"ATTACH '{source_db}' AS src (TYPE sqlite, READ_ONLY)")
 
@@ -6421,7 +6584,8 @@ def _build(args: argparse.Namespace, source_db: str, data_dir: Path, mart_versio
         # is disposable (progress is in the sentiment cache), so every exit that runs a finally
         # removes it. Only a SIGKILL can leave it behind, and the next run's _sweep_stale_scratch
         # collects it.
-        _sweep_own_scratch(data_dir, scratch_version, keep_artifact=validation_failed)
+        _sweep_own_scratch(data_dir, scratch_version, keep_artifact=validation_failed,
+                           spill_root=spill_root)
 
     print(f"[etl] done in {time.perf_counter() - t0:.1f}s  (version {mart_version})")
     return 0
