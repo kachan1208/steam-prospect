@@ -36,21 +36,32 @@ S = requests.Session()
 S.headers["User-Agent"] = "Prospect/1.0 (market research; kachan1208@gmail.com)"
 
 
+def _redact(text: str) -> str:
+    """Strip the API key from an error message (it arrives as `key=<value>` in URLs)."""
+    return text.replace(API_KEY, "<redacted>") if API_KEY else text
+
+
 def fetch_catalog() -> dict[int, tuple[int, int]]:
     """appid -> (last_modified, price_change_number) for the whole Steam catalog."""
     out: dict[int, tuple[int, int]] = {}
     last_appid = 0
     while True:
-        r = S.get(
-            "https://api.steampowered.com/IStoreService/GetAppList/v1/",
-            params={
-                "key": API_KEY, "max_results": 50000, "last_appid": last_appid,
-                "include_games": "true", "include_dlc": "false",
-                "include_software": "false",
-            },
-            timeout=60,
-        )
-        r.raise_for_status()
+        # The key rides in the query string, and requests puts the full URL into every
+        # HTTPError/ConnectionError message — so an unhandled failure here would print
+        # STEAM_API_KEY into the step log. Re-raise with the key redacted instead.
+        try:
+            r = S.get(
+                "https://api.steampowered.com/IStoreService/GetAppList/v1/",
+                params={
+                    "key": API_KEY, "max_results": 50000, "last_appid": last_appid,
+                    "include_games": "true", "include_dlc": "false",
+                    "include_software": "false",
+                },
+                timeout=60,
+            )
+            r.raise_for_status()
+        except requests.RequestException as exc:
+            raise RuntimeError(_redact(str(exc))) from None
         resp = r.json().get("response", {})
         apps = resp.get("apps", [])
         for a in apps:
