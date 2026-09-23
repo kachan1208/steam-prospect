@@ -300,7 +300,8 @@ export function SaturationTrend({ points, asOf }: { points: TrendPoint[]; asOf?:
             lifetime Est. revenue of that year&rsquo;s paid games with 50+ reviews
           </span>
         </div>
-        {t.revenue && (
+        {/* Without a line, the flagged box below is the whole story — no takeaway, no list. */}
+        {drawRevenue && t.revenue && (
           <p className="mb-1.5 text-[12px] text-ink-secondary" data-testid="takeaway-revenue">
             {t.revenue}
           </p>
@@ -380,12 +381,12 @@ export function SaturationTrend({ points, asOf }: { points: TrendPoint[]; asOf?:
           <p className="border border-dashed px-3 py-2 text-[12px] text-ink-secondary" style={{ borderColor: "var(--status-warning)" }} data-testid="revenue-not-drawn">
             No yearly revenue line:{" "}
             {t.plottedYears.length === 0
-              ? `no year has ${TREND_REV_MIN_SCORED} games with 50+ reviews`
-              : `only ${t.plottedYears[0]} has ${TREND_REV_MIN_SCORED} games with 50+ reviews`}{" "}
+              ? `no year has ${TREND_REV_MIN_SCORED} or more games with 50+ reviews`
+              : `only ${t.plottedYears[0]} has ${TREND_REV_MIN_SCORED} or more games with 50+ reviews`}{" "}
             — too few for a year-by-year read in a niche this size.
           </p>
         )}
-        {t.thinNote && (
+        {drawRevenue && t.thinNote && (
           <p className="mt-1 text-[11px] text-ink-muted" data-testid="takeaway-thin">
             {t.thinNote}
           </p>

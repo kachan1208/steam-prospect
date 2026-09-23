@@ -162,8 +162,11 @@ describe("thin years — a top-10% figure off one or two games is never plotted"
       const { container } = render(<SaturationTrend points={SMALL} asOf={AS_OF} />);
       expect(container.querySelectorAll(".recharts-wrapper")).toHaveLength(1); // releases only
       expect(screen.getByTestId("revenue-not-drawn").textContent).toBe(
-        "No yearly revenue line: only 2024 has 20 games with 50+ reviews — too few for a year-by-year read in a niche this size.",
+        "No yearly revenue line: only 2024 has 20 or more games with 50+ reviews — too few for a year-by-year read in a niche this size.",
       );
+      // The flagged box is the whole story: no year-over-year line, no list of thin years.
+      expect(screen.queryByTestId("takeaway-revenue")).toBeNull();
+      expect(screen.queryByTestId("takeaway-thin")).toBeNull();
     });
   });
 });
