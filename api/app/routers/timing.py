@@ -30,7 +30,7 @@ from __future__ import annotations
 import calendar
 
 import duckdb
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from .. import analytics_db, response_cache
@@ -42,9 +42,6 @@ _MARTS_MISSING_DETAIL = (
     "(mart_timing_demand/mart_timing_congestion/mart_timing_decay missing; they appear "
     "after the next ETL run)"
 )
-_DB_MISSING_DETAIL = (
-    "analytics database not available — the ETL hasn't produced current.duckdb yet"
-)
 
 _MONTH_NAMES = ["", *calendar.month_abbr[1:]]  # 1-indexed Jan..Dec
 
@@ -53,7 +50,7 @@ def _q(sql: str, params: list | None = None) -> list[dict]:
     """analytics_db.query with the pre-ETL failure modes mapped to a clean 503 (mirrors
     entities.py's _q — whole DB absent vs. DB present but built by an older ETL)."""
     if not analytics_db.is_ready():
-        raise HTTPException(status_code=503, detail=_DB_MISSING_DETAIL)
+        raise HTTPException(status_code=503, detail=analytics_db.missing_detail())
     try:
         return analytics_db.query(sql, params)
     except duckdb.CatalogException:
@@ -69,8 +66,10 @@ class DemandPoint(BaseModel):
 
 class CongestionPoint(BaseModel):
     month: int
+    # Average number of releases landing in THIS calendar month per year, over n_years
+    # complete years — a per-month count (the 12 of them sum to the yearly total).
     avg_releases: float
-    avg_big_releases: float  # est_rev_reviews >= $200K
+    avg_big_releases: float  # same unit, est_rev_reviews >= $200K only
     n_years: int
 
 
@@ -95,7 +94,7 @@ class WindowScore(BaseModel):
     month_name: str
     demand_share: float | None
     demand_index: float | None  # demand_share / (1/12); 1.0 = an average month
-    avg_releases: float | None
+    avg_releases: float | None  # releases in this calendar month per year (see CongestionPoint)
     avg_big_releases: float | None
     congestion_index: float | None  # avg_releases / mean(avg_releases); 1.0 = average
     score: float | None  # demand_index - congestion_index
@@ -164,12 +163,19 @@ def _recommendation(
     best = sorted(scored, key=lambda w: w.score, reverse=True)[:3]
     top = best[0]
     label = "the catalog" if genre == "__all__" else genre
+    # UNITS: avg_releases is the average number of releases landing in ONE calendar month
+    # per year (over the congestion window's n_years complete years) — a per-month figure.
+    # It used to print as "(1092 releases/yr ...)" for January, i.e. read as the YEAR's
+    # total, while the twelve monthly figures actually sum to ~16K releases a year.
+    n_years = c_by_m[top.month].n_years
+    month_full = calendar.month_name[top.month]
     rationale = (
         f"{', '.join(w.month_name for w in best)} look like the best windows for {label}: "
         f"in {top.month_name}, players do {top.demand_index:.2f}x an average month's buying "
         f"({(top.demand_share or 0) * 100:.1f}% of the year's post-launch review activity) "
         f"while release traffic runs {top.congestion_index:.2f}x the monthly average "
-        f"({top.avg_releases:.0f} releases/yr, {top.avg_big_releases:.0f} of them $200K+) — "
+        f"(~{top.avg_releases:,.0f} {month_full} releases per year, "
+        f"~{top.avg_big_releases:,.0f} of them $200K+; {n_years}-yr avg) — "
         "demand outruns crowding there. Timing is a second-order effect: it tilts odds, "
         "it doesn't rescue a weak game."
     )
@@ -206,15 +212,17 @@ def _decay_summary(decay: list[DecayPoint]) -> DecaySummary | None:
 
 @router.get("/overview", response_model=TimingOverview)
 def timing_overview(
+    request: Request,
     response: Response,
     genre: str = Query("__all__", description="Exact Steam genre label, or '__all__'."),
 ) -> TimingOverview:
     """Three mart reads plus the 12-month scoring pass — a pure function of the mart for a
-    given genre, so it is cached in-process keyed by the mart version and sent with an hour
-    of public cache (see response_cache). The 404 for an unknown genre is NOT cached: only
-    successful answers are stored."""
-    response.headers["Cache-Control"] = response_cache.CACHE_CONTROL
-    return response_cache.get_or_compute("timing_overview", (genre,), lambda: _overview(genre))
+    given genre, so it is cached in-process keyed by the mart version and sent with 5
+    minutes of public cache + a mart-identity ETag (see response_cache.serve()). The 404
+    for an unknown genre is NOT cached: only successful answers are stored."""
+    return response_cache.serve(
+        request, response, "timing_overview", (genre,), lambda: _overview(genre)
+    )
 
 
 def _overview(genre: str) -> TimingOverview:

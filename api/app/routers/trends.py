@@ -25,7 +25,7 @@ Data caveats (surfaced so the UI can caption the chart honestly):
 """
 from __future__ import annotations
 
-from functools import lru_cache
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -149,26 +149,29 @@ def _build_comps(requested: list[int]) -> GameTrendsComps:
 # ------------------------------------------------------------------------------------------
 # Daily live-player (CCU) series — GET /api/games/{appid}/players
 # ------------------------------------------------------------------------------------------
-@lru_cache(maxsize=1)
 def _has_players_daily() -> bool:
-    """Whether the current mart carries the daily CCU marts (mart_players.sql). Gated so
+    """Whether the served mart carries the daily CCU marts (mart_players.sql). Gated so
     the endpoint degrades to available=False (not a 500) when the app boots against an
-    older mart — same capability idiom as games.py::_has_name_lower. Cached: the DB is
-    swapped + app restarted on each ETL build."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.tables WHERE table_name = 'mart_game_players_daily'"
-    )
-    return bool(rows)
+    older mart — same capability idiom as games.py::_has_name_lower (the per-mart schema
+    snapshot, so a hot-reloaded mart re-answers it)."""
+    return analytics_db.has_table("mart_game_players_daily")
 
 
-@lru_cache(maxsize=1)
 def _has_players_history() -> bool:
     """mart_game_players_history (all-sources history incl. steamcharts monthly) — landed
     after the daily marts, so it gets its own gate."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.tables WHERE table_name = 'mart_game_players_history'"
+    return analytics_db.has_table("mart_game_players_history")
+
+
+def _players_daily_as_of() -> str | None:
+    """The last capture day in mart_game_players_daily ('YYYY-MM-DD'), memoized per mart —
+    the as-of date of the daily player series."""
+    return analytics_db.memo(
+        "trends.players_daily_as_of",
+        lambda: analytics_db.scalar(
+            "SELECT CAST(MAX(date) AS VARCHAR) FROM mart_game_players_daily"
+        ),
     )
-    return bool(rows)
 
 
 class GamePlayersPoint(BaseModel):
@@ -180,6 +183,10 @@ class GamePlayersSummary(BaseModel):
     live_players: int | None = None  # latest capture (mart_game.live_players)
     players_7d_avg: float | None = None  # trailing-7d average of the point samples
     players_trend_7d_pct: float | None = None  # vs the prior 7d (measured days only)
+    # The whole Steam panel's 7d change over the same days, and this game's trend relative
+    # to it. None until the mart carries the columns.
+    players_trend_7d_market_pct: float | None = None
+    players_trend_7d_rel_pct: float | None = None
     n_days_measured: int = 0  # measured days in the FULL retained history
     first_date: str | None = None  # bounds of that history
     last_date: str | None = None
@@ -203,6 +210,9 @@ class GamePlayersResponse(BaseModel):
     # Deep monthly history (top-8k games only; empty when the mart predates it or the game
     # has no external coverage). Source: steamcharts.com monthly averages/peaks.
     monthly: list[GamePlayersMonthlyPoint] = []
+    # The day the `days` window ends on: the last capture day in the daily mart (the data's
+    # own as-of), not today. None when the series is unavailable.
+    data_as_of: str | None = None
 
 
 @router.get("/{appid}/players", response_model=GamePlayersResponse)
@@ -216,14 +226,29 @@ def game_players(
     if not _has_players_daily():
         return GamePlayersResponse(appid=appid, days=days, available=False, summary=None, points=[])
 
+    # The window ends at the DATA's last capture day (the whole panel's, not this game's —
+    # a game rotated out of the panel must show its gap, not a shifted window), NOT at
+    # CURRENT_DATE: against a mart that is days old the wall-clock window silently lost
+    # its most recent days. Echoed back as data_as_of.
+    as_of = _players_daily_as_of()
+    anchor = as_of or datetime.now(timezone.utc).date().isoformat()
     # days is Query-validated (7-365), safe to interpolate into the INTERVAL literal.
     rows = analytics_db.query(
         f"SELECT CAST(date AS VARCHAR) AS date, players FROM mart_game_players_daily "
-        f"WHERE appid = ? AND date >= CURRENT_DATE - INTERVAL {days} DAY ORDER BY date ASC",
-        [appid],
+        f"WHERE appid = ? AND date >= CAST(? AS DATE) - INTERVAL {days} DAY "
+        f"AND date <= CAST(? AS DATE) ORDER BY date ASC",
+        [appid, anchor, anchor],
+    )
+    # The market-relative trend columns ride along once the mart carries them (gated per
+    # column, same as the game profile — see games.py::_MARKET_TREND_COLS).
+    market_cols = "".join(
+        f", {c}"
+        for c in ("players_trend_7d_market_pct", "players_trend_7d_rel_pct")
+        if analytics_db.has_column("mart_game", c)
     )
     game = analytics_db.query_one(
-        "SELECT live_players, players_7d_avg, players_trend_7d_pct FROM mart_game WHERE appid = ?",
+        "SELECT live_players, players_7d_avg, players_trend_7d_pct"
+        f"{market_cols} FROM mart_game WHERE appid = ?",
         [appid],
     )
     bounds = analytics_db.query_one(
@@ -249,6 +274,7 @@ def game_players(
         summary=GamePlayersSummary(**(game or {}), **(bounds or {})),
         points=[GamePlayersPoint(**r) for r in rows],
         monthly=monthly,
+        data_as_of=anchor,
     )
 
 

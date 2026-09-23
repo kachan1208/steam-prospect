@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -25,14 +26,22 @@ from .mcp_mount import close_prospect_mcp, load_prospect_mcp
 _prospect_mcp, _mcp_asgi = load_prospect_mcp()
 
 
+_log = logging.getLogger("prospect.api")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Analytics plane: open the read-only marts. Fail loud if the ETL hasn't run.
+    # Analytics plane: open the read-only marts. Fail LOUD in the log, never by dying.
     try:
         analytics_db.init(settings.analytics_db_path, settings.analytics_pool_size)
-    except FileNotFoundError as exc:
-        # Keep the app up so /api/docs and a clear error are reachable; endpoints will 503.
+    except analytics_db.MartUnavailable as exc:
+        # Keep the app up so /api/docs and a clear error are reachable; endpoints will 503
+        # and /api/health reports status=degraded with this reason. MartUnavailable covers
+        # EVERY failed open — a missing file, and also a 0-byte / truncated / garbage one
+        # (duckdb.IOException), which used to escape this block, kill the worker with
+        # STARTUP_FAILURE and take the whole container down with it.
         print(f"[api] WARNING: {exc}")
+        _log.warning("analytics DB unavailable at startup: %s", exc)
     # The mounted MCP's Streamable-HTTP transport needs its session manager running for the
     # whole app lifetime; drive it here when the MCP is enabled.
     if _prospect_mcp is not None:
@@ -139,9 +148,31 @@ app.include_router(trends.router)
 app.include_router(analytics.router)
 
 
+_MCP_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+
+
+def _register_mcp_slash_redirect(target_app: FastAPI) -> None:
+    """`/mcp` (no trailing slash) -> 307 `/mcp/`, query string kept.
+
+    The MCP is mounted at /mcp with its endpoint at the mount ROOT, i.e. /mcp/. A Starlette
+    Mount only matches "/mcp/..." — so a client configured with the bare ".../mcp" URL fell
+    through to the SPA catch-all, which answers any "mcp" segment with 404 (so the SPA
+    shell is never served as JSON-RPC), and Starlette's own slash redirect never ran
+    because the catch-all DID match. 307, not 301/302: it preserves the method AND body, so
+    a JSON-RPC POST is re-sent as a POST. The Location is relative, so it stays correct
+    behind whatever proxy/host the app is served from. Routing only — nothing about the
+    transport is touched."""
+
+    @target_app.api_route("/mcp", methods=_MCP_METHODS, include_in_schema=False)
+    def mcp_slash_redirect(request: Request) -> RedirectResponse:
+        query = request.url.query
+        return RedirectResponse("/mcp/" + (f"?{query}" if query else ""), status_code=307)
+
+
 # Mount the Prospect MCP (Streamable HTTP) at /mcp so users can add it to their own Claude.
 # Registered before the SPA catch-all below so /mcp routes to the MCP, not to index.html.
 if _mcp_asgi is not None:
+    _register_mcp_slash_redirect(app)
     app.mount("/mcp", _mcp_asgi)
 
 
@@ -153,12 +184,37 @@ _STATIC_DIR = Path(settings.static_dir) if settings.static_dir else None
 _INDEX_HTML = (_STATIC_DIR / "index.html") if _STATIC_DIR else None
 _SERVE_SPA = bool(_STATIC_DIR and _INDEX_HTML and _INDEX_HTML.exists())
 
+# Cache policy for the SPA. index.html (and every client route, which IS index.html) must be
+# revalidated on every load: it carried ETag/Last-Modified but no Cache-Control, so browsers
+# applied heuristic freshness and could keep an OLD index.html after a rebuild — one that
+# references hashed /assets/*.js files the new build no longer contains, i.e. a blank page
+# until a hard refresh. "no-cache" still allows a cheap 304 via the ETag. The unhashed
+# top-level files (favicon, robots.txt) get the same treatment. Vite's /assets/* names carry
+# a content hash, so a given URL's bytes never change: cache those for a year, immutable.
+_SPA_CACHE_CONTROL = "no-cache"
+_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
+
+
+class _ImmutableAssets(StaticFiles):
+    """StaticFiles for Vite's content-hashed /assets. Only successful answers (200/304) are
+    marked immutable — a 404 for an asset an old page still references must never be."""
+
+    async def get_response(self, path: str, scope: Scope):
+        response = await super().get_response(path, scope)
+        if response.status_code in (200, 304):
+            response.headers["Cache-Control"] = _ASSET_CACHE_CONTROL
+        return response
+
+
+def _spa_file(path: Path) -> FileResponse:
+    return FileResponse(str(path), headers={"Cache-Control": _SPA_CACHE_CONTROL})
+
 
 @app.get("/", include_in_schema=False)
 def root():
     # Hosted mode: the root path is the app itself. Local/dev: a small JSON pointer.
     if _SERVE_SPA:
-        return FileResponse(str(_INDEX_HTML))
+        return _spa_file(_INDEX_HTML)
     return {
         "name": settings.api_title,
         "version": settings.api_version,
@@ -171,7 +227,7 @@ if _SERVE_SPA:
     # Hashed JS/CSS/images emitted by Vite live under /assets.
     _assets_dir = _STATIC_DIR / "assets"
     if _assets_dir.is_dir():
-        app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="assets")
+        app.mount("/assets", _ImmutableAssets(directory=str(_assets_dir)), name="assets")
 
     # SPA fallback — registered LAST so it never shadows /api/*, /api/docs, /api/openapi.json,
     # /metrics (each matched by its own route above). Any other path returns a real static
@@ -208,5 +264,5 @@ if _SERVE_SPA:
             and candidate.is_file()
             and candidate.resolve().is_relative_to(_STATIC_DIR.resolve())
         ):
-            return FileResponse(str(candidate))
-        return FileResponse(str(_INDEX_HTML))
+            return _spa_file(candidate)
+        return _spa_file(_INDEX_HTML)

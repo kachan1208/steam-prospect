@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Query, Response
+from typing import Literal
 
-from .. import analytics_db, benchmarks, response_cache
+from fastapi import APIRouter, Query, Request, Response
+
+from .. import analytics_db, benchmarks, histograms, response_cache
 from ..schemas import (
     BenchmarkMark,
     BoxleiterRow,
@@ -15,8 +17,6 @@ from ..schemas import (
 )
 
 router = APIRouter(prefix="/api/market", tags=["market"])
-
-_METRICS = {"revenue", "reviews", "owners", "price"}
 
 
 def _marks_for(metric: str) -> list[BenchmarkMark]:
@@ -42,12 +42,12 @@ def _marks_for(metric: str) -> list[BenchmarkMark]:
 
 @router.get("/distribution", response_model=MarketDistribution)
 def distribution(
-    metric: str = Query("revenue"),
+    # A Literal, so an unknown metric is FastAPI's 422 naming the valid ones. It used to be
+    # silently rewritten to "revenue" — a typo'd metric=review got a revenue chart back.
+    metric: Literal["revenue", "reviews", "owners", "price"] = Query("revenue"),
     genre: str = Query("__all__"),
     window: str = Query("all", pattern="^(all|24m)$"),
 ) -> MarketDistribution:
-    if metric not in _METRICS:
-        metric = "revenue"
     buckets = analytics_db.query(
         "SELECT bucket_index, x_min, x_max, count FROM mart_market_hist "
         "WHERE metric = ? AND genre = ? AND win = ? ORDER BY bucket_index",
@@ -64,26 +64,32 @@ def distribution(
         genre=genre,
         window=window,
         n=n,
-        buckets=[HistBucket(**b) for b in buckets],
+        # revenue/reviews/owners are log-binned with the GREATEST(v, 1) floor — bucket 0
+        # holds e.g. every 0-review game, so it goes through the shared floor helper; price
+        # is linear $2.50 bins with no sentinel.
+        buckets=(
+            [HistBucket(**b) for b in buckets]
+            if metric == "price"
+            else histograms.log_buckets(buckets)
+        ),
         percentiles=[PercentilePoint(pctile=p["pctile"], value=p["value"]) for p in pcts],
         benchmark_marks=_marks_for(metric),
     )
 
 
 @router.get("/benchmarks", response_model=MarketBenchmarks)
-def market_benchmarks(response: Response) -> MarketBenchmarks:
+def market_benchmarks(request: Request, response: Response) -> MarketBenchmarks:
     """Cited benchmark constants + our catalog's own figures. A pure function of the mart
     (no parameters at all), so it is cached in-process keyed by the mart version and sent
-    with an hour of public cache — see response_cache."""
-    response.headers["Cache-Control"] = response_cache.CACHE_CONTROL
-    return response_cache.get_or_compute("market_benchmarks", (), _market_benchmarks)
+    with 5 minutes of public cache + a mart-identity ETag — see response_cache.serve()."""
+    return response_cache.serve(request, response, "market_benchmarks", (), _market_benchmarks)
 
 
 def _market_benchmarks() -> MarketBenchmarks:
     meta = {r["key"]: r["value"] for r in analytics_db.query("SELECT key, value FROM mart_meta")}
     boxleiter = analytics_db.query(
         "SELECT genre, n, owners_per_review_median, owners_per_review_p25, "
-        "owners_per_review_p75, slope, intercept FROM mart_market_boxleiter ORDER BY n DESC"
+        "owners_per_review_p75, slope, intercept FROM mart_market_boxleiter ORDER BY n DESC, genre"
     )
     tiers = analytics_db.query(
         "SELECT tier, tier_order, count, pct FROM mart_market_tiers ORDER BY tier_order"
@@ -107,6 +113,7 @@ def _market_benchmarks() -> MarketBenchmarks:
                 "computed medians/pct are Boxleiter gross over games with >=10 reviews "
                 "(paid = price>0, >=1 review); cited $249/8.5% are first-year/net over ALL releases"
             ),
+            opportunity_v2_model=meta.get("opportunity_v2_model") or None,
         ),
         boxleiter_by_genre=[BoxleiterRow(**b) for b in boxleiter],
         tiers=[TierRow(**t) for t in tiers],

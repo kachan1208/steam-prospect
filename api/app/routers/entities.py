@@ -22,7 +22,9 @@ import duckdb
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from .. import analytics_db
+from .. import analytics_db, paging
+from .. import scope as scope_mod
+from ..scope import Scope
 
 router = APIRouter(prefix="/api/entities", tags=["entities"])
 
@@ -48,9 +50,6 @@ _MARTS_MISSING_DETAIL = (
     "entity data is refreshing — the developer/publisher marts haven't been built yet "
     "(mart_entity/mart_entity_games missing; they appear after the next ETL run)"
 )
-_DB_MISSING_DETAIL = (
-    "analytics database not available — the ETL hasn't produced current.duckdb yet"
-)
 
 
 def _q(sql: str, params: list | None = None) -> list[dict]:
@@ -60,7 +59,7 @@ def _q(sql: str, params: list | None = None) -> list[dict]:
     main.py deliberately keeps the app up, see its lifespan), and the DB present but built
     by an ETL that predates the entity marts (CatalogException on the missing table)."""
     if not analytics_db.is_ready():
-        raise HTTPException(status_code=503, detail=_DB_MISSING_DETAIL)
+        raise HTTPException(status_code=503, detail=analytics_db.missing_detail())
     try:
         return analytics_db.query(sql, params)
     except duckdb.CatalogException:
@@ -83,36 +82,15 @@ _SEARCH_COLS = (
 )
 
 
-# Capability probes, cached manually rather than via lru_cache: these can be evaluated
-# BEFORE the analytics DB is up (the _entity_cols() f-string argument runs ahead of _q's
-# own is_ready() check), and an lru_cache would freeze that pre-init False for the whole
-# process lifetime — permanently hiding p90_rev/x_handle even after init. Compute-and-
-# don't-cache while not ready; only a real probe against a live DB is remembered.
-_p90_cache: bool | None = None
-_x_handle_cache: bool | None = None
-
-
-def _reset_capability_cache() -> None:
-    """Test hook — mirrors the cache_clear() the lru_cache idiom offered."""
-    global _p90_cache, _x_handle_cache
-    _p90_cache = None
-    _x_handle_cache = None
-
-
+# Capability probes, answered from analytics_db's per-mart schema snapshot. They can be
+# evaluated BEFORE the analytics DB is up (the _entity_cols() f-string argument runs ahead
+# of _q's own is_ready() check): with no mart open the answer is False, and — unlike the
+# manual caches these replaced (which existed because an lru_cache froze that pre-init False
+# for the whole process) — nothing is remembered past the moment a mart appears or reloads.
 def _has_p90() -> bool:
     """Whether the mart carries p90_rev (added 2026-08-14). Gated so the app still boots
     against an older mart — same capability idiom as games.py::_has_name_lower."""
-    global _p90_cache
-    if _p90_cache is None:
-        if not analytics_db.is_ready():
-            return False  # pre-init answer: usable, but never cached
-        _p90_cache = bool(
-            analytics_db.query(
-                "SELECT 1 FROM information_schema.columns "
-                "WHERE table_name = 'mart_entity' AND column_name = 'p90_rev'"
-            )
-        )
-    return _p90_cache
+    return analytics_db.has_column("mart_entity", "p90_rev")
 
 
 def _has_x_handle() -> bool:
@@ -121,17 +99,7 @@ def _has_x_handle() -> bool:
     pages / dev websites, so it may be a game's, the studio's, or the dev's personal
     account). Gated so the app still boots against an older mart — same capability idiom
     as _has_p90."""
-    global _x_handle_cache
-    if _x_handle_cache is None:
-        if not analytics_db.is_ready():
-            return False  # pre-init answer: usable, but never cached
-        _x_handle_cache = bool(
-            analytics_db.query(
-                "SELECT 1 FROM information_schema.columns "
-                "WHERE table_name = 'mart_entity' AND column_name = 'x_handle'"
-            )
-        )
-    return _x_handle_cache
+    return analytics_db.has_column("mart_entity", "x_handle")
 
 
 def _entity_cols() -> str:
@@ -158,6 +126,9 @@ class EntitySearchRow(BaseModel):
     p90_rev: float | None = None  # absent on marts that predate it
     hit_rate_200k: float | None
     top_genres: list[str]
+    # Share of the entity's FLAGGED games that are Steam Indie-flagged — the measure the
+    # indie scope keeps on (>= 0.5). Computed only under scope=indie; null otherwise.
+    indie_share: float | None = None
 
 
 class EntitySearchList(BaseModel):
@@ -165,6 +136,10 @@ class EntitySearchList(BaseModel):
     total: int
     limit: int
     offset: int = 0
+    # Population scope (app/scope.py). Under scope=indie, n_scope_unknown counts the
+    # entities that matched everything else but have no flagged game (unknown != indie).
+    scope: Scope = "all"
+    n_scope_unknown: int | None = None
 
 
 class EntitySummary(BaseModel):
@@ -232,6 +207,7 @@ def search_entities(
         "then n_games, then name, so a page order is stable across requests."
     ),
     order: str = Query("desc", pattern="^(asc|desc)$"),
+    scope: Scope = Query("all", description=scope_mod.ENTITY_SCOPE_DESC),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0, le=MAX_OFFSET),
 ) -> EntitySearchList:
@@ -250,16 +226,46 @@ def search_entities(
     if role:
         where.append("role = ?")
         params.append(role)
+
+    # scope=indie: mart_entity carries no indie measure of its own, so each entity's share
+    # of Indie-flagged games is aggregated here (mart_entity_games x mart_game — ~20ms on
+    # the real mart, paid only when the scope is asked for) and the entity kept when at
+    # least half of its FLAGGED games are indie. Unflagged-only entities are unknown:
+    # excluded and counted. See app/scope.py for the definition and why self-publishing
+    # alone is not a size signal.
+    source, share_col = "mart_entity", ""
+    n_scope_unknown: int | None = None
+    if scope == "indie":
+        source = (
+            "(SELECT e.*, s.indie_share FROM mart_entity e LEFT JOIN ("
+            " SELECT eg.role, eg.name, AVG(CAST(g.is_indie AS DOUBLE)) AS indie_share"
+            " FROM mart_entity_games eg JOIN mart_game g ON g.appid = eg.appid"
+            " GROUP BY eg.role, eg.name) s ON s.role = e.role AND s.name = e.name) ent"
+        )
+        share_col = ", indie_share"
+        unknown_where = "WHERE " + " AND ".join([*where, "indie_share IS NULL"])
+        n_scope_unknown = int(
+            _q(f"SELECT COUNT(*) AS n FROM {source} {unknown_where}", params)[0]["n"] or 0
+        )
+        where.append("indie_share >= ?")
+        params.append(scope_mod.ENTITY_INDIE_MIN_SHARE)
     where_sql = "WHERE " + " AND ".join(where)
 
     # `total` rides on every row as a window count, so the page and its count come out of
     # ONE pass over mart_entity instead of a COUNT(*) scan followed by a second scan for the
     # rows. The window is evaluated after WHERE and before ORDER BY/LIMIT, so it counts the
     # whole match set, not the page.
+    # (role, name) is mart_entity's unique key: `name ASC` alone still tied a developer and
+    # a publisher of the same name (same revenue, same game count) when role isn't filtered.
+    order_sql = paging.order_by(
+        f"{_SORT_SQL[sort]} {_ORDER_SQL[order]} NULLS LAST",
+        "total_rev DESC NULLS LAST",
+        "n_games DESC",
+        unique=("name", "role"),
+    )
     rows = _q(
-        f"SELECT {_search_cols()}, COUNT(*) OVER () AS total_n FROM mart_entity {where_sql} "
-        f"ORDER BY {_SORT_SQL[sort]} {_ORDER_SQL[order]} NULLS LAST, "
-        "total_rev DESC NULLS LAST, n_games DESC, name ASC LIMIT ? OFFSET ?",
+        f"SELECT {_search_cols()}{share_col}, COUNT(*) OVER () AS total_n FROM {source} "
+        f"{where_sql} {order_sql} LIMIT ? OFFSET ?",
         params + [limit, offset],
     )
     if rows:
@@ -267,7 +273,7 @@ def search_entities(
     else:
         # An empty page has no row to read the window count from — nothing matched, or the
         # offset ran past the end — so this is the one case that pays for a count scan.
-        total = int(_q(f"SELECT COUNT(*) AS n FROM mart_entity {where_sql}", params)[0]["n"] or 0)
+        total = int(_q(f"SELECT COUNT(*) AS n FROM {source} {where_sql}", params)[0]["n"] or 0)
     items = [
         EntitySearchRow(**{
             **{k: v for k, v in r.items() if k != "total_n"},
@@ -275,7 +281,10 @@ def search_entities(
         })
         for r in rows
     ]
-    return EntitySearchList(items=items, total=total, limit=limit, offset=offset)
+    return EntitySearchList(
+        items=items, total=total, limit=limit, offset=offset,
+        scope=scope, n_scope_unknown=n_scope_unknown,
+    )
 
 
 @router.get("/profile", response_model=EntityProfileResponse)
@@ -286,11 +295,13 @@ def entity_profile(
     rows = _q(f"SELECT {_entity_cols()} FROM mart_entity WHERE role = ? AND name = ?", [role, name])
     if not rows:
         # Structured 404: carry up to 5 near-miss names so the client can render
-        # "did you mean" links instead of a dead end.
+        # "did you mean" links instead of a dead end. The name is a LITERAL substring:
+        # unescaped, a '%' or '_' in it acted as a wildcard ("50%" matched every name
+        # containing "50", "_" matched everything) and the suggestions were noise.
         suggestions = _q(
-            "SELECT name FROM mart_entity WHERE role = ? AND name ILIKE ? "
-            "ORDER BY total_rev DESC NULLS LAST, n_games DESC LIMIT 5",
-            [role, f"%{name}%"],
+            "SELECT name FROM mart_entity WHERE role = ? AND name ILIKE ? ESCAPE '\\' "
+            "ORDER BY total_rev DESC NULLS LAST, n_games DESC, name LIMIT 5",
+            [role, f"%{_like_escape(name)}%"],
         )
         raise HTTPException(
             status_code=404,

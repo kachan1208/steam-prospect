@@ -8,10 +8,36 @@ from pydantic import BaseModel, Field
 
 # ---- health ---------------------------------------------------------------------------
 class Health(BaseModel):
-    status: str
+    status: str  # "ok" | "degraded"
+    # Why the API is degraded (missing mart, corrupt/truncated file, ...). None when ok.
+    detail: Optional[str] = None
+    # The mart THIS process serves (mart_meta of the loaded generation). mart_version is
+    # kept for existing readers (web/src/lib/api.ts); loaded_mart_version is the same value
+    # under the name the data-age contract uses.
     mart_version: Optional[str] = None
+    loaded_mart_version: Optional[str] = None
     built_at: Optional[str] = None
+    # The served data's as-of DATE (UTC date of built_at, 'YYYY-MM-DD') — the date every
+    # "last N days" window is anchored to.
+    data_as_of: Optional[str] = None
+    age_hours: Optional[float] = None  # now - built_at, hours (1dp); None when unknown
+    owners_as_of: Optional[str] = None  # mart_meta.owners_as_of, when the mart carries it
     source_db: Optional[str] = None
+    # Loaded vs published (analytics_db hot reload). loaded_file is the file the served mart
+    # was opened from; link_target is what the watched path (current.duckdb) points at NOW,
+    # and target_mart_version the YYYYMMDD token in its name. target_differs=true means a
+    # new mart is published but not yet served — normal for up to reload_interval_s after a
+    # nightly swap; with reload_error set it means the new file could not be opened and the
+    # previous mart is still being served. (A same-day rebuild keeps the same version token
+    # — target_differs, which compares the file itself, still flips.)
+    loaded_file: Optional[str] = None
+    loaded_at: Optional[str] = None  # when this process opened it (UTC ISO)
+    link_target: Optional[str] = None
+    link_target_exists: bool = False
+    target_mart_version: Optional[str] = None
+    target_differs: bool = False
+    reload_error: Optional[str] = None
+    reload_interval_s: Optional[float] = None  # 0 = hot reload disabled
 
 
 class HistBucket(BaseModel):
@@ -19,6 +45,12 @@ class HistBucket(BaseModel):
     x_min: float
     x_max: float
     count: int
+    # True on the lowest bucket of a LOG histogram, whose lower edge is a floor SENTINEL:
+    # the marts bin with GREATEST(v, 1), so every value below 1 — $0 revenue, 0 reviews,
+    # 0 players — is clamped into it. Read/label it as "< x_max (incl. 0)", never as
+    # "x_min–x_max". x_min is reported as 0.0 so the bucket round-trips into the [min, max)
+    # cross-filters. Always false on linear (price) histograms. See app/histograms.py.
+    floored: bool = False
 
 
 # ---- market ---------------------------------------------------------------------------
@@ -74,7 +106,11 @@ class CitedBenchmarks(BaseModel):
     first_week_to_first_year_mult: float
     steam_revenue_share_to_dev: float
     dev_tiers: list[dict]  # {label, min_copies, max_copies|None, revenue_anchor_usd}
+    # opportunity_v2's blend weights {momentum, market_pull, revenue_spread, quality_gap} —
+    # the live score's (these were the retired v1 `opportunity` weights until 2026-09).
+    # Weights alone are not the score: read opportunity_formula.
     opportunity_weights: dict[str, float]
+    opportunity_formula: str
     revenue_benchmark_marks: list[BenchmarkMark]
 
 
@@ -90,6 +126,10 @@ class ComputedBenchmarks(BaseModel):
     n_games_total: Optional[float] = None
     n_games_scored: Optional[float] = None
     population_note: str
+    # The served mart's OWN statement of the opportunity_v2 model (mart_meta
+    # .opportunity_v2_model): authoritative for the scores actually served. None on marts
+    # that predate it.
+    opportunity_v2_model: Optional[str] = None
 
 
 class MarketBenchmarks(BaseModel):
@@ -149,12 +189,6 @@ class LaunchCurve(BaseModel):
     points: list[LaunchCurvePoint]
 
 
-class Range(BaseModel):
-    low: float
-    mid: float
-    high: float
-
-
 # ---- games (Phase 2) -------------------------------------------------------------------
 class GameSearchRow(BaseModel):
     appid: int
@@ -188,6 +222,12 @@ class GameSearchRow(BaseModel):
     # Metacritic critic score, where Steam links a Metacritic page (~2.6% of the catalog).
     # None = no linked page, NOT a poor score.
     metacritic_score: Optional[int] = None
+    # Early-access lifecycle — None until the mart carries the columns (games.py::_ea_cols):
+    # first_public_date = first day buyable (EA start, or release if never EA), 'YYYY-MM-DD';
+    # release_date_1_0 = the full release; is_ea_graduate = went Early Access -> 1.0.
+    first_public_date: Optional[str] = None
+    release_date_1_0: Optional[str] = None
+    is_ea_graduate: Optional[bool] = None
 
 
 class GameSearchList(BaseModel):
@@ -195,6 +235,18 @@ class GameSearchList(BaseModel):
     total: int
     limit: int
     offset: int
+    # The date a `released_within_days` window was anchored to — the mart's as-of date
+    # (mart_meta.built_at), NOT today: caption it "released in the N days to <data_as_of>".
+    # None when no date window was applied.
+    data_as_of: Optional[str] = None
+    # When the owners estimates (owners_mid) were taken — a frozen SteamSpy-era snapshot,
+    # far older than the mart. None until the mart stamps mart_meta.owners_as_of.
+    owners_as_of: Optional[str] = None
+    # The population scope applied (app/scope.py). Under scope=indie, n_scope_unknown is how
+    # many games matched every other filter but have NO indie flag (unknown != indie, so
+    # they were left out) — show it; None when scope=all.
+    scope: Literal["all", "indie"] = "all"
+    n_scope_unknown: Optional[int] = None
 
 
 class TagSuggestion(BaseModel):
@@ -250,6 +302,11 @@ class GameProfile(BaseModel):
     # the router omits the columns there (see games.py::_has_players_summary).
     players_7d_avg: Optional[float] = None
     players_trend_7d_pct: Optional[float] = None
+    # The same 7 days for the WHOLE Steam panel, and this game's trend relative to it —
+    # never read players_trend_7d_pct without them once present (a +5% week in a +6% market
+    # is an underperformance). None until the mart carries the columns.
+    players_trend_7d_market_pct: Optional[float] = None
+    players_trend_7d_rel_pct: Optional[float] = None
     first_seen: Optional[str] = None   # when this game first entered our catalog (not Steam's release date)
     # Lifetime (steamcharts monthly, top-8k coverage): t0 = first month averaging 100+
     # concurrent players, death = first full month under 10. None = unknown, never zero
@@ -278,6 +335,12 @@ class GameProfile(BaseModel):
     dev_youtube_url: Optional[str] = None
     dev_bluesky_handle: Optional[str] = None
     dev_bluesky_url: Optional[str] = None
+    # Early-access lifecycle — see GameSearchRow. None until the mart carries the columns.
+    first_public_date: Optional[str] = None
+    release_date_1_0: Optional[str] = None
+    is_ea_graduate: Optional[bool] = None
+    # When owners_mid / est_rev_owners' owners estimate was taken (mart_meta.owners_as_of).
+    owners_as_of: Optional[str] = None
 
 
 class PriceBand(BaseModel):
@@ -380,6 +443,13 @@ class GamePriceHistory(BaseModel):
 
     appid: int
     items: list[PricePoint]
+    # Which empty an empty `items` is (never a 500 either way):
+    #   ok          the store was read — empty just means the collector hasn't reached
+    #               this game yet
+    #   missing     no signals.db / no price table yet (the collector never ran)
+    #   unavailable signals.db exists but is unreadable (corrupt or locked) — say
+    #               "price history unavailable", NOT "no price history yet"
+    status: Literal["ok", "missing", "unavailable"] = "ok"
 
 
 class GameEventList(BaseModel):
@@ -633,6 +703,16 @@ class NicheRow(BaseModel):
     # and served either way — suppression is a presentation/verdict concern.
     reviews_24m_new_share: Optional[float] = None  # share of reviews_24m from games released in the last 24 months
     demand_emerging: Optional[bool] = None         # prev base < threshold OR new-game mass >= threshold
+    # The ETL's in-flight columns (None until the mart carries each one):
+    # n_free / n_price_unknown — how many of the cut's n_games are free-to-play / have no
+    # known price. Since free and unknown-price revenue became NULL (not $0), median_rev and
+    # median_price describe the PRICED games only; these say how many were left out.
+    n_free: Optional[int] = None
+    n_price_unknown: Optional[int] = None
+    # The whole Steam panel's 7d player change over the same days, and this niche's
+    # players_trend_7d_pct RELATIVE to it — read the trend against the market, never alone.
+    players_trend_7d_market_pct: Optional[float] = None
+    players_trend_7d_rel_pct: Optional[float] = None
 
 
 class NicheList(BaseModel):
@@ -640,6 +720,9 @@ class NicheList(BaseModel):
     total: int
     limit: int
     offset: int
+    # When the owners estimates (total_owners / median_owners) were taken — a frozen
+    # SteamSpy-era snapshot. None until the mart stamps mart_meta.owners_as_of.
+    owners_as_of: Optional[str] = None
 
 
 class NicheGame(BaseModel):
@@ -706,6 +789,9 @@ class NichePlayers(BaseModel):
 
     total_players_now: Optional[float] = None
     players_trend_7d_pct: Optional[float] = None
+    # Market-relative reading of players_trend_7d_pct (see NicheRow). None until present.
+    players_trend_7d_market_pct: Optional[float] = None
+    players_trend_7d_rel_pct: Optional[float] = None
     players_coverage: Optional[float] = None
     n_games_panel: Optional[int] = None
     series: list[NichePlayersPoint] = Field(default_factory=list)
@@ -786,6 +872,16 @@ class NicheGameList(BaseModel):
     items: list[NicheGameRow] = Field(default_factory=list)
     limit: int
     offset: int
+    owners_as_of: Optional[str] = None  # when owners_est was taken (mart_meta.owners_as_of)
+    # Tag aliases (mart_tag_alias) — see NicheDetail.
+    canonical_key: str
+    requested_key: str
+    alias_of: Optional[str] = None
+    # Population scope (app/scope.py): under scope=indie `total`/`items` are the cut's
+    # Indie-flagged members and n_scope_unknown counts the members left out because their
+    # flag is unknown; None under scope=all.
+    scope: Literal["all", "indie"] = "all"
+    n_scope_unknown: Optional[int] = None
 
 
 class NicheDistribution(BaseModel):
@@ -800,7 +896,9 @@ class NicheDistribution(BaseModel):
       (bucket_index = floor(log10(max(v,1))*2), x_max = 10^((i+1)/2)) so the precomputed
       and the computed path are directly comparable. Bucket 0's x_min is reported as 0.0
       rather than the mart's 1.0, because the mart's GREATEST(v, 1) floor puts $0 games in
-      bucket 0 and a 1.0 lower edge would make the cross-filter silently drop them.
+      bucket 0 and a 1.0 lower edge would make the cross-filter silently drop them — and it
+      carries floored=true: label it "< $3.16 (incl. $0)", never "$0–$3.16" or "$1–$3.16".
+      (niche_detail's revenue_histogram goes through the same helper.)
 
     price: linear $2.50 bins matching mart_market_hist's price convention, EXCEPT that
       free-to-play gets its own bucket_index = -1 spanning [0.0, 0.01) instead of being
@@ -817,6 +915,13 @@ class NicheDistribution(BaseModel):
     buckets: list[HistBucket] = Field(default_factory=list)
     n_games: int = 0  # sum of bucket counts (games with a non-null value for the metric)
     source: Literal["mart", "computed"] = "computed"
+    # Tag aliases (mart_tag_alias) — see NicheDetail.
+    canonical_key: str
+    requested_key: str
+    alias_of: Optional[str] = None
+    # Population scope; scope=indie is always computed so the buckets round-trip into
+    # /games?scope=indie exactly.
+    scope: Literal["all", "indie"] = "all"
 
 
 class NicheCombinedInput(BaseModel):
@@ -825,8 +930,10 @@ class NicheCombinedInput(BaseModel):
     guaranteed equal to mart_niche.n_games for the same (dimension, key, win, min_reviews)."""
 
     dimension: str
-    key: str
+    key: str  # the CANONICAL key this input was served as
     n_games: int
+    requested_key: Optional[str] = None  # the spec's key as sent
+    alias_of: Optional[str] = None  # set only when requested_key was an alias of `key`
 
 
 class NicheCombined(BaseModel):
@@ -856,11 +963,36 @@ class NicheCombined(BaseModel):
     items: list[NicheGameRow] = Field(default_factory=list)
     limit: int
     offset: int
+    # Population scope: under scope=indie EVERY number above (inputs' n_games, the set, its
+    # percentiles) is over Indie-flagged members only; n_scope_unknown counts the games of
+    # the unscoped set left out because their flag is unknown. None under scope=all.
+    scope: Literal["all", "indie"] = "all"
+    n_scope_unknown: Optional[int] = None
+
+
+class HeadlineCut(BaseModel):
+    """Which mart_niche cut NicheDetail's headline numbers (hit_rates, tier) were read from.
+
+    The headline cut is window=all x min_reviews=50. A niche too small to materialise it
+    falls back — all/100, then all/0, then whatever exists — and fallback=true says so: the
+    numbers then describe a DIFFERENT population (min_reviews=0 counts unreviewed games),
+    so they must be labelled with this cut, never passed off as the all/50 figures."""
+
+    window: str
+    min_reviews: int
+    fallback: bool
 
 
 class NicheDetail(BaseModel):
     dimension: str
-    key: str
+    key: str  # the key SERVED — the canonical one when the URL used an alias
+    # Tag aliases (mart_tag_alias). canonical_key == key; requested_key is the key in the
+    # URL; alias_of is non-null ONLY when requested_key was an alias — it then equals
+    # canonical_key, and the client should replace its URL with the canonical one. Without
+    # the alias table (older marts) alias_of is always null and every key is canonical.
+    canonical_key: str
+    requested_key: str
+    alias_of: Optional[str] = None
     tier: Optional[str] = None
     variants: list[NicheRow]
     saturation_trend: list[TrendPoint]
@@ -871,4 +1003,8 @@ class NicheDetail(BaseModel):
     # None = mart predates mart_niche_press, or the niche has no published press rows
     # (below the covered-games floor / genuinely uncovered).
     press: Optional[NichePress] = None
+    # {hit_rate_200k, hit_rate_500k, median_rev, n_games, winner_concentration} of the
+    # headline cut — READ hit_rates_cut before labelling any of them.
     hit_rates: dict
+    hit_rates_cut: HeadlineCut
+    owners_as_of: Optional[str] = None  # when the owners figures were taken (mart_meta)

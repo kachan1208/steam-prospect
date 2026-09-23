@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from functools import lru_cache
+from datetime import datetime, timezone
 from typing import Literal
 
 import duckdb
 from fastapi import APIRouter, HTTPException, Query
 
-from .. import analytics_db, signals_db
+from .. import aliases, analytics_db, paging, signals_db
+from .. import scope as scope_mod
+from ..scope import Scope
 from ..schemas import (
     AspectReviewExcerpt,
     AspectReviewsResponse,
@@ -47,21 +49,19 @@ SORTABLE = {
     "lifetime_months", "metacritic_score",
 }
 
-@lru_cache(maxsize=1)
 def _has_name_lower() -> bool:
-    """Whether the current mart carries the persisted lowercased search column.
+    """Whether the served mart carries the persisted lowercased search column.
 
     mart_game.sql builds `name_lower` (lower(name)) so search can filter with the cheaper
     contains(name_lower, ?) instead of name ILIKE '%q%' (~2.3x faster — no per-row lower()
     over the ~170K-row full scan the leading-wildcard forces). The column only appears after
     the ETL rebuilds the mart, so we gate on its existence and fall back to ILIKE otherwise —
-    the router stays correct on both the pre-column mart and the rebuilt one. Cached: the DB
-    is swapped + app restarted on each nightly ETL, so the schema can't change under us."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'name_lower'"
-    )
-    return bool(rows)
+    the router stays correct on both the pre-column mart and the rebuilt one.
+
+    Like every probe in this module it answers from analytics_db's per-mart schema snapshot
+    (no query), so a hot-reloaded mart re-answers it — these used to be process-lifetime
+    lru_caches that assumed an app restart on every mart swap."""
+    return analytics_db.has_column("mart_game", "name_lower")
 
 
 _SEARCH_COLS = (
@@ -82,97 +82,96 @@ _PROFILE_COLS = (
 )
 
 
-@lru_cache(maxsize=1)
 def _has_players_summary() -> bool:
-    """Whether the current mart carries the daily-CCU summary columns (players_7d_avg /
+    """Whether the served mart carries the daily-CCU summary columns (players_7d_avg /
     players_trend_7d_pct from mart_players.sql). Gated like _has_name_lower(): the columns
     only appear after the ETL that added them rebuilds the mart, and this app can boot
     against an older mart (e.g. the App Platform path downloads a published duckdb) — the
-    profile must not 500 there. Cached for the same swap-then-restart reason."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'players_7d_avg'"
-    )
-    return bool(rows)
+    profile must not 500 there."""
+    return analytics_db.has_column("mart_game", "players_7d_avg")
 
 
-@lru_cache(maxsize=1)
 def _has_lifetime_game() -> bool:
-    """Whether the current mart carries the game-lifetime columns (mart_players.sql
+    """Whether the served mart carries the game-lifetime columns (mart_players.sql
     _game_lifetime: months from the first 100+-avg-CCU month to the first full month
-    under 10). Gated + cached exactly like _has_players_summary() and for the same
-    reasons — the app must serve marts built before the lifetime ETL landed."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'lifetime_months'"
-    )
-    return bool(rows)
+    under 10). Gated exactly like _has_players_summary() and for the same reasons — the
+    app must serve marts built before the lifetime ETL landed."""
+    return analytics_db.has_column("mart_game", "lifetime_months")
 
 
-@lru_cache(maxsize=1)
 def _has_dev_socials() -> bool:
-    """Whether the current mart carries dev_x_handle (mart_game.sql dev_x: the game's most
+    """Whether the served mart carries dev_x_handle (mart_game.sql dev_x: the game's most
     prominent official X handle, harvested from its developer-controlled pages — store
-    page + dev website — NOT from X itself). Gated + cached exactly like
-    _has_players_summary() and for the same reasons — the app must serve marts built
-    before the socials ETL landed. The column isn't filterable/sortable, so absence just
-    omits it (schema default None); there's no 503 path."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'dev_x_handle'"
-    )
-    return bool(rows)
+    page + dev website — NOT from X itself). Gated exactly like _has_players_summary() and
+    for the same reasons — the app must serve marts built before the socials ETL landed.
+    The column isn't filterable/sortable, so absence just omits it (schema default None);
+    there's no 503 path."""
+    return analytics_db.has_column("mart_game", "dev_x_handle")
 
 
-@lru_cache(maxsize=1)
 def _has_demo_flag() -> bool:
-    """Whether the current mart carries has_demo/demo_appid (mart_game.sql: the game's
-    playable demo from its own Steam appdetails `demos` field). Gated + cached exactly
-    like _has_players_summary() and for the same reasons. has_demo is tri-state — NULL
-    means the game's appdetails was never re-checked since demo capture landed, so the
-    filter drops unknowns naturally rather than reading them as 'no demo'."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'has_demo'"
-    )
-    return bool(rows)
+    """Whether the served mart carries has_demo/demo_appid (mart_game.sql: the game's
+    playable demo from its own Steam appdetails `demos` field). Gated exactly like
+    _has_players_summary() and for the same reasons. has_demo is tri-state — NULL means the
+    game's appdetails was never re-checked since demo capture landed, so the filter drops
+    unknowns naturally rather than reading them as 'no demo'."""
+    return analytics_db.has_column("mart_game", "has_demo")
 
 
-@lru_cache(maxsize=1)
 def _has_all_socials() -> bool:
     """Whether the mart carries the per-platform social columns (Discord/YouTube/Bluesky and
-    the X profile URL) rather than only dev_x_handle. Gated + cached like the others: the
-    harvest has always collected all four platforms, but until the widened dev_x CTE landed
-    the mart kept only the X handle."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'dev_discord_url'"
-    )
-    return bool(rows)
+    the X profile URL) rather than only dev_x_handle. Gated like the others: the harvest has
+    always collected all four platforms, but until the widened dev_x CTE landed the mart
+    kept only the X handle."""
+    return analytics_db.has_column("mart_game", "dev_discord_url")
 
 
-@lru_cache(maxsize=1)
 def _has_metacritic_url() -> bool:
-    """Whether the current mart carries metacritic_url (the Metacritic page Steam links in
-    appdetails). Gated + cached like the other additive columns. The SCORE needs no gate —
-    it has been in every mart — so filtering and sorting by it work regardless; only the
-    outbound link is conditional."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game' AND column_name = 'metacritic_url'"
-    )
-    return bool(rows)
+    """Whether the served mart carries metacritic_url (the Metacritic page Steam links in
+    appdetails). Gated like the other additive columns. The SCORE needs no gate — it has
+    been in every mart — so filtering and sorting by it work regardless; only the outbound
+    link is conditional."""
+    return analytics_db.has_column("mart_game", "metacritic_url")
 
 
 _LIFETIME_PROFILE_COLS = (
     ", lifetime_first_100_month, lifetime_died_month, lifetime_months, lifetime_alive"
 )
 
+# Early-access lifecycle (the ETL's in-flight mart_game columns): first_public_date = the
+# first day the game was buyable (Early Access start, or release when it never was EA),
+# release_date_1_0 = the full release, is_ea_graduate = it went EA -> 1.0. Each is gated on
+# its own column so a partially-landed build still serves what it has; dates are CAST to
+# VARCHAR so the contract is 'YYYY-MM-DD' whether the mart stores DATE or text.
+_EA_DATE_COLS = ("first_public_date", "release_date_1_0")
+
+# Market-relative 7-day player trends next to players_trend_7d_pct (the ETL's in-flight
+# mart_game/mart_niche columns): the whole Steam panel's own 7d change over the same days,
+# and the row's trend relative to it — so "+5%" in a week where Steam as a whole did +6%
+# reads as the slight UNDERperformance it is. Gated per column.
+_MARKET_TREND_COLS = ("players_trend_7d_market_pct", "players_trend_7d_rel_pct")
+
+
+def _ea_cols() -> str:
+    cols = ""
+    for c in _EA_DATE_COLS:
+        if analytics_db.has_column("mart_game", c):
+            cols += f", CAST({c} AS VARCHAR) AS {c}"
+    if analytics_db.has_column("mart_game", "is_ea_graduate"):
+        cols += ", is_ea_graduate"
+    return cols
+
+
+def _market_trend_cols() -> str:
+    return "".join(
+        f", {c}" for c in _MARKET_TREND_COLS if analytics_db.has_column("mart_game", c)
+    )
+
 
 def _profile_cols() -> str:
-    cols = _PROFILE_COLS
+    cols = _PROFILE_COLS + _ea_cols()
     if _has_players_summary():
-        cols += ", players_7d_avg, players_trend_7d_pct"
+        cols += ", players_7d_avg, players_trend_7d_pct" + _market_trend_cols()
     if _has_lifetime_game():
         cols += _LIFETIME_PROFILE_COLS
     if _has_dev_socials():
@@ -189,7 +188,7 @@ def _profile_cols() -> str:
 
 
 def _search_cols() -> str:
-    cols = _SEARCH_COLS
+    cols = _SEARCH_COLS + _ea_cols()
     if _has_lifetime_game():
         cols += ", lifetime_months, lifetime_alive"
     if _has_dev_socials():
@@ -247,6 +246,7 @@ def search_games(
         "(Steam links a Metacritic page for few games), so this drops the vast majority — "
         "use it to benchmark against critically-reviewed titles, not to filter a whole niche.",
     ),
+    scope: Scope = Query("all", description=scope_mod.SCOPE_DESC),
     sort: str = Query("total_reviews"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(25, ge=1, le=100),
@@ -256,6 +256,12 @@ def search_games(
 ) -> GameSearchList:
     if sort not in SORTABLE:
         raise HTTPException(status_code=400, detail=f"sort must be one of {sorted(SORTABLE)}")
+    if scope == "indie" and indie is False:
+        raise HTTPException(
+            status_code=422,
+            detail="scope=indie and indie=false contradict each other (scope=indie IS indie=true "
+            "plus a count of the games whose indie flag is unknown)",
+        )
     if (sort == "lifetime_months" or min_lifetime_months is not None or lifetime_alive is not None) \
             and not _has_lifetime_game():
         raise HTTPException(
@@ -284,17 +290,32 @@ def search_games(
         where.append("primary_genre = ?")
         params.append(genre)
     if tag:
-        where.append("list_contains(top_tags, ?)")
-        params.append(tag)
+        spellings = aliases.variants("tag", tag)
+        if len(spellings) == 1:
+            where.append("list_contains(top_tags, ?)")
+            params.append(spellings[0])
+        else:
+            # The canonical tag AND its aliases (mart_tag_alias): autocomplete now offers
+            # canonical names only, so a game tagged only "Rogue-like" must still match
+            # tag=Roguelike — and asking for the alias finds the same games.
+            where.append("list_has_any(top_tags, ?)")
+            params.append(spellings)
+    data_as_of: str | None = None
     if released_within_days is not None:
-        # "New releases": released in the recent PAST. Upper-bounded to today so upcoming/announced
-        # titles — and the garbage far-future placeholder dates in the source (e.g. 9998-12-31) —
-        # are excluded; NULL / unparseable release dates drop out via TRY_CAST.
+        # "New releases": released in the recent PAST. Upper-bounded to the anchor so
+        # upcoming/announced titles — and the garbage far-future placeholder dates in the
+        # source (e.g. 9998-12-31) — are excluded; NULL / unparseable release dates drop out
+        # via TRY_CAST. ANCHORED ON THE MART'S AS-OF DATE, not CURRENT_DATE: the catalog is
+        # a snapshot, and against a mart that is days old (a held or failed nightly) a
+        # wall-clock window silently shrank by the mart's age. The anchor is echoed back
+        # as data_as_of so the UI can say "released in the 30 days to <date>".
+        anchor = (analytics_db.as_of_date() or datetime.now(timezone.utc).date()).isoformat()
         where.append(
-            "TRY_CAST(release_date AS DATE) >= CURRENT_DATE - CAST(? AS INTEGER) "
-            "AND TRY_CAST(release_date AS DATE) <= CURRENT_DATE"
+            "TRY_CAST(release_date AS DATE) >= CAST(? AS DATE) - CAST(? AS INTEGER) "
+            "AND TRY_CAST(release_date AS DATE) <= CAST(? AS DATE)"
         )
-        params.append(released_within_days)
+        params.extend([anchor, released_within_days, anchor])
+        data_as_of = anchor
     # Price band, in USD. Comparisons on price_initial drop NULL-priced rows naturally —
     # a game with an unknown price can't be shown to satisfy a price constraint. Free games
     # (price_initial = 0, incl. is_free titles) stay in as long as the floor allows 0: a
@@ -341,12 +362,25 @@ def search_games(
     if min_metacritic is not None:
         where.append("metacritic_score >= ?")
         params.append(min_metacritic)
+    n_scope_unknown: int | None = None
+    if scope == "indie":
+        # How many games matched EVERY other filter but carry no indie flag (added after
+        # the catalog's analysis snapshot) — excluded by the scope, and said so.
+        unknown_sql = "WHERE " + " AND ".join([*where, scope_mod.game_unknown()])
+        n_scope_unknown = int(
+            analytics_db.scalar(f"SELECT COUNT(*) FROM mart_game {unknown_sql}", params) or 0
+        )
+        where.append(scope_mod.game_condition())
     where_sql = "WHERE " + " AND ".join(where)
 
     total = analytics_db.scalar(f"SELECT COUNT(*) FROM mart_game {where_sql}", params)
+    # appid closes the order: without it tied rows (a whole release DATE, a price point)
+    # came back in a different order per request and paging duplicated/skipped games.
+    order_sql = paging.order_by(
+        f"{sort} {order.upper()} NULLS LAST", "total_reviews DESC", unique=("appid",)
+    )
     rows = analytics_db.query(
-        f"SELECT {_search_cols()} FROM mart_game {where_sql} "
-        f"ORDER BY {sort} {order.upper()} NULLS LAST, total_reviews DESC LIMIT ? OFFSET ?",
+        f"SELECT {_search_cols()} FROM mart_game {where_sql} {order_sql} LIMIT ? OFFSET ?",
         params + [limit, offset],
     )
     return GameSearchList(
@@ -354,31 +388,47 @@ def search_games(
         total=int(total or 0),
         limit=limit,
         offset=offset,
+        data_as_of=data_as_of,
+        owners_as_of=analytics_db.mart_meta().get("owners_as_of"),
+        scope=scope,
+        n_scope_unknown=n_scope_unknown,
     )
 
 
-# In-process cache of the distinct (tag, n_games) list for /tags/suggest. Tradeoff, measured
-# on the real ~170K-row data/current.duckdb: running the UNNEST(top_tags) + ILIKE aggregate
-# per keystroke costs ~90ms per request (well over the 50ms budget — the scan re-unnests
-# every game's tag list each time), while building the FULL distinct list once costs ~25ms
-# and yields only ~460 rows, after which each suggest call is a sub-millisecond in-memory
-# substring filter. Cached lazily for the process lifetime: safe because the analytics DB is
-# swapped + the app restarted on each nightly ETL (the same invariant _has_name_lower()
-# relies on), so the tag universe can't change under a running process.
-_tag_freq_cache: list[tuple[str, int]] | None = None
-
-
+# The distinct (tag, n_games) list for /tags/suggest, memoized on the served mart
+# generation. Tradeoff, measured on the real ~170K-row data/current.duckdb: running the
+# UNNEST(top_tags) + ILIKE aggregate per keystroke costs ~90ms per request (well over the
+# 50ms budget — the scan re-unnests every game's tag list each time), while building the
+# FULL distinct list once costs ~25ms and yields only ~460 rows, after which each suggest
+# call is a sub-millisecond in-memory substring filter. Built once per mart: analytics_db
+# drops the memo along with the generation when a new mart is hot-reloaded.
 def _tag_frequencies() -> list[tuple[str, int]]:
-    global _tag_freq_cache
-    if _tag_freq_cache is None:
-        rows = analytics_db.query(
-            "SELECT tag, COUNT(*) AS n_games "
-            "FROM (SELECT UNNEST(top_tags) AS tag FROM mart_game) "
-            "WHERE tag IS NOT NULL "
-            "GROUP BY tag ORDER BY n_games DESC, tag"
-        )
-        _tag_freq_cache = [(r["tag"], int(r["n_games"])) for r in rows]
-    return _tag_freq_cache
+    def compute() -> list[tuple[str, int]]:
+        if aliases.has_aliases():
+            # CANONICAL names only (mart_tag_alias): "Rogue-like" and "Roguelike" are one
+            # suggestion, counted as the DISTINCT games carrying either spelling — summing
+            # the two raw counts would double-count games tagged both ways. Two hops, so an
+            # alias of an alias still lands on the canonical.
+            rows = analytics_db.query(
+                "SELECT COALESCE(a2.canonical, a1.canonical, t.tag) AS tag, "
+                "COUNT(DISTINCT t.appid) AS n_games "
+                "FROM (SELECT appid, UNNEST(top_tags) AS tag FROM mart_game) t "
+                "LEFT JOIN mart_tag_alias a1 ON a1.dimension = 'tag' AND a1.alias = t.tag "
+                "LEFT JOIN mart_tag_alias a2 ON a2.dimension = 'tag' AND a2.alias = a1.canonical "
+                "AND a2.alias <> a2.canonical "
+                "WHERE t.tag IS NOT NULL "
+                "GROUP BY 1 ORDER BY n_games DESC, tag"
+            )
+        else:
+            rows = analytics_db.query(
+                "SELECT tag, COUNT(*) AS n_games "
+                "FROM (SELECT UNNEST(top_tags) AS tag FROM mart_game) "
+                "WHERE tag IS NOT NULL "
+                "GROUP BY tag ORDER BY n_games DESC, tag"
+            )
+        return [(r["tag"], int(r["n_games"])) for r in rows]
+
+    return analytics_db.memo("games.tag_frequencies", compute)
 
 
 # NOTE: registered before the /{appid} route below — FastAPI matches in declaration order,
@@ -404,7 +454,7 @@ def game_profile(
     row = analytics_db.query_one(f"SELECT {_profile_cols()} FROM mart_game WHERE appid = ?", [appid])
     if row is None:
         raise HTTPException(status_code=404, detail=f"game not found: {appid}")
-    return GameProfile(**row)
+    return GameProfile(**row, owners_as_of=analytics_db.mart_meta().get("owners_as_of"))
 
 
 @router.get("/{appid}/comparables", response_model=GameComparablesResponse)
@@ -454,7 +504,7 @@ def game_comparables(
             n_shared * 1.0 / (len_sum - n_shared) AS jaccard
         FROM scored
         WHERE len_sum - n_shared > 0
-        ORDER BY jaccard DESC, total_reviews DESC
+        ORDER BY jaccard DESC, total_reviews DESC, appid ASC
         LIMIT ?
         """,
         [appid, lo, hi, min_reviews, limit],
@@ -497,7 +547,8 @@ def reviews_summary(appid: int) -> GameReviewsSummary:
         [appid],
     )
     lang = analytics_db.query(
-        "SELECT language, n, share FROM mart_game_reviews_lang WHERE appid = ? ORDER BY n DESC",
+        "SELECT language, n, share FROM mart_game_reviews_lang WHERE appid = ? "
+        "ORDER BY n DESC, language",
         [appid],
     )
     playtime = analytics_db.query(
@@ -534,7 +585,7 @@ def game_events(appid: int) -> GameEventList:
     try:
         rows = analytics_db.query(
             "SELECT CAST(event_date AS VARCHAR) AS event_date, kind, title, url "
-            "FROM mart_game_event WHERE appid = ? ORDER BY event_date",
+            "FROM mart_game_event WHERE appid = ? ORDER BY event_date, kind, title",
             [appid],
         )
     except duckdb.CatalogException:
@@ -544,8 +595,11 @@ def game_events(appid: int) -> GameEventList:
 
 @router.get("/{appid}/price-history", response_model=GamePriceHistory)
 def game_price_history(appid: int) -> GamePriceHistory:
-    """Live daily price snapshots from signals.db; depth accrues from 2026-08-24."""
-    rows = signals_db.query(
+    """Live daily price snapshots from signals.db; depth accrues from 2026-08-24.
+
+    Every failure degrades to an empty series (a page section over an optional enrichment
+    must never 500), but `status` says which empty it is — see signals_db.fetch()."""
+    rows, status = signals_db.fetch(
         "SELECT captured_on, final_cents, original_cents, COALESCE(discount_pct, 0) AS discount_pct,"
         " is_free, country FROM price_snapshots WHERE appid = ? ORDER BY captured_on",
         (appid,),
@@ -553,6 +607,7 @@ def game_price_history(appid: int) -> GamePriceHistory:
     return GamePriceHistory(
         appid=appid,
         items=[PricePoint(**{**r, "is_free": bool(r["is_free"])}) for r in rows],
+        status=status,
     )
 
 
@@ -594,7 +649,7 @@ def game_teardown(appid: int) -> GameTeardown:
         LEFT JOIN mart_genre_aspect_baseline gb ON gb.genre = ? AND gb.aspect = a.aspect
         LEFT JOIN mart_genre_aspect_baseline ab ON ab.genre = '__all__' AND ab.aspect = a.aspect
         WHERE a.appid = ?
-        ORDER BY a.total_mentions DESC
+        ORDER BY a.total_mentions DESC, a.aspect
         """,
         [game["primary_genre"], appid],
     )
@@ -608,7 +663,8 @@ def game_teardown(appid: int) -> GameTeardown:
         [appid],
     )
     by_source = analytics_db.query(
-        "SELECT source, n_mentions FROM mart_game_press_by_source WHERE appid = ? ORDER BY n_mentions DESC",
+        "SELECT source, n_mentions FROM mart_game_press_by_source WHERE appid = ? "
+        "ORDER BY n_mentions DESC, source",
         [appid],
     )
     timeline = analytics_db.query(
@@ -618,7 +674,7 @@ def game_teardown(appid: int) -> GameTeardown:
     notable = analytics_db.query(
         "SELECT source, title, author, published_at, match_confidence, is_earliest, "
         "url, sentiment_compound, sentiment "
-        "FROM mart_game_press_notable WHERE appid = ? ORDER BY published_at",
+        "FROM mart_game_press_notable WHERE appid = ? ORDER BY published_at, source, title",
         [appid],
     )
 
@@ -705,7 +761,6 @@ _VALID_ASPECTS = {
 }
 
 
-@lru_cache(maxsize=1)
 def _has_aspect_full_text() -> bool:
     """Whether mart_game_aspect_reviews carries the open-the-whole-review columns
     (review_text + steam_url, added 2026-08-21).
@@ -719,13 +774,9 @@ def _has_aspect_full_text() -> bool:
 
     One probe for both columns on purpose: they are written by the same CREATE TABLE in
     etl/marts/mart_game_aspect_reviews.sql, so there is no build in which one exists without
-    the other. Cached like _has_name_lower() — the DB is swapped atomically and the app
-    restarted on each ETL, so a per-process answer cannot go stale under a live process."""
-    rows = analytics_db.query(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'mart_game_aspect_reviews' AND column_name = 'review_text'"
-    )
-    return bool(rows)
+    the other. Answered from the per-mart schema snapshot like _has_name_lower(), so the
+    rebuilt mart lights the columns up the moment it is hot-reloaded."""
+    return analytics_db.has_column("mart_game_aspect_reviews", "review_text")
 
 
 @router.get("/{appid}/aspect-reviews", response_model=AspectReviewsResponse)
@@ -759,7 +810,7 @@ def game_aspect_reviews(
         SELECT excerpt, matched_keywords, votes_up, playtime_minutes, date, language{extra_cols}
         FROM mart_game_aspect_reviews
         WHERE appid = ? AND aspect = ? AND sentiment = ?
-        ORDER BY votes_up DESC NULLS LAST
+        ORDER BY votes_up DESC NULLS LAST, date DESC NULLS LAST, excerpt
         LIMIT ?
         """,
         [appid, aspect, sentiment, limit],
@@ -803,7 +854,7 @@ def game_channel_mix(appid: int) -> GameChannelMix:
             rows = analytics_db.query(
                 "SELECT channel, n_mentions, reach_weighted, share_mentions, "
                 "share_reach_weighted FROM mart_channel_mix WHERE genre = ? "
-                "ORDER BY share_reach_weighted DESC NULLS LAST",
+                "ORDER BY share_reach_weighted DESC NULLS LAST, channel",
                 [genre],
             )
         except duckdb.CatalogException:

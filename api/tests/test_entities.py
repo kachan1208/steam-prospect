@@ -204,7 +204,6 @@ def test_search_bad_order_is_422(client):
 def test_search_p90_sort_needs_the_column(client):
     # The fixture mart predates p90_rev, so sorting on it is a mart capability gap (503,
     # as games.py answers a lifetime sort on a pre-lifetime mart), not a bad request.
-    entities_router._reset_capability_cache()
     r = client.get("/api/entities/search", params={"sort": "p90_rev"})
     assert r.status_code == 503
     assert "p90_rev" in r.json()["detail"]
@@ -273,22 +272,29 @@ def test_missing_entity_marts_surface_as_503(client, monkeypatch):
     assert entities_router._MARTS_MISSING_DETAIL == r.json()["detail"]
 
 
-def test_capability_probe_not_poisoned_by_pre_init_call(client, monkeypatch):
+def test_capability_probe_not_poisoned_by_pre_init_call(client, tmp_path):
     """_has_p90/_has_x_handle used to be lru_cached: one call while the DB was still down
-    froze False for the process lifetime, hiding the columns even after init. A pre-ready
-    call must answer False WITHOUT caching; the first post-ready call must really probe."""
-    from app.routers import entities
+    froze False for the process lifetime, hiding the columns even after init. They now
+    answer from the SERVED mart's schema snapshot: False while nothing is open, and the
+    truth of whichever mart comes up next — nothing is remembered across the change."""
+    from app.config import settings
+    from conftest import ANALYTICS_DB_PATH, serving
 
-    entities._reset_capability_cache()
+    richer = tmp_path / "entity_p90.duckdb"
+    con = duckdb.connect(str(richer))
+    con.execute("CREATE TABLE mart_entity (role VARCHAR, name VARCHAR, p90_rev DOUBLE, x_handle VARCHAR)")
+    con.close()
+
+    analytics_db.close()
     try:
-        monkeypatch.setattr(entities.analytics_db, "is_ready", lambda: False)
-        assert entities._has_p90() is False
-        assert entities._has_x_handle() is False
-
-        # DB comes up carrying both columns: the probe must see them (no stale False).
-        monkeypatch.setattr(entities.analytics_db, "is_ready", lambda: True)
-        monkeypatch.setattr(entities.analytics_db, "query", lambda sql, params=None: [{"1": 1}])
-        assert entities._has_p90() is True
-        assert entities._has_x_handle() is True
+        assert entities_router._has_p90() is False  # pre-init: usable, not remembered
+        assert entities_router._has_x_handle() is False
     finally:
-        entities._reset_capability_cache()  # the fixture mart has neither column
+        analytics_db.init(str(ANALYTICS_DB_PATH), settings.analytics_pool_size)
+
+    with serving(richer):  # a mart carrying both columns: the probes must see them
+        assert entities_router._has_p90() is True
+        assert entities_router._has_x_handle() is True
+    # ...and the shared fixture mart (which has neither) answers False again.
+    assert entities_router._has_p90() is False
+    assert entities_router._has_x_handle() is False

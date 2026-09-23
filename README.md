@@ -59,9 +59,11 @@ task web    # 3. start the Vite dev server on http://127.0.0.1:5173 (separate te
 Then open **http://127.0.0.1:5173**. `task web`'s dev server proxies `/api/*` to
 the `task api` backend on `:8000`, so the browser only ever talks to one origin.
 
-The FastAPI process creates `prospect_control.db` (the SQLite control-plane DB —
-saved views, the seeded solo org) automatically on first boot; no manual step
-needed. Both databases are gitignored and local to your checkout.
+The API keeps no database of its own: it only reads `data/current.duckdb` (the
+marts, read-only) and, when present, `data/signals.db` next to it (live price
+snapshots written by the collectors). Both are gitignored and local to your
+checkout. (Older versions created a `prospect_control.db` control-plane DB; that
+code is gone, and a leftover file can be deleted.)
 
 `task --list` shows all three tasks with descriptions.
 
@@ -90,3 +92,18 @@ npm run preview    # serve the built bundle locally
   `etl/.venv/bin/python etl/build_marts.py --source /path/to/steam_games.db`.
 - The API never writes to the source catalog or the marts — it opens
   `data/current.duckdb` read-only. Only `task etl` (re)builds marts.
+- No restart is needed after `task etl`: every 30 s at most
+  (`PROSPECT_MART_RELOAD_INTERVAL_S`, `0` disables) a request checks whether
+  `current.duckdb` now points at a different file and, if so, the API opens it
+  and swaps it in; in-flight requests finish on the mart they started with.
+  `GET /api/health` reports the served mart (`loaded_mart_version`, `built_at`,
+  `data_as_of`, `age_hours`, `loaded_file`) next to what the link points at now
+  (`link_target`, `target_mart_version`, `target_differs`, `reload_error`).
+- If the mart is missing, empty or unreadable the API still starts: data
+  endpoints answer 503 and `/api/health` says `degraded`, with the reason in
+  `detail`. It picks the mart up on its own once a usable one is published.
+- Price history reads `signals.db` from the same directory as the analytics DB
+  unless `PROSPECT_SIGNALS_DB` says otherwise.
+- API tests: `cd api && uv pip install -r requirements.lock -r requirements-dev.txt`,
+  then `python -m pytest tests/` (a synthetic mart is built on the fly; no
+  `data/` needed).

@@ -7,6 +7,8 @@ from ..schemas import Health
 
 router = APIRouter(tags=["health"])
 
+_NOT_OPEN = "analytics database not open — the ETL hasn't produced current.duckdb yet"
+
 
 @router.get("/api/health", response_model=Health)
 def health() -> Health:
@@ -14,17 +16,36 @@ def health() -> Health:
     # body says "degraded" when the analytics DB is absent. For a readiness signal that
     # actually gates traffic, use /api/health/ready below.
     #
-    # The mart description comes from analytics_db's init-time copy of mart_meta, NOT from a
-    # query: querying takes a cursor from the pool, and a saturated pool now sheds with a
-    # 503 — which on this endpoint would tell DigitalOcean's health check and the nightly
-    # restart verification that the container is dead precisely when it is merely busy, i.e.
+    # The mart description comes from analytics_db's per-generation copy of mart_meta and
+    # an os.stat of the watched link, NOT from a query: querying takes a cursor from the
+    # pool, and a saturated pool sheds with a 503 — which on this endpoint would tell the
+    # deploy health check that the container is dead precisely when it is merely busy, i.e.
     # restart-loop the box under load. Liveness must not depend on the pool.
     meta = analytics_db.mart_meta()
+    ready = analytics_db.is_ready()
+    watch = analytics_db.watch_status()
     return Health(
-        status="ok" if analytics_db.is_ready() else "degraded",
+        status="ok" if ready else "degraded",
+        # WHY degraded, in words: "no mart yet" and "the mart file is corrupt" need very
+        # different fixes, and both used to look identical from the outside.
+        detail=None if ready else (analytics_db.unavailable_reason() or _NOT_OPEN),
         mart_version=meta.get("mart_version"),
+        loaded_mart_version=watch["loaded_mart_version"],
         built_at=meta.get("built_at"),
+        data_as_of=as_of.isoformat() if (as_of := analytics_db.as_of_date()) else None,
+        age_hours=analytics_db.age_hours(),
+        # When the owners estimates (a frozen SteamSpy-era snapshot) were taken — present
+        # only once the ETL stamps it into mart_meta.
+        owners_as_of=meta.get("owners_as_of"),
         source_db=meta.get("source_db"),
+        loaded_file=watch["loaded_file"],
+        loaded_at=watch["loaded_at"],
+        link_target=watch["link_target"],
+        link_target_exists=watch["link_target_exists"],
+        target_mart_version=watch["target_mart_version"],
+        target_differs=watch["target_differs"],
+        reload_error=watch["reload_error"],
+        reload_interval_s=watch["reload_interval_s"],
     )
 
 
@@ -34,8 +55,5 @@ def ready() -> dict:
     otherwise — same status the data endpoints themselves return pre-ETL, so a router
     pointing traffic at this signal never sends requests into a wall of 503s."""
     if not analytics_db.is_ready():
-        raise HTTPException(
-            status_code=503,
-            detail="analytics database not available — the ETL hasn't produced current.duckdb yet",
-        )
+        raise HTTPException(status_code=503, detail=analytics_db.missing_detail())
     return {"status": "ready"}

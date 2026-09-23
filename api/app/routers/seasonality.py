@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Query, Request, Response
 
 from .. import analytics_db, response_cache
 from ..schemas import LaunchCurve, LaunchCurvePoint, Seasonality, SeasonalityCell
@@ -15,17 +15,19 @@ _SEASON_COLS = (
 
 @router.get("/api/seasonality", response_model=Seasonality)
 def seasonality(
+    request: Request,
     response: Response,
     genre: str = Query("__all__"),
 ) -> Seasonality:
     """A pure function of the mart for a given genre — cached in-process keyed by the mart
-    identity, and sent with an hour of public cache (see response_cache).
+    identity, and sent with 5 minutes of public cache + a mart-identity ETag (see
+    response_cache.serve()).
 
     An unknown genre is not an error here, it is an empty grid — and an empty grid is NOT
     cached (`cache_if`), so enumerating genre names can't push the real ones out."""
-    response.headers["Cache-Control"] = response_cache.CACHE_CONTROL
-    return response_cache.get_or_compute(
-        "seasonality", (genre,), lambda: _seasonality(genre), cache_if=_has_seasonality
+    return response_cache.serve(
+        request, response, "seasonality", (genre,), lambda: _seasonality(genre),
+        cache_if=_has_seasonality,
     )
 
 
@@ -52,14 +54,15 @@ def _seasonality(genre: str) -> Seasonality:
 
 @router.get("/api/launch-curve", response_model=LaunchCurve)
 def launch_curve(
+    request: Request,
     response: Response,
     genre: str = Query("__all__"),
 ) -> LaunchCurve:
     """Cached + Cache-Control'd for the same reason as /api/seasonality above, including
     not caching the empty answer an unknown genre produces."""
-    response.headers["Cache-Control"] = response_cache.CACHE_CONTROL
-    return response_cache.get_or_compute(
-        "launch_curve", (genre,), lambda: _launch_curve(genre), cache_if=lambda c: bool(c.points)
+    return response_cache.serve(
+        request, response, "launch_curve", (genre,), lambda: _launch_curve(genre),
+        cache_if=lambda c: bool(c.points),
     )
 
 
