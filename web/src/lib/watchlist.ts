@@ -90,8 +90,10 @@ export const METRIC_META: Record<
   // score reaches 86.7, and OPP_WATCH_SCORE is the Radar's own "scores like an enter" bar
   // — the same constant the board and NicheFinder use, so a saved alert means the same
   // thing everywhere.
-  opportunity_v2: { label: "Opp v2", unit: "score", defaultComparator: "gt", defaultThreshold: OPP_WATCH_SCORE },
-  saturation_yoy: { label: "Saturation YoY", unit: "fraction_percent", defaultComparator: "gt", defaultThreshold: 0 },
+  // Plain names (2026-09-23) — the glossary's; "Opp v2" / "Saturation YoY" were the jargon the
+  // review retired everywhere else.
+  opportunity_v2: { label: "Opportunity score", unit: "score", defaultComparator: "gt", defaultThreshold: OPP_WATCH_SCORE },
+  saturation_yoy: { label: "Releases, year over year", unit: "fraction_percent", defaultComparator: "gt", defaultThreshold: 0 },
   price_initial: { label: "Price", unit: "usd", defaultComparator: "lt", defaultThreshold: 14.99 },
 };
 
@@ -101,7 +103,7 @@ export function defaultRuleFor(kind: WatchlistKind): AlertRule {
   return { metric, comparator: meta.defaultComparator, threshold: meta.defaultThreshold };
 }
 
-/** "players 7d ▲ > +20%" / "opp v2 crosses 80" / "price drops below $14.99" — the mockup's
+/** "players 7d ▲ > +20%" / "Opportunity score crosses 80" / "price drops below $14.99" — the mockup's
  * rule-column phrasing, generated from a real rule instead of hand-authored per row. */
 export function formatRuleLabel(rule: AlertRule): string {
   const up = rule.comparator === "gt";
@@ -111,12 +113,12 @@ export function formatRuleLabel(rule: AlertRule): string {
       return `players 7d ${up ? "▲" : "▼"} > ${up ? "+" : "−"}${pct}%`;
     }
     case "saturation_yoy": {
-      if (rule.threshold === 0) return `saturation YoY turns ${up ? "positive" : "negative"}`;
+      if (rule.threshold === 0) return `releases YoY turn ${up ? "positive" : "negative"}`;
       const pct = Math.abs(rule.threshold * 100).toFixed(0);
-      return `saturation YoY ${up ? "▲" : "▼"} > ${up ? "+" : "−"}${pct}%`;
+      return `releases YoY ${up ? "▲" : "▼"} > ${up ? "+" : "−"}${pct}%`;
     }
     case "opportunity_v2":
-      return up ? `opp v2 crosses ${rule.threshold}` : `opp v2 drops below ${rule.threshold}`;
+      return up ? `Opportunity score crosses ${rule.threshold}` : `Opportunity score drops below ${rule.threshold}`;
     case "price_initial":
       return up ? `price rises above $${rule.threshold.toFixed(2)}` : `price drops below $${rule.threshold.toFixed(2)}`;
     default:

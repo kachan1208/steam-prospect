@@ -263,7 +263,7 @@ describe("populated watchlist", () => {
     expect(screen.getByText("$9.99")).toBeTruthy();
 
     // The one honest timestamp on the page: the mart build date, clearly labeled as such.
-    expect(screen.getByText((_, el) => el?.textContent === "2 items · alerts evaluated live against current data · data as of Aug 19")).toBeTruthy();
+    expect(screen.getByText((_, el) => el?.textContent === "2 items · alerts evaluated live against current data · data as of Aug 19, 2026")).toBeTruthy();
   });
 
   it("bannering a fired rule states CURRENT status only — no invented crossing date", async () => {
@@ -341,5 +341,51 @@ describe("populated watchlist", () => {
     expect(await screen.findByText("price drops below $9.99")).toBeTruthy();
     const gameEntry = getWatchlist().find((e) => e.kind === "game");
     expect(gameEntry?.rule).toEqual({ metric: "price_initial", comparator: "lt", threshold: 9.99 });
+  });
+});
+
+describe("niche rules read the shared default cut (2026-09-23)", () => {
+  it("never evaluates an alert on another cut — a niche without the 24m × ≥50 row reads 'no data'", async () => {
+    // Only the ≥0 cut exists: the old local picker fell back to it ("any 24m cut") and would
+    // have printed its score as if it were the default population's.
+    addNicheToWatchlist("tag", "Colony Sim", "Colony Sim", { metric: "opportunity_v2", comparator: "gt", threshold: 50 });
+    vi.stubGlobal(
+      "fetch",
+      mockFetch({
+        niches: {
+          "Colony Sim": nicheFixture({
+            variants: [{ dimension: "tag", key: "Colony Sim", window: "24m", min_reviews: 0, opportunity_v2: 91 }],
+          }),
+        },
+      }),
+    );
+    renderWatchlist();
+    expect(await screen.findByText("Opportunity score crosses 50")).toBeTruthy();
+    await waitFor(() => expect(screen.getByText("no data")).toBeTruthy());
+    expect(screen.queryByText("91.0")).toBeNull();
+  });
+
+  it("reads a niche's 7-day players trend against the market when the data has it", async () => {
+    addNicheToWatchlist("tag", "Colony Sim", "Colony Sim");
+    vi.stubGlobal(
+      "fetch",
+      mockFetch({
+        niches: {
+          "Colony Sim": nicheFixture({
+            players: {
+              players_trend_7d_pct: 24,
+              players_trend_7d_market_pct: 0.75,
+              players_trend_7d_rel_pct: 23.25,
+              total_players_now: 1000,
+              players_coverage: 1,
+              n_games_panel: 1,
+              series: [],
+            },
+          }),
+        },
+      }),
+    );
+    renderWatchlist();
+    expect(await screen.findByText("+23.3 pts vs market")).toBeTruthy();
   });
 });

@@ -4,9 +4,12 @@ import { useQueries } from "@tanstack/react-query";
 
 import { EmptyState } from "../components/ui/EmptyState";
 import { Loading } from "../components/ui/Loading";
+import { SentinelTag } from "../components/ui/SentinelTag";
 import { TableScroll } from "../components/ui/TableScroll";
-import { gameProfileQueryOptions, nicheDetailQueryOptions, useHealth, type Dimension, type GameProfile, type NicheDetail, type NicheRow } from "../lib/api";
-import { monthName } from "../lib/format";
+import { gameProfileQueryOptions, nicheDetailQueryOptions, type Dimension, type GameProfile, type NicheDetail } from "../lib/api";
+import { useDataAge } from "../lib/dataAge";
+import { DEFAULT_NICHE_CUT, findNicheVariant } from "../lib/nicheSelection";
+import { readPlayersTrend } from "../lib/playersTrend";
 import {
   defaultRuleFor,
   editorValueToThreshold,
@@ -39,7 +42,7 @@ import { usePageTitle } from "../lib/usePageTitle";
  *    crossing event. Nothing in this stack records history, so that date is not
  *    reproducible truthfully; this page's banner states the CURRENT state of the rule
  *    ("currently meets your alert") with no invented "fired on" date. The one honest
- *    timestamp available — the mart's own build time (useHealth().built_at) — is surfaced
+ *    timestamp available — the data's own as-of date (lib/dataAge.ts) — is surfaced
  *    once, in the page subtitle, labeled for what it is ("data as of").
  *  - The mockup's rule column header is "90d trend"; every rule here evaluates against a
  *    field the API genuinely serves (players_trend_7d_pct, saturation_yoy, opportunity_v2,
@@ -68,17 +71,17 @@ const WATCHLIST_ICON = (
   </svg>
 );
 
-// The mart only materializes a handful of (window × min_reviews) cuts; 24m/50 is the app-wide
-// default (NicheFinder's own initial state) — same fallback chain NicheDetail.tsx uses to pick
-// activeVariant when the exact cut isn't available.
-function pickVariant(variants: NicheRow[] | undefined): NicheRow | null {
-  const list = variants ?? [];
-  return list.find((v) => v.window === "24m" && v.min_reviews === 50) ?? list.find((v) => v.window === "24m") ?? list[0] ?? null;
-}
-
+/**
+ * A niche rule reads the app-wide default cut (24m × ≥50 — the Radar's, the Finder's and the
+ * niche page's headline) through the SHARED exact-match finder (2026-09-23). This page used
+ * to carry its own copy with a fallback chain (any 24m cut, then whatever came first), which
+ * quietly evaluated an alert on a different population — the exact substitution
+ * lib/nicheSelection.ts's findNicheVariant exists to refuse. A niche with no row at that cut
+ * reads as "no data", never as another cut's number.
+ */
 function nicheMetricValue(detail: NicheDetail | undefined, metric: AlertMetric): number | null {
   if (!detail) return null;
-  const variant = pickVariant(detail.variants);
+  const variant = findNicheVariant(detail.variants, DEFAULT_NICHE_CUT) ?? null;
   switch (metric) {
     case "players_trend_7d_pct":
       return detail.players?.players_trend_7d_pct ?? variant?.players_trend_7d_pct ?? null;
@@ -107,20 +110,12 @@ function entryPath(entry: WatchlistEntry): string {
   return entry.kind === "niche" ? nicheDetailPath(entry.dimension as Dimension, entry.key as string) : `/games/${entry.appid}`;
 }
 
-/** "Aug 19" from an ISO build timestamp, or null if there isn't one (older marts / API down) —
- * never a placeholder date. Read in UTC (not the viewer's local offset) since built_at is a
- * server timestamp and the point is "which mart build", not a moment in the viewer's day. */
-function formatBuiltAt(iso: string | null | undefined): string | null {
-  if (!iso) return null;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  return `${monthName(d.getUTCMonth() + 1)} ${d.getUTCDate()}`;
-}
-
 export default function Watchlist() {
   usePageTitle("Watchlist");
   const entries = useWatchlist();
-  const healthQ = useHealth();
+  // The one data-age reading every page shares (lib/dataAge.ts) — it prefers the API's own
+  // data_as_of over a build timestamp, and prints it in UTC.
+  const dataAge = useDataAge();
 
   const nicheEntries = entries.filter((e) => e.kind === "niche");
   const gameEntries = entries.filter((e) => e.kind === "game");
@@ -167,7 +162,15 @@ export default function Watchlist() {
   };
 
   const fired = entries.filter((e) => e.rule && ruleFires(e.rule, currentValue(e)) === true);
-  const builtAt = formatBuiltAt(healthQ.data?.built_at);
+  const builtAt = dataAge.asOfLabel;
+
+  /** A niche's 7-day players trend is read against the market wherever it appears
+   * (lib/playersTrend.ts): "−11.4 pts vs market" beside the raw figure, when the data has it. */
+  function marketNote(entry: WatchlistEntry): string | null {
+    if (entry.kind !== "niche" || entry.rule?.metric !== "players_trend_7d_pct") return null;
+    const rel = readPlayersTrend(nicheData.get(entry.id)?.players ?? null).relative;
+    return rel ? `${rel} vs market` : null;
+  }
 
   if (entries.length === 0) {
     return (
@@ -273,7 +276,7 @@ export default function Watchlist() {
               </span>
             </div>
             {entries.map((entry) => (
-              <Row key={entry.id} entry={entry} value={currentValue(entry)} to={entryPath(entry)} />
+              <Row key={entry.id} entry={entry} value={currentValue(entry)} to={entryPath(entry)} vsMarket={marketNote(entry)} />
             ))}
           </div>
         </TableScroll>
@@ -317,7 +320,7 @@ function AlertBanner({ entry, value, to }: { entry: WatchlistEntry; value: numbe
   );
 }
 
-function Row({ entry, value, to }: { entry: WatchlistEntry; value: number | null; to: string }) {
+function Row({ entry, value, to, vsMarket }: { entry: WatchlistEntry; value: number | null; to: string; vsMarket?: string | null }) {
   return (
     <div
       role="row"
@@ -327,7 +330,7 @@ function Row({ entry, value, to }: { entry: WatchlistEntry; value: number | null
       <ItemCell entry={entry} to={to} />
       <TypeTag kind={entry.kind} />
       <RuleCell entry={entry} />
-      <MetricCell rule={entry.rule} value={value} />
+      <MetricCell rule={entry.rule} value={value} vsMarket={vsMarket} />
       <span
         className="text-[13px]"
         style={{ color: PAPER_65 }}
@@ -444,20 +447,21 @@ function RuleCell({ entry }: { entry: WatchlistEntry }) {
   );
 }
 
-function MetricCell({ rule, value }: { rule: AlertRule | null; value: number | null }): ReactNode {
+function MetricCell({ rule, value, vsMarket }: { rule: AlertRule | null; value: number | null; vsMarket?: string | null }): ReactNode {
   if (!rule) return <span style={{ color: "var(--verdict-flat)" }}>—</span>;
   if (value == null) {
-    return (
-      <span style={{ color: "var(--verdict-flat)" }} title="No live data yet for this metric">
-        —
-      </span>
-    );
+    // A sentinel, not a bare dash: the niche has no reading at the default cut (or the data
+    // hasn't arrived yet).
+    return <SentinelTag>no data</SentinelTag>;
   }
   if (metricIsSigned(rule.metric)) {
     const up = value >= 0;
     return (
-      <span className="tabular font-medium" style={{ color: up ? "var(--verdict-up)" : "var(--verdict-flat)" }}>
-        {up ? "▲" : "▼"} {formatMetricValue(rule.metric, value)}
+      <span className="inline-flex flex-col leading-tight">
+        <span className="tabular font-medium" style={{ color: up ? "var(--verdict-up)" : "var(--verdict-flat)" }}>
+          {up ? "▲" : "▼"} {formatMetricValue(rule.metric, value)}
+        </span>
+        {vsMarket && <span className="tabular text-[11px] text-ink-muted">{vsMarket}</span>}
       </span>
     );
   }
