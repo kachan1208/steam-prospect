@@ -186,7 +186,8 @@ W_QUALITY = 0.30
 #   gate = 1 - (1 - GATE_FLOOR) * MAX(sat_severity, entrant_severity)   -> in [GATE_FLOOR, 1]
 #
 # Deliberate deviation from the obvious "AND" gate (only penalize when BOTH signals are
-# bad): measured on the real catalog, the median tag's entrant_ratio is ~1.08 (24m medians
+# bad): measured on the real catalog, the median tag's entrant_ratio is ~0.79 (was ~1.08 before
+# the 2026-09-22 population fixes; 24m medians
 # run structurally higher than all-time medians — price inflation + the review floor
 # filtering recent releases harder), so entrant_ratio >= 1 is the NORM and cannot excuse a
 # collapsing release pipeline. Concretely, the user-rejected niches themselves (Naval
@@ -239,7 +240,7 @@ GATE_ENTRANT_FULL = 0.5          # entrant_ratio <= 0.5 -> full entrant severity
 #                     flood_room   100 at or below zero excess supply growth, 50 when
 #                                  supply outgrows demand by exactly the Radar's flooding
 #                                  bar (+15%/yr), 0 at twice that.
-#                     entrant_room 0 at entrant_ratio 0.5, 100 at the CATALOG NORM 1.08
+#                     entrant_room 0 at entrant_ratio 0.5, 100 at the CATALOG NORM 0.79
 #                                  (not 1.0 — see entrant_ratio's caveat). Capped there:
 #                                  above the norm is a survivor-cohort artifact, not
 #                                  evidence, so it earns no bonus.
@@ -307,16 +308,18 @@ OPP_WINNER_TAKE_MOST = 0.85      # == WC_WINNER_TAKE_MOST -> revenue_spread 50. 
                                  # 2026-09-22 the ring also refuses "enter" above it ("demand
                                  # surging, but winner-take-most revenue" -> watch); pinned by
                                  # test_opportunity_ordering.radar_ring
-OPP_ENTRANT_NORM = 1.08          # == ENTRANT_RATIO_CATALOG_NORM -> entrant_room 100 (capped).
-                                 # NOW STALE (2026-09-22): it was the catalog median (1.07 on
-                                 # the 2026-09-21 mart), but first-public dates + paid-only
-                                 # revenue moved that median to 0.79 (tag/24m/min50, validation
-                                 # build), so the median niche now scores entrant_room ~50 and
-                                 # the whole board ~10 points lower (median opp_v2 47.8 at a
-                                 # 0.79 norm vs 38.3 at 1.08; ring ordering holds at both).
-                                 # Left at 1.08 on purpose — the bearish side — until it is
-                                 # re-measured on a full production build and changed together
-                                 # with its web (ENTRANT_RATIO_CATALOG_NORM) and MCP mirrors.
+OPP_ENTRANT_NORM = 0.79          # == ENTRANT_RATIO_CATALOG_NORM -> entrant_room 100 (capped).
+                                 # The catalog median entrant_ratio on the board's pinned cut
+                                 # (tag/24m/min50). RE-FITTED 2026-09-23 from 1.08: dating Early
+                                 # Access graduates from their EA launch and taking free /
+                                 # unknown-price games out of revenue (2026-09-22) moved that
+                                 # median from 1.07 to 0.79 (full build from main, 317 niches;
+                                 # 0.808 at min100). Left at 1.08, the median niche scored
+                                 # entrant_room ~50 and the whole board read ~10 points low
+                                 # (median opp_v2 38.2 vs 47.8), which also broke the Radar's
+                                 # OPP_WATCH_SCORE=65 calibration (the median score of niches
+                                 # the board rings "enter"). Change it together with its web
+                                 # (ENTRANT_RATIO_CATALOG_NORM + glossary) and MCP mirrors.
 OPP_ENTRANT_FULL = 0.5           # entrant_ratio <= 0.5 -> entrant_room 0 (same bar the
                                  # retired gate used, kept so the two agree on "as bad as
                                  # newcomer economics get")
