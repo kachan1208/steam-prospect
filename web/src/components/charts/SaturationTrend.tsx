@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import {
   Bar,
   BarChart,
@@ -198,7 +199,26 @@ export function trendTakeaways(points: TrendPoint[], asOf: Date = new Date()): T
 const MARGIN = { top: 6, right: 8, left: 0, bottom: 0 } as const;
 const Y_AXIS_W = 52;
 
-export function SaturationTrend({ points, asOf }: { points: TrendPoint[]; asOf?: Date | null }) {
+/**
+ * The series with every missing year between its first and last put back as a zero-release
+ * year (the mart only has rows for years that had releases). On a category axis a missing
+ * year simply vanishes — Souls-like's axis read 2012, 2014, 2015… with no 2013 — and the bar
+ * beside the gap looks like the next year. Filled years have no games, so no revenue: the
+ * revenue panel lists them with the other thin years instead of inventing a figure.
+ */
+export function fillYearGaps(points: readonly TrendPoint[]): TrendPoint[] {
+  const sorted = [...points].sort((a, b) => a.year - b.year);
+  if (sorted.length < 2) return sorted;
+  const byYear = new Map(sorted.map((p) => [p.year, p]));
+  const out: TrendPoint[] = [];
+  for (let y = sorted[0].year; y <= sorted[sorted.length - 1].year; y++) {
+    out.push(byYear.get(y) ?? { year: y, n_releases: 0, n_scored: 0, median_rev: null, p90_rev: null });
+  }
+  return out;
+}
+
+export function SaturationTrend({ points: raw, asOf }: { points: TrendPoint[]; asOf?: Date | null }) {
+  const points = useMemo(() => fillYearGaps(raw), [raw]);
   // One hook for both panels: they plot the same years, so a range dragged on either must
   // move the other — two independent zooms on a shared axis would be a lie.
   const zoom = useDragZoom(points, "year");

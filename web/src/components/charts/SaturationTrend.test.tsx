@@ -4,6 +4,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import {
   SaturationTrend,
   TREND_REV_MIN_SCORED,
+  fillYearGaps,
   partialTrendYear,
   trendTakeaways,
   yearRanges,
@@ -96,10 +97,20 @@ describe("SaturationTrend — two single-unit panels, no dual axis", () => {
  * "top 10%" ($27.8M) was one hit — and it set the axis, pressing every later year flat.
  */
 describe("thin years — a top-10% figure off one or two games is never plotted", () => {
-  // The real GET /api/niches/tag/Roguelike saturation_trend, 2026-09-23 mart (trimmed).
+  // The real GET /api/niches/tag/Roguelike saturation_trend, 2026-09-23 mart.
   const ROGUELIKE: TrendPoint[] = [
     { year: 2012, n_releases: 10, n_scored: 9, median_rev: 217_522.5, p90_rev: 27_774_577.62 },
     { year: 2013, n_releases: 31, n_scored: 31, median_rev: 1_035_681.9, p90_rev: 7_127_455.5 },
+    { year: 2014, n_releases: 80, n_scored: 79, median_rev: 155_387.7, p90_rev: 5_449_180.5 },
+    { year: 2015, n_releases: 126, n_scored: 110, median_rev: 108_500.55, p90_rev: 1_841_498.79 },
+    { year: 2016, n_releases: 136, n_scored: 114, median_rev: 95_004.9, p90_rev: 2_255_379.93 },
+    { year: 2017, n_releases: 142, n_scored: 104, median_rev: 118_341.45, p90_rev: 2_962_096.11 },
+    { year: 2018, n_releases: 178, n_scored: 104, median_rev: 97_425, p90_rev: 2_054_746.62 },
+    { year: 2019, n_releases: 214, n_scored: 131, median_rev: 109_018.95, p90_rev: 3_448_327.32 },
+    { year: 2020, n_releases: 392, n_scored: 183, median_rev: 155_322.3, p90_rev: 3_533_225.88 },
+    { year: 2021, n_releases: 446, n_scored: 182, median_rev: 111_521.7, p90_rev: 2_022_308.34 },
+    { year: 2022, n_releases: 723, n_scored: 300, median_rev: 69_574.65, p90_rev: 1_643_165.85 },
+    { year: 2023, n_releases: 1029, n_scored: 331, median_rev: 89_040.6, p90_rev: 1_753_560.18 },
     { year: 2024, n_releases: 1477, n_scored: 469, median_rev: 58_792.95, p90_rev: 986_135.28 },
     { year: 2025, n_releases: 1781, n_scored: 504, median_rev: 73_966.2, p90_rev: 866_086.74 },
     { year: 2026, n_releases: 2000, n_scored: 369, median_rev: 59_205.9, p90_rev: 605_206.26 },
@@ -117,7 +128,7 @@ describe("thin years — a top-10% figure off one or two games is never plotted"
     const t = trendTakeaways(ROGUELIKE, AS_OF);
     expect(TREND_REV_MIN_SCORED).toBe(20);
     expect(t.thinYears).toEqual([2012]);
-    expect(t.plottedYears).toEqual([2013, 2024, 2025, 2026]);
+    expect(t.plottedYears).toEqual(ROGUELIKE.slice(1).map((p) => p.year)); // 2013–2026
     expect(t.thinNote).toBe(
       "Not plotted: 2012 — only 9 games with 50+ reviews; under 20, a year's top 10% is just its one or two biggest games.",
     );
@@ -156,6 +167,24 @@ describe("thin years — a top-10% figure off one or two games is never plotted"
       // 2013's $7.1M is the largest plotted figure; the axis tops out just above it, not at $30M.
       expect(top).toMatch(/^\$(7\.5|8|10)M$/);
       expect(screen.getByTestId("takeaway-thin").textContent).toContain("2012 — only 9 games");
+    });
+
+    it("puts a year with no releases back on the axis as a zero — never a vanished year", () => {
+      // Souls-like's mart rows skip 2013 (no releases): the axis read 2012, 2014, 2015…
+      const gappy: TrendPoint[] = [
+        { year: 2012, n_releases: 2, n_scored: 2, median_rev: 0, p90_rev: 0 },
+        { year: 2014, n_releases: 11, n_scored: 11, median_rev: 93_853, p90_rev: 22_485_201 },
+        { year: 2015, n_releases: 12, n_scored: 11, median_rev: 867_472, p90_rev: 6_284_108 },
+      ];
+      expect(fillYearGaps(gappy).map((p) => [p.year, p.n_releases, p.n_scored, p.p90_rev])).toEqual([
+        [2012, 2, 2, 0],
+        [2013, 0, 0, null],
+        [2014, 11, 11, 22_485_201],
+        [2015, 12, 11, 6_284_108],
+      ]);
+      const { container } = render(<SaturationTrend points={gappy} asOf={AS_OF} />);
+      const charts = container.querySelectorAll<HTMLElement>(".recharts-wrapper");
+      expect(axisTicks(charts[0], "x", 0)).toEqual(["2012", "2013", "2014", "2015"]);
     });
 
     it("draws no revenue line at all when fewer than two years clear the bar — and says why", () => {
