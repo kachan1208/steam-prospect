@@ -710,7 +710,9 @@ export default function Compare() {
               names={names}
               hideLegend
               align={align}
-              anchors={anchors}
+              // Only once every profile has answered: a half-loaded anchor map would draw the
+              // loaded games and call the rest "not drawn" for a moment.
+              anchors={anyLoading ? undefined : anchors}
               partialPeriod={partialPeriod}
             />
           </Panel>

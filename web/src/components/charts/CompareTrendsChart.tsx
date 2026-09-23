@@ -198,7 +198,10 @@ export function CompareTrendsChart({
   // cannot apply to them — useDragZoom passes rows without a date straight through.
   const zoom = useDragZoom(data, "x");
 
-  if (trendsQ.isLoading) {
+  // Aligned by launch, the x positions need each game's launch date, which arrives with the
+  // profiles (`anchors` undefined until then) — wait for it rather than flash "no launch
+  // date" and then jump to the chart.
+  if (trendsQ.isLoading || (launch && anchors === undefined)) {
     // The loaded chart's own height (220px plot + a caption line), so nothing below jumps
     // when it arrives.
     return <div className="flex h-[244px] items-center justify-center text-xs text-ink-muted">Loading trends…</div>;
