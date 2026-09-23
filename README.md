@@ -50,7 +50,8 @@ changes.
 ## Running the app
 
 ```bash
-task etl    # 1. build the DuckDB marts (writes data/current.duckdb) — rerun any
+task etl    # 1. build the DuckDB marts into $PROSPECT_DATA_DIR (see "Building the marts"
+            #    below: PROSPECT_SOURCE_DB and PROSPECT_DATA_DIR must be set) — rerun any
             #    time the source catalog changes; safe to rerun any time otherwise
 task api    # 2. start the FastAPI backend on http://127.0.0.1:8000 (separate terminal)
 task web    # 3. start the Vite dev server on http://127.0.0.1:5173 (separate terminal)
@@ -84,12 +85,47 @@ npm run build      # tsc -b && vite build -> web/dist
 npm run preview    # serve the built bundle locally
 ```
 
+## Building the marts (ETL)
+
+`etl/build_marts.py` reads the scraper's SQLite catalog **read-only** and writes versioned
+DuckDB marts. It has **no path defaults** — a default once pointed at a stale copy of the
+source and silently built a weeks-old mart in the wrong place:
+
+```bash
+export PROSPECT_SOURCE_DB=/path/to/steam-scraper/steam_games.db   # the LIVE scraper DB
+export PROSPECT_DATA_DIR=/path/to/prospect-data                   # must already exist
+task etl                        # = build_marts.py --source "$PROSPECT_SOURCE_DB" --data-dir "$PROSPECT_DATA_DIR"
+task etl -- --light             # extra build_marts flags go after --
+```
+
+`--source` / `--data-dir` override the env vars. The data dir holds `prospect_<YYYYMMDD>.duckdb`
+(the newest `--keep`, default 2), the `current.duckdb` symlink the API serves, the incremental
+`sentiment_cache.duckdb` (keep it: rebuilding it is a multi-night rescore) and two lock files.
+If it is not the repo's `data/`, point the API at it: `PROSPECT_ANALYTICS_DB_PATH=$PROSPECT_DATA_DIR/current.duckdb`.
+
+Every run logs the resolved paths and when the source was last written (the newer of the DB
+file and its `-wal`, since the scraper runs in WAL mode). If that is older than
+`--max-source-age-hours` (default 48; 0 = never) it **warns loudly and still builds** — a
+stalled scraper or a copy of the DB instead of the live file. `mart_meta` records the source
+path, its mtimes and its age as of build start (`source_db`, `source_db_mtime`,
+`source_db_wal_mtime`, `source_last_write_at`, `source_age_hours`). All dates are UTC,
+whatever the host's time zone.
+
+Runs lock the data dir: one mart build (full or `--light`) at a time; `--rescore-only` has its
+own lock so it can refill the sentiment cache beside the nightly; `--repair-arms` takes both.
+A run that finds its lock taken exits **3** without touching anything.
+
+| exit | meaning |
+|---|---|
+| 0 | built, validated, `current.duckdb` swapped |
+| 1 | built, but the validation gate refused the swap — the artifact is kept as `prospect_<date>.duckdb.building` (the log prints how to inspect/ship/discard it); an unhandled crash also exits 1 |
+| 2 | refused before doing any work (missing/unset paths, missing aspect model, contradictory flags, a garbled `PROSPECT_*` knob) |
+| 3 | busy: another run holds this data dir's lock — nothing was touched; a scheduler can treat it as "skipped" |
+
 ## Notes
 
-- `etl/build_marts.py` defaults `--source` to a Steam catalog SQLite path on the
-  machine this project was built on; pass `--source /path/to/steam_games.db`
-  (and optionally `--data-dir`) if your source catalog lives elsewhere:
-  `etl/.venv/bin/python etl/build_marts.py --source /path/to/steam_games.db`.
+- `etl/build_marts.py` has no default `--source` / `--data-dir` (see "Building the
+  marts" above); `task etl` passes `$PROSPECT_SOURCE_DB` / `$PROSPECT_DATA_DIR`.
 - The API never writes to the source catalog or the marts — it opens
   `data/current.duckdb` read-only. Only `task etl` (re)builds marts.
 - No restart is needed after `task etl`: every 30 s at most

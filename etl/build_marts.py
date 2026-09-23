@@ -8,11 +8,13 @@ counts, then atomically repoints the `data/current.duckdb` symlink at the new fi
 Why DuckDB: the marts lean on median()/quantile_cont()/percent_rank()/regr_slope() which
 SQLite lacks. The SQLite source is opened READ_ONLY and never mutated.
 
-Run:  python build_marts.py            (paths default relative to this file)
-      python build_marts.py --source /path/to/steam_games.db --data-dir /path/to/data
+Run:  python build_marts.py --source /path/to/steam_games.db --data-dir /path/to/data
+      (or set PROSPECT_SOURCE_DB / PROSPECT_DATA_DIR; there are NO path defaults — see
+      build_arg_parser for why a default here once built a stale mart in the wrong place)
 
 Safe to run beside other runs: it takes an exclusive lock on the data dir (a second run exits 3
-without touching anything) and pins every date to UTC.
+without touching anything), pins every date to UTC, and warns when the source DB has stopped
+being written.
 
 Exit codes (a scheduler should treat any non-zero as "keep the previous mart"):
   0  built, validated and swapped
@@ -20,8 +22,8 @@ Exit codes (a scheduler should treat any non-zero as "keep the previous mart"):
      untouched and the finished artifact is KEPT at data/prospect_<version>.duckdb.building
      (its spill dir is not) — see the remedy the run prints; none of the options need a rebuild.
      (An unhandled exception also exits 1 — Python's own code — so read the log to tell them apart.)
-  2  refused before doing any work (missing source DB, missing aspect model, --light guard,
-     contradictory flags such as --light with --fulltext build, a garbled knob).
+  2  refused before doing any work (missing/unset source DB or data dir, missing aspect model,
+     --light guard, contradictory flags such as --light with --fulltext build, a garbled knob).
   3  BUSY: another build_marts run holds this data dir's lock (a mart build, or a
      --rescore-only/--repair-arms run for those modes) — nothing was touched. Retry later; a
      scheduler can treat it as "skipped", not "failed".
@@ -4765,7 +4767,8 @@ def _optional_meta(con: duckdb.DuckDBPyConnection, sql: str) -> tuple | None:
 def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str,
                build_mode: str = "full", absent_sources: list[str] | tuple[str, ...] = (),
                classifier_absent: bool = False, fulltext_mode: str = "build",
-               fulltext_built_at: str = "", fulltext_scored_reviews: str = "") -> None:
+               fulltext_built_at: str = "", fulltext_scored_reviews: str = "",
+               source_info: dict[str, str] | None = None) -> None:
     """Provenance/meta rows for the mart. Beyond the headline stats:
 
       build_mode           'full' | 'light' — a --light build copies the heavy teardown/aspect
@@ -4793,9 +4796,16 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
                            accepted a missing aspect model — flags a degraded build whose
                            aspect counts are keyword-only (inflated ~28%).
       source_db_mtime/size the source SQLite's mtime (ISO-8601 UTC) + size in bytes, from
-                           os.stat at build time — lets a mart be matched back to the exact
-                           source snapshot it was built from ('' when unreadable: the build
-                           obviously succeeded, so this is provenance, not a gate).
+                           os.stat — lets a mart be matched back to the exact source snapshot
+                           it was built from ('' when unreadable: the build obviously
+                           succeeded, so this is provenance, not a gate). main() passes
+                           `source_info`, taken at build START (_source_snapshot) before staging
+                           read a byte; without it they are stat'ed now, as they always were.
+      source_db_wal_mtime  (with source_info) the source's -wal mtime ('' without one): in WAL
+                           mode recent writes live there until a checkpoint.
+      source_last_write_at (with source_info) the newer of the two — when the scraper last wrote.
+      source_age_hours     (with source_info) how old that was when the build started; main()
+                           warns past --max-source-age-hours (default 48).
       etl_git_sha          the ETL code's git SHA (best-effort `git rev-parse HEAD` from the
                            repo root; '' when not in a git checkout or git is unavailable).
       duckdb_version       the duckdb library version that built the file.
@@ -4924,6 +4934,7 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
         "absent_sources": ",".join(absent_sources),
         "source_db_mtime": source_mtime,
         "source_db_size": source_size,
+        **(source_info or {}),
         "etl_git_sha": git_sha,
         "duckdb_version": duckdb.__version__,
     }
@@ -5481,6 +5492,9 @@ LOCK_GRACE_SECONDS = 15.0             # a run waits this long for its own lock b
                                       # EXIT_BUSY: long enough to ride out another run's sweep
                                       # borrowing it for a deletion, nowhere near a real build
 EXIT_BUSY = 3                         # another run holds the lock — see the module docstring
+
+MAX_SOURCE_AGE_HOURS = 48.0           # --max-source-age-hours: warn when the source's last
+                                      # write is older than this (a stalled scraper, or a copy)
 _SCRATCH_RE = re.compile(r"^prospect_(.+?)\.duckdb\.building(\.wal|\.tmp)?$")
 
 # --rescore-only gets its OWN scratch name, outside the prospect_<version>.duckdb.building
@@ -5742,16 +5756,23 @@ def _refuse_publishing_rescore_scratch(building: Path) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Build Prospect DuckDB marts.")
-    # Default source: PROSPECT_SOURCE_DB env first (the droplet's layout differs from the
-    # laptop's), then the historical local path so a plain `task etl` keeps working.
-    ap.add_argument("--source",
-                    default=os.environ.get(
-                        "PROSPECT_SOURCE_DB",
-                        "/Users/maximbaginskiy/hobby/steam-scraper/steam_games.db"),
-                    help="Path to the read-only steam_games.db SQLite source "
-                         "(default: $PROSPECT_SOURCE_DB, else the local steam-scraper path).")
-    ap.add_argument("--data-dir", default=str(HERE.parent / "data"),
-                    help="Directory for versioned duckdb files + current.duckdb symlink.")
+    # NO PATH DEFAULTS (2026-09-22). --source used to fall back to a hard-coded laptop path —
+    # which by then held a stale August copy of the scraper DB — and --data-dir to the repo's own
+    # data/, and `task etl` passed neither: a bare run built a weeks-old mart in the wrong place
+    # and exited 0. Each is now required unless its env var is set (main() refuses with exit 2),
+    # and main() logs the resolved paths and how long ago the source was last written.
+    ap.add_argument("--source", default=os.environ.get("PROSPECT_SOURCE_DB") or None,
+                    help="Path to the read-only steam_games.db SQLite source. Required unless "
+                         "$PROSPECT_SOURCE_DB is set.")
+    ap.add_argument("--data-dir", default=os.environ.get("PROSPECT_DATA_DIR") or None,
+                    help="Existing directory for the versioned marts, the current.duckdb "
+                         "symlink, the sentiment cache and the run locks. Required unless "
+                         "$PROSPECT_DATA_DIR is set; never created implicitly.")
+    ap.add_argument("--max-source-age-hours", type=float, default=MAX_SOURCE_AGE_HOURS,
+                    help="Warn loudly (the build still runs) when the source DB — or its -wal — "
+                         "was last written more than this many hours ago: a stalled scraper, or "
+                         f"a copy instead of the live file. 0 = never warn. Default "
+                         f"{MAX_SOURCE_AGE_HOURS:g}.")
     # 2 = the serving mart + one rollback. Disk is the droplet's scarcest resource and the
     # deploy script's own duplicate prune is being removed separately — retention is owned
     # here, and 3 versions of a ~4GB mart was one version of pure waste.
@@ -5907,12 +5928,58 @@ def _env_config_errors() -> list[str]:
     return errors
 
 
+def _source_snapshot(source_db: str) -> dict[str, str]:
+    """What the build knows about its source, taken at START — before staging reads a byte —
+    so mart_meta describes the snapshot the marts were built from, not the file as it stood hours
+    later (the scraper keeps writing throughout). The source runs in WAL mode, where writes land
+    in `<db>-wal` and reach the main file only at a checkpoint, so "when was it last written" is
+    the newer of the two mtimes. Keys are write_meta's (see there)."""
+    def iso(ts: float | None) -> str:
+        return "" if ts is None else datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(
+            timespec="seconds")
+
+    st = os.stat(source_db)
+    try:
+        wal_mtime: float | None = os.stat(source_db + "-wal").st_mtime
+    except OSError:
+        wal_mtime = None
+    last = max(st.st_mtime, wal_mtime or 0.0)
+    return {
+        "source_db_mtime": iso(st.st_mtime),
+        "source_db_size": str(st.st_size),
+        "source_db_wal_mtime": iso(wal_mtime),
+        "source_last_write_at": iso(last),
+        "source_age_hours": f"{max(0.0, time.time() - last) / 3600.0:.1f}",
+    }
+
+
 def main() -> int:
     args = build_arg_parser().parse_args()
 
-    source_db = str(Path(args.source).resolve())
-    if not Path(source_db).exists():
+    # WHERE: both paths are required (see build_arg_parser for why there are no defaults), the
+    # source must be a file, and the data dir must already exist — it is never created on the
+    # fly, because a typo'd one would otherwise start a fresh mart AND a full multi-night
+    # sentiment rescore in the wrong place, and exit 0.
+    missing = [f"{flag} (or ${env})" for flag, env, value in (
+        ("--source", "PROSPECT_SOURCE_DB", args.source),
+        ("--data-dir", "PROSPECT_DATA_DIR", args.data_dir)) if not value]
+    if missing:
+        print(f"ERROR: {' and '.join(missing)} must be given — there are no path defaults "
+              "(one used to point at a stale copy of the source).", file=sys.stderr)
+        return 2
+    source_db = str(Path(args.source).expanduser().resolve())
+    if not Path(source_db).is_file():
         print(f"ERROR: source DB not found: {source_db}", file=sys.stderr)
+        return 2
+    data_dir = Path(args.data_dir).expanduser().resolve()
+    if not data_dir.is_dir():
+        print(f"ERROR: data dir not found: {data_dir} — it is not created implicitly (a typo "
+              "would start a fresh mart and a full sentiment rescore in the wrong place). "
+              "For a first-ever build, create it: mkdir -p " + str(data_dir), file=sys.stderr)
+        return 2
+    if not args.max_source_age_hours >= 0.0:   # written this way round so nan is refused too
+        print(f"ERROR: --max-source-age-hours {args.max_source_age_hours} is not a non-negative "
+              "number of hours (0 = never warn).", file=sys.stderr)
         return 2
 
     # Garbled env knobs are refused HERE, next to the classifier probe, for the same reason
@@ -5933,8 +6000,6 @@ def main() -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
 
-    data_dir = Path(args.data_dir).resolve()
-    data_dir.mkdir(parents=True, exist_ok=True)
     mart_version = _utc_today().strftime("%Y%m%d")   # UTC, whatever the host zone (ONE CLOCK)
     versioned = data_dir / f"prospect_{mart_version}.duckdb"
     current = data_dir / "current.duckdb"
@@ -6002,6 +6067,25 @@ def main() -> int:
               f"({current} missing) — run a full build first.", file=sys.stderr)
         return 2
 
+    # WHAT this run reads and where it writes, first thing in the log — and whether the source
+    # is still being written at all. A stale source is WARNED about, not refused: building from
+    # an old snapshot is sometimes exactly what an operator wants, but never silently.
+    source_info = _source_snapshot(source_db)
+    wal_note = (" (via its -wal)" if source_info["source_db_wal_mtime"]
+                and source_info["source_db_wal_mtime"] > source_info["source_db_mtime"] else "")
+    print(f"[etl] source     : {source_db}")
+    print(f"[etl]              last written {source_info['source_last_write_at']}{wal_note}, "
+          f"{float(source_info['source_age_hours']):,.1f}h ago; "
+          f"{int(source_info['source_db_size']) / 2**30:,.1f} GiB")
+    print(f"[etl] data dir   : {data_dir}")
+    if args.max_source_age_hours and float(source_info["source_age_hours"]) > args.max_source_age_hours:
+        print(f"[etl] WARNING: the source was last written {source_info['source_age_hours']}h ago "
+              f"({source_info['source_last_write_at']}) — older than --max-source-age-hours "
+              f"({args.max_source_age_hours:g}). Is the scraper still running, and is this the "
+              f"LIVE database rather than a copy? The build carries on and will publish marts "
+              f"from this snapshot; mart_meta.source_age_hours records how old it was.",
+              file=sys.stderr)
+
     # THE RUN LOCK(S) — see the Build scratch notes above _RunLock. Taken after every refusal
     # that needs no lock (so a refused run never even creates the lock file) and before anything
     # that touches the data dir. Held until this function returns; the kernel drops them if the
@@ -6022,14 +6106,14 @@ def main() -> int:
             return EXIT_BUSY
         locks.append(lock)
     try:
-        return _build(args, source_db, data_dir, mart_version, frozenset(families))
+        return _build(args, source_db, data_dir, mart_version, source_info, frozenset(families))
     finally:
         for lock in reversed(locks):
             lock.release()
 
 
 def _build(args: argparse.Namespace, source_db: str, data_dir: Path, mart_version: str,
-           held: frozenset[str]) -> int:
+           source_info: dict[str, str], held: frozenset[str]) -> int:
     """Everything main() does once it holds its run lock(s): sweep, build, validate, swap. Split out of main() only so the locks' try/finally wraps all of it."""
     versioned = data_dir / f"prospect_{mart_version}.duckdb"
     current = data_dir / "current.duckdb"
@@ -6056,7 +6140,6 @@ def _build(args: argparse.Namespace, source_db: str, data_dir: Path, mart_versio
                 else data_dir / f"prospect_{mart_version}.duckdb.building")
 
     params = build_params()
-    print(f"[etl] source     : {source_db}")
     if cache_only:
         # Deliberately NOT the versioned mart path: these modes never write one, and printing
         # one would put a filename in the log that nothing on disk will ever match.
@@ -6254,7 +6337,8 @@ def _build(args: argparse.Namespace, source_db: str, data_dir: Path, mart_versio
                    classifier_absent=_CLF_ABSENT,
                    fulltext_mode=fulltext.mode,
                    fulltext_built_at=fulltext.built_at,
-                   fulltext_scored_reviews=fulltext.scored_reviews)
+                   fulltext_scored_reviews=fulltext.scored_reviews,
+                   source_info=source_info)
 
         # Per-mart row counts.
         tables = [r[0] for r in con.execute(
