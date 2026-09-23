@@ -228,6 +228,11 @@ class GameSearchRow(BaseModel):
     first_public_date: Optional[str] = None
     release_date_1_0: Optional[str] = None
     is_ea_graduate: Optional[bool] = None
+    # How first_public_date was established: store | first_review | first_review_month
+    # (month precision — show it as '~Mon YYYY'). None on marts without the column.
+    release_date_source: Optional[str] = None
+    # paid | free | unknown (price 0 with is_free=0). Revenue is NULL unless paid.
+    price_status: Optional[str] = None
 
 
 class GameSearchList(BaseModel):
@@ -339,6 +344,11 @@ class GameProfile(BaseModel):
     first_public_date: Optional[str] = None
     release_date_1_0: Optional[str] = None
     is_ea_graduate: Optional[bool] = None
+    # How first_public_date was established: store | first_review | first_review_month
+    # (month precision — show it as '~Mon YYYY'). None on marts without the column.
+    release_date_source: Optional[str] = None
+    # paid | free | unknown (price 0 with is_free=0). Revenue is NULL unless paid.
+    price_status: Optional[str] = None
     # When owners_mid / est_rev_owners' owners estimate was taken (mart_meta.owners_as_of).
     owners_as_of: Optional[str] = None
 

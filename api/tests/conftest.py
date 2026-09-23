@@ -654,6 +654,7 @@ def build_modern_mart(
     *,
     new_niche_cols: bool = False,
     new_game_cols: bool = False,
+    etl_game_cols: bool = False,
     aliases: list[tuple[str, str, str]] | None = None,
     meta: dict[str, str] | None = None,
 ) -> None:
@@ -663,6 +664,8 @@ def build_modern_mart(
                     players_trend_7d_rel_pct on mart_niche (+ the two player-trend columns on
                     mart_game) — the ETL's in-flight additions.
     new_game_cols   first_public_date / release_date_1_0 / is_ea_graduate on mart_game.
+    etl_game_cols   the shape the ETL actually ships (PR #178): release_date = first public
+                    date + release_date_source, store_release_date, is_ea_graduate, price_status.
     aliases         rows for mart_tag_alias(dimension, alias, canonical); None = no table.
     meta            extra mart_meta rows (e.g. owners_as_of)."""
     from app.routers import niches
@@ -684,6 +687,23 @@ def build_modern_mart(
                 "UPDATE mart_game SET first_public_date = TRY_CAST(release_date AS DATE), "
                 "release_date_1_0 = TRY_CAST(release_date AS DATE), is_ea_graduate = FALSE "
                 "WHERE appid <> 1001"
+            )
+        if etl_game_cols:
+            con.execute("ALTER TABLE mart_game ADD COLUMN release_date_source VARCHAR")
+            con.execute("ALTER TABLE mart_game ADD COLUMN store_release_date VARCHAR")
+            con.execute("ALTER TABLE mart_game ADD COLUMN is_ea_graduate BOOLEAN")
+            con.execute("ALTER TABLE mart_game ADD COLUMN price_status VARCHAR")
+            # 1001: public in Early Access from its first review (2023-05-10), 1.0 on the store
+            # 2024-03-01 — release_date IS the first public date in this shape.
+            con.execute(
+                "UPDATE mart_game SET release_date = '2023-05-10', release_date_source = "
+                "'first_review', store_release_date = '2024-03-01', is_ea_graduate = TRUE, "
+                "price_status = 'paid' WHERE appid = 1001"
+            )
+            con.execute(
+                "UPDATE mart_game SET release_date_source = 'store', store_release_date = "
+                "release_date, is_ea_graduate = FALSE, price_status = CASE WHEN is_free "
+                "THEN 'free' ELSE 'paid' END WHERE appid <> 1001"
             )
         # The daily-CCU summary columns ship with mart_game_players_daily (built below).
         con.execute("ALTER TABLE mart_game ADD COLUMN players_7d_avg DOUBLE")
