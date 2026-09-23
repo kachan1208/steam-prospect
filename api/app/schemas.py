@@ -717,6 +717,9 @@ class NicheRow(BaseModel):
     # n_free / n_price_unknown — how many of the cut's n_games are free-to-play / have no
     # known price. Since free and unknown-price revenue became NULL (not $0), median_rev and
     # median_price describe the PRICED games only; these say how many were left out.
+    # n_paid: the paid games behind every revenue/price statistic, which the ETL withholds
+    # (NULL) when n_paid < 30 — quote it in the 'withheld' sentinel. The three sum to n_games.
+    n_paid: Optional[int] = None
     n_free: Optional[int] = None
     n_price_unknown: Optional[int] = None
     # The whole Steam panel's 7d player change over the same days, and this niche's
