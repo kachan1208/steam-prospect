@@ -4,7 +4,11 @@ Reuses test_full_build_smoke's tiny synthetic source (with the optional player/h
 added), runs the whole pipeline, and asserts what only a full run can show:
   * no mart column is DECIMAL — a bare `1.0` literal summed in DuckDB is DECIMAL(38,1), which
     Python reads back as decimal.Decimal; mart_channel_buzz shipped two, and the MCP's
-    `float += Decimal` crashed on them.
+    `float += Decimal` crashed on them;
+  * the new columns are published where the API/MCP/web will look for them, and the
+    market-relative player trend is exactly niche minus market;
+  * mart_tag_alias and the new mart_meta keys exist;
+  * a previous mart that still carries the retired mart_lang does not fail the gate.
 """
 from __future__ import annotations
 
@@ -68,3 +72,56 @@ def test_no_mart_column_is_decimal(built):
         con.close()
     assert bad == [], f"DECIMAL columns reach Python as decimal.Decimal: {bad}"
     assert buzz["reach_weighted_score"] == "DOUBLE", buzz
+
+
+def test_new_columns_are_published(built):
+    _src, data = built
+    con = duckdb.connect(str(data / "current.duckdb"), read_only=True)
+    try:
+        game, niche = _cols(con, "mart_game"), _cols(con, "mart_niche")
+        alias = _cols(con, "mart_tag_alias")
+        meta = dict(con.execute("SELECT key, value FROM mart_meta").fetchall())
+        rel = con.execute(
+            "SELECT COUNT(*), COUNT(*) FILTER (WHERE players_trend_7d_rel_pct IS NULL), "
+            "max(abs(players_trend_7d_rel_pct - "
+            "    round(players_trend_7d_pct - players_trend_7d_market_pct, 2))) "
+            "FROM mart_niche WHERE players_trend_7d_pct IS NOT NULL").fetchone()
+        split = con.execute(
+            "SELECT COUNT(*) FROM mart_niche WHERE n_paid + n_free + n_price_unknown != n_games"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    for col in ("store_release_date", "release_date_source", "is_ea_graduate", "price_status",
+                "owners_source", "players_trend_7d_market_pct", "players_trend_7d_rel_pct"):
+        assert col in game, f"mart_game.{col} missing"
+    for col in ("n_paid", "n_free", "n_price_unknown", "players_trend_7d_market_pct",
+                "players_trend_7d_rel_pct"):
+        assert col in niche, f"mart_niche.{col} missing"
+    assert set(alias) == {"dimension", "alias", "canonical", "reason", "n_games"}, alias
+    for key in ("owners_as_of", "owners_as_of_min", "n_games_scored_free",
+                "n_games_scored_price_unknown", "players_trend_7d_market_pct"):
+        assert key in meta, f"mart_meta.{key} missing"
+    assert meta["players_trend_7d_market_pct"] != "", "the fixture has a CCU panel"
+    assert rel[0] > 0 and rel[1] == 0, f"the fixture's niches must carry a relative trend: {rel}"
+    assert rel[2] <= 0.011, f"players_trend_7d_rel_pct is not niche - market: max drift {rel[2]}"
+    assert split == 0, "n_paid + n_free + n_price_unknown must equal n_games on every row"
+
+
+def test_a_previous_mart_carrying_mart_lang_passes_the_gate(built, capsys):
+    src, data = built
+    prev = (data / "current.duckdb").resolve()
+    con = duckdb.connect(str(prev))
+    try:
+        con.execute("CREATE TABLE mart_lang AS SELECT 'Action' AS genre, 'english' AS language, "
+                    "10 AS n FROM range(20)")
+    finally:
+        con.close()
+    saved = bm.VALIDATE_MIN_ROWS
+    bm.VALIDATE_MIN_ROWS = {}
+    try:
+        capsys.readouterr()
+        # a same-day rebuild is refused only for --light; a full rebuild replaces the file
+        assert _run(["--source", str(src), "--data-dir", str(data)]) == 0
+    finally:
+        bm.VALIDATE_MIN_ROWS = saved
+    assert "RETIRED" in capsys.readouterr().out
