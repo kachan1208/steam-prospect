@@ -3,9 +3,13 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import clsx from "clsx";
 
+import { OpportunityBreakdown } from "../components/OpportunityBreakdown";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ErrorState } from "../components/ui/ErrorState";
+import { HeaderLabel, HEADER_LABEL_STYLE } from "../components/ui/HeaderLabel";
+import { InfoTip } from "../components/ui/InfoTip";
 import { Loading } from "../components/ui/Loading";
+import { SentinelTag } from "../components/ui/SentinelTag";
 import { TableScroll } from "../components/ui/TableScroll";
 import { trackEvent } from "../lib/analytics";
 import {
@@ -18,11 +22,24 @@ import {
   type SortKey,
   type Window,
 } from "../lib/api";
+import { useDataAge } from "../lib/dataAge";
 import { fmtCompact, fmtInt, fmtMonths, fmtPct, fmtUsd } from "../lib/format";
-// The verdict, its two axes and the small score are the Radar's own strings — one builder
+import type { GlossaryKey } from "../lib/glossary";
+import { paidStatSentinel } from "../lib/nichePaid";
+import { medianNicheTrend, noMarketNote, readPlayersTrend } from "../lib/playersTrend";
+// The verdict, its inputs and the score are the Radar's own strings — one builder
 // (radarDossier), so the table, the deep dive and the board cannot disagree in wording.
-import { EMERGING_DEMAND_LABEL, radarDossier } from "../lib/radarVerdict";
+import {
+  EMERGING_DEMAND_LABEL,
+  cutPopulationLabel,
+  demandTrendWorked,
+  failedCheckClause,
+  failedChecks,
+  radarDossier,
+  releasesYoyWorked,
+} from "../lib/radarVerdict";
 import { useDebounced } from "../lib/useDebounced";
+import { useMinWidth } from "../lib/useMediaQuery";
 import { usePageTitle } from "../lib/usePageTitle";
 // From the leaf module, NEVER from pages/NicheCombined (which is where these lived until
 // 2026-08-29): a static import of a page module drags that page — and NicheDetail, and
@@ -39,18 +56,21 @@ import { nicheDetailPath } from "../lib/nichePath";
 
 const LIMIT = 50;
 
+/** The Radar's population limit — the pinned-cut verdict query asks for the same rows the
+ * board does (and so shares its cache entry). */
+const PINNED_LIMIT = 500;
+
 // ---------------------------------------------------------------------------------------
 // Industry blueprint grammar (design_handoff_prospect_dark_ui §4a). Most chrome maps onto
 // the shared semantic tokens (text-ink-muted, border-line-grid, bg-surface2…), but a
 // handful of alphas the mockup calls out precisely — segmented-control borders, bar
-// tracks, the decline-gate suffix — don't have an existing utility at that exact opacity.
-// These mix off --text-primary exactly the way index.css derives --text-muted/--text-secondary,
-// so they stay theme-correct in both light and dark rather than pinning a raw hex.
+// tracks — don't have an existing utility at that exact opacity. These mix off
+// --text-primary exactly the way index.css derives --text-muted/--text-secondary, so they
+// stay theme-correct in both light and dark rather than pinning a raw hex.
 // ---------------------------------------------------------------------------------------
 const PAPER_30 = "color-mix(in srgb, var(--text-primary) 30%, transparent)";
 const PAPER_35 = "color-mix(in srgb, var(--text-primary) 35%, transparent)";
 const PAPER_45 = "color-mix(in srgb, var(--text-primary) 45%, transparent)";
-const CONDENSED = '"Barlow Condensed", "Barlow", system-ui, sans-serif';
 
 // Umbrella/meta tags are containers/reception labels, not buildable niches — excluded by
 // default, same reasoning (and default) as the MCP find_niches tool.
@@ -60,8 +80,8 @@ const DEFAULT_SORT: SortKey = "opportunity_v2";
 
 /** The sortable columns THIS page offers — the seven server-sortable ones in the grid (the
  * Verdict column is the board's call, computed client-side per row, so it has no server
- * sort — order by its two axes instead) plus the four in the "More metrics" panel. The
- * URL's `sort` is validated against it (an unknown key falls back to the default) so a
+ * sort — order by its inputs instead) plus the four in the "More metrics" panel. The URL's
+ * `sort` is validated against it (an unknown key falls back to the default) so a
  * hand-edited link can't ask the API to order by a column the table can't even draw an
  * arrow on — which since 2026-09-09 includes the retired `demand` / `competition` /
  * `quality_gap` percentile meters. */
@@ -91,6 +111,14 @@ function parseTiers(raw: string | null): NicheTier[] {
   return picked.length > 0 ? picked : DEFAULT_TIERS;
 }
 
+/** Tier chips in plain words (2026-09-23: "micro" / "umbrella" were jargon on the chip). */
+const TIER_LABEL: Record<NicheTier, string> = {
+  micro: "Game types",
+  theme: "Themes",
+  umbrella: "Broad genres",
+  meta: "Review tags",
+};
+
 const TIER_TITLE: Record<NicheTier, string> = {
   micro: "Buildable game concepts (Colony Sim, Souls-like…)",
   theme: "Settings/aesthetics you attach to a game (Vikings, Pixel Graphics…)",
@@ -98,19 +126,11 @@ const TIER_TITLE: Record<NicheTier, string> = {
   meta: "Reception tags (Great Soundtrack…) — never buildable",
 };
 
-// Mockup 4a draws exactly 8 columns at an fr-weighted grid; the three middle ones changed
-// vocabulary on 2026-09-09 (user: "use radar numbers in niches") — Niche | Games | P90 rev
-// | Demand 24m | Releases YoY | Verdict | Opp v2 ↓ | Players 7d. The Demand / Competition
-// / Quality gap percentile meters were the retired v1 grammar drawn beside the v2 score;
-// what the Radar draws is its two axes and a verdict, so that is what the grid carries now.
-// The real table still tracks more sortable metrics than eight (longevity, total owners,
-// hit rate, live players) plus a multi-select checkbox; nothing is dropped: the checkbox
-// rides inside the (2fr-wide) Niche cell instead of owning its own track, and the extra
-// metrics live in a second, explicitly-toggled panel below (MORE_METRICS_GRID / "More
-// metrics"). The verdict track is the widest of the middle five: "Crowded · caution" has
-// to fit on one line at the table's minimum width.
-const GRID_TEMPLATE = "2fr .7fr 1fr 1fr 1fr 1.25fr .7fr 1fr";
-const TABLE_MIN_WIDTH = 920;
+// Mockup 4a draws exactly 8 columns at an fr-weighted grid. The Opportunity track is wider
+// since 2026-09-23: the score never stands alone, so it carries its four part bars and the
+// supply brake beside it (OpportunityBreakdown, compact).
+const GRID_TEMPLATE = "2fr .6fr .9fr 1fr .9fr 1.25fr 1.35fr 1fr";
+const TABLE_MIN_WIDTH = 980;
 
 const ROW_GRID: CSSProperties = {
   display: "grid",
@@ -120,10 +140,8 @@ const ROW_GRID: CSSProperties = {
 };
 
 // The second panel's grid — same grammar (14px gap, fr-weighted tracks), its own column
-// set: Niche (for correlation with the row above) + the four metrics the mockup doesn't
-// draw, plus the live player count (mockup 4a only draws the 7d *trend*, not the raw
-// "Playing now" total this page already had).
-const MORE_METRICS_GRID_TEMPLATE = "2fr .9fr 1fr .9fr 1fr .9fr";
+// set: Niche (for correlation with the row above) + the four metrics the grid doesn't draw.
+const MORE_METRICS_GRID_TEMPLATE = "2fr .9fr 1fr .9fr 1fr";
 const MORE_METRICS_MIN_WIDTH = 640;
 
 const MORE_METRICS_ROW_GRID: CSSProperties = {
@@ -132,44 +150,6 @@ const MORE_METRICS_ROW_GRID: CSSProperties = {
   gap: 14,
   alignItems: "center",
 };
-
-/** A clickable column header that drives the server-side sort, with a direction arrow.
- * `help` is the column's plain-language "how to read this" — it becomes the hover tooltip
- * (with the sort hint appended) so every metric column explains itself in place, even
- * though the visible affordance is now just the label + arrow (mockup 4a shows no icon). */
-function SortLabel({
-  label,
-  col,
-  active,
-  order,
-  onSort,
-  help,
-}: {
-  label: string;
-  col: SortKey;
-  active: boolean;
-  order: "asc" | "desc";
-  onSort: (col: SortKey) => void;
-  help?: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={() => onSort(col)}
-      title={help ? `${help}\n\nClick to sort by ${label}.` : `Sort by ${label}`}
-      className="group inline-flex items-center gap-1 whitespace-nowrap uppercase text-ink-muted transition-colors hover:text-ink-secondary"
-      style={{ fontFamily: CONDENSED, fontSize: 12, letterSpacing: ".08em", fontWeight: 600 }}
-    >
-      {label}
-      <span
-        aria-hidden
-        className={clsx("text-[10px] leading-none", active ? "opacity-100" : "opacity-0 group-hover:opacity-50")}
-      >
-        {active ? (order === "desc" ? "↓" : "↑") : "↕"}
-      </span>
-    </button>
-  );
-}
 
 function ColHead({
   active,
@@ -227,8 +207,57 @@ function SegButton({
   );
 }
 
+/**
+ * The Radar verdict for one row, ALWAYS at the board's pinned cut (2026-09-23). A verdict
+ * that flips when a display chip is clicked is not a verdict — Roguelike Deckbuilder read
+ * "Watch" here on the All-time chip while the Radar said otherwise. So the verdict cell reads
+ * the row's own 24m × ≥50 twin: the row itself when the table IS that cut, else the same
+ * niche from the pinned-cut list (the Radar's own query). A niche with no row at that cut
+ * (too few qualifying games) gets a sentinel, never a verdict computed on another population.
+ */
+function VerdictCell({ pinned, loading }: { pinned: NicheRow | null | undefined; loading: boolean }) {
+  if (!pinned) {
+    return loading ? (
+      <span className="text-ink-muted">…</span>
+    ) : (
+      <SentinelTag>not scored at the Radar&rsquo;s cut</SentinelTag>
+    );
+  }
+  const d = radarDossier(pinned);
+  const failed = failedChecks(d.verdict.checks);
+  return (
+    <span className="inline-flex items-center gap-1.5 text-ink-primary" data-verdict={d.verdict.ring}>
+      <span className="inline-block h-2 w-2 shrink-0" style={{ backgroundColor: d.color }} aria-hidden />
+      {d.verdictLabel}
+      <InfoTip
+        label={`${pinned.key}: ${d.verdictLabel}`}
+        ariaLabel={`Why ${pinned.key} is ${d.verdictLabel}`}
+        meaning={d.verdict.reason}
+        workedLabel={failed.length > 0 ? "Checks it fails" : "Checks"}
+        worked={
+          failed.length > 0 ? (
+            <span className="flex flex-col">
+              {failed.map((c) => (
+                <span key={c.id}>
+                  {c.decides ? "✕ " : "⚠ "}
+                  {failedCheckClause(c)}
+                </span>
+              ))}
+            </span>
+          ) : (
+            "every check passes"
+          )
+        }
+        notes="Judged at the Radar's cut — last 24 months, games with 50+ reviews — whatever cut this table shows."
+      />
+    </span>
+  );
+}
+
 export default function NicheFinder() {
   usePageTitle("Niche Finder");
+  const wide = useMinWidth(640);
+  const dataAge = useDataAge();
   // ---- URL-backed view state --------------------------------------------------------
   // THE WHOLE VIEW RIDES THE URL — dimension, cut (window × review floor), tiers, search,
   // sort/order, paging and the More-metrics disclosure, alongside the multi-select that
@@ -240,26 +269,19 @@ export default function NicheFinder() {
   //
   //  1. THESE FILTERS ARE NOT A POSE, THEY ARE THE POPULATION. mart_niche precomputes its
   //     aggregates per (window, min_reviews) population, so the cut chips don't narrow a
-  //     list — they swap in different medians, a different saturation_yoy and a different
-  //     opportunity_v2 for the same niche (Radar.tsx's BOARD_WINDOW doc spells this out,
-  //     which is why the board pins its cut instead of exposing chips). A URL that omits
-  //     them doesn't describe what the sender was looking at: the recipient sees the same
-  //     rows carrying different numbers.
+  //     list — they swap in different medians and a different opportunity_v2 for the same
+  //     niche. A URL that omits them doesn't describe what the sender was looking at.
   //  2. THIS PAGE ALREADY TREATED THE CUT AS PART OF THE ARTIFACT. "Analyse combined"
   //     hands win/min_reviews to nicheCombinedPath, and Export CSV builds its href from
-  //     every filter. So a shared /niches?niches=… link restored the ticked rows, silently
-  //     re-based them onto the DEFAULT cut, and then produced a different combined page
-  //     than the sender got. That is a wrong answer, not an inconvenience.
+  //     every filter.
   //  3. THE APP PROMISES THIS BEHAVIOUR OUT LOUD on /niches/:dim/:key ("This filter lives
-  //     in the URL — copy the address bar to share exactly this slice"). A user who learns
-  //     the rule one click away reasonably expects it here.
+  //     in the URL — copy the address bar to share exactly this slice").
   //
   // Contract, matching NicheDetail (the page these rows link into): DEFAULTS ARE OMITTED,
   // so a pristine /niches stays a clean URL and only a non-default reading writes a param;
   // unknown/garbage values fall back to the default instead of throwing; and every write
-  // `replace`s — this page's own convention since the selection landed ("ticking
-  // checkboxes shouldn't bury the previous page in history"), and flipping a chip or a
-  // sort arrow has exactly the same claim on the back button as ticking a row.
+  // `replace`s — ticking a checkbox, flipping a chip or a sort arrow has no claim on the
+  // back button.
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
 
@@ -285,10 +307,7 @@ export default function NicheFinder() {
   );
 
   const dimension: Dimension = searchParams.get("dim") === "genre" ? "genre" : "tag";
-  const setDimension = useCallback(
-    (d: Dimension) => patchParams({ dim: d === "tag" ? null : d }),
-    [patchParams],
-  );
+  const setDimension = useCallback((d: Dimension) => patchParams({ dim: d === "tag" ? null : d }), [patchParams]);
   // 24m is the market a new entrant actually faces — the all-time cut is context, not an
   // entry decision, so it is NOT the default (same default as the MCP tool).
   const windowParam: Window = searchParams.get("win") === "all" ? "all" : DEFAULT_NICHE_CUT.win;
@@ -313,6 +332,8 @@ export default function NicheFinder() {
   const sort: SortKey = rawSort && FINDER_SORT_KEYS.includes(rawSort) ? rawSort : DEFAULT_SORT;
   const order: "asc" | "desc" = searchParams.get("order") === "asc" ? "asc" : "desc";
   const offset = Math.max(0, Number(searchParams.get("offset")) || 0);
+  const cutLabel = cutPopulationLabel(windowParam, minReviews);
+  const atPinnedCut = windowParam === DEFAULT_NICHE_CUT.win && minReviews === DEFAULT_NICHE_CUT.min_reviews;
 
   // The search box keeps a local DRAFT — a request (and a URL write) per keystroke would
   // be absurd — committed to the URL on the same 300ms debounce it always fetched on.
@@ -402,219 +423,134 @@ export default function NicheFinder() {
     offset,
   });
 
+  // The verdicts' own population — the board's pinned cut — fetched only when the table
+  // shows another cut (see VerdictCell). Same params as the Radar's query for the default
+  // tiers, so a visit from the Radar costs nothing.
+  const pinnedQ = useNiches(
+    {
+      dimension,
+      window: DEFAULT_NICHE_CUT.win,
+      min_reviews: DEFAULT_NICHE_CUT.min_reviews,
+      sort: "opportunity_v2",
+      order: "desc",
+      tiers: tiersParam,
+      limit: PINNED_LIMIT,
+      offset: 0,
+    },
+    { enabled: !atPinnedCut },
+  );
+  const pinnedByKey = useMemo(() => {
+    const m = new Map<string, NicheRow>();
+    for (const r of pinnedQ.data?.items ?? []) m.set(r.key, r);
+    return m;
+  }, [pinnedQ.data]);
+  const pinnedRow = useCallback(
+    (row: NicheRow): NicheRow | null | undefined => (atPinnedCut ? row : pinnedByKey.get(row.key)),
+    [atPinnedCut, pinnedByKey],
+  );
+
+  // How the typical niche moved this week — the "is it the market?" read for the players
+  // column when the data has no market-relative figure.
+  const weekMedian = useMemo(() => medianNicheTrend(data?.items ?? []), [data]);
+  const hasMarketTrend = (data?.items ?? []).some((r) => r.players_trend_7d_rel_pct != null);
+
+  const header = useCallback(
+    (col: SortKey, term: GlossaryKey, extra?: { label?: string; worked?: ReactNode; notes?: ReactNode }) => (
+      <HeaderLabel
+        term={term}
+        label={extra?.label}
+        worked={extra?.worked}
+        info={extra?.notes ? { notes: extra.notes } : undefined}
+        sort={{ col, active: sort === col, order, onSort: toggleSort }}
+      />
+    ),
+    [sort, order, toggleSort],
+  );
+
   const columnHelper = useMemo(() => createColumnHelper<NicheRow>(), []);
   const columns = useMemo(
     () => [
-      // Mockup 4a's Niche column is 2fr-wide and draws nothing else in the row for it —
-      // the multi-select checkbox rides inside that cell (rather than owning a dedicated
-      // grid track the mockup never draws) so the selection feature keeps working without
-      // widening the grid past the mockup's 8 columns.
+      // The multi-select checkbox rides inside the Niche cell (rather than owning a grid
+      // track the mockup never draws).
       columnHelper.accessor("key", {
         header: () => (
-          <SortLabel label="Niche" help="A Steam community tag or Steam genre. The small badge marks non-buildable tiers (theme = a setting you attach to a game; umbrella = a genre container; meta = a reception tag)." col="key" active={sort === "key"} order={order} onSort={toggleSort} />
+          <HeaderLabel
+            label="Niche"
+            info={{
+              label: "Niche",
+              meaning:
+                "A Steam community tag or Steam genre. The small badge marks what kind of tag it is: a theme is a setting you attach to a game; a broad genre is a container; a review tag is a reception label — only game types are buildable niches on their own.",
+            }}
+            sort={{ col: "key", active: sort === "key", order, onSort: toggleSort }}
+          />
         ),
-        cell: (info) => {
-          const tier = info.row.original.tier;
-          const key = info.getValue();
-          const ref = `${dimension}:${key}`;
-          const on = selectedRefs.has(ref);
-          const full = !on && selectedRefs.size >= NICHE_COMBINE_CAP;
-          return (
-            <div className="flex min-w-0 items-center gap-2">
-              <input
-                type="checkbox"
-                checked={on}
-                disabled={full}
-                onChange={() => toggleSelected({ dimension, key })}
-                aria-label={`${on ? "Remove" : "Add"} ${key} ${on ? "from" : "to"} the combined analysis`}
-                title={
-                  full
-                    ? `You can combine up to ${NICHE_COMBINE_CAP} niches at once`
-                    : on
-                      ? "Selected — in the combination bar above the table"
-                      : "Select this niche to combine it with others"
-                }
-                className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-[var(--brand)] disabled:cursor-not-allowed disabled:opacity-40"
-              />
-              <Link
-                to={nicheDetailPath(dimension, key)}
-                onClick={() => trackEvent("niche_open")}
-                title={`Open the ${key} deep dive`}
-                className="group/nk inline-flex min-w-0 items-center gap-2"
-              >
-                <span className="truncate font-medium text-ink-primary transition-colors group-hover/nk:text-brand">
-                  {key}
-                </span>
-                {tier && tier !== "micro" && tier !== "genre" && (
-                  <span
-                    className="shrink-0 px-[7px] py-px text-[10px] text-ink-muted"
-                    style={{ border: `1px solid ${PAPER_30}` }}
-                    title={TIER_TITLE[tier as NicheTier] ?? tier}
-                  >
-                    {tier}
-                  </span>
-                )}
-              </Link>
-            </div>
-          );
-        },
+        cell: (info) => (
+          <NicheNameCell
+            row={info.row.original}
+            dimension={dimension}
+            selected={selectedRefs.has(`${dimension}:${info.getValue()}`)}
+            full={!selectedRefs.has(`${dimension}:${info.getValue()}`) && selectedRefs.size >= NICHE_COMBINE_CAP}
+            onToggle={toggleSelected}
+          />
+        ),
       }),
       columnHelper.accessor("n_games", {
-        header: () => (
-          <SortLabel label="Games" help="Scored games in this cut (released inside the window, at or above the review floor). Small counts = thin evidence." col="n_games" active={sort === "n_games"} order={order} onSort={toggleSort} />
+        header: () => header("n_games", "n_games", { worked: `Counts games in this cut: ${cutLabel}.` }),
+        cell: (info) => (
+          <span className="tabular text-ink-secondary" title={`${fmtInt(info.getValue())} games · ${cutLabel}`}>
+            {fmtInt(info.getValue())}
+          </span>
         ),
-        cell: (info) => <span className="tabular text-ink-secondary">{fmtInt(info.getValue())}</span>,
       }),
       columnHelper.accessor((row) => row.p90_rev ?? null, {
         id: "p90_rev",
-        header: () => (
-          <SortLabel label="P90 rev" help="What the niche's successful titles earn: the 90th percentile of estimated lifetime revenue across its scored games (1 in 10 does better). Each game's estimate = review count × 30 owners-per-review × launch price — one flat ratio (the mid of the cited 20–55 band), not fitted per genre; gross, lifetime, not reported sales. Median (the typical outcome) is in the deep dive." col="p90_rev" active={sort === "p90_rev"} order={order} onSort={toggleSort} />
-        ),
-        cell: (info) => {
-          const v = info.getValue();
-          return (
-            <span
-              className="tabular text-ink-secondary"
-              title="90th-percentile est. lifetime revenue — what the niche's successful titles earn (median lives in the deep dive)"
-            >
-              {v != null ? fmtUsd(v) : "—"}
-            </span>
-          );
-        },
+        header: () => header("p90_rev", "p90_rev"),
+        cell: (info) => <RevenueValue row={info.row.original} value={info.getValue()} />,
       }),
-      // THE RADAR'S TWO AXES AND ITS CALL (2026-09-09). The three 0–100 percentile meters
-      // (Demand / Competition / Quality gap) that sat here were the retired v1 vocabulary
-      // drawn beside the v2 score, and none of them is what the board plots. These three
-      // columns are the board's X axis, its Y axis and its verdict, through the SAME
-      // radarDossier() strings the deep dive's headline and the board's tooltip print, so a
-      // row here, its page and its dot cannot disagree in wording. Judged on THIS table's
-      // cut — the board pins 24m × ≥50 — and the header sentence says which is which.
+      // THE RADAR VERDICT'S INPUTS AND ITS CALL (2026-09-09): demand, releases and the
+      // verdict, through the SAME radarDossier() strings the deep dive's headline and the
+      // board's tooltip print. (The board is a ring dial since 2026-09-10 — these are the
+      // verdict's checks, not "the Radar's X/Y axes", which this header used to call them.)
       columnHelper.accessor((row) => row.demand_trend_24m_pct ?? null, {
         id: "demand_trend_24m_pct",
-        header: () => (
-          <SortLabel label="Demand 24m" help="The Radar's X axis: the niche's review inflow over the last 24 complete months vs the 24 before, in percent. At or above +40% is the board's 'enter' bar; at or below −30% its 'declining' bar. One value per niche, identical on every cut. An emerging niche shows no % — its prior window is near zero by construction — and is judged on absolute volume instead." col="demand_trend_24m_pct" active={sort === "demand_trend_24m_pct"} order={order} onSort={toggleSort} />
-        ),
-        cell: (info) => {
-          const d = radarDossier(info.row.original);
-          if (d.emerging) {
-            return (
-              <span
-                className="text-ink-muted"
-                title={`${EMERGING_DEMAND_LABEL}${d.reviews24m ? ` · ${d.reviews24m} reviews / 24m` : ""}`}
-              >
-                emerging
-              </span>
-            );
-          }
-          const v = info.getValue();
-          if (v == null) return <span style={{ color: "var(--verdict-flat)" }} title={d.demand24m}>—</span>;
-          // Same up/flat steel as the Players 7d column: direction reads from the glyph and
-          // the sign, hue only reinforces.
-          return (
-            <span
-              className="tabular font-medium"
-              style={{ color: v >= 0 ? "var(--verdict-up)" : "var(--verdict-flat)" }}
-              title="Last 24 complete months vs the prior 24 — the Radar's demand axis"
-            >
-              {d.demand24m}
-            </span>
-          );
-        },
+        header: () => header("demand_trend_24m_pct", "demand_trend_24m_pct"),
+        cell: (info) => <DemandValue row={info.row.original} />,
       }),
       columnHelper.accessor((row) => row.saturation_yoy ?? null, {
         id: "saturation_yoy",
-        header: () => (
-          <SortLabel label="Releases YoY" help="The Radar's Y axis: is the release pipeline growing? Calculated: (releases last calendar year − releases the year before) ÷ the year before, over the whole niche at every review count. Above +15% is the board's 'flooding' bar. Negative = SHRINKING — 'low competition' in a shrinking niche is decline, not opportunity." col="saturation_yoy" active={sort === "saturation_yoy"} order={order} onSort={toggleSort} />
-        ),
-        cell: (info) => {
-          const row = info.row.original;
-          const v = info.getValue();
-          if (v == null) return <span className="text-ink-muted">—</span>;
-          const title =
-            row.n_recent_year != null && row.n_prior_year != null
-              ? `(${fmtInt(row.n_recent_year)} releases last year − ${fmtInt(row.n_prior_year)} the year before) ÷ ${fmtInt(row.n_prior_year)} = ${(v * 100).toFixed(1)}%${v < -0.05 ? " — the pipeline is shrinking" : ""}`
-              : undefined;
-          return (
-            <span title={title} className="tabular text-ink-secondary">
-              {radarDossier(row).releasesYoy}
-            </span>
-          );
-        },
+        header: () => header("saturation_yoy", "saturation_yoy"),
+        cell: (info) => <ReleasesValue row={info.row.original} />,
       }),
       columnHelper.display({
         id: "verdict",
         header: () => (
-          // Not a SortLabel: the verdict is computed client-side per row from the two axes
-          // and winner concentration, so there is no server order to ask for — a sort arrow
-          // here would 422. Same type as its neighbours, minus the button.
-          <span
-            title="The Radar board's call for this row — Enter now / Watch / Emerging / Crowded / Declining — from the same rules the board rings with, read off Demand 24m, Releases YoY and winner concentration. Judged on this table's cut (the board pins last 24 months · ≥50 reviews). Not sortable: order by its two axes instead."
-            className="inline-flex items-center whitespace-nowrap uppercase text-ink-muted"
-            style={{ fontFamily: CONDENSED, fontSize: 12, letterSpacing: ".08em", fontWeight: 600 }}
-          >
-            Verdict
-          </span>
+          // Not sortable: the verdict is computed client-side per row, so there is no server
+          // order to ask for — a sort arrow here would 422. Order by its inputs instead.
+          <HeaderLabel
+            term="radar_verdict"
+            info={{ notes: "Always judged at the Radar's cut — last 24 months, games with 50+ reviews — so switching the cut above never flips a verdict. Not sortable: order by its inputs instead." }}
+          />
         ),
-        cell: (info) => {
-          const d = radarDossier(info.row.original);
-          return (
-            <span
-              className="inline-flex items-center gap-1.5 text-ink-primary"
-              title={d.verdict.reason}
-              data-verdict={d.verdict.ring}
-            >
-              <span className="inline-block h-2 w-2 shrink-0" style={{ backgroundColor: d.color }} aria-hidden />
-              {d.verdictLabel}
-            </span>
-          );
-        },
+        cell: (info) => (
+          <VerdictCell pinned={pinnedRow(info.row.original)} loading={!atPinnedCut && pinnedQ.isLoading} />
+        ),
       }),
       columnHelper.accessor("opportunity_v2", {
-        header: () => (
-          <SortLabel
-            label="Opp v2"
-            help="The Radar's rank number: the 0–100 opportunity_v2 score, printed exactly as the board's tooltip prints it. It orders the rows; the Verdict column is the board's call. How it is built — four blended sub-scores × a supply brake — is in the docs' score guide, and its parts ride every API row."
-            col="opportunity_v2"
-            active={sort === "opportunity_v2"}
-            order={order}
-            onSort={toggleSort}
-          />
-        ),
-        // The small rank number and nothing else (2026-09-09): no 17px display numeral, no
-        // "strong" tint, no "×0.96" brake suffix, no blend formula in the hover. The score
-        // is the table's order; the verdict two cells left is the headline, as on the board.
-        cell: (info) => <span className="tabular text-ink-secondary">{radarDossier(info.row.original).opportunity}</span>,
+        header: () => header("opportunity_v2", "opportunity_v2"),
+        // Never a lone score (2026-09-23): the four part bars and the supply brake ride
+        // beside it, and its ⓘ adds them up with this row's numbers.
+        cell: (info) => <OpportunityBreakdown row={info.row.original} variant="compact" title={`${info.row.original.key}: Opportunity score`} />,
       }),
       columnHelper.accessor("players_trend_7d_pct", {
-        header: () => (
-          <SortLabel
-            label="Players 7d" help="Live-player momentum. Calculated: (average players over the last 7 days − average over the prior 7) ÷ the prior 7, summed over games measured in BOTH windows — so growing data coverage can't fake an audience trend."
-            col="players_trend_7d_pct"
-            active={sort === "players_trend_7d_pct"}
-            order={order}
-            onSort={toggleSort}
-          />
-        ),
-        cell: (info) => {
-          const v = info.getValue();
-          // Trend verdicts are mono steel — never red/green. Up carries the accent, down
-          // (or flat) recedes to muted paper; direction reads from the glyph + sign, not hue.
-          if (v == null) return <span style={{ color: "var(--verdict-flat)" }}>—</span>;
-          const up = v >= 0;
-          return (
-            <span
-              className="tabular font-medium"
-              style={{ color: up ? "var(--verdict-up)" : "var(--verdict-flat)" }}
-              title="Last 7d vs prior 7d, same-panel (only games measured in both windows count)"
-            >
-              {up ? "▲" : "▼"} {up ? "+" : "−"}
-              {Math.abs(v).toFixed(1)}%
-            </span>
-          );
-        },
+        header: () =>
+          header("players_trend_7d_pct", hasMarketTrend ? "players_trend_7d_vs_market" : "players_trend_7d_pct", {
+            label: "Players 7d",
+            notes: hasMarketTrend ? undefined : noMarketNote(weekMedian),
+          }),
+        cell: (info) => <PlayersValue row={info.row.original} />,
       }),
     ],
-    [columnHelper, sort, order, toggleSort, dimension, selectedRefs, toggleSelected],
+    [columnHelper, sort, order, toggleSort, dimension, selectedRefs, toggleSelected, header, cutLabel, pinnedRow, atPinnedCut, pinnedQ.isLoading, hasMarketTrend, weekMedian],
   );
 
   const table = useReactTable({
@@ -625,17 +561,9 @@ export default function NicheFinder() {
 
   // ---- "more metrics" panel --------------------------------------------------------
   // Everything the app tracks that the grid above does NOT draw — longevity, total owners,
-  // hit rate, and the raw "playing now" count (the grid only draws the 7d *trend*).
-  // Saturation YoY left this panel on 2026-09-09: it is the grid's Releases YoY column
-  // now, and one number under two names is exactly the drift this table stopped carrying.
-  // Not deleted, just not crammed into the grid: reachable below the table, behind an
-  // explicit toggle, sharing the exact same sort/order state (and so the exact same row
-  // order) as the primary table above it.
-  //
-  // Routed too (?more=1) precisely BECAUSE it shares that sort state: a link carrying
-  // sort=saturation_yoy without the panel would land on a table that has no such column
-  // and no arrow to explain the order it is in. keepOffset — opening a disclosure is not
-  // a filter change, so it must not re-page the table.
+  // hit rate, and the raw "playing now" count. Behind an explicit toggle, sharing the exact
+  // same sort/order state (and so the exact same row order) as the primary table above it.
+  // Routed too (?more=1) precisely BECAUSE it shares that sort state.
   const showMoreMetrics = searchParams.get("more") === "1";
   const setShowMoreMetrics = useCallback(
     (v: boolean) => patchParams({ more: v ? "1" : null }, { keepOffset: true }),
@@ -645,15 +573,13 @@ export default function NicheFinder() {
     () => [
       {
         col: "lifetime_survival_12m" as SortKey,
-        label: "Longevity",
-        help: "Of this niche's games that ever reached 100+ concurrent players, the share still holding 10+ a year later. Calculated: fixed-horizon survival — games whose 100+ month is at least 12 months old only; steamcharts top-8k coverage.",
+        term: "lifetime_survival_12m" as GlossaryKey,
         render: (row: NicheRow) => {
           const v = row.lifetime_survival_12m ?? null;
-          if (v == null) return <span className="text-ink-muted">—</span>;
+          if (v == null) return <SentinelTag>no data</SentinelTag>;
           const m = row.lifetime_median_dead_months;
           const title =
-            `${fmtPct(v)} of its 100+ games still alive after a year` +
-            (m != null ? ` · dead ones lasted ~${fmtMonths(m)}` : "");
+            `${fmtPct(v)} of its 100+ games still alive after a year` + (m != null ? ` · dead ones lasted ~${fmtMonths(m)}` : "");
           return (
             <span className="tabular text-ink-secondary" title={title}>
               {fmtPct(v)}
@@ -663,23 +589,22 @@ export default function NicheFinder() {
       },
       {
         col: "total_owners" as SortKey,
-        label: "Total owners",
-        help: "The size of the pie. Calculated: SUM of each scored game's estimated owners (SteamSpy range midpoint; review-modeled where SteamSpy is coarse). A big pie with a low score means people play the HITS — it doesn't hand a new entrant a slice.",
-        render: (row: NicheRow) => (
-          <span className="tabular text-ink-secondary">{fmtCompact(row.total_owners)}</span>
-        ),
+        term: "total_owners" as GlossaryKey,
+        render: (row: NicheRow) => <span className="tabular text-ink-secondary">{fmtCompact(row.total_owners)}</span>,
       },
       {
         col: "hit_rate_200k" as SortKey,
-        label: "Hit ≥$200K",
-        help: "The odds a serious title 'works' here. Calculated: share of the niche's scored games whose estimated lifetime revenue clears $200K.",
+        term: "hit_rate_200k" as GlossaryKey,
         render: (row: NicheRow) => {
           const v = row.hit_rate_200k;
-          const n = row.n_games;
-          const title =
-            v != null && n ? `${Math.round(v * n)} of ${fmtInt(n)} scored games clear $200K est. lifetime revenue` : undefined;
+          const sentinel = paidStatSentinel(row, v);
+          if (sentinel) return <SentinelTag>{typeof sentinel === "string" ? sentinel : sentinel.tag}</SentinelTag>;
+          const n = row.n_paid ?? row.n_games;
           return (
-            <span className="tabular text-ink-secondary" title={title}>
+            <span
+              className="tabular text-ink-secondary"
+              title={v != null && n ? `≈ ${Math.round(v * n)} of ${fmtInt(n)} games clear $200K est. lifetime revenue` : undefined}
+            >
               {fmtPct(v)}
             </span>
           );
@@ -687,10 +612,9 @@ export default function NicheFinder() {
       },
       {
         col: "total_players_now" as SortKey,
-        label: "Playing now",
-        help: "Who's playing right now. Calculated: SUM of each scored game's latest nightly player capture (kept up to 7 days). Captures are ~21–22:00 UTC point samples, not daily peaks. Dominated by the niche's hits.",
+        term: "niche_players_now" as GlossaryKey,
         render: (row: NicheRow) => (
-          <span className="tabular text-ink-secondary" title="Summed current players (nightly point samples, ≤7d carry) — dominated by the niche's hits">
+          <span className="tabular text-ink-secondary">
             {row.total_players_now != null ? fmtCompact(row.total_players_now) : "—"}
           </span>
         ),
@@ -719,18 +643,13 @@ export default function NicheFinder() {
         <h1 className="text-ink-primary" style={{ fontSize: 25 }}>
           Niche Finder
         </h1>
-        {/* The ranking is Opp v2 (etl/marts/mart_niche.sql `scored_v2`); the labels are the
-            Radar's verdicts through lib/radarVerdict.ts — the board's rules, words and colour
-            tokens (2026-09-09, user: "use radar numbers in niches"). The board pins its cut at
-            24m × ≥50 while this table has chips, so away from that cut the sentence says the
-            verdicts are judged HERE, on this cut. NOT "growth-gated" — there is no gate in the
-            model; decline_gate is a falsification tell only. */}
-        <span className="text-[13px] text-ink-secondary">
-          {total > 0 ? `${total.toLocaleString()} niches · ` : ""}
-          ranked and labelled as on the Radar — Opp v2 order, the board&rsquo;s verdicts
-          {windowParam === DEFAULT_NICHE_CUT.win && minReviews === DEFAULT_NICHE_CUT.min_reviews
-            ? " on its own cut (last 24 months · ≥50 reviews)"
-            : " judged on this cut (the board itself pins last 24 months · ≥50 reviews)"}
+        {/* Every count says what it counts (2026-09-23): the niche count is THIS cut's; the
+            verdicts are always the Radar's cut, and the sentence says so whichever chip is
+            lit — a verdict never follows the chips. */}
+        <span className="text-[13px] text-ink-secondary" data-testid="finder-summary">
+          {total > 0 ? `${total.toLocaleString()} niches · ` : ""}numbers for {cutLabel} · ranked by Opportunity score ·
+          verdicts judged at the Radar&rsquo;s cut (last 24 months · ≥50 reviews)
+          {!atPinnedCut ? " — not this table's" : ""}
         </span>
         <a
           href={csvUrl}
@@ -772,14 +691,14 @@ export default function NicheFinder() {
             first
             active={minReviews === 0}
             onClick={() => setMinReviews(0)}
-            title="No review floor — the whole tag, unreviewed releases included. Game counts are the honest tag size; revenue stats still skip games too small to estimate."
+            title="No review floor — the whole tag, unreviewed releases included. Game counts are the honest tag size; revenue stats still count only the paid games."
           >
             All games
           </SegButton>
-          <SegButton active={minReviews === 50} onClick={() => setMinReviews(50)} title="Broader population, noisier stats">
+          <SegButton active={minReviews === 50} onClick={() => setMinReviews(50)} title="Games with 50+ reviews — broader population, noisier stats">
             ≥50 reviews
           </SegButton>
-          <SegButton active={minReviews === 100} onClick={() => setMinReviews(100)} title="Stricter population, cleaner stats">
+          <SegButton active={minReviews === 100} onClick={() => setMinReviews(100)} title="Games with 100+ reviews — stricter population, cleaner stats">
             ≥100
           </SegButton>
         </Segmented>
@@ -788,18 +707,20 @@ export default function NicheFinder() {
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search niches…"
+          aria-label="Search niches"
           className="bg-transparent text-[13px] text-ink-primary outline-none placeholder:text-ink-muted"
-          style={{ width: 220, border: `1px solid ${PAPER_30}`, padding: "6px 12px" }}
+          style={{ width: 220, maxWidth: "100%", border: `1px solid ${PAPER_30}`, padding: "6px 12px" }}
         />
         {dimension === "tag" && (
-          <span className="flex items-center gap-1.5 text-[11px] text-ink-muted">
-            Tiers:
+          <span className="flex flex-wrap items-center gap-1.5 text-[11px] text-ink-muted">
+            Show:
             {NICHE_TIERS.map((t) => {
               const active = tiers.includes(t);
               return (
                 <button
                   key={t}
                   type="button"
+                  aria-pressed={active}
                   onClick={() => toggleTier(t)}
                   title={TIER_TITLE[t]}
                   className={clsx(
@@ -808,7 +729,7 @@ export default function NicheFinder() {
                   )}
                   style={{ border: `1px solid ${active ? "var(--brand)" : PAPER_30}` }}
                 >
-                  {t}
+                  {TIER_LABEL[t]}
                 </button>
               );
             })}
@@ -822,9 +743,7 @@ export default function NicheFinder() {
         onClear={() => writeSelection([])}
         onAnalyse={() => {
           trackEvent("niche_filter_apply");
-          navigate(
-            nicheCombinedPath(selection, "intersect", { win: windowParam, min_reviews: minReviews }),
-          );
+          navigate(nicheCombinedPath(selection, "intersect", { win: windowParam, min_reviews: minReviews }));
         }}
       />
 
@@ -833,21 +752,14 @@ export default function NicheFinder() {
         {isLoading && <Loading label="Loading niches…" className="p-8 text-sm" />}
         {/* Was `error.message` in raw — "Failed to load niches: Failed to fetch" with the
             API unreachable (measured on production 2026-09-01), and no way to try again. */}
-        {isError && (
-          <ErrorState
-            title="Couldn't load niches"
-            error={error}
-            onRetry={() => void refetch()}
-            className="p-8"
-          />
-        )}
+        {isError && <ErrorState title="Couldn't load niches" error={error} onRetry={() => void refetch()} className="p-8" />}
         {data && data.items.length === 0 && (
           <EmptyState
             title="No niches match these filters"
             description="Try a broader tier selection, a lower review floor, or clear the search."
           />
         )}
-        {data && data.items.length > 0 && (
+        {data && data.items.length > 0 && wide && (
           <TableScroll>
             <div role="table" style={{ minWidth: TABLE_MIN_WIDTH }}>
               {table.getHeaderGroups().map((hg) => (
@@ -876,14 +788,57 @@ export default function NicheFinder() {
             </div>
           </TableScroll>
         )}
+        {/* BELOW 640px, CARDS (2026-09-23): the 8-column grid at 390px was a 980px table in a
+            340px scroller showing Niche, Games and one money column — the verdict, demand and
+            score were all off-screen. A card leads with what decides: the verdict, demand,
+            the score with its parts; the rest follows in plain words. */}
+        {data && data.items.length > 0 && !wide && (
+          <div data-testid="finder-cards">
+            <MobileSort sort={sort} order={order} onSort={(col, ord) => patchParams({ sort: col === DEFAULT_SORT ? null : col, order: ord === "desc" ? null : ord })} />
+            <ul className="flex flex-col">
+              {data.items.map((row) => (
+                <li key={row.key} className="border-t border-line-grid px-4 py-3" data-testid={`finder-card-${row.key}`}>
+                  <NicheNameCell
+                    row={row}
+                    dimension={dimension}
+                    selected={selectedRefs.has(`${dimension}:${row.key}`)}
+                    full={!selectedRefs.has(`${dimension}:${row.key}`) && selectedRefs.size >= NICHE_COMBINE_CAP}
+                    onToggle={toggleSelected}
+                  />
+                  <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[13px]">
+                    <VerdictCell pinned={pinnedRow(row)} loading={!atPinnedCut && pinnedQ.isLoading} />
+                    <span className="inline-flex items-center gap-1 text-ink-muted">
+                      Demand <DemandValue row={row} />
+                    </span>
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-x-2 text-[13px] text-ink-muted">
+                    Opportunity <OpportunityBreakdown row={row} variant="compact" title={`${row.key}: Opportunity score`} />
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[12px] text-ink-muted">
+                    <span>
+                      {fmtInt(row.n_games)} games · {cutLabel}
+                    </span>
+                    <span>
+                      top-10% revenue <RevenueValue row={row} value={row.p90_rev ?? null} />
+                    </span>
+                    <span>
+                      releases <ReleasesValue row={row} />
+                    </span>
+                    <span>
+                      players 7d <PlayersValue row={row} />
+                    </span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
 
       {data && (
         <div className="flex items-center justify-between text-[12px] text-ink-muted">
           <span>
-            {total > 0
-              ? `${rangeStart.toLocaleString()}–${rangeEnd.toLocaleString()} of ${total.toLocaleString()}`
-              : "0 results"}
+            {total > 0 ? `${rangeStart.toLocaleString()}–${rangeEnd.toLocaleString()} of ${total.toLocaleString()} niches` : "0 results"}
           </span>
           <div className="flex items-center gap-2">
             <button
@@ -899,10 +854,7 @@ export default function NicheFinder() {
               type="button"
               disabled={offset + LIMIT >= total}
               onClick={() => setOffset(offset + LIMIT)}
-              className={clsx(
-                "px-3 py-1 text-ink-primary transition-colors",
-                offset + LIMIT >= total ? "pointer-events-none" : "hover:bg-surface2",
-              )}
+              className={clsx("px-3 py-1 text-ink-primary transition-colors", offset + LIMIT >= total ? "pointer-events-none" : "hover:bg-surface2")}
               style={{ border: `1px solid ${PAPER_35}`, color: offset + LIMIT >= total ? PAPER_45 : undefined }}
             >
               Next
@@ -911,11 +863,8 @@ export default function NicheFinder() {
         </div>
       )}
 
-      {/* Mockup 4a draws exactly 8 columns. This page already tracked more sortable
-          metrics than that (longevity, total owners, hit rate, raw live-player count) —
-          kept, not deleted, but pushed below the table and behind an explicit toggle rather
-          than crammed into its grid. Shares the same sort/order state, so its row order
-          always matches the table above it. */}
+      {/* More metrics — kept, not deleted, but below the table and behind an explicit
+          toggle; shares the same sort/order state, so its row order matches the table. */}
       {data && data.items.length > 0 && (
         <div className="flex flex-col" style={{ gap: 10 }}>
           <button
@@ -931,20 +880,21 @@ export default function NicheFinder() {
           {showMoreMetrics && (
             <div className="blueprint">
               <i className="bp-corner" />
+              <p className="px-5 pt-3 text-[11px] text-ink-muted">
+                {cutLabel}. Live players are each game&rsquo;s latest nightly sample
+                {dataAge.asOfLabel ? ` (data as of ${dataAge.asOfLabel})` : ""}, not a daily peak.
+              </p>
               <TableScroll>
                 <div role="table" style={{ minWidth: MORE_METRICS_MIN_WIDTH }}>
                   <div role="row" className="border-b border-chartborder" style={{ ...MORE_METRICS_ROW_GRID, padding: "12px 20px" }}>
                     <ColHead active={false} order="desc">
-                      <span
-                        className="uppercase text-ink-muted"
-                        style={{ fontFamily: CONDENSED, fontSize: 12, letterSpacing: ".08em", fontWeight: 600 }}
-                      >
+                      <span className="uppercase text-ink-muted" style={HEADER_LABEL_STYLE}>
                         Niche
                       </span>
                     </ColHead>
                     {moreMetricsColumns.map((c) => (
                       <ColHead key={c.col} active={sort === c.col} order={order}>
-                        <SortLabel label={c.label} help={c.help} col={c.col} active={sort === c.col} order={order} onSort={toggleSort} />
+                        <HeaderLabel term={c.term} sort={{ col: c.col, active: sort === c.col, order, onSort: toggleSort }} />
                       </ColHead>
                     ))}
                   </div>
@@ -971,6 +921,173 @@ export default function NicheFinder() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function NicheNameCell({
+  row,
+  dimension,
+  selected,
+  full,
+  onToggle,
+}: {
+  row: NicheRow;
+  dimension: Dimension;
+  selected: boolean;
+  full: boolean;
+  onToggle: (sel: NicheSelection) => void;
+}) {
+  const key = row.key;
+  const tier = row.tier;
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <input
+        type="checkbox"
+        checked={selected}
+        disabled={full}
+        onChange={() => onToggle({ dimension, key })}
+        aria-label={`${selected ? "Remove" : "Add"} ${key} ${selected ? "from" : "to"} the combined analysis`}
+        title={
+          full
+            ? `You can combine up to ${NICHE_COMBINE_CAP} niches at once`
+            : selected
+              ? "Selected — in the combination bar above the table"
+              : "Select this niche to combine it with others"
+        }
+        className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-[var(--brand)] disabled:cursor-not-allowed disabled:opacity-40"
+      />
+      <Link
+        to={nicheDetailPath(dimension, key)}
+        onClick={() => trackEvent("niche_open")}
+        title={`Open the ${key} deep dive`}
+        className="group/nk inline-flex min-w-0 items-center gap-2"
+      >
+        <span className="truncate font-medium text-ink-primary transition-colors group-hover/nk:text-brand">{key}</span>
+        {tier && tier !== "micro" && tier !== "genre" && (
+          <span
+            className="shrink-0 px-[7px] py-px text-[10px] text-ink-muted"
+            style={{ border: `1px solid ${PAPER_30}` }}
+            title={TIER_TITLE[tier as NicheTier] ?? tier}
+          >
+            {TIER_LABEL[tier as NicheTier]?.toLowerCase().replace(/s$/, "") ?? tier}
+          </span>
+        )}
+      </Link>
+    </div>
+  );
+}
+
+function DemandValue({ row }: { row: NicheRow }) {
+  const d = radarDossier(row);
+  if (d.emerging) {
+    return (
+      <span className="text-ink-muted" title={`${EMERGING_DEMAND_LABEL}${d.reviews24m ? ` · ${d.reviews24m} reviews in the last 24 months` : ""}`}>
+        emerging
+      </span>
+    );
+  }
+  const v = row.demand_trend_24m_pct ?? null;
+  if (v == null) return <SentinelTag>no data</SentinelTag>;
+  // Same up/flat steel as the players column: direction reads from the glyph and the sign,
+  // hue only reinforces.
+  return (
+    <span
+      className="tabular font-medium"
+      style={{ color: v >= 0 ? "var(--verdict-up)" : "var(--verdict-flat)" }}
+      title={demandTrendWorked(row.reviews_24m, row.reviews_prev_24m, v) ?? "last 24 complete months vs the 24 before"}
+    >
+      {d.demand24m}
+    </span>
+  );
+}
+
+function ReleasesValue({ row }: { row: NicheRow }) {
+  const v = row.saturation_yoy;
+  if (v == null) return <SentinelTag>no data</SentinelTag>;
+  const worked = releasesYoyWorked(row.n_recent_year, row.n_prior_year, v);
+  return (
+    <span title={worked ? `${worked}${v < -0.05 ? " — the pipeline is shrinking" : ""}` : undefined} className="tabular text-ink-secondary">
+      {radarDossier(row).releasesYoy}
+    </span>
+  );
+}
+
+function RevenueValue({ row, value }: { row: NicheRow; value: number | null }) {
+  const sentinel = paidStatSentinel(row, value);
+  if (sentinel) {
+    return <SentinelTag>{typeof sentinel === "string" ? sentinel : sentinel.tag}</SentinelTag>;
+  }
+  return (
+    <span className="tabular text-ink-secondary" title="Only 1 game in 10 earns more (median in the deep dive)">
+      {fmtUsd(value)}
+    </span>
+  );
+}
+
+function PlayersValue({ row }: { row: NicheRow }) {
+  const t = readPlayersTrend(row);
+  if (t.value === null) return <SentinelTag>no data</SentinelTag>;
+  // Trend verdicts are mono steel — never red/green. Up carries the accent, down recedes.
+  return (
+    <span className="inline-flex flex-col leading-tight">
+      <span className="tabular font-medium" style={{ color: t.up ? "var(--verdict-up)" : "var(--verdict-flat)" }}>
+        {t.value}
+      </span>
+      {t.relative && (
+        <span className="tabular text-[11px] text-ink-muted" title={t.worked ?? undefined}>
+          {t.relative} vs market
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** Below 640px there are no column headers to click, so the sort is a plain control. */
+const MOBILE_SORTS: { col: SortKey; label: string }[] = [
+  { col: "opportunity_v2", label: "Opportunity score" },
+  { col: "demand_trend_24m_pct", label: "Demand trend, 24 months" },
+  { col: "saturation_yoy", label: "Releases, year over year" },
+  { col: "p90_rev", label: "Top-10% revenue" },
+  { col: "n_games", label: "Games" },
+  { col: "players_trend_7d_pct", label: "7-day players trend" },
+  { col: "key", label: "Name" },
+];
+
+function MobileSort({
+  sort,
+  order,
+  onSort,
+}: {
+  sort: SortKey;
+  order: "asc" | "desc";
+  onSort: (col: SortKey, order: "asc" | "desc") => void;
+}) {
+  return (
+    <div className="flex items-center gap-2 px-4 py-2.5 text-[12px] text-ink-muted">
+      <label htmlFor="finder-mobile-sort">Sort by</label>
+      <select
+        id="finder-mobile-sort"
+        value={MOBILE_SORTS.some((s) => s.col === sort) ? sort : "opportunity_v2"}
+        onChange={(e) => onSort(e.target.value as SortKey, e.target.value === "key" ? "asc" : "desc")}
+        className="border bg-transparent px-1.5 py-1 text-ink-primary"
+        style={{ borderColor: PAPER_30 }}
+      >
+        {MOBILE_SORTS.map((s) => (
+          <option key={s.col} value={s.col}>
+            {s.label}
+          </option>
+        ))}
+      </select>
+      <button
+        type="button"
+        onClick={() => onSort(sort, order === "desc" ? "asc" : "desc")}
+        className="border px-2 py-1 text-ink-primary"
+        style={{ borderColor: PAPER_30 }}
+        aria-label={order === "desc" ? "Sorted high to low — switch to low to high" : "Sorted low to high — switch to high to low"}
+      >
+        {order === "desc" ? "↓ high first" : "↑ low first"}
+      </button>
     </div>
   );
 }

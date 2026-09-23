@@ -211,7 +211,7 @@ export const GLOSSARY = {
     computed: true,
   },
 
-  // ─────────────────────────────── the Radar's axes ───────────────────────────────
+  // ─────────────────────────────── the Radar verdict's inputs ───────────────────────────────
   demand_trend_24m_pct: {
     label: "Demand trend, 24 months",
     short: "Demand 24m",
@@ -220,7 +220,7 @@ export const GLOSSARY = {
     formula: "(reviews in the last 24 months − reviews in the 24 months before) ÷ reviews in the 24 months before",
     unit: "percent",
     notes:
-      "The Radar's first axis: +40% or more is its “enter” bar, −30% or worse its “declining” bar. One value per niche — identical at every window and review floor. An emerging niche shows no % (its prior window is near zero by construction).",
+      "The Radar verdict's demand check: +40% or more clears its “enter” bar, −30% or worse is its “declining” bar. One value per niche — identical at every window and review floor. An emerging niche shows no % (its prior window is near zero by construction).",
     source: "Steam's own monthly review histograms (uncapped), games with 50+ reviews",
     computed: true,
     fields: ["demand_trend_24m_pct", "reviews_24m", "reviews_prev_24m"],
