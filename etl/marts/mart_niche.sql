@@ -46,9 +46,14 @@
 -- input (an older source without is_indie/playtime degrades to NULL, never to 0).
 --   tier            tags only (dimension='genre' rows get 'genre'):
 --                   'micro' | 'umbrella' | 'theme' | 'meta'. Curated TAG_TIER map in
---                   build_marts.py; unmapped tags: all-time n_games (win='all',
+--                   build_marts.py, re-keyed onto the canonical tag names by
+--                   create_staging() (so every spelling of a curated tag shares its tier);
+--                   unmapped tags: all-time n_games (win='all',
 --                   min_reviews=@MIN_REVIEWS_DEFAULT@ cut) >= @UMBRELLA_N_GAMES@ ->
 --                   'umbrella', else 'micro'.
+--   key             the CANONICAL spelling of the tag/genre (2026-09-22): spelling twins
+--                   such as Rogue-like/Roguelike are one niche now. Every other spelling
+--                   resolves through mart_tag_alias(dimension, alias, canonical).
 --   decline_gate    A FALSIFICATION TELL, NOT A SCORE FACTOR (since 2026-08-31 — it used
 --                   to multiply opportunity_v2; see the REBUILD block below). It answers
 --                   one question: "did everyone STOP entering this niche?" — which is the

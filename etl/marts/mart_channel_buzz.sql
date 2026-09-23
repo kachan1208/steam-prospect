@@ -84,10 +84,16 @@ WHERE len(tw.words) >= 2;
 -- mart_press.sql's own concept_unigram/concept_bigram temp tables in the same session.
 -- stg_game_tags, NOT src.game_tags: HTML-entity phantom-twin tags fake niche demand
 -- trends (source fixed 2026-08-26; stale snapshots/regressions must not resurrect them).
+-- Canonical tag names plus their other spellings (stg_niche_alias), exactly as
+-- mart_press.sql's _concept_source — a headline's "rogue-like" is still a concept word.
 CREATE TEMP TABLE _cb_concept_source AS
 SELECT DISTINCT lower(trim(tag)) AS phrase
 FROM stg_game_tags
 WHERE tag NOT IN (SELECT tag FROM denylist_tag)
+UNION
+SELECT DISTINCT lower(trim(alias)) AS phrase
+FROM stg_niche_alias
+WHERE dimension = 'tag' AND canonical NOT IN (SELECT tag FROM denylist_tag)
 UNION
 SELECT DISTINCT lower(trim(genre)) AS phrase
 FROM src.game_genres

@@ -232,10 +232,17 @@ WHERE len(tw.words) >= 2;
 -- "action" alone — exactly the kind of noise this fix removes.
 -- stg_game_tags, NOT src.game_tags: HTML-entity phantom-twin tags fake niche demand
 -- trends (source fixed 2026-08-26; stale snapshots/regressions must not resurrect them).
+-- stg_game_tags carries only CANONICAL names since the spelling-twin merge (2026-09-22), so
+-- the twins' other spellings are added back from stg_niche_alias: a headline still says
+-- "rogue-like" and "base-building", and the vocabulary is about words, not niche keys.
 CREATE TEMP TABLE _concept_source AS
 SELECT DISTINCT lower(trim(tag)) AS phrase
 FROM stg_game_tags
 WHERE tag NOT IN (SELECT tag FROM denylist_tag)
+UNION
+SELECT DISTINCT lower(trim(alias)) AS phrase
+FROM stg_niche_alias
+WHERE dimension = 'tag' AND canonical NOT IN (SELECT tag FROM denylist_tag)
 UNION
 SELECT DISTINCT lower(trim(genre)) AS phrase
 FROM src.game_genres

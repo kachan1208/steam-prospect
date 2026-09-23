@@ -481,6 +481,48 @@ TAG_TIER: dict[str, str] = {
     "Unforgiving": "meta", "Intentionally Awkward Controls": "meta",
     "Design &amp; Illustration": "meta",  # HTML-entity twin of a DENYLIST_TAG entry
 }
+# NOTE (2026-09-22): the spellings above no longer have to be matched exactly. create_staging()
+# re-keys this map through the same normalisation as the tags themselves (stg_niche_spelling),
+# so 'e-sports' also tiers 'eSports', 'Vampire' also tiers 'Vampires', and a tier conflict
+# between two spellings of one tag fails the build instead of being settled by row order.
+
+# --------------------------------------------------------------------------------------
+# Tag / genre SPELLING TWINS (2026-09-22). Steam respells tags now and then, and this catalog
+# holds tag sets scraped at different times from two sources: SteamSpy's (real vote counts,
+# the OLD vocabulary) and the store page's (synthetic N..1 votes, the CURRENT vocabulary). So
+# one tag arrived under two names, with its new games under the new one — and each name
+# published as a niche of its own with a fake trend: Roguelike +1,610.9% demand vs Rogue-like
+# -0.6%; Base Building +1,761.9% (sat_yoy +2.81) vs Base-Building -5.7% (sat_yoy -0.38);
+# Vampires +10,593.8% vs Vampire -49.0% (tag / 24m / min50, 2026-09-21 mart). The new spelling
+# looked like a boom and the old one like a collapse, and neither was either.
+#
+# The twin KEY is lower() with every non-letter/non-digit removed ('Rogue-like' -> 'roguelike',
+# 'Mouse only' -> 'mouseonly'); spellings sharing a key merge into ONE niche per game (MAX
+# votes, rank recomputed) under a deterministic display name — the spelling carried by the most
+# games first public in the last RECENT_MONTHS (i.e. Steam's current spelling), then most votes,
+# then alphabetical. Every other spelling is published in mart_tag_alias so an old URL/key
+# still resolves.
+#
+# AUDIT of the 2026-09-21 source (485 tags, 33 genres), every collision under that key:
+#   Base Building / Base-Building        eSports / e-sports        Mouse Only / Mouse only
+#   Puzzle Platformer / Puzzle-Platformer    Roguelike / Rogue-like    Roguelite / Rogue-lite
+# all six true twins (no game carries both spellings; one side is store-page-only, the other
+# SteamSpy-only). Genres: no collisions.
+#
+# EXCEPTIONS — spellings that collide under the key but are genuinely different tags. They keep
+# a key of their own ('=' || spelling, which no folded key can equal). Empty today on purpose:
+# nothing in the audit above qualified. Add (dimension, spelling) with a reason when one does.
+NICHE_TWIN_EXCEPTIONS: list[tuple[str, str]] = []
+# RENAMES the key cannot see: Steam also pluralised tags. Same evidence as the punctuation twins
+# (old spelling only on SteamSpy-voted games, new only on store-page ones, never both on one
+# game) and the same damage (Vampires +10,593.8% vs Vampire -49.0%). Curated, never inferred:
+# the other old-only / new-only pairs in the catalog (Clicker/Incremental, Pool/Billiards,
+# Conversation/Dialogue Heavy, Cult Classic/Cult) are plausible renames but not provable ones,
+# and merging two real tags is worse than leaving one rename unmerged.
+TAG_RENAME_TWINS: list[tuple[str, str]] = [
+    ("Assassin", "Assassins"), ("Dog", "Dogs"), ("Dwarf", "Dwarves"),
+    ("Elf", "Elves"), ("Fox", "Foxes"), ("Vampire", "Vampires"),
+]
 
 # Launch-curve eligibility.
 CURVE_MIN_REVIEWS = 10           # sampled first-year reviews a game needs to enter the curve
@@ -1083,6 +1125,9 @@ MART_FILES = [
                             # stg_tag/genre_membership — TEMPs that live for the whole
                             # run, never dropped). Adjacency also keeps the CURRENT_DATE
                             # both files evaluate for the 24m window seconds apart.
+    "mart_tag_alias.sql",   # retired tag/genre spellings -> the canonical niche key
+                            # (reads only staging's stg_niche_alias; placed with the niche
+                            # family it resolves keys for)
     "mart_market.sql",
     "mart_seasonality.sql",
     "mart_launch_curve.sql",
@@ -1256,100 +1301,94 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
     # ENTITY_CORP_SUFFIXES above; consumed by mart_entity.sql via lower(trim(token))).
     con.execute("CREATE TEMP TABLE entity_suffix(token VARCHAR)")
     con.executemany("INSERT INTO entity_suffix VALUES (?)", [(s,) for s in ENTITY_CORP_SUFFIXES])
-    # Curated tag tiers (niche-score v2) — read by mart_niche.sql; unmapped tags fall back
-    # to the UMBRELLA_N_GAMES size heuristic there.
-    con.execute("CREATE TEMP TABLE tag_tier(tag VARCHAR, tier VARCHAR)")
-    con.executemany("INSERT INTO tag_tier VALUES (?, ?)", list(TAG_TIER.items()))
+    # Curated tag tiers (niche-score v2), AS WRITTEN. The SQL below re-keys them onto the
+    # canonical tag names as `tag_tier` — the table mart_niche.sql reads; unmapped tags fall
+    # back to the UMBRELLA_N_GAMES size heuristic there.
+    con.execute("CREATE TEMP TABLE _tag_tier_curated(tag VARCHAR, tier VARCHAR)")
+    con.executemany("INSERT INTO _tag_tier_curated VALUES (?, ?)", list(TAG_TIER.items()))
+    # Spelling-twin configuration (see NICHE_TWIN_EXCEPTIONS / TAG_RENAME_TWINS). A rename pair
+    # becomes two rows sharing a group spelling, so both fold onto one key.
+    con.execute("CREATE TEMP TABLE niche_twin_exception(dimension VARCHAR, spelling VARCHAR)")
+    if NICHE_TWIN_EXCEPTIONS:  # executemany refuses an empty list, and the list is empty today
+        con.executemany("INSERT INTO niche_twin_exception VALUES (?, ?)", NICHE_TWIN_EXCEPTIONS)
+    con.execute("CREATE TEMP TABLE niche_rename_twin(dimension VARCHAR, spelling VARCHAR, "
+                "group_spelling VARCHAR)")
+    if TAG_RENAME_TWINS:
+        con.executemany("INSERT INTO niche_rename_twin VALUES ('tag', ?, ?)",
+                        [(s, pair[0]) for pair in TAG_RENAME_TWINS for s in pair])
+
+    # The two normalisations every niche key goes through, defined ONCE as session macros so
+    # the tags, the genres, the tier map and both denylists cannot be folded differently.
+    #   niche_clean  the scraper's store-page fallback briefly stored HTML-entity-escaped names
+    #                ('Point &amp; Click'), and trailing spaces ('Dystopian ') published twins
+    #                too — unescape FIRST, then trim.
+    #   niche_fold   the spelling-twin key: lower(), then every run of non-letters/non-digits
+    #                removed. \p{L}/\p{N} rather than [a-z0-9] so a non-Latin name folds to
+    #                itself instead of to '' (which would merge every such tag into one); on
+    #                today's all-ASCII vocabulary the two are identical. A name with no letter
+    #                or digit at all keeps its lower()ed self for the same reason.
+    con.execute(
+        "CREATE OR REPLACE TEMP MACRO niche_clean(s) AS trim(replace(replace(replace(replace("
+        "replace(s, '&amp;', '&'), '&quot;', '\"'), '&#39;', ''''), '&lt;', '<'), '&gt;', '>'))"
+    )
+    con.execute(
+        "CREATE OR REPLACE TEMP MACRO niche_fold(s) AS "
+        "COALESCE(NULLIF(regexp_replace(lower(s), '[^\\p{L}\\p{N}]+', '', 'g'), ''), lower(s))"
+    )
 
     staging_sql = render(
         """
-        -- Single normalized read of src.game_tags — every tag consumer (staging below,
-        -- mart_game/mart_press/mart_channel_buzz) reads THIS, never src.game_tags directly:
-        -- the scraper's store-page fallback briefly stored HTML-entity-escaped tag names
-        -- ('Point &amp; Click'), and such phantom-twin tags skew toward recently-fetched
-        -- games, faking explosive niche demand trends. The source was fixed 2026-08-26, but
-        -- stale snapshots / future scraper regressions must not resurrect the twins.
-        -- '&amp;' is unescaped FIRST; twins that merge into one (appid, tag) keep MAX(votes),
-        -- and rank is recomputed by votes DESC (source rank can't be trusted across a merge).
-        CREATE TEMP TABLE stg_game_tags AS
-        WITH unescaped AS (
-            -- trim() is the same fix as the unescape beside it, for a different character.
-            -- The unescape landed because '&amp;' and '&' were publishing as two niches with
-            -- one visible name; trailing SPACE does exactly that too, and was still doing it
-            -- on 2026-09-01: 'Dystopian ' and 'Dystopian' rendered as an identical pair in the
-            -- Niche Finder, and on the Radar as two blips with OPPOSITE verdicts (ENTER NOW vs
-            -- EMERGING). Splitting one tag's games across two keys also wrecks the trend — the
-            -- thinner twin showed demand_trend_24m_pct +2735%, a pure artifact of the split.
-            -- Normalise BEFORE the GROUP BY below so the twins merge into one niche and their
-            -- votes combine, exactly as the entity variants do.
-            SELECT gt.appid,
-                trim(replace(replace(replace(replace(replace(gt.tag,
-                    '&amp;', '&'), '&quot;', '"'), '&#39;', ''''), '&lt;', '<'), '&gt;', '>')) AS tag,
-                gt.votes
-            FROM src.game_tags gt
-            WHERE trim(COALESCE(gt.tag, '')) <> ''   -- a whitespace-only tag is not a niche
-        ),
-        merged AS (
-            SELECT appid, tag, MAX(votes) AS votes
-            FROM unescaped
-            GROUP BY appid, tag
+        -- Single normalized read of src.game_tags. Every tag consumer reads the CANONICAL
+        -- stg_game_tags built from it further down, never src.game_tags directly, because a
+        -- tag name can arrive in several spellings:
+        --   * HTML-entity escapes ('Point &amp; Click') from the scraper's store-page
+        --     fallback — skewed toward recently fetched games, so they faked explosive
+        --     trends (source fixed 2026-08-26; stale snapshots must not resurrect them);
+        --   * trailing spaces ('Dystopian ') — on 2026-09-01 the Radar showed 'Dystopian '
+        --     and 'Dystopian' as two blips with OPPOSITE verdicts (ENTER NOW vs EMERGING);
+        --   * Steam's own respellings (Rogue-like -> Roguelike, Vampire -> Vampires): the
+        --     2026-09-22 fix, see NICHE_TWIN_EXCEPTIONS / TAG_RENAME_TWINS in build_marts.py.
+        -- niche_clean() handles the first two here; niche_fold() keys the third below.
+        CREATE TEMP TABLE _stg_tag_raw AS
+        SELECT gt.appid, niche_clean(gt.tag) AS spelling, gt.votes
+        FROM src.game_tags gt
+        WHERE niche_clean(COALESCE(gt.tag, '')) <> '';   -- a whitespace-only tag is not a niche
+
+        -- EVERY spelling that can name a niche — the source's, plus the curated config's (tier
+        -- map, both denylists) — with its twin key. Folding the config through the SAME table
+        -- is the point: a denylist or tier entry written in one spelling applies to all of
+        -- them. norm_key: '=' || spelling for a listed exception (no fold can produce a '='),
+        -- else niche_fold() of the rename group's spelling, else of the spelling itself.
+        CREATE TEMP TABLE stg_niche_spelling AS
+        WITH spellings AS (
+            SELECT DISTINCT 'tag' AS dimension, spelling FROM _stg_tag_raw
+            UNION SELECT 'tag', niche_clean(tag) FROM _tag_tier_curated
+            UNION SELECT 'tag', niche_clean(tag) FROM denylist_tag
+            UNION SELECT DISTINCT 'genre', niche_clean(genre) FROM src.game_genres
+                  WHERE niche_clean(COALESCE(genre, '')) <> ''
+            UNION SELECT 'genre', niche_clean(genre) FROM denylist_genre
         )
-        SELECT appid, tag, votes,
-            row_number() OVER (PARTITION BY appid ORDER BY votes DESC, tag) AS rank
-        FROM merged;
-
-        CREATE TEMP TABLE stg_tag_membership AS
-        SELECT DISTINCT gt.appid, gt.tag
-        FROM stg_game_tags gt
-        WHERE gt.votes >= @TAG_VOTE_FLOOR@
-          AND gt.rank <= @TAG_RANK_FLOOR@
-          AND gt.tag NOT IN (SELECT tag FROM denylist_tag);
-
-        CREATE TEMP TABLE stg_genre_membership AS
-        -- trim + case-fold BOTH sides of the denylist comparison (2026-09-01). It was an exact
-        -- NOT IN, so 'Early Access ' with a trailing space, or 'early access', slipped straight
-        -- past the list and republished the very niche the denylist exists to suppress — the
-        -- bug this table was created to fix. The list carrying BOTH 'Free To Play' and
-        -- 'Free to Play' by hand is the tell that case had already bitten once; enumerating
-        -- spellings does not scale, normalising does. The whitespace half is not theoretical:
-        -- the TAG side shipped 'Dystopian ' and 'Parody ' as twins of their trimmed selves.
-        -- trim() on the stored value too, so twins merge instead of publishing side by side.
-        SELECT DISTINCT gg.appid, trim(gg.genre) AS genre
-        FROM src.game_genres gg
-        WHERE trim(COALESCE(gg.genre, '')) <> ''
-          AND lower(trim(gg.genre)) NOT IN (SELECT lower(trim(genre)) FROM denylist_genre);
+        SELECT s.dimension, s.spelling,
+            CASE WHEN x.spelling IS NOT NULL THEN '=' || s.spelling
+                 ELSE niche_fold(COALESCE(r.group_spelling, s.spelling)) END AS norm_key,
+            (r.group_spelling IS NOT NULL AND x.spelling IS NULL) AS is_rename
+        FROM spellings s
+        LEFT JOIN niche_twin_exception x
+               ON x.dimension = s.dimension AND x.spelling = s.spelling
+        LEFT JOIN niche_rename_twin r
+               ON r.dimension = s.dimension AND niche_fold(r.spelling) = niche_fold(s.spelling);
 
         -- Niche-score v2 fallback for is_singleplayer (see stg_game below): games carrying
-        -- the 'Singleplayer' community tag anywhere in the FULL game_tags table — no vote/
-        -- rank floor, deliberately unlike stg_tag_membership, because this is a coverage
-        -- signal ("is the game playable solo at all?"), not a niche-membership signal.
+        -- the 'Singleplayer' community tag — in ANY spelling — anywhere in the FULL game_tags
+        -- table, no vote/rank floor, deliberately unlike stg_tag_membership, because this is a
+        -- coverage signal ("is the game playable solo at all?"), not a niche-membership signal.
         -- Only consulted when the game's raw Steam `categories` field is missing/empty
         -- (~0.6 percent of the catalog); Steam's own category list wins whenever present.
         CREATE TEMP TABLE stg_singleplayer_tag AS
-        SELECT DISTINCT gt.appid FROM stg_game_tags gt WHERE gt.tag = 'Singleplayer';
-
-        -- Moved ahead of stg_game (below needs it for the owners-floor genre lookup).
-        -- 'Early Access'/'Free To Play' are denylisted upstream (release-state/monetization
-        -- labels, not genres — user-reported 2026-08-28), so they left the deprioritized
-        -- CASE list: a game keeps its best REMAINING real genre, and a game whose ONLY
-        -- genres are denylisted gets no row here -> NULL primary_genre downstream (every
-        -- consumer LEFT JOINs this table or filters primary_genre IS NOT NULL).
-        CREATE TEMP TABLE stg_primary_genre AS
-        -- Same trim + case-fold as stg_genre_membership above, and for the same reason: this
-        -- is a SECOND copy of the denylist filter, so fixing only the other one still let
-        -- 'early access' through as a game's PRIMARY genre. Two filters over one list is the
-        -- hazard; they must be normalised identically or they drift apart silently.
-        WITH g AS (
-            SELECT gg.appid, trim(gg.genre) AS genre,
-                row_number() OVER (PARTITION BY gg.appid ORDER BY
-                    CASE WHEN trim(gg.genre) IN ('Indie','Casual','Massively Multiplayer')
-                         THEN 1 ELSE 0 END,
-                    trim(gg.genre)) AS rn
-            FROM src.game_genres gg
-            WHERE trim(COALESCE(gg.genre, '')) <> ''
-              AND lower(trim(gg.genre)) NOT IN (SELECT lower(trim(genre)) FROM denylist_genre)
-        )
-        SELECT appid, genre AS primary_genre FROM g WHERE rn = 1;
+        SELECT DISTINCT r.appid
+        FROM _stg_tag_raw r
+        JOIN stg_niche_spelling s ON s.dimension = 'tag' AND s.spelling = r.spelling
+        WHERE s.norm_key = 'singleplayer';
 
         -- Review-count reconciliation source: per-appid counts from the actual scraped
         -- `reviews` table (already deduped at scrape time -- recommendationid PK / unique
@@ -1481,6 +1520,137 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
                 ELSE ss_positive_ratio END AS positive_ratio,
             COALESCE(api_total_reviews, GREATEST(ss_total_reviews, reviews_table_count)) * 30 * price_initial AS est_rev_reviews
         FROM base;
+
+        -- =====================================================================================
+        -- CANONICAL NICHE NAMES. One display name per twin key, per dimension: the spelling
+        -- carried by the most games first public in the last @RECENT_MONTHS@ months (Steam's
+        -- CURRENT spelling — the store page is what recent games were scraped from), then the
+        -- most votes, then alphabetical, so the choice is deterministic run to run. A key that
+        -- only the config knows (a tier/denylist spelling no game carries) has no row here.
+        -- =====================================================================================
+        CREATE TEMP TABLE _stg_niche_carrier AS
+        SELECT 'tag' AS dimension, r.spelling, r.appid, r.votes
+        FROM _stg_tag_raw r
+        UNION ALL
+        SELECT 'genre', niche_clean(gg.genre), gg.appid, 0
+        FROM src.game_genres gg
+        WHERE niche_clean(COALESCE(gg.genre, '')) <> '';
+
+        CREATE TEMP TABLE stg_niche_canonical AS
+        WITH spelling_stats AS (
+            SELECT c.dimension, s.norm_key, c.spelling,
+                COUNT(DISTINCT c.appid) FILTER (
+                    WHERE g.release_date <= CURRENT_DATE
+                      AND g.release_date >= CURRENT_DATE - INTERVAL @RECENT_MONTHS@ MONTH
+                ) AS n_recent_games,
+                SUM(c.votes) AS votes
+            FROM _stg_niche_carrier c
+            JOIN stg_niche_spelling s ON s.dimension = c.dimension AND s.spelling = c.spelling
+            LEFT JOIN _stg_game_reconciled g ON g.appid = c.appid
+            GROUP BY 1, 2, 3
+        )
+        SELECT dimension, norm_key, spelling AS canonical
+        FROM spelling_stats
+        QUALIFY row_number() OVER (PARTITION BY dimension, norm_key
+                                   ORDER BY n_recent_games DESC, votes DESC, spelling) = 1;
+
+        -- Every NON-canonical spelling the source carries, and what it now resolves to —
+        -- published as mart_tag_alias so an old key (a bookmarked URL, a saved MCP query)
+        -- still finds its niche. reason: 'rename' for a curated TAG_RENAME_TWINS pair,
+        -- 'spelling' for a case/punctuation twin; n_games = games carrying the alias spelling.
+        CREATE TEMP TABLE stg_niche_alias AS
+        SELECT c.dimension, c.spelling AS alias, k.canonical,
+            CASE WHEN bool_or(s.is_rename) THEN 'rename' ELSE 'spelling' END AS reason,
+            COUNT(DISTINCT c.appid) AS n_games
+        FROM _stg_niche_carrier c
+        JOIN stg_niche_spelling s ON s.dimension = c.dimension AND s.spelling = c.spelling
+        JOIN stg_niche_canonical k ON k.dimension = c.dimension AND k.norm_key = s.norm_key
+        WHERE c.spelling <> k.canonical
+        GROUP BY 1, 2, 3;
+
+        -- The canonical per-game tag table — what every tag consumer reads (the membership
+        -- below, mart_game.top_tags, mart_press/mart_channel_buzz's concept vocabulary). Twins
+        -- merging into one (appid, tag) keep MAX(votes) — the votes of ONE spelling, never a
+        -- sum (a game carries each name from one scrape, and synthetic store-page votes are
+        -- not addable to SteamSpy's) — and rank is recomputed by votes DESC (source rank
+        -- can't be trusted across a merge).
+        CREATE TEMP TABLE stg_game_tags AS
+        WITH merged AS (
+            SELECT r.appid, k.canonical AS tag, MAX(r.votes) AS votes
+            FROM _stg_tag_raw r
+            JOIN stg_niche_spelling s ON s.dimension = 'tag' AND s.spelling = r.spelling
+            JOIN stg_niche_canonical k ON k.dimension = 'tag' AND k.norm_key = s.norm_key
+            GROUP BY 1, 2
+        )
+        SELECT appid, tag, votes,
+            row_number() OVER (PARTITION BY appid ORDER BY votes DESC, tag) AS rank
+        FROM merged;
+
+        -- The raw tag rows (~2.7M) have no reader past this point.
+        DROP TABLE _stg_tag_raw;
+
+        -- The tier map, re-keyed onto the canonical names mart_niche.sql joins on: a curated
+        -- entry tiers every spelling of its tag. A spelling nothing carries keeps its own
+        -- name (inert). create_staging() fails the build if two spellings of one tag were
+        -- curated into DIFFERENT tiers — that is a contradiction in the map, not a tiebreak.
+        CREATE TEMP TABLE tag_tier AS
+        SELECT DISTINCT COALESCE(k.canonical, s.spelling) AS tag, t.tier
+        FROM _tag_tier_curated t
+        JOIN stg_niche_spelling s ON s.dimension = 'tag' AND s.spelling = niche_clean(t.tag)
+        LEFT JOIN stg_niche_canonical k ON k.dimension = 'tag' AND k.norm_key = s.norm_key;
+
+        -- Same re-keying for the tag denylist, which mart_game / mart_press / mart_channel_buzz
+        -- test with a plain `tag NOT IN (SELECT tag FROM denylist_tag)`: the canonical name of
+        -- every denylisted key is added beside the curated spellings (LEGO/Lego stay listed by
+        -- hand only as documentation now — they fold to one key).
+        INSERT INTO denylist_tag
+        SELECT DISTINCT k.canonical
+        FROM denylist_tag d
+        JOIN stg_niche_spelling s ON s.dimension = 'tag' AND s.spelling = niche_clean(d.tag)
+        JOIN stg_niche_canonical k ON k.dimension = 'tag' AND k.norm_key = s.norm_key
+        WHERE k.canonical NOT IN (SELECT tag FROM denylist_tag);
+
+        CREATE TEMP TABLE stg_tag_membership AS
+        SELECT DISTINCT gt.appid, gt.tag
+        FROM stg_game_tags gt
+        WHERE gt.votes >= @TAG_VOTE_FLOOR@
+          AND gt.rank <= @TAG_RANK_FLOOR@
+          AND gt.tag NOT IN (SELECT tag FROM denylist_tag);
+
+        -- Genres, same machinery. The denylist is compared on the twin KEY, which subsumes the
+        -- trim + case-fold this used to spell out (2026-09-01: an exact NOT IN let
+        -- 'Early Access ' and 'early access' straight past the list and republished the very
+        -- niche it exists to suppress; the list carrying both 'Free To Play' and 'Free to Play'
+        -- by hand was the tell that case had bitten once already).
+        CREATE TEMP TABLE stg_genre_membership AS
+        SELECT DISTINCT c.appid, k.canonical AS genre
+        FROM _stg_niche_carrier c
+        JOIN stg_niche_spelling s ON s.dimension = 'genre' AND s.spelling = c.spelling
+        JOIN stg_niche_canonical k ON k.dimension = 'genre' AND k.norm_key = s.norm_key
+        WHERE c.dimension = 'genre'
+          AND s.norm_key NOT IN (
+              SELECT ds.norm_key FROM denylist_genre d
+              JOIN stg_niche_spelling ds
+                ON ds.dimension = 'genre' AND ds.spelling = niche_clean(d.genre));
+
+        DROP TABLE _stg_niche_carrier;
+
+        -- Needed by stg_game below (the owners-floor genre lookup). 'Early Access' /
+        -- 'Free To Play' are denylisted (release-state/monetization labels, not genres —
+        -- user-reported 2026-08-28), so a game keeps its best REMAINING real genre, and a game
+        -- whose ONLY genres are denylisted gets no row here -> NULL primary_genre downstream
+        -- (every consumer LEFT JOINs this table or filters primary_genre IS NOT NULL).
+        -- Picked FROM stg_genre_membership rather than re-filtering src.game_genres: this used
+        -- to be a SECOND copy of the denylist filter, and fixing only one copy is how
+        -- 'early access' once survived as a primary genre. One filter, one table.
+        CREATE TEMP TABLE stg_primary_genre AS
+        SELECT appid, genre AS primary_genre
+        FROM stg_genre_membership
+        QUALIFY row_number() OVER (
+            PARTITION BY appid
+            ORDER BY CASE WHEN niche_fold(genre) IN ('indie', 'casual', 'massivelymultiplayer')
+                          THEN 1 ELSE 0 END,
+                     genre) = 1;
 
         -- Genre Boxleiter multiplier (owners per review), computed ONCE here -- pre-floor,
         -- so every input row is a REAL SteamSpy owners_mid observation, never a value this
@@ -1705,6 +1875,29 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         params,
     )
     con.execute(staging_sql)
+    _check_niche_spelling_config(con)
+
+
+def _check_niche_spelling_config(con: duckdb.DuckDBPyConnection) -> None:
+    """Refuse a build whose curated spelling config contradicts itself. Both are config bugs a
+    SQL tiebreak would otherwise settle silently, by row order:
+      * one spelling folding onto two keys — two TAG_RENAME_TWINS pairs claiming the same
+        spelling, which would fan every join on stg_niche_spelling out;
+      * one canonical tag curated into two TAG_TIER tiers (e.g. 'e-sports': meta beside
+        'eSports': micro) — the tier decides whether a niche can headline at all."""
+    dup = con.execute(
+        "SELECT dimension, spelling, list(norm_key ORDER BY norm_key) FROM stg_niche_spelling "
+        "GROUP BY 1, 2 HAVING COUNT(*) > 1 ORDER BY 1, 2"
+    ).fetchall()
+    if dup:
+        raise ValueError(f"niche spellings folding onto more than one key (check "
+                         f"TAG_RENAME_TWINS / NICHE_TWIN_EXCEPTIONS): {dup}")
+    clash = con.execute(
+        "SELECT tag, list(DISTINCT tier ORDER BY tier) FROM tag_tier "
+        "GROUP BY tag HAVING COUNT(DISTINCT tier) > 1 ORDER BY tag"
+    ).fetchall()
+    if clash:
+        raise ValueError(f"TAG_TIER gives one tag conflicting tiers across its spellings: {clash}")
 
 
 # --------------------------------------------------------------------------------------
