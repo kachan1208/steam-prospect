@@ -36,9 +36,11 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 ETL = REPO / "etl"
 sys.path.insert(0, str(ETL))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import duckdb  # noqa: E402
 import build_marts as bm  # noqa: E402
+from scratch_holder import hold, listing  # noqa: E402  (a live build; lock-free listing)
 
 N_GAMES = 40
 
@@ -655,7 +657,7 @@ def test_rescore_only_fills_the_cache_and_publishes_nothing(tmp_path, monkeypatc
     assert status == [(1200, 1200, 6, 6)], status
 
     # ...and NOTHING was published: no mart, no symlink, no leftover scratch.
-    left = sorted(p.name for p in data.iterdir())
+    left = listing(data)
     assert left == [bm.SENTIMENT_CACHE_DB_NAME], (
         f"--rescore-only must leave only the cache behind, found {left}"
     )
@@ -716,17 +718,17 @@ def test_rescore_only_refuses_flags_it_cannot_honour(tmp_path, monkeypatch):
 # never write: prospect_<YYYYMMDD>.duckdb.building, derived from the same UTC date the NIGHTLY
 # derives its own scratch name from — and with a GB-scale .building.tmp/ spill beside it, held
 # for DAYS. Three things then wanted that name:
-#   * the nightly, which opens the identical path (deploy/prospect-refresh.sh has no guard
-#     against a build_marts that is already running);
-#   * deploy/light-build-cron.sh's stale-scratch sweep, which globs prospect_*.duckdb.building*
-#     and deletes by age;
-#   * prospect-refresh.sh's post-success cleanup, which rm -rf's that glob with NO age test.
+#   * the nightly, which opened the identical path;
+#   * the droplet's light-build stale-scratch sweep, which globbed prospect_*.duckdb.building*
+#     and deleted by age;
+#   * the droplet nightly's post-success cleanup, which rm -rf'd that glob with NO age test.
 # The only defence was a build hold — i.e. freezing every published mart for the length of the
 # rescore, which is the exact cost --rescore-only exists to remove.
 #
-# These tests pin the name out of all three globs, and pin the lifecycle that replaces them:
-# build_marts' own age-scoped sweep owns the name, so a live multi-day rescore is never swept
-# and a SIGKILLed one is still reclaimed.
+# These tests pin the name out of those globs, and pin the lifecycle that replaces them:
+# build_marts' own sweep owns the name, and since 2026-09-22 decides liveness by the rescore
+# RUN LOCK (see tests/test_run_lock.py) — a live multi-day rescore is never swept however long
+# it goes without writing, and a SIGKILLed one is reclaimed by the very next run.
 # ------------------------------------------------------------------------------------------
 
 # The two globs that decide a file's fate on the droplet. Quoted here from the shell scripts /
@@ -736,11 +738,9 @@ MART_VERSION_GLOB = "prospect_*.duckdb"             # main()'s --keep retention 
 
 
 def _fake_rescore_scratch(data: Path, age_seconds: float) -> list[Path]:
-    """A rescore scratch exactly as DuckDB leaves one: the database file, its .wal and the
-    .tmp/ spill DIRECTORY with a block inside it. The block matters — a scoring rescore writes
-    into the spill continuously while the directory's own mtime may not move, which is why
-    _scratch_age_seconds looks one level in, and why a test that aged only the directory would
-    prove nothing about liveness."""
+    """A DEAD rescore's scratch exactly as DuckDB leaves one: the database file, its .wal and the
+    .tmp/ spill DIRECTORY with a block inside it — and no process holding the rescore lock or
+    the file. (A LIVE one is scratch_holder.hold(): a real process holding both.)"""
     f = data / bm.RESCORE_SCRATCH_DB_NAME
     wal = data / f"{bm.RESCORE_SCRATCH_DB_NAME}.wal"
     spill = data / f"{bm.RESCORE_SCRATCH_DB_NAME}.tmp"
@@ -792,54 +792,52 @@ def test_rescore_only_scratch_cannot_collide_with_a_mart_build(tmp_path, monkeyp
         f"a prune would treat it as a dated mart"
     )
     assert bm.RESCORE_SCRATCH_DB_NAME in live["all"], live["all"]
+    assert bm.RESCORE_LOCK_NAME in live["all"] and bm.BUILD_LOCK_NAME not in live["all"], (
+        "a rescore holds its OWN lock, never the mart builds' one"
+    )
 
 
 def test_a_live_rescore_scratch_survives_every_sweep(tmp_path):
     """A multi-day rescore's scratch must outlive the nightly AND the light build that run
-    beside it. Age is the only liveness test any sweep has, and a scoring rescore touches its
-    spill constantly and the scratch file once a bucket (~16 min on the droplet)."""
+    beside it — however long it goes without writing (the old age rule's blind spot). The
+    rescore holds its lock; a mart build's sweep cannot borrow it, so it leaves the scratch
+    alone. (A second RESCORE never gets as far as sweeping: it exits on the same lock — see
+    test_run_lock.py.)"""
     data = tmp_path / "data"
     data.mkdir()
-    paths = _fake_rescore_scratch(data, age_seconds=600)   # 10 min: mid-bucket
-
-    # The shell sweeps (deploy/light-build-cron.sh, deploy/prospect-refresh.sh) cannot even see
-    # it — their glob is the mart-scratch family, which this name is deliberately not in.
-    assert list(data.glob(MART_SCRATCH_GLOB)) == []
-
-    bm._sweep_stale_scratch(data, "20260902")                    # a nightly/light build
-    assert all(p.exists() for p in paths), "a mart build swept a live rescore's scratch"
-    bm._sweep_stale_scratch(data, bm.RESCORE_SCRATCH_VERSION)    # a rescore that resumed
-    assert all(p.exists() for p in paths), (
-        "a resuming rescore deleted a scratch that may belong to a rescore already running — "
-        "DuckDB's file lock, not the sweep, is what must refuse the second one"
-    )
+    with hold(data, bm.RESCORE_SCRATCH_DB_NAME, bm.RESCORE_LOCK_NAME) as (f, wal, spill):
+        week = time.time() - 7 * 86400
+        for p in (f, wal, spill):
+            if p.exists():
+                os.utime(p, (week, week))
+        # The shell sweeps cannot even see it — their glob is the mart-scratch family.
+        assert list(data.glob(MART_SCRATCH_GLOB)) == []
+        bm._sweep_stale_scratch(data, frozenset({"build"}))           # a nightly/light build
+        assert f.exists() and spill.is_dir(), "a mart build swept a live rescore's scratch"
 
 
 def test_an_orphaned_rescore_scratch_is_always_reclaimed(tmp_path):
-    """The other half: a SIGKILLed rescore never runs main()'s finally, so nothing but this
-    sweep will ever remove the file. Disk is the droplet's scarcest resource — it must not be
-    left behind forever just because it is exempt from the shell globs."""
+    """The other half: a SIGKILLed rescore never runs main()'s finally, so nothing but a sweep
+    will ever remove the file. Disk is the scarcest resource — it must go on the very next run
+    of EITHER family, however fresh it looks (no lock holder and no open handle = dead)."""
     data = tmp_path / "data"
     data.mkdir()
 
-    paths = _fake_rescore_scratch(data, age_seconds=3 * 3600)  # 3h: no bucket takes that long
-    bm._sweep_stale_scratch(data, "20260902")
-    assert all(p.exists() for p in paths), (
-        f"a mart build must spare another owner's scratch until SCRATCH_STALE_HOURS "
-        f"({bm.SCRATCH_STALE_HOURS}h) — 3h old is not provably dead to IT"
-    )
-    bm._sweep_stale_scratch(data, bm.RESCORE_SCRATCH_VERSION)
+    paths = _fake_rescore_scratch(data, age_seconds=5)
+    bm._sweep_stale_scratch(data, frozenset({"build"}))            # a nightly/light build
     assert not any(p.exists() for p in paths), (
-        "the next rescore must reclaim its own dead scratch — this is the resume path, and it "
-        "is what stops a killed run's spill from accumulating night after night"
+        "a mart build must reclaim a dead rescore's scratch — it can take the rescore lock, so "
+        "nothing can own it"
     )
 
-    paths = _fake_rescore_scratch(data, age_seconds=(bm.SCRATCH_STALE_HOURS + 1) * 3600)
-    bm._sweep_stale_scratch(data, "20260902")
+    paths = _fake_rescore_scratch(data, age_seconds=5)
+    bm._sweep_stale_scratch(data, frozenset({"rescore"}))          # the next rescore
     assert not any(p.exists() for p in paths), (
-        "a long-dead rescore scratch must also be reclaimed by the nightly/light build, so it "
-        "cannot survive forever just because no further rescore is ever run"
+        "the next rescore must reclaim its own dead scratch before it starts"
     )
+    lock = bm._RunLock(data / bm.RESCORE_LOCK_NAME)
+    assert lock.acquire(), "a sweep that borrowed the rescore lock must give it back"
+    lock.release()
 
 
 def test_the_rescore_scratch_is_never_publishable_or_prunable(tmp_path):
@@ -850,36 +848,32 @@ def test_the_rescore_scratch_is_never_publishable_or_prunable(tmp_path):
     # ...and a real build's scratch is still publishable, or the guard would just be a crash.
     bm._refuse_publishing_rescore_scratch(Path("prospect_20260902.duckdb.building"))
 
-    # End to end: a FULL build with a live rescore scratch beside it must publish, prune with
-    # --keep, and leave the rescore alone. This is the nightly running under a rescore.
+    # End to end: a FULL build with a LIVE rescore beside it must publish, prune with --keep,
+    # and leave the rescore alone. This is the nightly running under a rescore.
     src = tmp_path / "steam_games.db"
     data = tmp_path / "data"
     data.mkdir()
     build_source(src)
-    _fake_rescore_scratch(data, age_seconds=60)
     stale_mart = data / "prospect_20250101.duckdb"    # a real dated mart, to prove --keep ran
     stale_mart.write_bytes(b"")
-
-    assert _run(["--source", str(src), "--data-dir", str(data), "--keep", "1"]) == 0
-    assert not stale_mart.exists(), "--keep 1 did not prune, so this proves nothing about it"
-    assert (data / bm.RESCORE_SCRATCH_DB_NAME).exists(), (
-        "the retention prune or the pre-build sweep took the rescore scratch"
-    )
+    with hold(data, bm.RESCORE_SCRATCH_DB_NAME, bm.RESCORE_LOCK_NAME) as (f, _wal, spill):
+        assert _run(["--source", str(src), "--data-dir", str(data), "--keep", "1"]) == 0
+        assert not stale_mart.exists(), "--keep 1 did not prune, so this proves nothing about it"
+        assert f.exists() and spill.is_dir(), (
+            "the retention prune or the pre-build sweep took a live rescore's scratch"
+        )
     assert (data / "current.duckdb").resolve().name.startswith("prospect_"), (
         "current.duckdb must point at a versioned mart, never at the rescore scratch"
     )
 
 
-def test_a_killed_rescore_resumes_on_the_same_scratch(tmp_path, monkeypatch):
-    """Resuming IS the normal case for a multi-night rescore, and the file it reopens is
-    whatever the last run left. A SIGKILL runs no finally, so the scratch survives with the
-    scoring loop's REGULAR working tables still committed inside it — and the sweep spares it
-    on purpose (it cannot tell a killed run's file from a running one's).
-
-    Reuse is therefore only safe while every working table on this path is TEMP or is dropped
-    immediately before it is created. That is true today, and this test is what keeps it true:
-    delete the `DROP TABLE IF EXISTS _sent_windows` that guards the scoring loop and the resume
-    dies on 'Table with name _sent_windows already exists' instead of finishing the pool."""
+def test_a_killed_rescore_is_reclaimed_and_the_rerun_finishes_the_pool(tmp_path, monkeypatch):
+    """Resuming IS the normal case for a multi-night rescore, and a SIGKILL runs no finally: the
+    scratch survives with the scoring loop's REGULAR working tables still committed inside it.
+    The rerun holds the rescore lock, so it KNOWS that scratch is dead and sweeps it before it
+    starts (it used to reuse it, which made any stray REGULAR table a resume-breaker: 'Table with
+    name _sent_windows already exists'). Progress lives in the sentiment cache, so the rerun
+    loses nothing by starting from a fresh scratch and must finish the whole pool."""
     monkeypatch.setenv("PROSPECT_SENTIMENT_CACHE", "on")
     monkeypatch.setenv("PROSPECT_RESCORE_BUCKET_REVIEWS", "200")
     src = tmp_path / "steam_games.db"
@@ -905,15 +899,15 @@ def test_a_killed_rescore_resumes_on_the_same_scratch(tmp_path, monkeypatch):
     finally:
         con.close()
 
-    # Run 2 resumes onto that same file and must finish the whole pool.
+    # Run 2 must reclaim that scratch and finish the whole pool.
     monkeypatch.delenv("PROSPECT_SENTIMENT_DEADLINE_SECONDS", raising=False)
-    assert _run(argv) == 0, "the resumed rescore died on the scratch its predecessor left"
+    assert _run(argv) == 0, "the rerun died on the scratch its predecessor left"
     c = duckdb.connect(str(data / bm.SENTIMENT_CACHE_DB_NAME), read_only=True)
     try:
         scored = c.execute("SELECT count(*) FROM scored_review").fetchone()[0]
     finally:
         c.close()
-    assert scored == 40 * 30, f"the resume scored {scored} of 1200 reviews"
-    assert sorted(p.name for p in data.iterdir()) == [bm.SENTIMENT_CACHE_DB_NAME], (
-        "a completed resume must leave the data dir with only the cache in it"
+    assert scored == 40 * 30, f"the rerun scored {scored} of 1200 reviews"
+    assert listing(data) == [bm.SENTIMENT_CACHE_DB_NAME], (
+        "a completed rerun must leave the data dir with only the cache in it"
     )

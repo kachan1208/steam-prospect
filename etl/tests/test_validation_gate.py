@@ -21,9 +21,11 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 ETL = REPO / "etl"
 sys.path.insert(0, str(ETL))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import duckdb  # noqa: E402
 import build_marts as bm  # noqa: E402
+from scratch_holder import hold  # noqa: E402  (a live build, as another process)
 
 
 def _make_mart(path: Path, counts: dict[str, int], meta: dict[str, str] | None = None) -> Path:
@@ -294,11 +296,19 @@ def test_light_guard_refuses_an_unreadable_file(tmp_path):
 
 
 # ------------------------------------------------------------------------------------
-# Scratch sweeping: scoped to this run + provably-dead leftovers
+# Scratch sweeping: every PROVABLY dead scratch goes at once; a live build's never does.
+#
+# "Provably" used to mean "old": another version's scratch after 12h, this version's after an
+# hour without writes. Since 2026-09-22 it means "no run holds its family's lock and no process
+# has it open" (see the Build scratch notes in build_marts.py and tests/test_run_lock.py). The
+# sweeper below is always called as a mart build holding the build lock — what main() does.
 # ------------------------------------------------------------------------------------
+BUILD = frozenset({"build"})
+
+
 def _make_scratch(data: Path, version: str, age_seconds: float) -> list[Path]:
-    """A full scratch set for `version` — .building, .building.wal and a .building.tmp/
-    spill dir with a file in it — aged by `age_seconds`."""
+    """A DEAD build's full scratch set for `version` — .building, .building.wal and a
+    .building.tmp/ spill dir with a file in it — aged by `age_seconds`."""
     base = data / f"prospect_{version}.duckdb.building"
     paths = [base, Path(str(base) + ".wal")]
     for p in paths:
@@ -314,59 +324,53 @@ def _make_scratch(data: Path, version: str, age_seconds: float) -> list[Path]:
     return paths
 
 
-def test_pre_build_sweep_removes_this_versions_dead_leftovers(tmp_path):
-    _make_scratch(tmp_path, "20260828", age_seconds=bm.SCRATCH_ACTIVE_SECONDS + 60)
-    bm._sweep_stale_scratch(tmp_path, "20260828")
+def test_pre_build_sweep_removes_dead_leftovers_of_every_version_at_once(tmp_path):
+    """Written a minute ago or three days ago, this version or another: nothing holds the build
+    lock but the sweeper and nothing has the files open, so it is all a dead build's, and a dead
+    build's 18GB spill is disk the next build needs NOW (the old rules kept it for 1-12h)."""
+    _make_scratch(tmp_path, "20260828", age_seconds=60)
+    _make_scratch(tmp_path, "20260827", age_seconds=60)
+    _make_scratch(tmp_path, "20260825", age_seconds=3 * 86400)
+    bm._sweep_stale_scratch(tmp_path, BUILD)
     assert list(tmp_path.glob("*building*")) == []
 
 
 def test_pre_build_sweep_spares_another_versions_live_spill(tmp_path):
-    """THE defect: the globs were unscoped, so a run's pre-build sweep rmtree'd EVERY
+    """THE 2026-08 defect: the globs were unscoped, so a run's pre-build sweep rmtree'd EVERY
     version's .building.tmp — including the 18GB spill of a build still running (the midday
-    --light run vs a nightly that overran)."""
-    live = _make_scratch(tmp_path, "20260827", age_seconds=30)      # written 30s ago
-    _make_scratch(tmp_path, "20260828", age_seconds=bm.SCRATCH_ACTIVE_SECONDS + 60)
+    --light run vs a nightly that overran). A live build is now recognised by what it HOLDS:
+    this one holds no run lock (an older build_marts) but has its scratch open, and has not
+    written for two days — it must survive, and carry on afterwards (hold() checks)."""
+    with hold(tmp_path, "prospect_20260827.duckdb.building", None) as live:
+        two_days = time.time() - 2 * 86400
+        for p in live:
+            if p.exists():
+                os.utime(p, (two_days, two_days))
+        _make_scratch(tmp_path, "20260828", age_seconds=60)
 
-    bm._sweep_stale_scratch(tmp_path, "20260828")
+        bm._sweep_stale_scratch(tmp_path, BUILD)
 
-    for p in live:
-        assert p.exists(), f"a live build's {p.name} was deleted out from under it"
-    assert not list(tmp_path.glob("prospect_20260828.duckdb.building*"))
+        assert live[0].exists() and live[2].is_dir(), "a live build's scratch was deleted"
+        assert not list(tmp_path.glob("prospect_20260828.duckdb.building*"))
 
 
 def test_pre_build_sweep_spares_this_versions_live_scratch_too(tmp_path):
-    """A concurrent build of the SAME version (a nightly that overran into the midday run)
-    is the worst case — same filename, so the old exclude-by-version escape did not help."""
-    live = _make_scratch(tmp_path, "20260828", age_seconds=60)
-    bm._sweep_stale_scratch(tmp_path, "20260828")
-    for p in live:
-        assert p.exists(), f"{p.name} belonged to a build that may still be running"
+    """A concurrent build of the SAME version is the worst case — same filename, so no rule
+    about versions can tell the two apart. Only the open handle can."""
+    with hold(tmp_path, "prospect_20260828.duckdb.building", None) as live:
+        bm._sweep_stale_scratch(tmp_path, BUILD)
+        assert live[0].exists() and live[2].is_dir(), f"{live[0].name} belongs to a live build"
 
 
-def test_pre_build_sweep_leaves_another_versions_recent_dead_scratch(tmp_path):
-    """Only OUR version's scratch is ours on sight; someone else's is reclaimed just for
-    being provably stale."""
-    _make_scratch(tmp_path, "20260827", age_seconds=bm.SCRATCH_ACTIVE_SECONDS + 60)
-    bm._sweep_stale_scratch(tmp_path, "20260828")
-    assert list(tmp_path.glob("prospect_20260827.duckdb.building*")), (
-        "another version's hours-old scratch is not yet provably dead"
-    )
-
-    _make_scratch(tmp_path, "20260826", age_seconds=bm.SCRATCH_STALE_HOURS * 3600 + 60)
-    bm._sweep_stale_scratch(tmp_path, "20260828")
-    assert not list(tmp_path.glob("prospect_20260826.duckdb.building*")), (
-        "scratch past the stale threshold must be reclaimed — disk is the scarcest resource"
-    )
-
-
-def test_sweep_never_touches_real_marts_or_the_sentiment_cache(tmp_path):
+def test_sweep_never_touches_real_marts_the_cache_or_the_locks(tmp_path):
     keep = [tmp_path / "prospect_20260828.duckdb", tmp_path / "current.duckdb",
-            tmp_path / "sentiment_cache.duckdb", tmp_path / "prospect_20260828.duckdb.wal"]
+            tmp_path / "sentiment_cache.duckdb", tmp_path / "prospect_20260828.duckdb.wal",
+            tmp_path / bm.BUILD_LOCK_NAME, tmp_path / bm.RESCORE_LOCK_NAME]
     for p in keep:
         p.write_bytes(b"precious")
-    _make_scratch(tmp_path, "20260828", age_seconds=bm.SCRATCH_ACTIVE_SECONDS + 60)
+    _make_scratch(tmp_path, "20260828", age_seconds=60)
 
-    bm._sweep_stale_scratch(tmp_path, "20260828")
+    bm._sweep_stale_scratch(tmp_path, BUILD)
     bm._sweep_own_scratch(tmp_path, "20260828")
     for p in keep:
         assert p.exists(), f"{p.name} is not build scratch and must never be swept"
@@ -385,7 +389,7 @@ def test_own_sweep_can_keep_the_artifact_but_never_the_spill(tmp_path):
 
 def test_own_sweep_ignores_other_versions_entirely(tmp_path):
     """main()'s finally sweep must only ever clean up after ITSELF."""
-    other = _make_scratch(tmp_path, "20260827", age_seconds=bm.SCRATCH_STALE_HOURS * 3600 + 60)
+    other = _make_scratch(tmp_path, "20260827", age_seconds=3 * 86400)
     _make_scratch(tmp_path, "20260828", age_seconds=1)
 
     bm._sweep_own_scratch(tmp_path, "20260828")

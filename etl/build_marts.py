@@ -11,13 +11,20 @@ SQLite lacks. The SQLite source is opened READ_ONLY and never mutated.
 Run:  python build_marts.py            (paths default relative to this file)
       python build_marts.py --source /path/to/steam_games.db --data-dir /path/to/data
 
-Exit codes (deploy/prospect-refresh.sh treats any non-zero as "keep the previous mart"):
+Safe to run beside other runs: it takes an exclusive lock on the data dir (a second run exits 3
+without touching anything) and pins every date to UTC.
+
+Exit codes (a scheduler should treat any non-zero as "keep the previous mart"):
   0  built, validated and swapped
   1  the build FINISHED but the pre-swap validation gate refused the swap. current.duckdb is
      untouched and the finished artifact is KEPT at data/prospect_<version>.duckdb.building
      (its spill dir is not) — see the remedy the run prints; none of the options need a rebuild.
+     (An unhandled exception also exits 1 — Python's own code — so read the log to tell them apart.)
   2  refused before doing any work (missing source DB, missing aspect model, --light guard,
-     contradictory flags such as --light with --fulltext build).
+     contradictory flags such as --light with --fulltext build, a garbled knob).
+  3  BUSY: another build_marts run holds this data dir's lock (a mart build, or a
+     --rescore-only/--repair-arms run for those modes) — nothing was touched. Retry later; a
+     scheduler can treat it as "skipped", not "failed".
 
 DEPLOY NOTE — the first build after the model-fingerprint change (2026-08). The sentiment
 cache is keyed on a hash of the scoring config, which includes a fingerprint of
@@ -38,12 +45,15 @@ build, so:
 from __future__ import annotations
 
 import argparse
+import errno
+import fcntl
 import gc
 import hashlib
 import json
 import multiprocessing
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -5376,20 +5386,34 @@ def _count_scored_reviews(con: duckdb.DuckDBPyConnection, data_dir: Path) -> int
 # Build scratch: `prospect_<version>.duckdb.building` (the in-progress build), its `.wal`,
 # and the `.building.tmp/` DuckDB spill directory (documented to reach 18GB on the droplet).
 # Disk is the droplet's scarcest resource, so a dead build must not leave any of it behind —
-# but the globs used to be UNSCOPED, so a run's pre-build sweep deleted EVERY version's
-# scratch, including the live 18GB spill of a concurrent build (the midday --light run vs a
-# nightly that overran, both writing the same-day version). Sweeping is now scoped to this
-# run's version plus other versions' provably-dead leftovers, and never touches scratch that
-# was written recently enough to belong to a build still in flight.
+# and a LIVE build's scratch must never be touched. Both rules used to be enforced by guesses:
+# the unscoped globs of 2026-08 deleted the 18GB spill of a concurrent build; the age rules that
+# replaced them (an hour without writes = dead, another version's scratch kept 12h) spared a
+# dead spill for an hour and would delete a live build's scratch the moment it went quiet; and a
+# second run of the SAME version, correctly refused by DuckDB's file lock, then deleted the live
+# build's .building, .wal and spill in its own finally — the live build died at its next spill
+# or at validate_mart, losing the night's mart (2026-09-22 review, reproduced with a holder
+# process).
+#
+# LIVENESS IS A LOCK NOW, NOT A GUESS (2026-09-22). Every run holds an exclusive flock in the
+# data dir for its whole life (_RunLock): mart builds (full and --light) BUILD_LOCK_NAME,
+# --rescore-only RESCORE_LOCK_NAME — its own, so it keeps running beside a build as designed —
+# and --repair-arms both, since it must run beside neither. A second run of a family exits
+# EXIT_BUSY before touching anything. A run holding a family's lock KNOWS every scratch of that
+# family is dead (nothing else of the family can be alive), so its pre-build sweep reclaims them
+# whatever their version or age; another family's scratch it reclaims only while it can take
+# that family's lock itself, for as long as the deletion takes. Two belts on top: a scratch
+# database another process still has OPEN is never swept (DuckDB's own POSIX lock on it — an
+# older build_marts that takes no flock, a `duckdb` shell on a kept artifact), and main()
+# connects to its scratch BEFORE the try/finally that sweeps it, so a refused connect cannot
+# reach that sweep at all.
 # --------------------------------------------------------------------------------------
-SCRATCH_STALE_HOURS = 12.0      # another version's scratch older than this is provably dead
-                                # (no build here has ever run longer than ~10h)
-SCRATCH_ACTIVE_SECONDS = 3600   # anything written more recently than this may belong to a
-                                # RUNNING build — never delete it, whatever version it is.
-                                # Generous on purpose: the cost of guessing "dead" wrongly is
-                                # a destroyed multi-hour build + its 18GB spill; the cost of
-                                # guessing "alive" wrongly is that we build into an existing
-                                # scratch file (every mart file DROPs before it CREATEs).
+BUILD_LOCK_NAME = ".build.lock"       # held by every mart build (full or --light) for its life
+RESCORE_LOCK_NAME = ".rescore.lock"   # held by --rescore-only; --repair-arms holds both
+LOCK_GRACE_SECONDS = 15.0             # a run waits this long for its own lock before exiting
+                                      # EXIT_BUSY: long enough to ride out another run's sweep
+                                      # borrowing it for a deletion, nowhere near a real build
+EXIT_BUSY = 3                         # another run holds the lock — see the module docstring
 _SCRATCH_RE = re.compile(r"^prospect_(.+?)\.duckdb\.building(\.wal|\.tmp)?$")
 
 # --rescore-only gets its OWN scratch name, outside the prospect_<version>.duckdb.building
@@ -5399,39 +5423,129 @@ _SCRATCH_RE = re.compile(r"^prospect_(.+?)\.duckdb\.building(\.wal|\.tmp)?$")
 #
 #   * the nightly derives prospect_<YYYYMMDD>.duckdb.building from the SAME UTC date, so a
 #     multi-day rescore and a nightly that starts under it open the IDENTICAL file (plus the
-#     GB-scale .building.tmp/ spill beside it), and prospect-refresh.sh has no guard that
-#     would stop the nightly from trying;
-#   * deploy/light-build-cron.sh sweeps `prospect_*.duckdb.building*` by age, and
-#     prospect-refresh.sh's post-success cleanup does it with no age test at all — both would
-#     happily delete a live rescore's spill;
+#     GB-scale .building.tmp/ spill beside it);
+#   * the old droplet cron sweeps globbed `prospect_*.duckdb.building*` — one by age, one with
+#     no age test at all — and would happily have deleted a live rescore's spill;
 #   * the only way to keep those apart used to be a build hold, which freezes ALL published
 #     data for the length of the rescore — precisely what --rescore-only exists to avoid.
 #
 # The name is deliberately NOT `prospect_*`: it cannot match those shell globs, and it cannot
 # match main()'s `prospect_*.duckdb` retention glob either, so no --keep value can ever see it
 # as a dated mart. Nothing in it is durable (progress lives in the sentiment cache), so it is
-# safe to reuse, recreate or delete between runs.
+# safe to recreate or delete between runs.
 #
 # LIFECYCLE — it must survive a multi-DAY rescore and still never linger forever:
 #   * a clean or crashed exit removes it in main()'s finally, like any other scratch;
-#   * a SIGKILL leaves it behind, so it is swept HERE instead, by every build_marts run
-#     (nightly + light build = at least twice a day) under the same age rules as the versioned
-#     scratch. Age is measured with _scratch_age_seconds, which looks one level INTO the spill
-#     dir — a scoring rescore writes there continuously and to the scratch file once a bucket
-#     (~16 min), so a live rescore is never mistaken for a dead one;
-#   * a rescore that resumes reuses the file if it is there, and DuckDB's own file lock is then
-#     what stops a SECOND rescore from starting on top of the first (see main()).
+#   * a SIGKILL leaves it behind; the next rescore-family run holds RESCORE_LOCK_NAME and so
+#     sweeps it as provably dead before it starts (it used to REUSE it, which made every stray
+#     REGULAR table in it a resume-breaker), and every mart build reclaims it too whenever it
+#     can borrow that lock — i.e. whenever no rescore is running;
+#   * two rescores can never share it: the second one exits EXIT_BUSY on the lock.
 RESCORE_SCRATCH_DB_NAME = "rescore_scratch.duckdb"
-# The pseudo-version this scratch is grouped under, so _sweep_stale_scratch's existing
-# own-version/other-version rules apply to it unchanged. Never a real mart version (those are
-# YYYYMMDD), which is what keeps "a rescore is running" and "a mart build is running" separate.
+# The pseudo-version this scratch is grouped under by _scratch_paths. Never a real mart version
+# (those are YYYYMMDD), which is what keeps "a rescore is running" and "a mart build is running"
+# separate: _scratch_family maps it to the rescore lock, every other version to the build lock.
 RESCORE_SCRATCH_VERSION = "rescore"
+
+
+class _RunLock:
+    """An exclusive, non-blocking flock on one file in the data dir, held for a run's whole life.
+
+    flock, not fcntl record locks: it belongs to the open file DESCRIPTION, so it is released
+    the instant the process dies (SIGKILL included — nothing stale to clean up), it conflicts
+    even between two descriptors of ONE process (the tests rely on that), and forked scoring
+    workers share it instead of dropping it. The file is never deleted — unlinking a lock file
+    while someone waits on it is how two processes both end up holding "the" lock — and it
+    carries the holder's pid and command line, which the refusal message quotes."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._fd: int | None = None
+
+    def acquire(self, wait_seconds: float = 0.0) -> bool:
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        deadline = time.monotonic() + max(0.0, wait_seconds)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                if e.errno not in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+                    os.close(fd)
+                    raise
+                if time.monotonic() >= deadline:
+                    os.close(fd)
+                    return False
+                time.sleep(0.25)
+        self._fd = fd
+        try:
+            os.ftruncate(fd, 0)
+            os.write(fd, (f"pid={os.getpid()} since="
+                          f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} "
+                          f"argv={' '.join(sys.argv[1:])}\n").encode("utf-8", "replace"))
+        except OSError:
+            pass  # informational only; the flock is the lock
+        return True
+
+    def holder(self) -> str:
+        try:
+            return self.path.read_text(encoding="utf-8", errors="replace").strip() or "?"
+        except OSError:
+            return "?"
+
+    def release(self) -> None:
+        if self._fd is not None:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self._fd)
+                self._fd = None
+
+
+def _scratch_family(version: str) -> str:
+    """'rescore' for the --rescore-only/--repair-arms scratch, 'build' for every mart build's."""
+    return "rescore" if version == RESCORE_SCRATCH_VERSION else "build"
+
+
+def _lock_path(data_dir: Path, family: str) -> Path:
+    return data_dir / (RESCORE_LOCK_NAME if family == "rescore" else BUILD_LOCK_NAME)
+
+
+def _scratch_db(data_dir: Path, version: str) -> Path:
+    """The scratch DATABASE of a version's group — the file a live run has open."""
+    if version == RESCORE_SCRATCH_VERSION:
+        return data_dir / RESCORE_SCRATCH_DB_NAME
+    return data_dir / f"prospect_{version}.duckdb.building"
+
+
+def _duckdb_file_in_use(path: Path) -> bool:
+    """True when another process holds DuckDB's lock on this database file. DuckDB takes a POSIX
+    record lock on every database file it opens (F_SETLK: F_WRLCK read-write, F_RDLCK
+    read-only), and a non-blocking write-lock probe conflicts with either. Conservative: a file
+    that exists but cannot be opened for the probe counts as in use — never delete what cannot
+    be proven idle. Never call it on a file THIS process has open through DuckDB: POSIX record
+    locks are per-process, so closing the probe's descriptor would drop DuckDB's own lock."""
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    else:
+        fcntl.lockf(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 def _scratch_paths(data_dir: Path) -> dict[str, list[Path]]:
     """Every build-scratch path in data_dir, grouped by the mart version it belongs to
     (--rescore-only's scratch groups under RESCORE_SCRATCH_VERSION). Never matches
-    prospect_*.duckdb, current.duckdb or the sentiment cache."""
+    prospect_*.duckdb, current.duckdb, the sentiment cache or the lock files."""
     groups: dict[str, list[Path]] = {}
     for p in sorted(data_dir.glob("prospect_*.duckdb.building*")):
         m = _SCRATCH_RE.match(p.name)
@@ -5454,10 +5568,9 @@ def _scratch_label(version: str) -> str:
 
 
 def _scratch_age_seconds(paths: list[Path]) -> float:
-    """Seconds since the newest write anywhere in this version's scratch. The spill dir is
-    checked one level deep: DuckDB writes its temp blocks INSIDE it, and on some filesystems
-    that never touches the directory's own mtime — reading only the dir would make a
-    furiously-spilling build look idle."""
+    """Seconds since the newest write anywhere in this version's scratch (log lines only — it no
+    longer decides anything). The spill dir is checked one level deep: DuckDB writes its temp
+    blocks INSIDE it, and on some filesystems that never touches the directory's own mtime."""
     newest = 0.0
     for p in paths:
         try:
@@ -5480,8 +5593,6 @@ def _remove_scratch(paths: list[Path], keep_artifact: bool = False) -> None:
     whatever database file it was given, so the rescore scratch's is rescore_scratch.duckdb.tmp
     and the narrower test silently left every byte of it on the disk (it is a directory, so the
     `is_file()` arm below skipped it too — a leak with no error and no log line)."""
-    import shutil
-
     for p in sorted(paths):
         is_spill = p.name.endswith(".tmp")
         if keep_artifact and not is_spill:
@@ -5498,37 +5609,53 @@ def _remove_scratch(paths: list[Path], keep_artifact: bool = False) -> None:
             print(f"[etl] WARNING: could not remove scratch {p.name}: {e}")
 
 
-def _sweep_stale_scratch(data_dir: Path, version: str) -> None:
-    """PRE-BUILD sweep. Removes this run's own leftovers (a crashed earlier run of the same
-    version) plus any OTHER version's scratch that is provably dead, and leaves everything
-    else strictly alone. A version whose scratch was touched within SCRATCH_ACTIVE_SECONDS
-    is treated as a build in flight and skipped loudly — if it really is running, DuckDB's
-    own file lock stops us from opening it a moment later, which is the correct outcome.
+def _sweep_stale_scratch(data_dir: Path, held: set[str] | frozenset[str]) -> None:
+    """PRE-BUILD sweep, run with the caller's run lock(s) held — `held` names the families it
+    holds ('build' and/or 'rescore'). Reclaims every scratch group it can PROVE dead and leaves
+    everything else strictly alone:
 
-    `version` is RESCORE_SCRATCH_VERSION for a --rescore-only run, so the rescore scratch is
-    "own" to a rescore (reclaimed once provably dead) and "another version's" to a mart build
-    (spared for SCRATCH_STALE_HOURS) — which is what lets a multi-day rescore and the nightly
-    share the data dir. It is also why every build_marts run is what stops a SIGKILLed
-    rescore's scratch from living on the disk forever: nothing else sweeps that name."""
+      * a group of a family the caller holds the lock for is dead by construction, whatever its
+        version or age — no other run of that family can be alive;
+      * a group of another family is dead only while the caller can take THAT family's lock
+        itself; it holds it for the deletion and releases it at once (a run of that family
+        starting meanwhile waits LOCK_GRACE_SECONDS for it rather than failing);
+      * a group whose scratch database another process still has OPEN is spared either way
+        (see _duckdb_file_in_use), and the connect a moment later refuses to build into it.
+
+    This is what makes a SIGKILLed build's 18GB spill disappear on the very next run instead of
+    after an hour, a validation-failure artifact live until the next build of any version, and
+    a live build's scratch untouchable however long it goes without writing."""
     for v, paths in sorted(_scratch_paths(data_dir).items()):
-        age = _scratch_age_seconds(paths)
-        if age < SCRATCH_ACTIVE_SECONDS:
-            print(f"[etl] NOT sweeping {_scratch_label(v)} — written "
-                  f"{age / 60:.0f} min ago, a build may still be using it "
-                  f"(remove it by hand if you know it is dead)")
-            continue
-        if v != version and age < SCRATCH_STALE_HOURS * 3600:
-            print(f"[etl] NOT sweeping {_scratch_label(v)} — another version's "
-                  f"scratch, only {age / 3600:.1f}h old (stale threshold "
-                  f"{SCRATCH_STALE_HOURS:.0f}h)")
-            continue
-        _remove_scratch(paths)
+        family = _scratch_family(v)
+        borrowed = None
+        if family not in held:
+            borrowed = _RunLock(_lock_path(data_dir, family))
+            if not borrowed.acquire():
+                print(f"[etl] NOT sweeping {_scratch_label(v)} — a {family} run holds "
+                      f"{_lock_path(data_dir, family).name} ({borrowed.holder()})")
+                continue
+        try:
+            db = _scratch_db(data_dir, v)
+            if _duckdb_file_in_use(db):
+                print(f"[etl] NOT sweeping {_scratch_label(v)} — {db.name} is open in another "
+                      "process that holds no run lock (a build_marts older than the lock? a "
+                      "duckdb shell?); remove it by hand once that process is gone")
+                continue
+            age = _scratch_age_seconds(paths)
+            print(f"[etl] sweeping dead scratch {_scratch_label(v)} (no run holds it; last "
+                  f"written {age / 3600:,.1f}h ago)")
+            _remove_scratch(paths)
+        finally:
+            if borrowed is not None:
+                borrowed.release()
 
 
 def _sweep_own_scratch(data_dir: Path, version: str, keep_artifact: bool = False) -> None:
-    """POST-BUILD sweep (main()'s finally): only THIS run's scratch, which is unambiguously
-    ours to clean up. On success only the `.wal`/`.tmp` leftovers still exist — the
-    `.building` file has already been os.replace()d into place."""
+    """POST-BUILD sweep (main()'s finally): only THIS run's scratch — its own version's group,
+    which the run lock proves nobody else's — and only once main()'s connect to that scratch
+    has SUCCEEDED (the connect is outside the try whose finally calls this). On success only the
+    `.wal`/`.tmp` leftovers still exist — the `.building` file has already been os.replace()d
+    into place."""
     _remove_scratch(_scratch_paths(data_dir).get(version, []), keep_artifact=keep_artifact)
 
 
@@ -5544,24 +5671,6 @@ def _refuse_publishing_rescore_scratch(building: Path) -> None:
             "(staging only, no marts) and must never be validated, landed as a versioned "
             "mart or swapped into current.duckdb"
         )
-
-
-def _live_mart_build_scratch(data_dir: Path) -> str | None:
-    """The scratch label of a MART build (a nightly or a --light run, never the rescore
-    family) written within SCRATCH_ACTIVE_SECONDS — i.e. one that may still be running — or
-    None. --repair-arms refuses to start beside one: it deletes and rewrites cache rows a
-    full build's read-back treats as settled, and a config wipe under it would be fed rows
-    scored under the previous config. The other direction is enforced by the cron guards
-    (deploy/prospect-refresh.sh and deploy/light-build-cron.sh skip themselves while any
-    build_marts that is not a --rescore-only run is alive), and two rescore-family runs are
-    kept apart by DuckDB's file lock on the scratch they share. Same liveness test as
-    _sweep_stale_scratch, so a scratch this refuses is one the sweep would also have spared."""
-    for v, paths in sorted(_scratch_paths(data_dir).items()):
-        if v == RESCORE_SCRATCH_VERSION:
-            continue
-        if _scratch_age_seconds(paths) < SCRATCH_ACTIVE_SECONDS:
-            return _scratch_label(v)
-    return None
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -5807,6 +5916,10 @@ def main() -> int:
         if err is not None:
             print(f"ERROR: {err}", file=sys.stderr)
             return 2
+        if not current.exists():
+            print("ERROR: --light needs a published mart to copy the heavy tables from "
+                  f"({current} missing) — run a full build first.", file=sys.stderr)
+            return 2
 
     # --fulltext is a FULL build's choice. --light never scores, so it has nothing to build the
     # full-text marts from and always copies: `build` contradicts it outright (`copy`/`auto` are
@@ -5822,37 +5935,56 @@ def main() -> int:
               f"({current} missing) — run a full build first.", file=sys.stderr)
         return 2
 
+    # THE RUN LOCK(S) — see the Build scratch notes above _RunLock. Taken after every refusal
+    # that needs no lock (so a refused run never even creates the lock file) and before anything
+    # that touches the data dir. Held until this function returns; the kernel drops them if the
+    # process dies any other way.
+    families = (["build", "rescore"] if args.repair_arms
+                else ["rescore"] if args.rescore_only else ["build"])
+    locks: list[_RunLock] = []
+    for family in families:
+        lock = _RunLock(_lock_path(data_dir, family))
+        if not lock.acquire(LOCK_GRACE_SECONDS):
+            who = ("a mart build (nightly, --light or --repair-arms)" if family == "build"
+                   else "a --rescore-only or --repair-arms run")
+            print(f"[etl] BUSY: {who} already holds {lock.path} ({lock.holder()}). This run did "
+                  f"nothing and touched nothing — exit {EXIT_BUSY}; run it again once that one "
+                  "is done.", file=sys.stderr)
+            for held in reversed(locks):
+                held.release()
+            return EXIT_BUSY
+        locks.append(lock)
+    try:
+        return _build(args, source_db, data_dir, mart_version, frozenset(families))
+    finally:
+        for lock in reversed(locks):
+            lock.release()
+
+
+def _build(args: argparse.Namespace, source_db: str, data_dir: Path, mart_version: str,
+           held: frozenset[str]) -> int:
+    """Everything main() does once it holds its run lock(s): sweep, build, validate, swap. Split out of main() only so the locks' try/finally wraps all of it."""
+    versioned = data_dir / f"prospect_{mart_version}.duckdb"
+    current = data_dir / "current.duckdb"
+
     # Build into a scratch file and only os.replace() it over the versioned name once the
     # build succeeds. A SAME-DAY rerun otherwise deletes and rebuilds the very file
     # current.duckdb points at, so the serving app and the ETL fight over a DuckDB file
     # lock — any app (re)start mid-build then crash-loops on "Conflicting lock is held"
-    # (took the site down on 2026-08-04 after several manual same-day rebuilds). The
-    # nightly never hits this only because each day gets a fresh filename; this makes
-    # reruns safe regardless of restart timing. A failed/killed run leaves stale .building
-    # scratch (the file, its .wal, an up-to-18GB .tmp spill dir) — swept here before the
-    # build (scoped: this version plus provably-dead leftovers, never a live build's spill)
-    # and again in the try/finally below, so a failed run cleans up after itself.
+    # (took the site down on 2026-08-04 after several manual same-day rebuilds). A failed or
+    # killed run leaves stale .building scratch (the file, its .wal, an up-to-18GB .tmp spill
+    # dir) — swept here before the build, as provably dead because no run holds its lock (see
+    # _sweep_stale_scratch), and again in the try/finally below, so a failed run cleans up
+    # after itself.
     #
-    # --rescore-only builds into RESCORE_SCRATCH_DB_NAME instead, under its own pseudo-version.
-    # It writes no mart, so naming its scratch after the date's mart made a multi-day rescore
-    # and the nightly fight over one filename (and one spill dir) with nothing but a build hold
-    # — i.e. a total publishing freeze — to keep them apart. See RESCORE_SCRATCH_DB_NAME.
-    #
-    # --repair-arms shares that scratch and its pseudo-version: it too writes only the sentiment
-    # cache, may run for hours, and must not be swept by a nightly's stale-scratch sweep. Unlike
-    # a rescore it must never run BESIDE a mart build, which is checked right after the sweep
-    # on the sweep's own liveness test (see _live_mart_build_scratch).
+    # --rescore-only builds into RESCORE_SCRATCH_DB_NAME instead, under its own pseudo-version
+    # and its own lock, so a multi-day rescore and the nightly never share a filename, a spill
+    # dir or a lock. See RESCORE_SCRATCH_DB_NAME. --repair-arms shares that scratch; it holds
+    # the build lock as well, which is what keeps it from running beside any mart build.
     cache_only = args.rescore_only or args.repair_arms
     scratch_version = RESCORE_SCRATCH_VERSION if cache_only else mart_version
-    _sweep_stale_scratch(data_dir, scratch_version)
-    if args.repair_arms:
-        live = _live_mart_build_scratch(data_dir)
-        if live is not None:
-            print(f"ERROR: --repair-arms must not run beside a mart build, and {live} was written "
-                  f"less than {SCRATCH_ACTIVE_SECONDS / 60:.0f} min ago — a nightly or --light "
-                  "build may be in flight. Wait for it to finish (or remove that scratch by hand "
-                  "if you know it is dead).", file=sys.stderr)
-            return 2
+    _sweep_stale_scratch(data_dir, held)
+
     building = (data_dir / RESCORE_SCRATCH_DB_NAME if cache_only
                 else data_dir / f"prospect_{mart_version}.duckdb.building")
 
@@ -5871,24 +6003,21 @@ def main() -> int:
     # finished artifact is then kept on disk (see the remedy printed below). Every other
     # exit — success, crash, source error — cleans its scratch up as before.
     validation_failed = False
-    # Resuming is the NORMAL case for a multi-night rescore, so the scratch it opens is often
-    # the one a SIGKILL left behind minutes ago — the sweep above spares those on purpose (it
-    # cannot tell a killed run's file from a running one's). Reusing it is safe and REQUIRES NO
-    # CLEANUP: nothing in this file is durable (progress lives in the sentiment cache, staging
-    # is rebuilt from src every run), and every working table the scoring path creates is either
-    # TEMP or DROP-IF-EXISTS'd immediately before it is created — keep it that way, because a
-    # plain CREATE TABLE added there would turn every resume into "Table with name X already
-    # exists". test_a_killed_rescore_resumes_on_the_same_scratch pins exactly that.
-    #
-    # Not deleting the file first is also deliberate: DuckDB's file lock refusing this connect
-    # is the ONLY thing that keeps a second rescore off a live one's scratch, and unlinking the
-    # name would hand both processes their own inode and let them both run.
-    reused_scratch = cache_only and building.exists()
+    # CONNECT OUTSIDE THE try/finally THAT SWEEPS (2026-09-22). This used to be the first line
+    # INSIDE it: a run refused here by DuckDB's file lock — i.e. one whose scratch belongs to a
+    # LIVE build — then ran that finally and deleted the live build's .building, .wal and spill.
+    # The run lock makes that unreachable for any build_marts that takes it; this keeps it
+    # unreachable for one that does not (the sweep above spared its open scratch too).
     try:
-      con = _connect(str(building))
-      if reused_scratch:
-          print(f"[etl] reusing the scratch {building.name} left by a previous run "
-                "(nothing in it is durable — see the rescore-scratch notes)")
+        con = _connect(str(building))
+    except duckdb.IOException as e:
+        if "lock" not in str(e).lower():
+            raise
+        print(f"[etl] BUSY: {building.name} is open in another process that holds no run lock "
+              f"({e}). This run did nothing and touched nothing — exit {EXIT_BUSY}.",
+              file=sys.stderr)
+        return EXIT_BUSY
+    try:
       try:
         # On memory-constrained hosts (e.g. a small Droplet) cap DuckDB's memory so it spills
         # to its on-disk temp dir instead of being OOM-killed. Env-driven; unset = default.
@@ -6102,7 +6231,8 @@ def main() -> int:
                   f"                    ln -sfn {versioned.name} {current}\n"
                   f"          discard : rm -rf {building} {building}.wal\n"
                   f"        (--skip-validation swaps unconditionally but REBUILDS from scratch;\n"
-                  f"         the next build of version {mart_version} sweeps this file.)",
+                  f"         the NEXT BUILD OF ANY VERSION sweeps this file as dead scratch —\n"
+                  f"         inspect or ship it before then.)",
                   file=sys.stderr)
               return 1
 

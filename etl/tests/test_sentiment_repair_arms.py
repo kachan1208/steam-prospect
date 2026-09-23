@@ -29,9 +29,11 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 ETL = REPO / "etl"
 sys.path.insert(0, str(ETL))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import duckdb  # noqa: E402
 import build_marts as bm  # noqa: E402
+from scratch_holder import hold, listing  # noqa: E402  (a live build; lock-free listing)
 from test_full_build_smoke import _run, build_source  # noqa: E402  (one fixture source, not two)
 from test_sentiment_wipe_bucketing import (  # noqa: E402
     N_BUCKETS, POOL_IDS, _buckets_of, _cache, _fresh_con, _score)
@@ -428,12 +430,13 @@ def test_repair_arms_refuses_flags_it_cannot_honour(tmp_path, monkeypatch):
     )
 
     monkeypatch.setenv("PROSPECT_SENTIMENT_CACHE", "on")
-    live = data / "prospect_20990101.duckdb.building"    # a mart build, written just now
-    live.write_bytes(b"")
-    assert _run(base) == 2
-    assert sorted(p.name for p in data.iterdir()) == [live.name], (
-        "a live build's scratch must be neither swept nor built beside"
-    )
+    monkeypatch.setattr(bm, "LOCK_GRACE_SECONDS", 0.3)
+    with hold(data, "prospect_20990101.duckdb.building", bm.BUILD_LOCK_NAME) as (live, _w, spill):
+        assert _run(base) == bm.EXIT_BUSY
+        assert live.exists() and spill.is_dir(), (
+            "a live build's scratch must be neither swept nor built beside"
+        )
+        assert not (data / bm.SENTIMENT_CACHE_DB_NAME).exists(), "refused before the cache"
 
 
 def test_repair_arms_end_to_end_repairs_the_cache_and_publishes_nothing(tmp_path, monkeypatch,
@@ -478,7 +481,7 @@ def test_repair_arms_end_to_end_repairs_the_cache_and_publishes_nothing(tmp_path
                          ).fetchone() == (4, 1)
     finally:
         c.close()
-    assert sorted(p.name for p in data.iterdir()) == [bm.SENTIMENT_CACHE_DB_NAME], (
+    assert listing(data) == [bm.SENTIMENT_CACHE_DB_NAME], (
         "--repair-arms must leave only the cache behind"
     )
 
@@ -487,4 +490,4 @@ def test_repair_arms_end_to_end_repairs_the_cache_and_publishes_nothing(tmp_path
     out = capsys.readouterr().out
     assert "the previous pass is complete" in out
     assert _summary(out)[:3] == (1200, 0, 0), out
-    assert sorted(p.name for p in data.iterdir()) == [bm.SENTIMENT_CACHE_DB_NAME]
+    assert listing(data) == [bm.SENTIMENT_CACHE_DB_NAME]
