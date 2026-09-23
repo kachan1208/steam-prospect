@@ -1,7 +1,12 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 
 import { Card } from "../components/ui/Card";
+import { SentinelTag } from "../components/ui/SentinelTag";
+import { request, useMarketBenchmarks } from "../lib/api";
+import { useDataAge } from "../lib/dataAge";
+import { fmtCompact, fmtInt } from "../lib/format";
 import { CSS_VAR } from "../lib/palette";
 import { usePageTitle } from "../lib/usePageTitle";
 
@@ -16,22 +21,65 @@ const MCP_URL = `${window.location.origin}/mcp/`;
 // drifted badly once already (it claimed 15 tools while the server had 25, and a ~142K catalog
 // while the mart held ~175K) — that is what these comments exist to prevent.
 
-// KEEP IN SYNC with mcp/prospect_mcp.py — the number of @mcp.tool() decorators in that file.
-// Verify with: grep -c '@mcp.tool()' mcp/prospect_mcp.py
-// Cross-check against the deployed server: tools/list over POST {origin}/mcp/.
-// The same constant is stated on /chat (web/src/pages/Chat.tsx) — change both together.
-const MCP_TOOL_COUNT = 25;
+// KEEP IN SYNC with mcp/prospect_mcp.py — the number of @_tool-decorated functions there.
+// Verify with: grep -c '^@_tool' mcp/prospect_mcp.py   (27 on 2026-09-23: niche_games and
+// methodology joined the 25). Cross-check against the deployed server: tools/list over POST
+// {origin}/mcp/. /chat (web/src/pages/Chat.tsx) states the same count — change both together.
+const MCP_TOOL_COUNT = 27;
 
-// Corpus size and freshness. Source: GET /api/refresh/history (the Data log's own feed) for
-// the mart build these were read from. Deliberately stated as "as of <mart>" rather than as a
-// bare number, so a stale figure is visibly stale instead of quietly wrong. Re-read with:
-//   curl -s {origin}/api/refresh/history?limit=1
-//   curl -s {origin}/api/games/search?limit=1   (the `total` = games searchable in mart_game)
-const CORPUS_AS_OF = "mart 20260831";
-const CORPUS_GAMES = "~175K";        // 174,705 scraped apps / 174,265 searchable in mart_game
-const CORPUS_REVIEWS = "~52M";       // 51,965,530 sampled reviews
-const CORPUS_ARTICLES = "~1.1M";     // 1,128,930 press articles
-const CORPUS_OUTLETS = 6;            // distinct `source` values in the press corpus
+// Press outlets named in the methodology below (distinct `source` values in the corpus).
+const CORPUS_OUTLETS = 6;
+
+// Corpus SIZE is no longer a constant here (2026-09-23): the page stated "~52M reviews as of
+// mart 20260831" long after the catalog passed 63M. The figures now come from the API at
+// read time — see CorpusLine below — and when the API can't say, the page says nothing
+// numeric rather than something stale.
+
+/** The refresh ledger's per-run counts (GET /api/refresh/history — the Data log's feed). */
+type RunCounts = { games?: number; reviews?: number; articles?: number };
+
+/** "As of Sep 23, 2026: 181,140 games in the catalog, 63.1M reviews and 1.1M press articles"
+ * — the catalog size from /api/market/benchmarks, the review and article counts from the
+ * latest refresh that recorded them, the date from /api/health. Nothing numeric when none
+ * of it loads: a stale figure is worse than no figure. */
+function CorpusLine() {
+  const age = useDataAge();
+  const bench = useMarketBenchmarks();
+  const history = useQuery({
+    queryKey: ["refresh-history"],
+    queryFn: ({ signal }) => request<{ runs: { result: string; counts?: RunCounts }[] }>("/refresh/history", { signal }),
+    staleTime: 5 * 60_000,
+  });
+  const counts = history.data?.runs.find((r) => r.counts && (r.counts.reviews != null || r.counts.articles != null))?.counts;
+  const games = bench.data?.computed.n_games_total ?? counts?.games ?? null;
+  const parts = [
+    games != null ? `${fmtInt(games)} games in the catalog` : null,
+    counts?.reviews != null ? `${fmtCompact(counts.reviews)} reviews` : null,
+    counts?.articles != null ? `${fmtCompact(counts.articles)} press articles` : null,
+  ].filter((p): p is string => p !== null);
+  if (parts.length === 0) {
+    return (
+      <>
+        The current size of the data is in the <a href="#datalog" className="text-brand hover:underline">Data log</a>.
+      </>
+    );
+  }
+  const list = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+  return (
+    <>
+      {age.asOfLabel ? (
+        <>
+          As of <span className="text-ink-primary">{age.asOfLabel}</span>:{" "}
+        </>
+      ) : (
+        <>
+          <SentinelTag>data date unknown</SentinelTag>{" "}
+        </>
+      )}
+      {list} — read live from the API, so this line is as current as the data it describes.
+    </>
+  );
+}
 
 // The build the worked example in #opportunity-score was read from. Stamped next to the
 // numbers so a stale example announces itself instead of reading as current.
@@ -184,7 +232,7 @@ function FormulaFlow() {
       </div>
       <span aria-hidden className="self-center text-lg text-ink-muted">=</span>
       <div className="self-center rounded-card border border-brand bg-brand-tint px-3 py-2 text-center">
-        <div className="text-xs font-semibold text-brand">Opportunity v2</div>
+        <div className="text-xs font-semibold text-brand">Opportunity score</div>
       </div>
     </div>
   );
@@ -270,7 +318,7 @@ const TOC: { group: string; items: [string, string][] }[] = [
       ["radar", "Radar"],
       ["niches", "Niche Finder"],
       ["opportunity-score", "Reading the Opportunity score"],
-      ["games", "Games & teardown"],
+      ["games", "Games, teardown & Compare"],
       ["studios", "Studios"],
       ["timing", "Launch & Timing"],
       ["watchlist", "Watchlist"],
@@ -315,8 +363,23 @@ function TableOfContents() {
 
 // ---- page -------------------------------------------------------------------------------
 
+/** "Data as of Sep 23, 2026 · under a day old" — the footer's own readout, so the guide never
+ * points at a control that no longer exists (it used to send readers to hover a "footer
+ * health dot", removed in the 2026-09-22 shell rework). */
+function DataAsOf() {
+  const age = useDataAge();
+  if (!age.asOfLabel) return <span>The footer shows how old the data is on every page</span>;
+  return (
+    <span>
+      Data as of <span className="text-ink-secondary">{age.asOfLabel}</span>
+      {age.ageLabel ? ` · ${age.ageLabel}` : ""} — the footer shows the same on every page
+    </span>
+  );
+}
+
 export default function Docs() {
   usePageTitle("Docs");
+  const age = useDataAge();
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-8 pb-20">
       {/* Header */}
@@ -335,9 +398,7 @@ export default function Docs() {
             </a>
           </span>
           <span aria-hidden>·</span>
-          <span>Data refreshes nightly</span>
-          <span aria-hidden>·</span>
-          <span>The footer health dot shows the exact "data as of" build</span>
+          <DataAsOf />
         </div>
       </div>
 
@@ -423,43 +484,46 @@ export default function Docs() {
 
       <Section id="first-10" kicker="Start here" title="Your first 10 minutes">
         <Card>
+          {/* Starts on the screens, not the connector (2026-09-23): the old first step was
+              "Connect Prospect to your Claude", which sent a first-time reader off-site before
+              they had seen a single chart. */}
           <ol className="flex flex-col gap-3 text-sm leading-relaxed text-ink-secondary">
             {[
               <>
-                <span className="font-semibold text-ink-primary">Connect Prospect to your Claude.</span> Follow{" "}
-                <Link to="/chat" className="font-medium text-brand hover:underline">MCP</Link> — one command.
-                The next two steps happen there, in plain language.
+                <span className="font-semibold text-ink-primary">Start on the Radar.</span>{" "}
+                <Link to="/radar" className="font-medium text-brand hover:underline">Radar</Link> plots every niche on
+                its verdict rings — Enter now in the middle, then Watch, Emerging, Crowded, Declining. Pick a niche near
+                the middle that you could actually build, and read the reason it rings where it does.
               </>,
               <>
-                <span className="font-semibold text-ink-primary">Find a niche.</span> Ask{" "}
-                <em>"what are the best under-served Steam niches right now?"</em> — that runs{" "}
-                <Code>find_niches</Code>, ranking every tag and genre by opportunity (demand vs. competition vs. how
-                beatable the incumbents look). Follow up on any one of them for its saturation trend, revenue
-                histogram and top games.
+                <span className="font-semibold text-ink-primary">Open its niche page — and argue with it.</span> Read
+                the <span className="text-ink-primary">“Read this first”</span> flags before the numbers: a shrinking
+                pipeline, newcomers who under-earn the back catalog, winner-take-most revenue, multiplayer dependence.
+                Then the demand trend against the release pipeline, and what the typical (median) game earns — not the
+                top 10%.
               </>,
               <>
-                <span className="font-semibold text-ink-primary">Price the payoff.</span> Ask what a game with that
-                niche's median review count would earn at your price — <Code>estimate_revenue</Code> returns an
-                owners and revenue <em>range</em>, never a single fake-precise number.
+                <span className="font-semibold text-ink-primary">Study a game that works there.</span> Open one of the
+                niche's top games (indie games first) and read its estimated revenue <em>range</em>, how fast its
+                reviews arrived after launch, and <span className="text-ink-primary">What reviews praise / pan</span>{" "}
+                — what its own players say, against genre peers.
               </>,
               <>
-                <span className="font-semibold text-ink-primary">Study a hit.</span> Search a comparable game in{" "}
-                <Link to="/games" className="font-medium text-brand hover:underline">Games</Link>, open it, and read{" "}
-                <span className="text-ink-primary">What reviews praise / pan</span> — what its own players praise,
-                measured against genre peers. Flip the page's{" "}
-                <span className="text-ink-primary">Simple / Detailed</span> control to Detailed for the charts and the
-                press footprint.
+                <span className="font-semibold text-ink-primary">Put it beside its rivals.</span> Add two or three
+                comparables to{" "}
+                <Link to="/compare" className="font-medium text-brand hover:underline">Compare</Link> and switch the
+                chart to <span className="text-ink-primary">Since launch</span> to see how each one started.
               </>,
               <>
                 <span className="font-semibold text-ink-primary">Time it.</span> Check{" "}
-                <Link to="/timing" className="font-medium text-brand hover:underline">Launch &amp; Timing</Link> to see
-                whether your genre rewards a big launch week or a sustained slow burn.
+                <Link to="/timing" className="font-medium text-brand hover:underline">Launch &amp; Timing</Link> for when
+                your genre's players buy, how crowded each month is, and which months are Steam sale season.
               </>,
               <>
-                <span className="font-semibold text-ink-primary">Take it into your own Claude.</span> Optionally connect
-                the{" "}
-                <a href="#mcp" className="font-medium text-brand hover:underline">MCP server</a> and just ask follow-up
-                questions in plain language.
+                <span className="font-semibold text-ink-primary">Then, if you like, ask your own Claude.</span> The{" "}
+                <a href="#mcp" className="font-medium text-brand hover:underline">MCP server</a> answers follow-up
+                questions in plain language over the same data — <Code>estimate_revenue</Code> prices a payoff as a
+                range, never one fake-precise number.
               </>,
             ].map((step, i) => (
               <li key={i} className="flex gap-3">
@@ -488,9 +552,17 @@ export default function Docs() {
             innermost, then Watch, Emerging, Crowded, Declining — so distance from the middle IS the call, and the
             shape of the market reads before any number does. The sector is the tag tier; inside a ring, nearer the
             centre means a higher opportunity rank; the number in a dot is its rank in the list beside the board.
-            Filter by class, restrict to <span className="text-ink-primary">solo-friendly</span> niches, or cap the
-            board to the top N. Click a ring to zoom it;{" "}
+            Filter by class or by solo viability, or cap the board to the top N. Click a ring to zoom it;{" "}
             <span className="text-ink-primary">Open Niche Finder →</span> takes the same cut into the sortable table.
+          </p>
+          <p>
+            <span className="text-ink-primary">The rings, first match wins:</span> Emerging (no comparable demand
+            base yet) → Enter now (demand up 40%+ over 24 months while releases grow no more than 15% a year) →
+            Declining (demand down 30% or more) → Crowded (the top 5% of games take more than 85% of the revenue, or
+            releases growing faster than 15% a year without demand keeping up) → Watch.{" "}
+            <span className="text-ink-primary">A winner-take-most niche never rings Enter now:</span> even with demand
+            surging it rings Watch — “demand surging, but winner-take-most revenue” — because a surge that flows to
+            a few hits doesn't reach a newcomer.
           </p>
           {/* The old copy here read "the same evidence, on the same thresholds ... it is why the
               board and the score can't disagree about direction". The first half is true of the
@@ -529,17 +601,18 @@ export default function Docs() {
             Ranks every Steam community tag and genre by the{" "}
             <span className="text-ink-primary">Opportunity score</span> (explained in full below) and labels each row
             with the <span className="text-ink-primary">Radar's verdict</span> — the same words, rules and two axes as
-            the board (demand trend over 24 months, releases year-over-year) — alongside the evidence you should
-            check before believing it: how many games compete there, what the successful ones earn (P90 revenue), how
-            big the total audience is (owners), and <span className="text-ink-primary">who is actually playing right
-            now</span> (live concurrent players, updated nightly, with a 7-day trend). Click any niche for the deep
-            dive, in the order the page actually presents it: the Radar's dossier (verdict, Demand 24m, Releases YoY,
-            P90 revenue, games — the board's own numbers at the board's own cut, with the score as the small rank
-            number the board's tooltip shows), the <span className="text-ink-primary">“Read this first”</span> flags
-            that argue against it, demand-vs-pipeline by year, then the niche's top games. Switching that page to{" "}
-            <span className="text-ink-primary">Detailed</span> adds live-player history, revenue
-            spread, hit rates, the saturation trend, what players praise and complain about, press coverage, the
-            revenue and price distributions, and the full games table.
+            the board (the demand trend over 24 months, releases year over year) — alongside the evidence you should
+            check before believing it: how many games compete there, what the successful ones earn (top-10%
+            revenue), how big the total audience is (owners), and <span className="text-ink-primary">who is actually
+            playing right now</span> (players now, a nightly sample, with its 7-day trend read against Steam's). Click
+            any niche for the deep dive, in the order the page actually presents it: the Radar's dossier (verdict,
+            demand trend, releases year over year, top-10% revenue, games — the board's own numbers at the board's own
+            cut, with the score as the small rank number the board's tooltip shows), the{" "}
+            <span className="text-ink-primary">“Read this first”</span> flags that argue against it, demand against
+            the release pipeline by year, then the niche's top games. Switching that page to{" "}
+            <span className="text-ink-primary">Detailed</span> adds player history, revenue spread, the share of games
+            earning $200K+, the saturation trend, what players praise and complain about, press coverage, the revenue
+            and price distributions, and the full games table.
           </p>
           <ReadBox>
             Defaults are opinionated on purpose: the <span className="text-ink-primary">last-24-months</span> window
@@ -547,7 +620,11 @@ export default function Docs() {
             <span className="text-ink-primary">≥50-review floor</span> (enough of a track record to estimate from), and
             only <span className="text-ink-primary">buildable tiers</span> (micro-genres and themes — “Open World” is a
             container, not a plan). Window and floor are the two controls at the top; between them they select the six
-            cuts the mart materialises. Every column header has a ⓘ hover explaining how to read it.
+            cuts the mart materialises. Each column header carries its definition — what the number means and how
+            it's computed — so no figure on the table goes unexplained.{" "}
+            <span className="text-ink-primary">Revenue figures are paid games only</span>: a niche needs 30 or more
+            paid games in the cut before its revenue statistics are shown at all; below that they are withheld, not
+            guessed.
           </ReadBox>
         </Feature>
       </Section>
@@ -644,19 +721,34 @@ export default function Docs() {
           question="When should I launch, and does the calendar even matter?"
         >
           <p>
-            Three reads on release timing. <span className="text-ink-primary">Launch shape by genre</span> shows what
-            share of a genre's first-year reviews land in each window after launch — a tall left side means{" "}
-            <span className="text-ink-primary">front-loaded</span> (the launch-week splash is everything), a flatter
-            spread means <span className="text-ink-primary">slow-burn</span> (sustained marketing and updates keep
-            paying off). <span className="text-ink-primary">Seasonality</span> is a month × weekday heatmap of median
-            revenue plus a launch-weekday bar. <span className="text-ink-primary">Price distribution</span> shows what
-            paid games in a genre actually charge.
+            <span className="text-ink-primary">Best launch windows</span> scores each month as{" "}
+            <span className="text-ink-primary">buying minus crowding</span>: the month's share of a year's
+            post-launch reviews against an average month (8.33%), minus its releases against an average month's. Hover
+            a bar (or open its ⓘ) for the two parts and the subtraction. When the best months fall in Steam's sale
+            weeks — Nov and Dec usually do — the card says so first: much of that buying is discounted back catalog,
+            a launch competes with every hit on sale, and shoppers expect a discount. Pick a genre and the card tells
+            you whether it changed the answer at all (Indie, for one, lands on the whole catalog's months).
+          </p>
+          <p>
+            Below it: <span className="text-ink-primary">when players buy</span> (each month's share of the year),{" "}
+            <span className="text-ink-primary">how crowded each window is</span> (all releases, then the ones that
+            reached $200K+, as two charts on one month axis), with Steam's Next Fest and seasonal sales marked under
+            every month chart (approximate — Valve sets the dates each year);{" "}
+            <span className="text-ink-primary">release day × month</span>, a heatmap of median revenue or release
+            counts with its value scale printed; <span className="text-ink-primary">how long a launch pays out</span>{" "}
+            (the share of a game's first two years of reviews landing in each month since launch);{" "}
+            <span className="text-ink-primary">launch shape by genre</span> — a tall left side means front-loaded
+            (the launch week is everything), a flatter spread means slow-burn (updates and marketing keep paying); and
+            the <span className="text-ink-primary">price distribution</span>, drawn to scale in $2.50 bands, with its
+            percentiles in plain words (“cheapest 10%: $1.99 or less”).
           </p>
           <ReadBox>
             Timing effects are usually <span className="text-ink-primary">mild</span> — treat this as a tiebreaker, not
             a strategy. It's also correlational: a strong month often reflects <em>what kind</em> of game usually
-            launches then (big titles cluster in fall), not the date itself. The launch-shape read is the more
-            actionable one: it tells you whether to bet your marketing budget on week one or spread it out.
+            launches then (big titles cluster in the fall), not the date itself. Reviews stand in for sales
+            throughout, and launches are dated by their first public day — an Early Access game counts from the day
+            it went on sale. The launch-shape read is the more actionable one: it tells you whether to bet your
+            marketing budget on week one or spread it out.
           </ReadBox>
         </Feature>
       </Section>
@@ -670,9 +762,20 @@ export default function Docs() {
           question="Where does a specific title or competitor actually stand?"
         >
           <p>
-            Search the catalog by name, genre, or exact tag to profile any title. Sort by owners, reviews, rating, or
-            estimated revenue. Tags are case- and hyphenation-sensitive (Steam treats "Rogue-like" and "Roguelike" as
-            different tags), so use the tag chips under the search bar to pick exact strings that exist in your results.
+            Search the catalog by name, genre or tag to profile any title; sort by reviews, positive reviews,
+            estimated revenue, players now and more. The list opens on{" "}
+            <span className="text-ink-primary">indie games</span> — the games Steam flags Indie — because Counter-Strike
+            and Dota 2 are nobody's comparables; one click on <span className="text-ink-primary">All games</span>{" "}
+            shows everything, and the line under the filters says which view you're on and how many games have no
+            indie flag yet (those are left out, not guessed).
+          </p>
+          <p>
+            Tag spelling twins are merged: “Rogue-like” is “Roguelike”, “Rogue-lite” is “Roguelite”, and the same for
+            Base-Building, Puzzle-Platformer, e-sports and Mouse only, plus plural renames (Vampire, Dog, Dwarf, Elf,
+            Fox, Assassin). Search either spelling and you land on the one canonical tag. An Early Access graduate
+            reads “EA Nov 2017 → 1.0 Jan 2019”; a date inferred from a game's first review reads “~Jun 2015”; and a
+            game whose price we don't know says{" "}
+            <span className="text-ink-primary">Price unknown</span> rather than “Free”.
           </p>
         </Feature>
 
@@ -688,9 +791,9 @@ export default function Docs() {
             reads: the estimated revenue range, owners, reviews, rating and live players; review velocity since launch;
             price history; the niches the game belongs to; and{" "}
             <span className="text-ink-primary">What reviews praise / pan</span>, the teardown.{" "}
-            <span className="text-ink-primary">Detailed</span> adds the{" "}
-            <span className="text-ink-primary">percentile-vs-genre</span> read (where it ranks among genre peers on
-            revenue, reviews and owners), review and momentum timelines, its genre's launch shape and channel mix, a
+            <span className="text-ink-primary">Detailed</span> adds its{" "}
+            <span className="text-ink-primary">rank vs genre</span> (where it ranks among genre peers on revenue,
+            reviews and owners), review and momentum timelines, its genre's launch shape and channel mix, a
             language split, playtime, a <span className="text-ink-primary">comparables</span> table ranked by tag
             overlap, and the press footprint.
           </p>
@@ -710,6 +813,25 @@ export default function Docs() {
             games carry a caveat.
           </ReadBox>
         </Feature>
+
+        <Feature
+          id="compare-card"
+          name="Compare"
+          where="The + on any game row, or “+ Compare” on a game page — up to 6"
+          to="/compare"
+          question="How do my comparables stack up against each other?"
+        >
+          <p>
+            Two to six games side by side, opening on one plain line — the bearish reading first (who is losing
+            players this week, read against Steam's own week), then who earned the most and who started fastest.
+            Every row's ⓘ works its formula through each game's own numbers (“198,820 reviews × 30 × $14.99 =
+            $89.4M”); every tied best is highlighted, and a row where every game ties says so instead. The monthly
+            reviews chart lines the games up on the calendar or{" "}
+            <span className="text-ink-primary">since launch</span> — months since each went on sale — so a 2017 hit
+            and a 2024 hit compare launch for launch, and the first-3- and first-12-month rows count from Steam's full
+            monthly review history, not a sample.
+          </p>
+        </Feature>
       </Section>
 
       <Section id="studios" kicker="The core" title="Studios">
@@ -721,15 +843,19 @@ export default function Docs() {
           question="Who ships games like mine, and what's their track record?"
         >
           <p>
-            Browse or search developer and publisher track records — release count, career and median est. revenue,
-            hit rate, and whether they're still shipping — then open any studio for its full release trajectory. Built
-            for publisher scouting: filter to publishers, find who's active in your genres, and judge them by what
-            their releases actually did.
+            Browse or search developer and publisher track records — release count, estimated revenue across their
+            games, their top-10% revenue, the share of their games earning $200K+, and how many they released in the
+            last 24 months — then open any studio for its full release trajectory. Built for publisher scouting: it
+            opens on <span className="text-ink-primary">indie studios</span> (at least half of their flagged games
+            carry Steam's Indie flag — Devolver, Team17 and Klei stay; EA, Ubisoft and Capcom drop out), with{" "}
+            <span className="text-ink-primary">All studios</span> one click away.
           </p>
           <ReadBox>
             Studio names are self-reported Steam credit strings, so the same company can appear under several
             spellings, and every revenue figure is a review-based estimate — read the numbers as directional, not as a
-            registry.
+            registry. Small records are marked, not dressed up: under 10 releases with an estimate a studio's hit
+            rate prints as the count it is (“1 of 1 release”, tagged “tiny sample”) and its top-10% figure is
+            withheld; under 3 games the list withholds both.
           </ReadBox>
         </Feature>
       </Section>
@@ -832,16 +958,17 @@ export default function Docs() {
               Prospect exposes{" "}
               <span className="text-ink-primary">{MCP_TOOL_COUNT} read-only analytics tools</span> plus a{" "}
               <span className="text-ink-primary">data-dictionary resource</span>:{" "}
-              <Code>find_niches</Code>, <Code>niche_detail</Code>, <Code>niche_player_history</Code>,{" "}
-              <Code>niche_review_themes</Code>, <Code>tag_combos</Code>, <Code>tag_suggest</Code>,{" "}
-              <Code>market_benchmarks</Code>, <Code>revenue_distribution</Code>, <Code>estimate_revenue</Code>,{" "}
-              <Code>launch_shape</Code>, <Code>best_launch_timing</Code>, <Code>lifetime_curve</Code>,{" "}
-              <Code>game_search</Code>, <Code>game_profile</Code>, <Code>game_teardown</Code>,{" "}
-              <Code>game_reviews_summary</Code>, <Code>game_player_history</Code>, <Code>aspect_reviews</Code>,{" "}
-              <Code>find_comparables</Code>, <Code>entity_profile</Code>, <Code>publisher_pitch_list</Code>,{" "}
-              <Code>press_pitch_list</Code>, <Code>buzz_trends</Code>, <Code>channel_mix</Code> and{" "}
-              <Code>channel_buzz</Code>. Ask Claude to read the data dictionary first, so it uses the same definitions
-              of opportunity / demand / competition / quality-gap that this guide does.
+              <Code>find_niches</Code>, <Code>niche_detail</Code>, <Code>niche_games</Code>,{" "}
+              <Code>niche_player_history</Code>, <Code>niche_review_themes</Code>, <Code>tag_combos</Code>,{" "}
+              <Code>tag_suggest</Code>, <Code>market_benchmarks</Code>, <Code>revenue_distribution</Code>,{" "}
+              <Code>estimate_revenue</Code>, <Code>launch_shape</Code>, <Code>best_launch_timing</Code>,{" "}
+              <Code>lifetime_curve</Code>, <Code>game_search</Code>, <Code>game_profile</Code>,{" "}
+              <Code>game_teardown</Code>, <Code>game_reviews_summary</Code>, <Code>game_player_history</Code>,{" "}
+              <Code>aspect_reviews</Code>, <Code>find_comparables</Code>, <Code>entity_profile</Code>,{" "}
+              <Code>publisher_pitch_list</Code>, <Code>press_pitch_list</Code>, <Code>buzz_trends</Code>,{" "}
+              <Code>channel_mix</Code>, <Code>channel_buzz</Code> and <Code>methodology</Code>. Ask Claude to call{" "}
+              <Code>methodology</Code> first (the same text as the data dictionary), so it uses the same definitions of
+              the Opportunity score, the Radar verdicts and the revenue estimates that this guide does.
             </ReadBox>
           </div>
         </Card>
@@ -857,10 +984,11 @@ export default function Docs() {
           question="How fresh is the data I'm looking at?"
         >
           <p>
-            The refresh history. Each nightly run re-scrapes Steam, rebuilds the analytics, and reloads the app; this log
-            shows what each run added (games, reviews, player updates), the mart version, and how long it took. The
-            footer's health dot is the quick version — hover it for the exact mart version and build timestamp, which is
-            the authoritative "data as of" answer.
+            The refresh history. Each refresh re-scrapes Steam, rebuilds the analytics and reloads the app; this log
+            shows what each run added (games, reviews, player updates), the data build, and how long it took — and
+            says so when a run was held or skipped and the previous data stayed in service. The footer is the quick
+            version: every page shows <span className="text-ink-primary">“Data as of &lt;date&gt; · N days old”</span>,
+            its ⓘ carries the exact build and timestamp, and past three days without a refresh every page warns you.
           </p>
         </Feature>
       </Section>
@@ -870,20 +998,27 @@ export default function Docs() {
           <div className="flex flex-col gap-3 text-sm leading-relaxed text-ink-secondary">
             <Terms
               items={[
-                ["Steam storefront", "The public catalog (names, prices, tags, genres, release dates, header art, short descriptions) and player reviews. Review counts are reconciled against Steam's own numbers for ground truth where possible."],
-                ["SteamSpy", "Owner-range estimates. These got noisier after Steam changed its default profile privacy in 2018 — which is exactly why Prospect treats owners as a range and leans on review-based estimates."],
+                ["Steam storefront", "The public catalog (names, prices, tags, genres, release dates, header art, short descriptions), each game's own monthly review counts, and a sample of the reviews themselves. Review counts are reconciled against Steam's own numbers for ground truth where possible."],
+                [
+                  "SteamSpy",
+                  <>
+                    Owner-range estimates, from a single SteamSpy snapshot
+                    {age.ownersAsOfLabel ? (
+                      <>
+                        {" "}taken <span className="text-ink-primary">{age.ownersAsOfLabel}</span>
+                      </>
+                    ) : null}{" "}
+                    — not a live feed, so a game released since has no SteamSpy owners figure, and every Owners number is
+                    as old as that snapshot. These estimates got noisier after Steam changed its default profile privacy
+                    in 2018, which is exactly why Prospect treats owners as a range and leans on review-based estimates.
+                  </>,
+                ],
                 ["Games press", `Article metadata (headline, byline, date, outlet) from ${CORPUS_OUTLETS} tracked outlets — Eurogamer, GamesIndustry.biz, PC Gamer, IGN, Game Developer and DOU Gamedev — matched to games by title. Prospect links to the original article and never reproduces its body text.`],
+                ["Store prices", "Each game's Steam price over time, recorded whenever it CHANGES (a daily check of Steam's price-change counter) since 24 Aug 2026 — so the price history is a list of changes, not a daily series, and nothing before that date is recorded."],
               ]}
             />
-            {/* Numbers come from the constants at the top of this file; see the provenance
-                comment there for how to re-read them. Stated with an explicit as-of because
-                the previous version of this line claimed ~142K apps against a ~175K mart. */}
             <p className="text-xs text-ink-muted">
-              Roughly, as of <span className="text-ink-primary">{CORPUS_AS_OF}</span>: the full Steam catalog
-              ({CORPUS_GAMES} apps), {CORPUS_REVIEWS} sampled reviews, and {CORPUS_ARTICLES} press articles — rebuilt
-              nightly, and growing. Don't quote these; the exact size and build date for your session are in the footer
-              health dot and the <a href="#datalog" className="text-brand hover:underline">Data log</a>, which is the
-              authoritative answer.
+              <CorpusLine />
             </p>
           </div>
         </Card>
@@ -911,7 +1046,7 @@ export default function Docs() {
                 ["Revenue spread (0.20)", "How evenly revenue is shared. 50 = winner-take-most; higher = money reaches more than the top few."],
                 ["Quality gap (0.18)", "How beatable the field is — the share of incumbents weak enough to out-execute."],
                 ["Supply brake (×0.35–1.0)", "The only downside term. It bites when releases outgrow demand, or when recent entrants earn under the catalog norm — either alone can sink a score. An unknown supply read is never a penalty: it scores 1.0."],
-                ["Opportunity v2", "clamp( (0.40 × Momentum + 0.22 × Market pull + 0.20 × Revenue spread + 0.18 × Quality gap) × Supply brake, 0, 100 ). A sub-score that can't be computed drops out of both the numerator and the weight total, so a missing part never reads as a zero."],
+                ["Opportunity score", "clamp( (0.40 × Momentum + 0.22 × Market pull + 0.20 × Revenue spread + 0.18 × Quality gap) × Supply brake, 0, 100 ). A sub-score that can't be computed drops out of both the numerator and the weight total, so a missing part never reads as a zero."],
               ]}
             />
             <p>
@@ -938,17 +1073,25 @@ export default function Docs() {
         <Card title="Revenue & owners estimates — and their error bars">
           <div className="flex flex-col gap-3 text-sm leading-relaxed text-ink-secondary">
             <p>
-              The revenue figure used across the app is{" "}
-              <span className="text-ink-primary">estimated owners × launch price</span> = gross lifetime box revenue
-              (not net-of-Steam's-cut, not first-year-only). Owners come from the{" "}
-              <span className="text-ink-primary">Boxleiter method</span>: reviews are a small, roughly-consistent
-              fraction of owners, so owners ≈ reviews × a multiplier in the{" "}
+              <span className="text-ink-primary">Est. revenue</span> — the one name the app uses for it — is{" "}
+              <span className="text-ink-primary">estimated copies × launch price</span> = gross lifetime box revenue
+              (not net of Steam's cut, not first-year-only). Copies come from the{" "}
+              <span className="text-ink-primary">Boxleiter method</span>: reviews are a small, roughly consistent
+              fraction of buyers, so copies ≈ reviews × a multiplier in the{" "}
               <span className="text-ink-primary">20–55</span> band. The two paths pick that multiplier differently, and
               the page you're on decides which you're reading. Every catalog figure — the game profile, /compare, the
-              niche tables, median and P90 revenue — uses the <span className="text-ink-primary">flat mid of 30</span>{" "}
-              (est_rev_reviews = reviews × 30 × launch price, with 20 and 55 giving the low and high of the range).
-              It is deliberately NOT genre-fitted: one multiplier keeps every one of those surfaces agreeing with the
-              others. estimate_revenue, below, is the exception that does fit per genre.
+              niche tables, median and top-10% revenue — uses the{" "}
+              <span className="text-ink-primary">flat mid of 30</span> (Est. revenue = reviews × 30 × launch price,
+              with 20 and 55 giving the low and high of the range). It is deliberately NOT genre-fitted: one
+              multiplier keeps every one of those surfaces agreeing with the others. estimate_revenue, below, is the
+              exception that does fit per genre.
+            </p>
+            <p>
+              <span className="text-ink-primary">Free games and games whose price is unknown get no estimate</span>{" "}
+              — there is no price to multiply (a $0 price Steam doesn't flag free reads “Price unknown”, never
+              “Free”) — and they are left out of every revenue statistic: medians, top-10% revenue, the share earning
+              $200K+ and the totals are over <span className="text-ink-primary">paid games only</span>, and a niche
+              needs 30 or more of them before its revenue statistics are shown at all.
             </p>
             <p>
               In estimate_revenue, the reviews path gives owners = reviews × (20 / genre-mid / 55) for low/mid/high —
@@ -985,17 +1128,31 @@ export default function Docs() {
                 unmeasured here.
               </>,
               <>
-                <span className="font-semibold text-ink-primary">Freshness.</span> The catalog rebuilds nightly, but a
-                brand-new release lags until SteamSpy and the review scrape catch up (Prospect flags when a count is an
-                honest lower bound). Trust the health dot's build date over your memory.
+                <span className="font-semibold text-ink-primary">Freshness.</span> The data is rebuilt on a schedule,
+                but a brand-new release lags until the review scrape catches up (Prospect flags when a count is an
+                honest lower bound), and Owners figures are only as new as the SteamSpy snapshot behind them. Trust
+                the footer's data date over your memory.
               </>,
               <>
                 <span className="font-semibold text-ink-primary">Tags vs. genres.</span> Genre is Steam's small, fixed,
                 exact-match field (a game's primary genre is used); tags are the larger community vocabulary — more
-                specific and better for niche-finding, but case- and hyphenation-sensitive. Non-descriptive tags like
-                "early access" or "video game" are filtered out of the niche vocabulary on purpose. Release dates come
-                from Steam and, for Early Access titles, generally reflect the Early Access launch rather than the 1.0
-                date.
+                specific and better for niche-finding. Spelling twins are merged into one canonical tag
+                (“Rogue-like” → “Roguelike”, “Rogue-lite” → “Roguelite”, plural renames like Vampire or Fox), and
+                old spellings still resolve to it. Non-descriptive tags like “early access” or “video game” are
+                filtered out of the niche vocabulary on purpose.
+              </>,
+              <>
+                <span className="font-semibold text-ink-primary">Launch dates are first public dates.</span> An Early
+                Access game is dated — and judged, in every niche window and timing chart — from the day it first went
+                on sale, not from its 1.0; its 1.0 date is kept alongside (“EA Nov 2017 → 1.0 Jan 2019”). Where Steam
+                only has the 1.0 date, the first public day is inferred from the game's first review, and a date known
+                only to the month reads “~Jun 2015”.
+              </>,
+              <>
+                <span className="font-semibold text-ink-primary">“Indie” is Steam's own flag.</span> /games and
+                /studios open on indie games and indie studios: games the developer flagged Indie on the store page,
+                and studios at least half of whose flagged games are. A game whose flag we haven't read yet (mostly
+                very recent releases) is left out of that view, and the page counts how many.
               </>,
             ].map((li, i) => (
               <li key={i} className="flex gap-2">
@@ -1026,7 +1183,7 @@ export default function Docs() {
               ],
               [
                 "Can I export data?",
-                "Ask your Claude — the MCP tools return structured JSON you can save or reshape. Bulk raw exports of the underlying catalog aren't offered.",
+                "Yes. The Niche Finder and every niche page have an Export CSV button — the niche table at your current window and review floor, or the niche's own numbers — and the MCP tools return structured JSON you can save or reshape. What isn't offered is a bulk dump of the raw catalog.",
               ],
               [
                 "Does Prospect track my personal Steam account?",
@@ -1034,7 +1191,7 @@ export default function Docs() {
               ],
               [
                 "How current is what I'm seeing?",
-                "The data rebuilds nightly. The footer health dot (and the Data log) show the exact mart version and build timestamp — that's the authoritative “data as of.”",
+                "The footer says it on every page: “Data as of <date> · N days old”, with the exact build in its ⓘ — that's the authoritative “data as of”. The Data log lists every refresh, and if refreshes stop for more than three days every page warns you.",
               ],
             ].map(([q, a], i) => (
               <div key={i} className="py-3 first:pt-0 last:pb-0">
@@ -1045,8 +1202,8 @@ export default function Docs() {
           </div>
         </Card>
         <p className="text-center text-xs text-ink-muted">
-          Prospect is early and solo-run — if a number looks wrong, note the mart version from the footer health dot so
-          it can be reproduced.
+          Prospect is early and solo-run — if a number looks wrong, note the data date and build from the footer's ⓘ
+          so it can be reproduced.
         </p>
       </Section>
     </div>
