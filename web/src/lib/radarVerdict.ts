@@ -311,8 +311,12 @@ export const MOMENTUM_FLAT = momentumAt(0);
  * falsification TELL, not a ring input (below 1.0 = recent entrants underearn — the same
  * check the MCP guidance runs before recommending a niche). Dossier-only. */
 export const ENTRANT_RATIO_PAR = 1.0;
-/** Catalog-median entrant_ratio (~1.08) — display context for the dossier's tell row. */
-export const ENTRANT_RATIO_CATALOG_NORM = 1.08;
+/** Catalog-median entrant_ratio on the board's pinned cut (tag/24m/min50) — display context for
+ * the dossier's tell row, and the point where the score's entrant_room reaches 100. MUST equal
+ * etl/build_marts.py's OPP_ENTRANT_NORM (lib/opportunity.ts reproduces the served score with it).
+ * Re-fitted 1.08 -> 0.79 on 2026-09-23: dating Early Access graduates from their EA launch and
+ * taking free/unknown-price games out of revenue moved the catalog median there. */
+export const ENTRANT_RATIO_CATALOG_NORM = 0.79;
 /** reviews_24m_new_share at or above which an emerging niche is a genuinely YOUNG LABEL
  * (the mart's tell 2 — MUST stay in lockstep with DEMAND_NEW_MASS_SHARE in
  * etl/build_marts.py). Below it, an emerging flag came from the low-base floor alone: a
