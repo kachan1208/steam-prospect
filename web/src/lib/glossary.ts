@@ -245,10 +245,10 @@ export const GLOSSARY = {
     meaning:
       "The Radar's call on a niche — Enter now, Watch, Emerging, Crowded or Declining — read off its demand trend, its release pipeline and how concentrated its revenue is.",
     formula:
-      "First match wins: Emerging (no comparable demand base) → Enter now (Demand trend ≥ +40% and Releases YoY ≤ +15% or unknown) → Declining (Demand trend ≤ −30%) → Crowded (top 5% hold > 85% of revenue, or Releases YoY > +15% with demand flat, falling or unknown) → Watch (everything else).",
+      "First match wins: Emerging (no comparable demand base) → Enter now (Demand trend ≥ +40%, Releases YoY ≤ +15% or unknown, AND top 5% hold ≤ 85% of revenue or unknown) → Watch (Demand trend ≥ +40% and Releases YoY ≤ +15%, but the top 5% hold > 85%: “demand surging, but winner-take-most revenue”) → Declining (Demand trend ≤ −30%) → Crowded (top 5% hold > 85% of revenue, or Releases YoY > +15% with demand flat, falling or unknown) → Watch (everything else, including demand surging into a flooding pipeline).",
     unit: "category",
     notes:
-      "Newcomer earnings and Singleplayer share are shown beside it but never move it. A verdict on thin evidence is flagged “caution”.",
+      "Enter now needs every deciding check to pass: a winner-take-most niche never rings it, however fast demand grows. Newcomer earnings and Singleplayer share are shown beside it but never move it. A verdict on thin evidence is flagged “caution”.",
     computed: true,
     replaces: ["Ring"],
   },

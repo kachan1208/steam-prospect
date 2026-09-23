@@ -351,8 +351,9 @@ function RadarBoardSection({
           board; dot colour repeats the verdict the band already names (green = enter, steel = watch, violet =
           emerging, amber = crowded, terracotta = declining — reinforcement only, every meaning survives grayscale);
           a hollow dot is team-scale under the solo lens and a dotted ring means the verdict is hedged. Verdicts:
-          Enter now = demand past +40% / 24m without a flooding release pipeline · Watch = demand holding or
-          softening, or score-only evidence · Emerging = no comparable demand base — either a young label (≥80% of its
+          Enter now = demand past +40% / 24m without a flooding release pipeline and without winner-take-most
+          revenue (the top 5% of games taking more than 85%) · Watch = demand holding or softening, demand surging
+          but one of those two checks failing (the dossier names which), or score-only evidence · Emerging = no comparable demand base — either a young label (≥80% of its
           reviews from games released in the last 24 months) or a prior base too small for a % read, so no trustworthy
           trend % exists and the rail shows absolute 24-month volume instead of a percentage · Crowded = releases up
           &gt;15% YoY against flat-to-down demand, or winner-take-most · Declining = demand down ≥30% per 24 months.

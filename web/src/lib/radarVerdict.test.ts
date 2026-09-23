@@ -179,11 +179,50 @@ describe("radarVerdict — precedence (exactly one ring)", () => {
     expect(v.ring).toBe("enter");
   });
 
-  it("enter beats crowded: rising demand with a calm pipeline wins over winner-take-most", () => {
-    // Precedence rule 1 vs 3: enter is checked first, so a concentrated niche whose
-    // demand is genuinely surging still plates as enter.
+  it("winner-take-most vetoes enter: a surge on a calm pipeline rings WATCH, with the failure named", () => {
+    // 2026-09-22 owner rule — never a bullish verdict when a deciding check fails. This used
+    // to plate "enter" (precedence 1 beat crowded's winner-take-most arm) while the dossier
+    // printed a failing concentration row under it: Souls-like 0.88, Hunting 0.96, AI 0.95.
     const v = radarVerdict({ demand_trend_24m_pct: 50, saturation_yoy: 0.05, winner_concentration: 0.95 });
-    expect(v.ring).toBe("enter");
+    expect(v.ring).toBe("watch");
+    expect(v.caution).toBe(false); // the surge is solid evidence; the concentration is the caveat
+    expect(v.reason).toBe("demand surging, but winner-take-most revenue");
+    // Souls-like's own numbers (24m × ≥50, 2026-09-21 mart).
+    const souls = radarVerdictTrace({ demand_trend_24m_pct: 49.5, saturation_yoy: 0.0147, winner_concentration: 0.8837 });
+    expect(souls.ring).toBe("watch");
+    const conc = souls.checks.find((c) => c.id === "concentration")!;
+    expect(conc.pass).toBe(false);
+    expect(conc.note).toContain("vetoes enter");
+  });
+
+  it("the veto is strict (> 0.85), and an unknown concentration is not a veto", () => {
+    const base = { demand_trend_24m_pct: 50, saturation_yoy: 0.05 };
+    expect(radarVerdict({ ...base, winner_concentration: WC_WINNER_TAKE_MOST }).ring).toBe("enter");
+    expect(radarVerdict({ ...base, winner_concentration: WC_WINNER_TAKE_MOST + 0.001 }).ring).toBe("watch");
+    expect(radarVerdict({ ...base, winner_concentration: null }).ring).toBe("enter");
+    // Unknown saturation still passes too — the veto is concentration's alone.
+    expect(radarVerdict({ demand_trend_24m_pct: 50, saturation_yoy: null, winner_concentration: 0.9 }).ring).toBe("watch");
+  });
+
+  it("winner-take-most with a FLOODING pipeline is still crowded — only the calm-supply surge became watch", () => {
+    // Party-Based RPG's shape: surging demand, +19% releases, winner-take-most. Precedence
+    // 3 (crowded) was already ahead of the surging-but-flooding watch arm; unchanged.
+    const v = radarVerdict({ demand_trend_24m_pct: 59.4, saturation_yoy: 0.19, winner_concentration: 0.9 });
+    expect(v.ring).toBe("crowded");
+    expect(v.reason).toBe("winner-take-most revenue");
+  });
+
+  it("an enter ring never sits over a failing deciding check", () => {
+    const demands = [null, -80, -20, 0, 20, DEMAND_ENTER_PCT, 70, 300];
+    const sats = [null, -0.5, 0, SAT_FLOOD_YOY, 0.5];
+    const wcs = [null, 0.5, WC_WINNER_TAKE_MOST, 0.9, 0.99];
+    for (const demand_trend_24m_pct of demands)
+      for (const saturation_yoy of sats)
+        for (const winner_concentration of wcs) {
+          const t = radarVerdictTrace({ demand_trend_24m_pct, saturation_yoy, winner_concentration });
+          if (t.ring !== "enter") continue;
+          for (const c of t.checks.filter((x) => x.decides)) expect(c.pass, `${c.id} on an enter ring`).not.toBe(false);
+        }
   });
 
   it("declining beats crowded: flooding AND collapsing plates as declining (the outer, stronger warning)", () => {

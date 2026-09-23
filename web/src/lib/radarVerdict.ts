@@ -4,11 +4,14 @@
  * rule is unit-testable and the board component stays geometry-only.
  *
  * RINGS, inner -> outer (inner = strongest "build here" signal):
- *   enter     "Enter now"  — demand in structural growth while supply is not flooding.
+ *   enter     "Enter now"  — demand in structural growth while supply is not flooding AND
+ *                            revenue is not winner-take-most: every DECIDING check passes.
  *   watch     "Watch"      — demand holding (flat-to-up, or drifting only mildly), or a
- *                            high v2 score without trend evidence (caution). Also the
- *                            CATCH-ALL: a niche with no strong signal in either
- *                            direction parks here rather than being invented into a
+ *                            high v2 score without trend evidence (caution). Also where a
+ *                            SURGING niche lands when one deciding check fails ("demand
+ *                            surging, but supply flooding" / "…but winner-take-most
+ *                            revenue"), and the CATCH-ALL: a niche with no strong signal in
+ *                            either direction parks here rather than being invented into a
  *                            stronger ring.
  *   emerging  "Emerging"   — no comparable demand base (demand_emerging from the mart),
  *                            so NO trend-derived claim is possible in either direction.
@@ -29,15 +32,32 @@
  *                   the same youth distorts saturation_yoy, so the crowding arms are
  *                   pre-empted too. The niche's real signal is absolute volume, which
  *                   the board/feed surface instead of the %.
- *   1. enter      — the strongest positive claim, checked first among trend verdicts.
+ *   1. enter      — the strongest positive claim, checked first among trend verdicts:
+ *                   demand clears the enter bar AND the pipeline is calm (or unknown) AND
+ *                   revenue is NOT winner-take-most (or unknown).
+ *      1b. watch  — demand clears the bar on a calm pipeline but revenue IS winner-take-
+ *                   most: "demand surging, but winner-take-most revenue". Mirrors the
+ *                   surging-but-flooding arm below — a DEMAND arm, not crowded: the surge is
+ *                   real evidence, the concentration is the caveat on it.
  *   2. declining  — a hard demand collapse trumps crowding: a niche can be both
  *                   flooding AND collapsing (entrants still arriving into falling
  *                   demand); "declining" is the outer, stronger warning, so it wins.
- *   3. crowded    — winner-take-most OR supply flooding with flat/negative/unknown
- *                   demand.
- *   4. watch      — demand holding or softening (but not enter/declining), or
+ *   3. crowded    — winner-take-most (without a surge on a calm pipeline, see 1b) OR
+ *                   supply flooding with flat/negative/unknown demand.
+ *   4. watch      — demand surging into a flooding pipeline ("demand surging, but supply
+ *                   flooding"), demand holding or softening (but not enter/declining), or
  *                   opportunity_v2 evidence with a caution flag, or the no-signal
  *                   catch-all (also flagged caution).
+ *
+ * WINNER-TAKE-MOST NEVER RINGS "ENTER NOW" (2026-09-22, owner rule: never a bullish verdict
+ * when a deciding check fails). The enter arm used to test demand and supply only, so a niche
+ * whose top 5% of games take more than WC_WINNER_TAKE_MOST of the revenue still rang "Enter
+ * now" whenever demand surged on a calm pipeline — while its own dossier printed a FAILING
+ * concentration row right under the verdict. Measured on the 2026-09-21 default board, 3 of
+ * its 8 enter rings failed that check (Hunting 0.96, Artificial Intelligence 0.95, Souls-like
+ * 0.88); across the whole 24m x ≥50 cut it was 18 of 34. They ring watch now, with the failed
+ * check named. etl/tests/test_opportunity_ordering.py's port of this chain and the MCP
+ * server's rules state the same rule — keep all three in lockstep.
  *
  * FIELD UNITS (verified against the mart, not assumed):
  *   - demand_trend_24m_pct is PERCENT units (+40 means +40%), from mart_niche's
@@ -552,7 +572,7 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
         wc === null
           ? "unknown — the winner-take-most read is unreachable"
           : winnerTakeMost
-            ? "winner-take-most revenue — judge by the median, not the hits"
+            ? "winner-take-most revenue — vetoes enter; judge by the median, not the hits"
             : wc > WC_WINNER_TAKE_MOST - 0.05
               ? "a hair under the winner-take-most bar"
               : "revenue spread across the field",
@@ -582,12 +602,18 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
     soloCheck,
   ];
 
-  // Ring decision — the same precedence chain as ever (see module doc), expressed over
-  // the atoms above so the trace can't drift from it.
+  // Ring decision — the precedence chain in the module doc, expressed over the atoms above
+  // so the trace can't drift from it.
   let verdict: RadarVerdict;
-  if (demandEnter && supplyCalm) {
-    // 1. enter — structural growth AND supply not flooding (unknown saturation passes).
+  if (demandEnter && supplyCalm && !winnerTakeMost) {
+    // 1. enter — structural growth, supply not flooding and revenue not winner-take-most
+    //    (unknown saturation / concentration pass: absence of evidence is not a veto).
     verdict = { ring: "enter", caution: false, reason: "demand in structural growth, supply not flooding" };
+  } else if (demandEnter && supplyCalm) {
+    // 1b. winner-take-most vetoes enter (2026-09-22, see the module doc): the surge is
+    //     real, so this is the watch ring with the failed check named — never "Enter now"
+    //     over a dossier whose concentration row fails.
+    verdict = { ring: "watch", caution: false, reason: "demand surging, but winner-take-most revenue" };
   } else if (demandDecline) {
     // 2. declining — sustained demand decay, checked BEFORE crowded (precedence doc).
     verdict = { ring: "declining", caution: false, reason: "demand in sustained decline" };
