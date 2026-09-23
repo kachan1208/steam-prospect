@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQueries } from "@tanstack/react-query";
 import clsx from "clsx";
@@ -11,7 +11,7 @@ import { TableScroll } from "../components/ui/TableScroll";
 import { trackEvent } from "../lib/analytics";
 import {
   ApiError,
-  request,
+  nicheDetailQueryOptions,
   useNichesCombined,
   type Dimension,
   type NicheCombined as NicheCombinedResponse,
@@ -21,11 +21,16 @@ import {
   type Window,
 } from "../lib/api";
 import { estimatedUnits } from "../lib/estimates";
-import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtRevenue, fmtUsd, isFreeTitle } from "../lib/format";
+import { fmtCompact, fmtInt, fmtPct, fmtPrice, fmtUsd, PRICE_UNKNOWN_NOTE } from "../lib/format";
+import { glossary } from "../lib/glossary";
+import { PriceText, RevenueText } from "../components/ui/GameMoney";
+import { HeaderLabel } from "../components/ui/HeaderLabel";
 // The §4b KPI-cell primitive (condensed numeral, 1px-gap blueprint grid) is shared with the
 // deep-dive page — from components/ui, so neither page has to import the other.
 import { KpiCell } from "../components/ui/KpiCell";
+import { cutPopulationLabel } from "../lib/radarVerdict";
 import {
+  DEFAULT_NICHE_CUT,
   formatNicheRef,
   nicheFinderPath,
   parseCombineMode,
@@ -50,13 +55,27 @@ import { usePageTitle } from "../lib/usePageTitle";
 const PAGE = 25;
 const MIN_REVIEW_OPTIONS = [0, 50, 100];
 
-function parseMinReviews(raw: string | null): number {
+/**
+ * The review floor from the URL. Read as a STRING first (2026-09-23): 0 is a real floor
+ * ("All games"), and Number(null) is ALSO 0 — so a plain Number() turned a link WITHOUT
+ * min_reviews into the All-games cut instead of the ≥50 default every other niche surface
+ * lands on (NicheFinder.tsx does the same). Garbage reads as the default too.
+ */
+export function parseMinReviews(raw: string | null): number {
+  if (raw === null || raw.trim() === "") return DEFAULT_NICHE_CUT.min_reviews;
   const v = Number(raw);
-  return MIN_REVIEW_OPTIONS.includes(v) ? v : 50;
+  return MIN_REVIEW_OPTIONS.includes(v) ? v : DEFAULT_NICHE_CUT.min_reviews;
 }
 
 function parseWin(raw: string | null): Window {
-  return raw === "all" ? "all" : "24m";
+  return raw === "all" ? "all" : DEFAULT_NICHE_CUT.win;
+}
+
+/** The page offset from the URL — clamped to a whole, non-negative number (the API caps at
+ * 50,000), so a hand-edited link can't 422 the table. */
+export function parseOffset(raw: string | null): number {
+  const n = Math.floor(Number(raw));
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 50_000) : 0;
 }
 
 /** The prose the whole page hangs on: a reader who thinks a union is an intersection will
@@ -64,7 +83,7 @@ function parseWin(raw: string | null): Window {
 function modeSentence(mode: NicheCombineMode, names: string[]): string {
   const joined = names.join(mode === "intersect" ? " AND " : " OR ");
   return mode === "intersect"
-    ? `Every game counted below carries ALL ${names.length} niches — ${joined}.`
+    ? `Every game counted below carries ${names.length === 2 ? "BOTH niches" : `ALL ${names.length} niches`} — ${joined}.`
     : `Every game counted below carries AT LEAST ONE of these ${names.length} niches — ${joined}.`;
 }
 
@@ -102,10 +121,23 @@ function SegButton({
   );
 }
 
-/** The per-input sizes, under whichever name the API used (`inputs` today, `per_niche` in
- * the original spec) — see the NicheCombined type. */
+/** The per-input sizes (routers/niches.py NicheCombined `inputs`). The originally-specced
+ * `per_niche` name, and the `degraded` / `note` fields, were never sent by the API — the
+ * page no longer reads them (2026-09-23). */
 function combinedInputs(data: NicheCombinedResponse | undefined): NicheCombinedPerNiche[] {
-  return data?.inputs ?? data?.per_niche ?? [];
+  return data?.inputs ?? [];
+}
+
+/** The API echo for one selected niche. Tag aliases: an old spelling in the URL is served as
+ * its canonical niche, so the echo's `key` is the canonical one and `requested_key` is what
+ * was sent — match on either. */
+export function inputFor(
+  inputs: readonly NicheCombinedPerNiche[],
+  sel: NicheSelection,
+): NicheCombinedPerNiche | undefined {
+  return inputs.find(
+    (p) => p.dimension === sel.dimension && ((p.requested_key ?? p.key) === sel.key || p.key === sel.key),
+  );
 }
 
 /** A niche's own size in the same cut, read out of the detail endpoint's variant list.
@@ -127,16 +159,14 @@ export default function NicheCombined() {
     win: parseWin(searchParams.get("win")),
     min_reviews: parseMinReviews(searchParams.get("min_reviews")),
   };
-  const [offset, setOffset] = useState(0);
+  // The page rides the URL (2026-09-23) — it was component state, so a reload, a shared link
+  // or Back always landed on page 1 of the overlap. Every control that changes WHAT is asked
+  // clears it (see `update`), so it can never point past a new result set.
+  const offset = parseOffset(searchParams.get("offset"));
 
   const refs = useMemo(() => selection.map(formatNicheRef), [selection]);
   const refsKey = refs.join("|");
   const enough = selection.length >= 2;
-
-  // Any change to what we're asking re-pages to the top.
-  useEffect(() => {
-    setOffset(0);
-  }, [refsKey, mode, cut.win, cut.min_reviews]);
 
   // Event names must exist in the backend allowlist (api/app/analytics_metrics.py:
   // KNOWN_EVENTS) or they're dropped server-side — reuse niche_open rather than invent one.
@@ -157,7 +187,7 @@ export default function NicheCombined() {
   // 503 is the EXPECTED state for the first hours after a deploy: the combined mart is
   // still being rebuilt. Not an error the user caused, and not a spinner — a stated wait.
   const martPending = apiError?.status === 503;
-  const degraded = martPending || combinedQ.data?.degraded === true;
+  const degraded = martPending;
   // 422 + "not materialised" = the cut isn't served here (the message names the ones that
   // are). Distinct from a real failure, and fixable in one click.
   const cutUnavailable = apiError?.status === 422 && /materialis/i.test(apiError.message);
@@ -166,22 +196,23 @@ export default function NicheCombined() {
   // per-niche marts are already live), which is most of the "what WOULD this be" answer.
   const needFallback =
     enough && (martPending || (combinedQ.data != null && combinedInputs(combinedQ.data).length === 0));
+  // THE SHARED QUERY FACTORY (2026-09-23): this was a hand-built queryFn with no abort
+  // signal and its own copy of the key — the one call site in the app that could drift from
+  // useNicheDetail's cache entry, and whose requests outlived the page.
   const detailQs = useQueries({
     queries: selection.map((s) => ({
-      // Same key shape as useNicheDetail so this shares its cache with the deep-dive page.
-      queryKey: ["niche-detail", s.dimension, s.key] as const,
-      queryFn: () => request<NicheDetail>(`/niches/${s.dimension}/${encodeURIComponent(s.key)}`),
+      ...nicheDetailQueryOptions(s.dimension, s.key),
       enabled: needFallback,
-      staleTime: 5 * 60_000,
       retry: false,
     })),
   });
 
   const apiInputs = combinedInputs(combinedQ.data);
   const perNiche = selection.map((s, i) => {
-    const fromApi = apiInputs.find((p) => p.dimension === s.dimension && p.key === s.key);
+    const fromApi = inputFor(apiInputs, s);
     return {
       ...s,
+      aliasOf: fromApi?.alias_of ?? null,
       n_games: fromApi?.n_games ?? variantGames(detailQs[i]?.data, cut),
     };
   });
@@ -191,10 +222,23 @@ export default function NicheCombined() {
     null,
   );
 
+  /** Any change to WHAT is asked (mode, cut, niches) re-pages to the top. */
   const update = useCallback(
     (mutate: (sp: URLSearchParams) => void) => {
       const sp = new URLSearchParams(searchParams);
       mutate(sp);
+      sp.delete("offset");
+      setSearchParams(sp);
+    },
+    [searchParams, setSearchParams],
+  );
+
+  /** The pager: a history entry per page, like every other paged list. */
+  const setOffset = useCallback(
+    (next: number) => {
+      const sp = new URLSearchParams(searchParams);
+      if (next > 0) sp.set("offset", String(next));
+      else sp.delete("offset");
       setSearchParams(sp);
     },
     [searchParams, setSearchParams],
@@ -389,12 +433,7 @@ export default function NicheCombined() {
       {enough && degraded && (
         <Card
           title="This combination can’t be computed yet"
-          subtitle={
-            data?.note ??
-            (martPending
-              ? "The combined-niche mart is rebuilt by the nightly ETL and lands a few hours after a deploy. Everything below is what will be computed — no numbers are being guessed in the meantime."
-              : "The API answered from an incomplete mart, so the combined figures are not trustworthy yet.")
-          }
+          subtitle="The per-game data combinations are built from is rebuilt a few hours after each data update. Below is each niche's own size — no combined numbers are guessed in the meantime."
         >
           <div className="flex flex-col gap-3">
             <p className="text-sm text-ink-secondary">{modeSentence(mode, names)}</p>
@@ -510,26 +549,58 @@ export default function NicheCombined() {
         <>
           <div className="grid grid-cols-1 gap-px border border-ink-primary/20 bg-ink-primary/20 sm:grid-cols-2 lg:grid-cols-4">
             <KpiCell
-              label={mode === "intersect" ? `Games in ALL ${selection.length} niches` : `Games in ANY of ${selection.length} niches`}
+              label={
+                mode === "intersect"
+                  ? selection.length === 2
+                    ? "Games in BOTH niches"
+                    : `Games in ALL ${selection.length} niches`
+                  : selection.length === 2
+                    ? "Games in EITHER niche"
+                    : `Games in ANY of ${selection.length} niches`
+              }
+              term="n_games"
               value={fmtInt(data.n_games)}
               valueClassName="text-brand"
+              footnoteWrap
               footnote={
-                mode === "intersect" && smallest != null && smallest > 0
-                  ? `${fmtPct(data.n_games / smallest, 1)} of the smallest input niche (${fmtInt(smallest)} games)`
-                  : undefined
+                <>
+                  {cutPopulationLabel(cut.win, cut.min_reviews)}
+                  {mode === "intersect" && smallest != null && smallest > 0 && (
+                    <span className="block">
+                      {fmtPct(data.n_games / smallest, 1)} of the smallest input niche ({fmtInt(smallest)} games)
+                    </span>
+                  )}
+                </>
+              }
+            />
+            {/* Revenue is estimated for PAID games only (the rebuilt mart leaves free and
+                unknown-price games without an estimate), so these percentiles are paid-only by
+                construction — said on the tile. /combined doesn't return the paid count yet,
+                so the niche page's "withheld: only N paid games" rule can't run here. */}
+            <KpiCell
+              term="median_rev"
+              value={fmtUsd(data.median_rev)}
+              sentinel={data.median_rev == null ? "no data" : undefined}
+              footnoteWrap
+              footnote={
+                data.p25_rev != null || data.p75_rev != null
+                  ? `paid games only · bottom 25% ${fmtUsd(data.p25_rev)} · top 25% ${fmtUsd(data.p75_rev)}`
+                  : "paid games only"
               }
             />
             <KpiCell
-              label="Median est. revenue"
-              value={fmtUsd(data.median_rev)}
-              footnote={
-                data.p25_rev != null || data.p75_rev != null
-                  ? `P25 ${fmtUsd(data.p25_rev)} · P75 ${fmtUsd(data.p75_rev)}`
-                  : undefined
-              }
+              term="p90_rev"
+              value={fmtUsd(data.p90_rev)}
+              sentinel={data.p90_rev == null ? "no data" : undefined}
+              footnote="only 1 paid game in 10 earns more"
             />
-            <KpiCell label="P90 est. revenue" value={fmtUsd(data.p90_rev)} footnote="1 in 10 does better" />
-            <KpiCell label="Median price" value={fmtPrice(data.median_price)} />
+            <KpiCell
+              term="median_price"
+              value={fmtPrice(data.median_price)}
+              sentinel={data.median_price == null ? "no data" : undefined}
+              footnoteWrap
+              footnote="every game in the set, a $0 listing (free or unpriced) counted as $0"
+            />
           </div>
 
           <Card
@@ -573,14 +644,15 @@ export default function NicheCombined() {
                           next to `est_revenue` (est_rev_reviews, Boxleiter) — two estimators
                           in one row, so revenue ÷ copies fought the price column. Derived from
                           the revenue actually printed, via the one helper (lib/estimates.ts). */}
-                      <th
-                        className="px-4 py-2.5 font-semibold"
-                        title="Estimated copies sold on the same reviews-based (Boxleiter) estimator as Est. revenue — est. revenue ÷ launch price, exactly."
-                      >
-                        Est. units
+                      <th className="px-4 py-2.5 font-semibold">
+                        <HeaderLabel label="Est. units" term="units" />
                       </th>
-                      <th className="px-4 py-2.5 font-semibold" title="Estimated lifetime gross: reviews × 30 owners-per-review × launch price">
-                        Est. revenue
+                      <th className="px-4 py-2.5 font-semibold">
+                        <HeaderLabel
+                          label="Est. revenue"
+                          term="est_revenue"
+                          info={{ notes: `${glossary("est_revenue").notes ?? ""} ${PRICE_UNKNOWN_NOTE}`.trim() }}
+                        />
                       </th>
                     </tr>
                   </thead>
@@ -593,13 +665,15 @@ export default function NicheCombined() {
                           </Link>
                         </td>
                         <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">{g.release_year ?? "—"}</td>
-                        <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">{fmtPrice(g.price_initial)}</td>
+                        <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">
+                          <PriceText row={g} />
+                        </td>
                         <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">{fmtCompact(g.total_reviews)}</td>
                         <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">
                           {fmtCompact(estimatedUnits(g.est_revenue, g.price_initial, g.total_reviews))}
                         </td>
                         <td className="tabular whitespace-nowrap px-4 py-2.5 text-ink-secondary">
-                          {fmtRevenue(g.est_revenue, isFreeTitle(g))}
+                          <RevenueText row={g} value={g.est_revenue} />
                         </td>
                       </tr>
                     ))}
@@ -620,7 +694,7 @@ export default function NicheCombined() {
                   <button
                     type="button"
                     disabled={offset === 0}
-                    onClick={() => setOffset((o) => Math.max(0, o - PAGE))}
+                    onClick={() => setOffset(Math.max(0, offset - PAGE))}
                     className="border border-chartborder bg-surface px-3 py-1 font-medium text-ink-secondary transition-colors hover:text-ink-primary disabled:pointer-events-none disabled:opacity-40"
                   >
                     Prev
@@ -628,7 +702,7 @@ export default function NicheCombined() {
                   <button
                     type="button"
                     disabled={offset + PAGE >= data.n_games}
-                    onClick={() => setOffset((o) => o + PAGE)}
+                    onClick={() => setOffset(offset + PAGE)}
                     className="border border-chartborder bg-surface px-3 py-1 font-medium text-ink-secondary transition-colors hover:text-ink-primary disabled:pointer-events-none disabled:opacity-40"
                   >
                     Next
@@ -652,7 +726,7 @@ function PerNicheFunnel({
   smallest,
   loading,
 }: {
-  perNiche: (NicheSelection & { n_games: number | null })[];
+  perNiche: (NicheSelection & { n_games: number | null; aliasOf?: string | null })[];
   mode: NicheCombineMode;
   combined: number | null;
   smallest: number | null;
@@ -668,9 +742,16 @@ function PerNicheFunnel({
             </span>
           )}
           <div className="rounded-card border border-chartborder bg-page px-3 py-2">
-            <Link to={nicheDetailPath(p.dimension, p.key)} className="text-xs font-medium text-ink-primary hover:text-brand">
-              {p.key}
+            <Link
+              to={nicheDetailPath(p.dimension, p.aliasOf ?? p.key)}
+              className="text-xs font-medium text-ink-primary hover:text-brand"
+            >
+              {p.aliasOf ?? p.key}
             </Link>
+            {/* An old tag spelling is served as its canonical niche — say so, don't swap silently. */}
+            {p.aliasOf && p.aliasOf !== p.key && (
+              <div className="text-[10px] text-ink-muted">was &lsquo;{p.key}&rsquo; — merged on Steam</div>
+            )}
             <div className="tabular mt-0.5 text-sm font-semibold text-ink-secondary">
               {p.n_games != null ? `${fmtInt(p.n_games)} games` : loading ? "…" : "size unavailable"}
             </div>
@@ -691,7 +772,13 @@ function PerNicheFunnel({
             /studios inactive tab had, from the same token on a lighter-than-usual panel.
             Measured 2026-09-01; ink-secondary reads 4.86:1 here. */}
         <div className="text-xs font-medium text-ink-secondary">
-          {mode === "intersect" ? "In all of them" : "In any of them"}
+          {mode === "intersect"
+            ? perNiche.length === 2
+              ? "In both"
+              : "In all of them"
+            : perNiche.length === 2
+              ? "In either"
+              : "In any of them"}
         </div>
         <div
           className={clsx(

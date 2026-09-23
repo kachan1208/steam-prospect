@@ -1,19 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Line,
-  LineChart,
-  ReferenceArea,
-  ReferenceLine,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { CartesianGrid, Line, LineChart, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { Histogram } from "../components/charts/Histogram";
 import {
@@ -21,51 +10,93 @@ import {
   type BucketSelection,
   type DistributionBucket,
 } from "../components/charts/NicheDistribution";
+import { PressTimelineChart } from "../components/charts/PressTimelineChart";
 import { SaturationTrend } from "../components/charts/SaturationTrend";
 import { TooltipPanel } from "../components/charts/TooltipPanel";
+import { OpportunityBreakdown } from "../components/OpportunityBreakdown";
 import { Card } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ErrorState } from "../components/ui/ErrorState";
+import { HeaderLabel } from "../components/ui/HeaderLabel";
+import { InfoTip } from "../components/ui/InfoTip";
 import { KpiCell } from "../components/ui/KpiCell";
 import { Loading } from "../components/ui/Loading";
 import { BulletMeter } from "../components/ui/Meter";
+import { SentinelTag } from "../components/ui/SentinelTag";
+import { hasRevenueFigure, PriceText, RevenueText } from "../components/ui/GameMoney";
 import { StatTile } from "../components/ui/StatTile";
 import { TableScroll } from "../components/ui/TableScroll";
 import { ViewToggle } from "../components/ui/ViewToggle";
 import { trackEvent } from "../lib/analytics";
+import { useDataAge } from "../lib/dataAge";
 import { estimatedUnits } from "../lib/estimates";
 import { nicheWatchlistId, toggleNicheWatchlist, useWatchlist, WATCHLIST_CAP } from "../lib/watchlist";
 import {
   ApiError,
+  errorMessage,
   isNotFound,
-  nicheExportCsvUrl,
+  nicheDetailQueryOptions,
   notFoundReason,
-  useMarketBenchmarks,
   useNicheDetail,
   useNicheDistribution,
   useNicheGames,
   type Dimension,
+  type NicheDetail as NicheDetailData,
+  type NicheGameRow,
   type NicheGameSortKey,
+  type NicheGamesList,
   type NicheGamesParams,
   type NichePlayers,
   type NichePlayersMonthlyPoint,
   type NichePlayersPoint,
-  type NichePressPoint,
   type NicheRow,
-  type TrendPoint,
+  type NicheScope,
+  type PressTimelinePoint,
   type Window,
 } from "../lib/api";
-import { axisScale, fmtCompact, fmtInt, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtSigned, fmtUsd, titleCase, isFreeTitle } from "../lib/format";
+import {
+  axisScale,
+  fmtCompact,
+  fmtInt,
+  fmtMonths,
+  fmtPct,
+  fmtPrice,
+  fmtUsd,
+  isFiniteNumber,
+  titleCase,
+  priceKind,
+  PRICE_UNKNOWN_NOTE,
+} from "../lib/format";
+import { glossary, type GlossaryKey } from "../lib/glossary";
 import { heatDomain, heatStyle } from "../lib/heat";
-import { CSS_VAR, MONO } from "../lib/palette";
+import { fillMonthGaps, partialMonth } from "../lib/monthSeries";
+import { downloadCsv, exportNicheGamesCsv } from "../lib/nicheCsv";
+import { paidCount, paidOnlyNote, paidStatSentinel, paidWithheld } from "../lib/nichePaid";
+import { CSS_VAR } from "../lib/palette";
+import { noMarketNote, readPlayersTrend } from "../lib/playersTrend";
 import { usePageTitle } from "../lib/usePageTitle";
+import { useMinWidth } from "../lib/useMinWidth";
 import { useDetailView } from "../lib/viewMode";
 import { DEFAULT_NICHE_CUT, findNicheVariant, formatNicheRef, nicheCombinedPath } from "../lib/nicheSelection";
 // The headline is the Radar's dossier — same evaluation, same strings, same colour tokens
 // as the board's tooltip (see the "the dossier, as the board prints it" block there).
-import { radarBoardAbsence, radarDossier, radarSector } from "../lib/radarVerdict";
+import {
+  DOSSIER_LABEL,
+  ENTRANT_RATIO_CATALOG_NORM,
+  ENTRANT_RATIO_PAR,
+  WC_WINNER_TAKE_MOST,
+  cutPopulationLabel,
+  demandTrendWorked,
+  failedCheckClause,
+  failedChecks,
+  radarBoardAbsence,
+  radarDossier,
+  radarSector,
+  releasesYoyWorked,
+} from "../lib/radarVerdict";
 import { useDragZoom } from "../lib/useDragZoom";
 import { SELECTION_AREA_PROPS, ZoomFrame } from "../components/charts/ZoomFrame";
+import { nicheDetailPath } from "../lib/nichePath";
 
 /** The condensed stack the foundation applies to h1–h6 and .kicker (index.css) — used inline
  * for KPI/panel numerals that aren't semantically headings, so they still read as the
@@ -75,48 +106,37 @@ const CONDENSED = '"Barlow Condensed", "Barlow", system-ui, sans-serif';
 /**
  * The niche deep-dive PAGE — the twin of /games/:appid, replacing the old right-hand
  * NicheDetailDrawer. Everything that decides what you see lives in the URL (the cut, the
- * tab, the distribution bucket selection), so a filtered view is a link you can send —
- * which is the whole reason this stopped being a drawer.
+ * tab, the scope, the distribution bucket selection), so a filtered view is a link you can
+ * send — which is the whole reason this stopped being a drawer.
  *
- * Structure deliberately mirrors GameProfile.tsx: back link → identity card → a row of
- * StatTiles → tab pills + the shared Simple/Detailed ViewToggle → Cards.
+ * READING ORDER (2026-09-23 review — the owner's rules applied top to bottom):
+ *   1. the VERDICT, with every check it failed named beside it (never a bullish verdict over
+ *      a failing deciding check, never a failure the reader has to go and find);
+ *   2. "Read this first" — the red flags — ABOVE the headline numbers, on every width;
+ *   3. the headline numbers, each with an ⓘ that works THIS niche's numbers through its
+ *      formula, and sentinels (withheld / no data / emerging) marked in place;
+ *   4. the Opportunity score WITH its parts (never a lone score).
+ * Then the panels, which follow the cut chips; the headline never does (it is the Radar's
+ * pinned cut, so a display chip can't move a verdict).
  */
 
 // ---- route + URL contract ----------------------------------------------------------------
 
-// The route pattern + link builder moved to lib/nichePath.ts (eager modules — App's route
+// The route pattern + link builder live in lib/nichePath.ts (eager modules — App's route
 // table, RadarBoard — must be able to link here without statically importing this whole
 // page module, or the route-level code splitting is defeated). Re-exported so the pages
 // and tests that always imported them from here keep working.
 export { NICHE_ROUTE_PATH, nicheDetailPath } from "../lib/nichePath";
+// The partial-year rule moved to the chart that draws it; re-exported for the same reason.
+export { partialTrendYear } from "../components/charts/SaturationTrend";
 
 export const GAMES_PAGE_SIZE = 25;
 
-/** Rows in the overview's "Top games in the niche" preview. It is a request `limit` now, not
- * a `.slice()` of a fixed top-8 the API happened to ship — see the panel for why. */
+/** Rows in the overview's "Top games" preview. It is a request `limit` now, not a `.slice()`
+ * of a fixed top-8 the API happened to ship — see the panel for why. */
 export const TOP_GAMES_PANEL_SIZE = 5;
 
 const DIMENSIONS: Dimension[] = ["tag", "genre"];
-
-/** The "Demand vs. pipeline" releases line — the same paper tone the two-series line-chart
- *  convention uses for a secondary series (lib/palette.ts MONO.paper45). Named because the
- *  legend key has to draw the SAME stroke, and the previous legend used a Tailwind opacity
- *  modifier on a var()-valued colour, which silently produced no swatch at all. */
-const TREND_RELEASES_STROKE = MONO.paper45;
-
-/**
- * The year in a yearly trend series that is still being filled in, or null if the series
- * stops before the current one.
- *
- * A yearly series always ends on a partial year for eight months out of twelve, and the
- * final point then plots a few months of releases beside twelve-month neighbours — the
- * "2026 cliff" the niche charts show is that artifact, not a market event. `now` is a
- * parameter so the rule is testable without freezing the clock.
- */
-export function partialTrendYear(points: { year: number }[], now: Date = new Date()): number | null {
-  const currentYear = now.getFullYear();
-  return points.some((p) => p.year === currentYear) ? currentYear : null;
-}
 
 export type DistMetric = "revenue" | "price";
 
@@ -168,6 +188,19 @@ export function writeSelection(
   return next;
 }
 
+/**
+ * THE GAMES SCOPE — indie first (2026-09-23 review: a niche's "top games" led with Monster
+ * Hunter Wilds and ELDEN RING NIGHTREIGN, which tell a solo developer nothing about what
+ * THEY can earn). The API's scope=indie keeps Steam's Indie-flagged games; unknown flags are
+ * left out and counted. Default indie; ?scope=all is the "All games" toggle. Anything else
+ * in the URL reads as the default.
+ */
+export const DEFAULT_SCOPE: NicheScope = "indie";
+
+export function readScope(sp: URLSearchParams): NicheScope {
+  return sp.get("scope") === "all" ? "all" : DEFAULT_SCOPE;
+}
+
 // The API's request-side sort names (routers/niches.py `_GAME_SORT`), not the row fields.
 // Owners is deliberately absent there, so its column header stays inert.
 const GAME_SORT_KEYS: NicheGameSortKey[] = ["revenue", "price", "reviews", "release_year", "name"];
@@ -175,7 +208,7 @@ const GAME_SORT_KEYS: NicheGameSortKey[] = ["revenue", "price", "reviews", "rele
 /** URL query string → the games request. The two bucket selections are the cross-filter:
  * whatever is brushed on the revenue/price histograms lands here as the rev_min/rev_max and
  * price_min/price_max bounds, so the table below the charts always shows exactly the
- * selected slice. */
+ * selected slice — in the page's scope. */
 export function readGamesParams(
   sp: URLSearchParams,
   cut: { win: Window; min_reviews: number },
@@ -195,6 +228,7 @@ export function readGamesParams(
     rev_max: revenue?.max,
     price_min: price?.min,
     price_max: price?.max,
+    scope: readScope(sp),
   };
 }
 
@@ -203,19 +237,47 @@ export function selectionLabel(metric: DistMetric, selection: NonNullable<Bucket
   return `${metric === "revenue" ? "Revenue" : "Price"} ${fmt(selection.min)} – ${fmt(selection.max)}`;
 }
 
-// ---- ported from NicheDetailDrawer -------------------------------------------------------
+/**
+ * Which scope a games response ACTUALLY applied. An API that predates `scope` ignores the
+ * param and serves every game without saying so — the page then says "all games" (and why),
+ * never labels them indie.
+ */
+export function appliedScope(requested: NicheScope, res: Pick<NicheGamesList, "scope"> | undefined): {
+  scope: NicheScope;
+  unsupported: boolean;
+} {
+  if (!res) return { scope: requested, unsupported: false };
+  if (res.scope === undefined) return { scope: "all", unsupported: requested === "indie" };
+  return { scope: res.scope, unsupported: false };
+}
 
-function variantLabel(v: NicheRow): string {
-  return `${v.window === "24m" ? "Last 24m" : "All-time"} · ≥${v.min_reviews} reviews`;
+/** "Last 24 months · ≥50 reviews" — a cut chip's label, the same words every count uses. */
+function variantLabel(v: Pick<NicheRow, "window" | "min_reviews">): string {
+  const s = cutPopulationLabel(v.window, v.min_reviews);
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 const TIER_HINT: Record<string, string> = {
   micro: "buildable game concept",
-  theme: "setting/aesthetic — attach it to a micro-genre",
+  theme: "setting/aesthetic — attach it to a game type",
   umbrella: "genre container, not a buildable niche",
   meta: "reception tag, never buildable",
   genre: "Steam genre",
 };
+
+/** The tier badge in plain words (2026-09-23 review: "micro tier" / "umbrella" were jargon).
+ * Same vocabulary as the Niche Finder's tier chips. */
+const TIER_BADGE: Record<string, string> = {
+  micro: "game type",
+  theme: "theme",
+  umbrella: "broad genre",
+  meta: "review tag",
+  genre: "Steam genre",
+};
+
+/** The Est. revenue ⓘ, plus what its "Price unknown" sentinel means — the same note every
+ * other games table carries (lib/format.ts PRICE_UNKNOWN_NOTE). */
+const EST_REVENUE_NOTES = `${glossary("est_revenue").notes ?? ""} ${PRICE_UNKNOWN_NOTE}`.trim();
 
 /** The falsification rules from the growth-gate work, rendered as read-this-first flags:
  * a niche that LOOKS open can be a market in decline, a hits-only market, or not solo-
@@ -228,22 +290,32 @@ function declineFlags(v: NicheRow, players: NichePlayers | null): { serious: boo
       text: `Release pipeline shrinking ${fmtPct(Math.abs(v.saturation_yoy))}/yr — "low competition" here is everyone leaving, not an open market.`,
     });
   }
-  if (v.entrant_ratio != null && v.entrant_ratio < 1) {
+  // The same par the verdict trace's newcomer row uses — it moves with the constant's re-fit.
+  if (v.entrant_ratio != null && v.entrant_ratio < ENTRANT_RATIO_PAR) {
     flags.push({
       serious: v.entrant_ratio < 0.7,
-      text: `Recent entrants earn ${v.entrant_ratio.toFixed(2)}× the back catalog's median (catalog norm ~1.08) — newcomers underearn here.`,
+      text: `Recent entrants earn ${v.entrant_ratio.toFixed(2)}× the back catalog's median (catalog norm ~${ENTRANT_RATIO_CATALOG_NORM}×) — newcomers underearn here.`,
     });
   }
-  if (v.winner_concentration != null && v.winner_concentration > 0.85) {
+  if (v.winner_concentration != null && v.winner_concentration > WC_WINNER_TAKE_MOST) {
     flags.push({
       serious: false,
       text: `Winner-take-most: the top 5% of titles hold ${fmtPct(v.winner_concentration)} of revenue — expect the median outcome, not the hits.`,
     });
   }
+  const paid = paidCount(v);
+  if (v.median_rev == null && paid !== null && paidWithheld(v)) {
+    flags.push({
+      serious: true,
+      text: `Only ${fmtInt(paid)} of its ${fmtInt(v.n_games)} games sell for a price — too few to estimate what a paid game earns here, so every revenue figure is withheld. Most of this niche is free-to-play or unpriced.`,
+    });
+  }
   if (v.solo_viability != null && v.solo_viability < 0.8) {
     flags.push({
       serious: v.solo_viability < 0.6,
-      text: `Leans multiplayer (${fmtPct(v.solo_viability)} of games playable single-player; norm ~90%) — netcode, servers and a live player base are table stakes.`,
+      // "Most niches: 95–99%" — the catalog median is 97.5%; this said "norm ~90%", which is
+      // the bottom tenth of the catalog, not its norm (see radarVerdict.ts).
+      text: `Leans multiplayer: only ${fmtPct(v.solo_viability)} of its games can be played single-player (most niches: 95–99%) — netcode, servers and a live player base come with it.`,
     });
   }
   if (v.lifetime_survival_12m != null && v.lifetime_survival_12m < 0.5) {
@@ -252,11 +324,21 @@ function declineFlags(v: NicheRow, players: NichePlayers | null): { serious: boo
       text: "Short-lived niche: fewer than half of its 100+-player games still hold 10+ a year later.",
     });
   }
-  if (players?.players_trend_7d_pct != null && players.players_trend_7d_pct < -10) {
-    flags.push({
-      serious: false,
-      text: `Live players down ${Math.abs(players.players_trend_7d_pct).toFixed(1)}% vs the prior 7 days (same-panel).`,
-    });
+  const trend = readPlayersTrend(players);
+  const own = players?.players_trend_7d_pct;
+  const rel = players?.players_trend_7d_rel_pct;
+  if (isFiniteNumber(own)) {
+    if (trend.hasMarket && isFiniteNumber(rel) && rel < -10) {
+      flags.push({
+        serious: false,
+        text: `Live players ${trend.value} this week ${trend.vsMarket} — the niche trailed the whole market.`,
+      });
+    } else if (!trend.hasMarket && own < -10) {
+      flags.push({
+        serious: false,
+        text: `Live players down ${Math.abs(own).toFixed(1)}% vs the prior 7 days, counting games measured in both weeks — a Steam-wide week can move every niche, so check the market before reading it as decline.`,
+      });
+    }
   }
   return flags;
 }
@@ -275,109 +357,78 @@ function PlayersSeriesChart({ points }: { points: NichePlayersPoint[] }) {
     <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
       <ResponsiveContainer width="100%" height={150}>
         <LineChart data={zoom.data} margin={{ top: 6, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
-        <CartesianGrid stroke="var(--gridline)" vertical={false} />
-        <XAxis
-          dataKey="date"
-          tick={{ fontSize: 10 }}
-          tickFormatter={(v: string) => v.slice(5)}
-          interval="preserveStartEnd"
-          minTickGap={24}
-          tickLine={false}
-          axisLine={{ stroke: "var(--baseline)" }}
-        />
-        <YAxis
-          tick={{ fontSize: 10 }}
-          ticks={y.ticks}
-          interval={0}
-          domain={y.domain}
-          tickFormatter={(v: number) => y.format(v)}
-          tickLine={false}
-          axisLine={false}
-          width={44}
-        />
-        <Tooltip
-          cursor={{ stroke: "var(--baseline)" }}
-          content={({ active, payload, label }) => {
-            if (!active || !payload || payload.length === 0) return null;
-            const p = payload[0].payload as NichePlayersPoint;
-            return (
-              <TooltipPanel
-                title={String(label)}
-                rows={[
-                  { label: "Total players", value: fmtCompact(p.total_players), color: CSS_VAR.demand },
-                  {
-                    label: `Measured same-day (${fmtInt(p.n_games_measured)} games)`,
-                    value: p.measured_players != null ? fmtCompact(p.measured_players) : "—",
-                    color: CSS_VAR.competition,
-                  },
-                ]}
-              />
-            );
-          }}
-        />
-        <Line
-          type="linear"
-          dataKey="total_players"
-          stroke={CSS_VAR.demand}
-          strokeWidth={2}
-          dot={points.length <= 45 ? { r: 2.5, fill: CSS_VAR.demand, strokeWidth: 0 } : false}
-        />
-        {zoom.selection && (
-          <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />
-        )}
+          <CartesianGrid stroke="var(--gridline)" vertical={false} />
+          <XAxis
+            dataKey="date"
+            tick={{ fontSize: 10 }}
+            tickFormatter={(v: string) => v.slice(5)}
+            interval="preserveStartEnd"
+            minTickGap={24}
+            tickLine={false}
+            axisLine={{ stroke: "var(--baseline)" }}
+          />
+          <YAxis
+            tick={{ fontSize: 10 }}
+            ticks={y.ticks}
+            interval={0}
+            domain={y.domain}
+            tickFormatter={(v: number) => y.format(v)}
+            tickLine={false}
+            axisLine={false}
+            width={44}
+          />
+          <Tooltip
+            cursor={{ stroke: "var(--baseline)" }}
+            content={({ active, payload, label }) => {
+              if (!active || !payload || payload.length === 0) return null;
+              const p = payload[0].payload as NichePlayersPoint;
+              return (
+                <TooltipPanel
+                  title={String(label)}
+                  rows={[
+                    { label: "Total players", value: fmtCompact(p.total_players), color: CSS_VAR.demand },
+                    {
+                      label: `Measured that day (${fmtInt(p.n_games_measured)} games)`,
+                      value: p.measured_players != null ? fmtCompact(p.measured_players) : "—",
+                      color: CSS_VAR.competition,
+                    },
+                  ]}
+                />
+              );
+            }}
+          />
+          <Line
+            type="linear"
+            dataKey="total_players"
+            stroke={CSS_VAR.demand}
+            strokeWidth={2}
+            dot={points.length <= 45 ? { r: 2.5, fill: CSS_VAR.demand, strokeWidth: 0 } : false}
+          />
+          {zoom.selection && <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />}
         </LineChart>
       </ResponsiveContainer>
     </ZoomFrame>
   );
 }
 
-/** Monthly press-mention volume for the niche — same single-hue count-per-period bar shape
- * (and same aqua hue) as the game page's PressTimelineChart, since both slice the identical
- * underlying metric (journalist press mentions), just per game vs. pooled per niche. */
-function NichePressChart({ points }: { points: NichePressPoint[] }) {
-  const zoom = useDragZoom(points, "month");
-  return (
-    <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
-      <ResponsiveContainer width="100%" height={150}>
-        <BarChart data={zoom.data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
-        <CartesianGrid stroke="var(--gridline)" vertical={false} />
-        <XAxis
-          dataKey="month"
-          tick={{ fontSize: 10 }}
-          interval="preserveStartEnd"
-          minTickGap={24}
-          tickLine={false}
-          axisLine={{ stroke: "var(--baseline)" }}
-        />
-        <YAxis
-          tick={{ fontSize: 10 }}
-          tickFormatter={(v: number) => fmtInt(v)}
-          tickLine={false}
-          axisLine={false}
-          width={36}
-          allowDecimals={false}
-        />
-        <Tooltip
-          cursor={{ fill: "var(--gridline)", opacity: 0.5 }}
-          content={({ active, payload, label }) => {
-            if (!active || !payload || payload.length === 0) return null;
-            const p = payload[0].payload as NichePressPoint;
-            return (
-              <TooltipPanel
-                title={String(label)}
-                rows={[{ label: "Articles", value: fmtInt(p.n_articles), color: CSS_VAR.competition }]}
-              />
-            );
-          }}
-        />
-        <Bar dataKey="n_articles" fill={CSS_VAR.competition} radius={[4, 4, 0, 0]} maxBarSize={20} />
-        {zoom.selection && (
-          <ReferenceArea x1={zoom.selection.x1} x2={zoom.selection.x2} {...SELECTION_AREA_PROPS} />
-        )}
-        </BarChart>
-      </ResponsiveContainer>
-    </ZoomFrame>
+/**
+ * The niche's monthly press timeline as the SHARED press chart reads it (2026-09-23). This
+ * page used to carry its own copy of PressTimelineChart (NichePressChart) that drew the
+ * mart's SPARSE months on a category axis, so a month without coverage vanished and two bars
+ * a year apart sat side by side as if consecutive. The months are filled with zeros first.
+ */
+export function nichePressTimeline(points: readonly { month: string; n_articles: number }[]): PressTimelinePoint[] {
+  return fillMonthGaps(
+    points.map((p) => ({ period: p.month, n_mentions: p.n_articles })),
+    (p) => p.period,
+    (period) => ({ period, n_mentions: 0 }),
   );
+}
+
+/** A revenue figure, or the reason it has none ("withheld" on the rebuilt mart). */
+function usdOrWhy(row: NicheRow, value: number | null | undefined): string {
+  if (isFiniteNumber(value)) return fmtUsd(value);
+  return paidWithheld(row) ? "withheld" : "no data";
 }
 
 // ---- page --------------------------------------------------------------------------------
@@ -388,42 +439,72 @@ const TABS = [
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
 
-/** Sortable header for the games table — same click-to-sort/arrow affordance as the Niche
- * Finder's SortLabel, scaled down to this table's type ramp. */
-function GameSortLabel({
-  label,
-  col,
-  active,
-  order,
-  onSort,
-  className,
+/** "Indie games | All games" — one control, one URL param (?scope=all), used by the overview
+ * panel and the games tab alike. */
+function ScopeToggle({ scope, onChange }: { scope: NicheScope; onChange: (s: NicheScope) => void }) {
+  const opts: { v: NicheScope; label: string; title: string }[] = [
+    {
+      v: "indie",
+      label: "Indie games",
+      title: "Only games the developer tagged Indie on Steam — the comparables a small team can learn from",
+    },
+    { v: "all", label: "All games", title: "Every game in the niche, big publishers included" },
+  ];
+  return (
+    <div className="inline-flex border border-ink-primary/25" role="group" aria-label="Which games to list">
+      {opts.map((o, i) => (
+        <button
+          key={o.v}
+          type="button"
+          aria-pressed={scope === o.v}
+          onClick={() => onChange(o.v)}
+          title={o.title}
+          className={clsx(
+            "px-2.5 py-1 text-[11px] font-medium transition-colors",
+            i > 0 && "border-l border-ink-primary/25",
+            scope === o.v ? "bg-brand text-brand-fg" : "text-ink-muted hover:text-ink-secondary",
+          )}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** "150 indie games · last 24 months · ≥50 reviews · 13 with an unknown indie flag left out"
+ * — every list says which games it counts. */
+function ScopeLine({
+  total,
+  scope,
+  unsupported,
+  nScopeUnknown,
+  population,
+  filtered,
 }: {
-  label: string;
-  col: NicheGameSortKey;
-  active: boolean;
-  order: "asc" | "desc";
-  onSort: (col: NicheGameSortKey) => void;
-  className?: string;
+  total: number | null;
+  scope: NicheScope;
+  unsupported: boolean;
+  nScopeUnknown: number | null | undefined;
+  population: string;
+  filtered?: boolean;
 }) {
   return (
-    <button
-      type="button"
-      onClick={() => onSort(col)}
-      title={`Sort by ${label}`}
-      className={clsx(
-        "group inline-flex items-center gap-1 font-medium transition-colors",
-        active ? "text-ink-primary" : "text-ink-muted hover:text-ink-secondary",
-        className,
+    <span className="text-[11px] text-ink-muted" data-testid="games-scope-line">
+      {total != null ? `${fmtInt(total)} ${scope === "indie" ? "indie " : ""}game${total === 1 ? "" : "s"}` : "Games"}
+      {" · "}
+      {population}
+      {filtered ? " · in the selected buckets" : ""}
+      {scope === "indie" && nScopeUnknown != null && nScopeUnknown > 0 && (
+        <> · {fmtInt(nScopeUnknown)} with an unknown indie flag left out</>
       )}
-    >
-      {label}
-      <span
-        aria-hidden
-        className={clsx("text-[10px] leading-none", active ? "opacity-100" : "opacity-0 group-hover:opacity-40")}
-      >
-        {active ? (order === "desc" ? "↓" : "↑") : "↕"}
-      </span>
-    </button>
+      {unsupported && (
+        <>
+          {" "}
+          <SentinelTag>all games — indie filter not in this data build</SentinelTag>
+        </>
+      )}
+    </span>
   );
 }
 
@@ -431,7 +512,11 @@ export default function NicheDetail() {
   const { dimension: dimensionParam, key: keyParam } = useParams<{ dimension: string; key: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
+  const location = useLocation();
+  const queryClient = useQueryClient();
   const [view, setView] = useDetailView();
+  const dataAge = useDataAge();
+  const wide = useMinWidth(640);
   // Persisted since lib/watchlist.ts landed — the earlier local-only toggle was honest about
   // not saving, but it left the Watchlist page unreachable in practice: nothing could put an
   // entry into it. Same versioned-localStorage store the Watchlist page reads.
@@ -453,16 +538,31 @@ export default function NicheDetail() {
   // with GameProfile's "In niches" rail, so a score quoted there is this page's score.
   const urlWindow: Window = searchParams.get("win") === "all" ? "all" : DEFAULT_NICHE_CUT.win;
   const urlMinReviews = readNum(searchParams.get("min_reviews")) ?? DEFAULT_NICHE_CUT.min_reviews;
+  const scope = readScope(searchParams);
 
   const detailQ = useNicheDetail(dimension ?? "tag", dimension ? nicheKey : null);
-  const benchmarksQ = useMarketBenchmarks();
   const detail = detailQ.data;
-  // Drag-to-zoom for the two charts inlined in this render (the yearly demand/pipeline
-  // panel and the full-history players line). Their hooks live up here, above every
-  // early return below, because a hook that runs only on the loaded frame changes hook
-  // order between renders. Optional chaining keeps them harmless while the query is out.
-  const yearZoom = useDragZoom(detail?.saturation_trend ?? [], "year");
+  // Drag-to-zoom for the full-history players line, inlined in this render. Its hook lives up
+  // here, above every early return below, because a hook that runs only on the loaded frame
+  // changes hook order between renders.
   const playersMonthlyZoom = useDragZoom(detail?.players?.monthly ?? [], "month");
+
+  // TAG ALIASES (2026-09-23). Steam renamed or merged some tag spellings ("Rogue-like" →
+  // "Roguelike"), and the mart serves an old spelling as its canonical niche with alias_of
+  // set. The URL is REPLACED with the canonical key (no history entry for the old spelling —
+  // nobody should go "back" to it), the answer is seeded into the canonical key's cache entry
+  // so the swap doesn't refetch, and a one-line note says what happened.
+  const aliasFrom = (location.state as { aliasFrom?: string } | null)?.aliasFrom ?? null;
+  useEffect(() => {
+    if (!dimension || !nicheKey || !detail?.alias_of) return;
+    const canonical = detail.canonical_key ?? detail.alias_of;
+    if (!canonical || canonical === nicheKey) return;
+    queryClient.setQueryData(nicheDetailQueryOptions(dimension, canonical).queryKey, detail);
+    navigate(
+      { pathname: nicheDetailPath(dimension, canonical), search: location.search },
+      { replace: true, state: { aliasFrom: detail.requested_key ?? nicheKey } },
+    );
+  }, [detail, dimension, nicheKey, navigate, location.search, queryClient]);
 
   // The cut shown is whatever the URL asks for, falling back to the nearest materialized
   // variant — the mart only builds a handful of (window × min_reviews) combinations.
@@ -501,13 +601,13 @@ export default function NicheDetail() {
   const priceSelection = readSelection(searchParams, "price");
   const hasSelection = revenueSelection !== null || priceSelection !== null;
 
-  // The two new endpoints only exist after a mart rebuild; both are scoped to the games tab
-  // so the overview never waits on them.
+  // The drill-down endpoints only exist after a mart rebuild; both are scoped to the games
+  // tab so the overview never waits on them.
   const onGamesTab = tab === "games";
   const gamesQ = useNicheGames(dimension ?? "tag", dimension && onGamesTab ? nicheKey : null, gamesParams);
-  // The overview's "Top games in the niche" panel reads the SAME cut-aware endpoint as the
-  // games tab's table — see the panel itself for the measurement that forced it. It asks for
-  // the cut ONLY: no rev_min/price_min, because this panel is "the niche's biggest games at
+  // The overview's "Top games" panel reads the SAME cut-aware endpoint as the games tab's
+  // table — see the panel itself for the measurement that forced it. It asks for the cut and
+  // the scope ONLY: no rev_min/price_min, because this panel is "the niche's biggest games at
   // this cut", not the histogram-brushed slice (the brush belongs to the table below).
   const topGamesParams = useMemo<NicheGamesParams>(
     () => ({
@@ -517,12 +617,14 @@ export default function NicheDetail() {
       order: "desc",
       limit: TOP_GAMES_PANEL_SIZE,
       offset: 0,
+      scope,
     }),
-    [cut],
+    [cut, scope],
   );
   const topGamesQ = useNicheGames(dimension ?? "tag", dimension && !onGamesTab ? nicheKey : null, topGamesParams);
-  const revenueDistQ = useNicheDistribution(dimension ?? "tag", dimension && onGamesTab ? nicheKey : null, "revenue", cut);
-  const priceDistQ = useNicheDistribution(dimension ?? "tag", dimension && onGamesTab ? nicheKey : null, "price", cut);
+  const distParams = useMemo(() => ({ ...cut, scope }), [cut, scope]);
+  const revenueDistQ = useNicheDistribution(dimension ?? "tag", dimension && onGamesTab ? nicheKey : null, "revenue", distParams);
+  const priceDistQ = useNicheDistribution(dimension ?? "tag", dimension && onGamesTab ? nicheKey : null, "price", distParams);
 
   useEffect(() => {
     if (dimension && nicheKey) trackEvent("niche_open");
@@ -530,10 +632,11 @@ export default function NicheDetail() {
 
   const patch = useCallback(
     (next: URLSearchParams) => {
-      // replace, not push: brushing a histogram or flipping a cut shouldn't bury the Niche
-      // Finder under a dozen history entries. The URL still fully describes the view, which
-      // is what makes it linkable.
-      setSearchParams(next, { replace: true });
+      // PUSH, not replace (2026-09-23): a tab, a sort, a page, a cut or a brushed bucket is a
+      // step the reader took, and Back should undo it — the /games convention. With replace,
+      // Back left the page entirely from three tabs deep. (The alias redirect above is the
+      // one replace: the old spelling is not a place anyone should go back to.)
+      setSearchParams(next);
     },
     [setSearchParams],
   );
@@ -548,6 +651,11 @@ export default function NicheDetail() {
       patch(next);
     },
     [searchParams, patch],
+  );
+
+  const setScope = useCallback(
+    (s: NicheScope) => setParam({ scope: s === DEFAULT_SCOPE ? null : s, offset: null }),
+    [setParam],
   );
 
   const onSelectionChange = useCallback(
@@ -569,15 +677,34 @@ export default function NicheDetail() {
     [gamesParams.sort, gamesParams.order, setParam],
   );
 
+  // ---- CSV: THIS cut's games (see lib/nicheCsv.ts for why it is built here) ---------------
+  const [csv, setCsv] = useState<{ status: "idle" | "busy" | "done" | "error"; message?: string }>({ status: "idle" });
+  const exportCsv = useCallback(async () => {
+    if (!dimension || !nicheKey) return;
+    setCsv({ status: "busy" });
+    try {
+      const { limit: _limit, offset: _offset, ...params } = gamesParams;
+      const res = await exportNicheGamesCsv(dimension, nicheKey, params);
+      downloadCsv(res.filename, res.csv);
+      trackEvent("niche_export_csv");
+      setCsv({
+        status: "done",
+        message: res.truncated
+          ? `Exported the first ${fmtInt(res.rows)} of ${fmtInt(res.total)} games.`
+          : `Exported ${fmtInt(res.rows)} ${res.scope === "indie" ? "indie " : ""}game${res.rows === 1 ? "" : "s"}.`,
+      });
+    } catch (e) {
+      setCsv({ status: "error", message: `Export failed — ${errorMessage(e)}` });
+    }
+  }, [dimension, nicheKey, gamesParams]);
+
   // ---- guard rails (same shapes as GameProfile's invalid-appid / not-found states) --------
 
   if (!dimension || !nicheKey) {
     return (
       <Card>
         <div className="flex flex-col items-center gap-2 py-8 text-center text-sm">
-          <span className="text-verdict-serious">
-            Invalid niche URL — the dimension must be “tag” or “genre”.
-          </span>
+          <span className="text-verdict-serious">Invalid niche URL — the dimension must be “tag” or “genre”.</span>
           <Link to="/niches" className="text-series-1 hover:underline">
             Back to the Niche Finder
           </Link>
@@ -615,8 +742,6 @@ export default function NicheDetail() {
       );
     }
     // The API's own 404 detail already reads "niche not found: tag/Foo" — don't stutter it.
-    // Shared with GameProfile, which had the same 404 shape and NOT the same regex (it
-    // rendered "Game not found: game not found: 999999999" until this moved into lib/api).
     const reason = notFoundReason(detailQ.error);
     return (
       <Card>
@@ -639,11 +764,12 @@ export default function NicheDetail() {
   // they read the SAME row.
   const dossierVariant = radarVariant ?? activeVariant;
   const dossier = radarDossier(dossierVariant);
+  const failed = failedChecks(dossier.verdict.checks);
   const absence = radarBoardAbsence({ dimension, tier, solo_viability: dossierVariant.solo_viability });
   const flags = declineFlags(dossierVariant, players);
   // The inverse of the board dossier's "Open deep dive →": select this niche on the board,
-  // in its own class, with the solo lens opened if that is what hides it there. The id is
-  // the board's own "dimension:key" (Radar.tsx handleSelect / RadarBoard's pool lookup).
+  // in its own class, with the singleplayer lens opened if that is what hides it there. The
+  // id is the board's own "dimension:key" (Radar.tsx handleSelect / RadarBoard's pool lookup).
   const radarHref = (() => {
     const sp = new URLSearchParams();
     const sector = radarSector(dimension, tier);
@@ -652,41 +778,43 @@ export default function NicheDetail() {
     sp.set("niche", formatNicheRef({ dimension, key: nicheKey }));
     return `/radar?${sp.toString()}`;
   })();
-  const catalogHitRateBenchmark = benchmarksQ.data?.cited.pct_new_releases_over_100k;
-  const csvUrl = nicheExportCsvUrl({
-    dimension,
-    window: cut.win,
-    min_reviews: cut.min_reviews,
-    q: nicheKey,
-    limit: 200,
-  });
 
+  const cutLabel = cutPopulationLabel(cut.win, cut.min_reviews);
+  const dossierCutLabel = cutPopulationLabel(dossierVariant.window, dossierVariant.min_reviews);
   const totalPlayersNow = players?.total_players_now ?? activeVariant.total_players_now;
-  const playersTrend = players?.players_trend_7d_pct ?? activeVariant.players_trend_7d_pct;
-  // /niches/.../games now carries live_players per row (routers/niches.py `_GAME_SELECT`),
-  // which is what killed the old players.distribution.top_games join here: that list is the
-  // top 8 BY PLAYERS, so every row outside it fell through to "—". DARK SOULS III, Sekiro
-  // and Clair Obscur each printed "—" in this panel while /games/374320, /games/814380 and
-  // /games/1903340 printed 3,849 / 2,716 / 6,453 for the same moment. Same fact, two
-  // answers — the join was a ranked list being used as a lookup table.
-  const hasP90Trend = detail.saturation_trend.some((p) => p.p90_rev != null);
-  // The cut-aware top games for the overview panel. Falls back to the cut-INDEPENDENT
-  // representative_games (mart_niche_top) only when the games mart isn't there — and says so
-  // in the panel when it does, because that list is a different population.
+  const playersRow = players ?? {
+    players_trend_7d_pct: activeVariant.players_trend_7d_pct,
+    players_trend_7d_market_pct: activeVariant.players_trend_7d_market_pct,
+    players_trend_7d_rel_pct: activeVariant.players_trend_7d_rel_pct,
+  };
+  const playersTrend = readPlayersTrend(playersRow);
+  const dossierPaid = paidCount(dossierVariant);
+  const dossierPaidNote = paidOnlyNote(dossierVariant);
+
+  // /niches/.../games carries live_players per row (routers/niches.py `_GAME_SELECT`), which
+  // is what killed the old players.distribution.top_games join here: that list is the top 8
+  // BY PLAYERS, so every row outside it fell through to "—" while /games/:appid printed the
+  // number. Same fact, two answers — the join was a ranked list being used as a lookup table.
   const topGames = topGamesQ.data?.items ?? [];
-  const topGamesDegraded = !topGamesQ.isLoading && (topGamesQ.isError || topGames.length === 0);
+  // The cut-aware top games for the overview panel. Falls back to the cut-INDEPENDENT
+  // representative_games (mart_niche_top) only when the games data isn't there — and says so
+  // in the panel when it does, because that list is a different population.
+  const topScope = appliedScope(scope, topGamesQ.data);
+  const topGamesDegraded =
+    !topGamesQ.isLoading && (topGamesQ.isError || (topGames.length === 0 && topScope.scope === "all"));
 
   const gamesUnavailable =
     gamesQ.isError ||
     // A degraded (but 200) response: the mart answered, with nothing in it and no filter to
     // explain the emptiness.
-    (!!gamesQ.data && gamesQ.data.total === 0 && !hasSelection);
+    (!!gamesQ.data && gamesQ.data.total === 0 && !hasSelection && appliedScope(scope, gamesQ.data).scope === "all");
   const gamesErrorStatus = gamesQ.error instanceof ApiError ? gamesQ.error.status : null;
+  const gamesScope = appliedScope(scope, gamesQ.data);
 
   const revenueBuckets = revenueDistQ.data?.buckets ?? [];
   const priceBuckets = priceDistQ.data?.buckets ?? [];
-  // Degraded = the endpoint errored, or answered 200 with nothing in it. Both mean "the mart
-  // hasn't been rebuilt for this cut yet", and both are honest states, not spinners.
+  // Degraded = the endpoint errored, or answered 200 with nothing in it. Both mean "the per-
+  // game data for this cut isn't ready yet", and both are honest states, not spinners.
   const revenueDistDegraded = revenueDistQ.isError || (!revenueDistQ.isLoading && revenueBuckets.length === 0);
   const priceDistDegraded = priceDistQ.isError || (!priceDistQ.isLoading && priceBuckets.length === 0);
   const bucketTotal = (buckets: DistributionBucket[]) => buckets.reduce((sum, b) => sum + b.count, 0);
@@ -696,16 +824,19 @@ export default function NicheDetail() {
   const rangeStart = gamesQ.data && gamesQ.data.total > 0 ? gamesParams.offset + 1 : 0;
   const rangeEnd = gamesQ.data ? Math.min(gamesParams.offset + GAMES_PAGE_SIZE, gamesQ.data.total) : 0;
 
+  const pressPoints = detail.press ? nichePressTimeline(detail.press.timeline) : [];
+  const pressPartial = partialMonth(
+    pressPoints.map((p) => p.period),
+    dataAge.asOf,
+  );
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-3">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div className="min-w-0">
             {/* No trailing separator: the niche name is the <h1> BELOW this line, not the
-                next crumb on it, so "Niches / Tag /" rendered a slash with nothing after it
-                (measured on production 2026-09-01). /niches/combined already ends its trail
-                on the last crumb — "Niches / Combined" — which is what proved this a bug
-                rather than a house style. */}
+                next crumb on it — /niches/combined already ends its trail on the last crumb. */}
             <div className="text-[11px] text-ink-primary/55">
               <Link to="/niches" className="hover:text-ink-primary">
                 Niches
@@ -714,69 +845,78 @@ export default function NicheDetail() {
               {titleCase(dimension)}
             </div>
             <h1 className="mt-0.5 truncate text-[28px] text-ink-primary sm:text-[32px]">{nicheKey}</h1>
+            {aliasFrom && aliasFrom !== nicheKey && (
+              <p className="mt-1 text-[12px] text-ink-secondary" data-testid="alias-note">
+                &lsquo;{aliasFrom}&rsquo; is now &lsquo;{nicheKey}&rsquo; on Steam — the two spellings are merged into
+                this one niche.
+              </p>
+            )}
             <div className="mt-2 flex flex-wrap gap-1.5">
               {tier && (
                 <span
                   title={TIER_HINT[tier] ?? tier}
                   className="border border-brand px-2 py-0.5 text-[11px] font-medium text-brand"
                 >
-                  {tier} tier
+                  {TIER_BADGE[tier] ?? tier}
                 </span>
               )}
               <span className="border border-ink-primary/30 px-2 py-0.5 text-[11px] font-medium text-ink-primary/65">
-                window {cut.win === "all" ? "all-time" : "24m"}
-              </span>
-              <span className="border border-ink-primary/30 px-2 py-0.5 text-[11px] font-medium text-ink-primary/65">
-                {cut.min_reviews > 0 ? `≥${cut.min_reviews} reviews` : "all games"}
+                panels: {cutLabel}
               </span>
             </div>
           </div>
-          <div className="flex shrink-0 flex-wrap items-center gap-3">
-            <a
-              href={csvUrl}
-              onClick={() => trackEvent("niche_export_csv")}
-              className="text-[11px] font-medium text-ink-muted transition-colors hover:text-ink-primary"
-            >
-              Export CSV
-            </a>
-            <button
-              type="button"
-              onClick={() => {
-                if (!dimension || !nicheKey) return;
-                const r = toggleNicheWatchlist(dimension, nicheKey, nicheKey);
-                if (r === "full") window.alert(`Watchlist is full (${WATCHLIST_CAP} items).`);
-                else trackEvent("view_save");
-              }}
-              aria-pressed={watchlisted}
-              title={watchlisted ? "Remove from watchlist" : "Track this niche on the Watchlist page"}
-              className="border border-ink-primary/35 px-3 py-1.5 text-xs font-medium text-ink-primary transition-colors hover:bg-ink-primary/[0.08]"
-            >
-              {watchlisted ? "✓ Watchlisted" : "+ Watchlist"}
-            </button>
-            <Link
-              to={nicheCombinedPath([{ dimension, key: nicheKey }], "intersect", cut)}
-              className="bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg transition-colors hover:bg-brand-hover"
-            >
-              Combine with…
-            </Link>
+          <div className="flex shrink-0 flex-col items-end gap-1">
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void exportCsv()}
+                disabled={csv.status === "busy"}
+                data-testid="export-csv"
+                title={`Download this cut's ${scope === "indie" ? "indie " : ""}games (${cutLabel}${
+                  hasSelection ? ", in the selected revenue/price buckets" : ""
+                }) as a CSV — the same list the Games table shows`}
+                className="text-[11px] font-medium text-ink-muted transition-colors hover:text-ink-primary disabled:opacity-60"
+              >
+                {csv.status === "busy" ? "Exporting…" : "Export these games (CSV)"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const r = toggleNicheWatchlist(dimension, nicheKey, nicheKey);
+                  if (r === "full") window.alert(`Watchlist is full (${WATCHLIST_CAP} items).`);
+                  else trackEvent("view_save");
+                }}
+                aria-pressed={watchlisted}
+                title={watchlisted ? "Remove from watchlist" : "Track this niche on the Watchlist page"}
+                className="border border-ink-primary/35 px-3 py-1.5 text-xs font-medium text-ink-primary transition-colors hover:bg-ink-primary/[0.08]"
+              >
+                {watchlisted ? "✓ Watchlisted" : "+ Watchlist"}
+              </button>
+              <Link
+                to={nicheCombinedPath([{ dimension, key: nicheKey }], "intersect", cut)}
+                className="bg-brand px-3 py-1.5 text-xs font-semibold text-brand-fg transition-colors hover:bg-brand-hover"
+              >
+                Combine with…
+              </Link>
+            </div>
+            {csv.message && (
+              <span
+                role="status"
+                data-testid="export-csv-status"
+                className={clsx("text-[11px]", csv.status === "error" ? "text-status-serious" : "text-ink-muted")}
+              >
+                {csv.message}
+              </span>
+            )}
           </div>
         </div>
-
       </div>
 
-      {/* THE HEADLINE IS THE RADAR'S DOSSIER (2026-09-09; user: "Opportunity v2 / 77 / after
-          supply brake ×1.00 is still visible on niches page, it's not consistent with radar,
-          use radar numbers in niches"). The numbers agreed all along — at the board's cut
-          this strip's tile equalled the board's row (Action RTS 87 vs 86.69, Clicker 52 vs
-          51.71) — but the strip led with "OPPORTUNITY V2 87 after supply brake ×1.00", a
-          "Why 87" weighted blend and a "SATURATION YOY" tile, while the board leads with a
-          verdict and its two axes and prints the score small in its tooltip. Same model,
-          different vocabulary, and a different vocabulary reads as a different model. So
-          this section now carries exactly the board tooltip's rows — Verdict, Demand 24m,
-          Releases YoY, P90 revenue, Games, Opp v2, Singleplayer share — through the same
-          radarVerdict.ts evaluation, at the board's pinned cut (see radarVariant), with the
-          board's colour tokens and legend words. Players / 7d stays as the one secondary
-          tile: it is real, live and cut-independent, and the board doesn't have it. */}
+      {/* THE HEADLINE IS THE RADAR'S DOSSIER (2026-09-09), read top to bottom in the owner's
+          order (2026-09-23): the verdict and every check it FAILED; the red flags; the
+          headline numbers, each explaining itself with this niche's own numbers; the
+          Opportunity score WITH its parts. Judged at the board's pinned cut (radarVariant)
+          whatever chip is lit below. */}
       <section aria-label="Radar dossier" data-testid="radar-dossier" className="flex flex-col gap-2.5">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
           <span className="kicker text-[11px] text-ink-primary/55">Verdict</span>
@@ -799,24 +939,77 @@ export default function NicheDetail() {
             {dossier.verdictLabel}
           </span>
           <span className="text-[13px] text-ink-secondary">{dossier.verdict.reason}</span>
-          {/* Opp v2 is the small rank number the board's tooltip shows — nothing more. */}
-          <span className="tabular ml-auto text-[12px] text-ink-muted">
-            Opp v2 <span className="text-ink-primary">{dossier.oppV2}</span> · Singleplayer share{" "}
-            <span className="text-ink-primary">{dossier.singleplayerShare}</span>
+          <InfoTip term="radar_verdict" />
+          <span className="tabular ml-auto inline-flex flex-wrap items-center gap-x-1.5 text-[12px] text-ink-muted">
+            <a href="#opportunity-breakdown" className="transition-colors hover:text-ink-primary" data-testid="opportunity-link">
+              {DOSSIER_LABEL.opportunity} <span className="text-ink-primary">{dossier.opportunity}</span> — how it adds
+              up ↓
+            </a>
+            <span aria-hidden>·</span>
+            <span>
+              {DOSSIER_LABEL.singleplayer} <span className="text-ink-primary">{dossier.singleplayerShare}</span>
+            </span>
           </span>
           <Link to={radarHref} className="text-[12px] font-medium text-brand transition-colors hover:text-brand-hover">
             See on the Radar →
           </Link>
         </div>
 
+        {/* Every failed check, named where the verdict is read — deciding checks first (the
+            ones that kept it off "Enter now"), then the warning signs that never move the
+            ring. A reader should never have to open the Radar to learn why. */}
+        {failed.length > 0 && (
+          <ul className="flex flex-col gap-0.5 text-[12px] text-ink-secondary" data-testid="verdict-failed-checks">
+            {failed.map((c) => (
+              <li key={c.id} className="flex flex-wrap items-baseline gap-x-1.5">
+                <span aria-hidden className="text-[11px]" style={{ color: "var(--verdict-crowded)" }}>
+                  ✕
+                </span>
+                <span className="kicker text-[10px] text-ink-muted">{c.decides ? "Fails" : "Warning sign"}</span>
+                <span className="text-ink-primary">{failedCheckClause(c)}</span>
+                <span className="text-ink-muted">— {c.note}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {/* READ THIS FIRST — ABOVE the headline numbers (2026-09-23; it sat below them, and
+            on a phone five tall tiles pushed it off the first two screens). It carries the
+            counter-argument to the verdict just above it, so it is read before any number
+            that could flatter the niche. */}
+        <Card title="Read this first" className="!p-4">
+          {flags.length > 0 ? (
+            <div className="flex flex-col gap-1.5" data-testid="read-this-first">
+              {flags.map((f) => (
+                <div key={f.text} className="flex items-start gap-2 text-xs text-ink-secondary">
+                  <span
+                    aria-hidden
+                    className={clsx(
+                      "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
+                      f.serious
+                        ? "bg-[var(--text-primary)]"
+                        : "bg-[color-mix(in_srgb,var(--text-primary)_50%,transparent)]",
+                    )}
+                  />
+                  {f.text}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-xs text-ink-secondary" data-testid="read-this-first">
+              No red flags at this cut — the release pipeline, newcomer earnings, revenue concentration, singleplayer
+              share and live players all read normal.
+            </div>
+          )}
+        </Card>
+
         {/* 5 equal cells, 1px gaps that read as the rules (gap = paper-20% background showing
             through, cells = the ground colour) — the §4b KPI-strip construction. */}
         <div className="grid grid-cols-1 gap-px border border-ink-primary/20 bg-ink-primary/20 sm:grid-cols-2 lg:grid-cols-5">
-          {/* THE X AXIS: review inflow over the last 24 complete months vs the 24 before. An
-              emerging niche never headlines its % (the board's rule — its base is near zero
-              by construction), so the tile says "emerging" and carries the absolute volume. */}
+          {/* Demand. An emerging niche never headlines its % (the board's rule — its base is
+              near zero by construction), so the tile says "emerging" and carries the volume. */}
           <KpiCell
-            label="Demand 24m"
+            term="demand_trend_24m_pct"
             valueClassName={
               !dossier.emerging && dossierVariant.demand_trend_24m_pct != null && dossierVariant.demand_trend_24m_pct >= 0
                 ? "text-brand"
@@ -828,40 +1021,65 @@ export default function NicheDetail() {
               ) : dossierVariant.demand_trend_24m_pct != null ? (
                 dossier.demand24m
               ) : (
-                // The tooltip's own words, at a size that fits the tile: "no demand data" at
-                // the strip's 38px condensed numeral truncates to "no demand …" in a fifth of
-                // a 1360px strip (measured on the 2026-08-18 snapshot, which predates the
-                // 24m columns — the exact state a mart-lag deploy would show).
+                // At the strip's 38px numeral "no demand data" truncates; a smaller size fits.
                 <span className="text-[22px]">{dossier.demand24m}</span>
               )
+            }
+            worked={
+              dossier.emerging
+                ? undefined
+                : (demandTrendWorked(
+                    dossierVariant.reviews_24m,
+                    dossierVariant.reviews_prev_24m,
+                    dossierVariant.demand_trend_24m_pct,
+                  ) ?? undefined)
+            }
+            sentinel={
+              dossier.emerging
+                ? {
+                    tag: "emerging",
+                    detail:
+                      "No comparable demand base: this tag's earlier games were never tagged with it, so its prior 24 months are near zero by construction and a % would be the label's age, not growth. It is judged on its absolute review volume instead.",
+                  }
+                : dossierVariant.demand_trend_24m_pct == null
+                  ? {
+                      tag: "no data",
+                      detail: "No prior-window baseline, so no trend — the Enter now and Declining verdicts are unreachable.",
+                    }
+                  : undefined
             }
             footnoteWrap
             footnote={
               dossier.emerging
-                ? `no comparable % base — judged on absolute volume${dossier.reviews24m ? `: ${dossier.reviews24m} reviews / 24m` : ""}`
+                ? `judged on absolute volume${dossier.reviews24m ? `: ${dossier.reviews24m} reviews in the last 24 months` : ""}`
                 : dossierVariant.demand_trend_24m_pct != null
-                  ? `last 24 months vs the prior 24${
-                      dossierVariant.reviews_prev_24m != null
-                        ? ` · prior window ${fmtCompact(dossierVariant.reviews_prev_24m)} reviews`
-                        : ""
-                    }`
+                  ? dossierVariant.reviews_24m != null && dossierVariant.reviews_prev_24m != null
+                    ? `${fmtCompact(dossierVariant.reviews_24m)} reviews in the last 24 months vs ${fmtCompact(
+                        dossierVariant.reviews_prev_24m,
+                      )} in the 24 before`
+                    : "last 24 months vs the 24 before"
                   : "no prior-window baseline — the enter/declining verdicts are unreachable"
             }
           />
-          {/* THE Y AXIS. The footnote states THIS number's own basis: saturation_yoy compares
-              two FULL CALENDAR YEARS over every member of the niche with no review floor
-              (mart_niche.sql's `sat` CTE) — so the counts printed are the ones the % divides,
-              never n_recent (a 24m AND review-floored count; Trading Card Game once read
-              "▲ +4% / 38 released in the last 24m" against a 124-vs-119 truth). */}
+          {/* Releases. The footnote states THIS number's own basis: saturation_yoy compares
+              two FULL CALENDAR YEARS over every member of the niche with no review floor —
+              so the counts printed are the ones the % divides, never n_recent (a 24m AND
+              review-floored count; Trading Card Game once read "▲ +4% / 38 released in the
+              last 24m" against a 124-vs-119 truth). */}
           <KpiCell
-            label="Releases YoY"
+            term="saturation_yoy"
             value={dossier.releasesYoy}
+            worked={
+              releasesYoyWorked(dossierVariant.n_recent_year, dossierVariant.n_prior_year, dossierVariant.saturation_yoy) ??
+              undefined
+            }
+            sentinel={dossierVariant.saturation_yoy == null ? "no data" : undefined}
             footnoteWrap
             footnote={
               dossierVariant.n_recent_year != null && dossierVariant.n_prior_year != null ? (
                 <>
-                  {fmtInt(dossierVariant.n_recent_year)} released last full year vs{" "}
-                  {fmtInt(dossierVariant.n_prior_year)} the year before
+                  {fmtInt(dossierVariant.n_recent_year)} released last full year vs {fmtInt(dossierVariant.n_prior_year)}{" "}
+                  the year before
                   <span className="mt-0.5 block text-ink-primary/45">
                     Whole niche, every review count — this tile ignores the window and review-floor controls above.
                   </span>
@@ -872,60 +1090,71 @@ export default function NicheDetail() {
             }
           />
           <KpiCell
-            label="P90 revenue"
+            term="p90_rev"
             value={dossier.p90Revenue}
-            footnote={`median ${fmtUsd(dossierVariant.median_rev)} · the successful tail`}
+            worked={
+              isFiniteNumber(dossierVariant.p90_rev)
+                ? `90th percentile of Est. revenue across the ${fmtInt(dossierPaid ?? dossierVariant.n_games)}${
+                    dossierPaid !== null ? " paid" : ""
+                  } games (${dossierCutLabel}) = ${fmtUsd(dossierVariant.p90_rev)}`
+                : undefined
+            }
+            sentinel={paidStatSentinel(dossierVariant, dossierVariant.p90_rev)}
+            footnoteWrap
+            footnote={`median ${usdOrWhy(dossierVariant, dossierVariant.median_rev)}${dossierPaidNote ? ` · ${dossierPaidNote}` : ""}`}
           />
-          <KpiCell label="Games" value={dossier.games} footnote="scored games at the Radar's cut" />
-        {/* §4b specs "Demand / 90d" as a review-velocity trend, which no endpoint serves at
-            that horizon (the mart's demand trend is demand_trend_24m_pct — a 24-month
-            structural read, deliberately not a 90-day one) — used the real 7-day, same-panel
-            PLAYERS trend instead of inventing a 90-day review-velocity number. */}
-        {/* Same disclosure problem as Saturation YoY next door, and the same fix. The live-
-            player marts are keyed by (dimension, key, date) ONLY — mart_players.sql's panel
-            is "niche members with >=50 reviews that the CCU collector has ever measured",
-            with no window and no review-floor dimension to filter on — so this pair of
-            numbers is identical under all six cuts. Live API, tag/Souls-like: 207.0K playing
-            now over n_games_panel = 798 games, which matches NONE of the six selectable cuts
-            (624 / 223 / 177 / 1841 / 739 / 584). Four of the eight biggest contributors are
-            outside the 223-game 24m/>=50 cut the header names — ELDEN RING 32,145 (15.53%),
-            Where Winds Meet 10,446, Wuthering Waves 9,212, Black Myth 8,392 — 60,195 players
-            together, 29.1% of the 207,006 shown. A cut-scoped sum is NOT available to invent
-            here either: the 7-day trend that is this tile's actual VALUE needs both windows'
-            per-game averages, and only the ratio survives into the marts. So the tile does
-            what the saturation tile does — states its own population instead of pretending
-            to answer the controls. */}
-        <KpiCell
-          label="Players / 7d"
-          valueClassName={playersTrend != null && playersTrend >= 0 ? "text-brand" : undefined}
-          value={
-            playersTrend != null
-              ? `${playersTrend >= 0 ? "▲" : "▼"} ${playersTrend >= 0 ? "+" : ""}${playersTrend.toFixed(1)}%`
-              : "—"
-          }
-          footnoteWrap
-          footnote={
-            // No figure at all -> nothing to disown; keep the bare basis line.
-            totalPlayersNow == null && playersTrend == null ? (
-              "same-panel vs prior 7d"
-            ) : (
-              <>
-                {totalPlayersNow != null ? `${fmtCompact(totalPlayersNow)} playing now` : "same-panel vs prior 7d"}
-                <span className="mt-0.5 block text-ink-primary/45">
-                  Every measured game in the niche
-                  {players?.n_games_panel != null ? ` (${fmtInt(players.n_games_panel)})` : ""} — this tile ignores the
-                  window and review-floor controls above.
-                </span>
-              </>
-            )
-          }
-        />
+          <KpiCell
+            term="n_games"
+            value={dossier.games}
+            worked={
+              dossierPaid !== null
+                ? `${fmtInt(dossierVariant.n_games)} games (${dossierCutLabel}) = ${fmtInt(dossierPaid)} paid + ${fmtInt(
+                    dossierVariant.n_free ?? 0,
+                  )} free + ${fmtInt(dossierVariant.n_price_unknown ?? 0)} with no known price`
+                : `${fmtInt(dossierVariant.n_games)} games released in the ${dossierCutLabel.replace(" · ", " with ")}`
+            }
+            footnoteWrap
+            footnote={`${dossierCutLabel} — the Radar's cut`}
+          />
+          {/* The live-player marts are keyed by (dimension, key, date) ONLY — no window and no
+              review-floor dimension — so this pair of numbers is identical under all six
+              cuts, and its panel of measured games matches none of them. The tile states its
+              own population instead of pretending to answer the controls. Since 2026-09-23
+              it also reads the trend against the MARKET when the data carries it. */}
+          <KpiCell
+            term={playersTrend.hasMarket ? "players_trend_7d_vs_market" : "players_trend_7d_pct"}
+            label="7-day players trend"
+            valueClassName={playersTrend.up ? "text-brand" : undefined}
+            value={playersTrend.value ?? "—"}
+            worked={playersTrend.worked ?? undefined}
+            info={playersTrend.hasMarket ? undefined : { notes: noMarketNote() }}
+            sentinel={playersTrend.value === null ? "no data" : undefined}
+            footnoteWrap
+            footnote={
+              totalPlayersNow == null && playersTrend.value === null ? (
+                "games measured in both weeks"
+              ) : (
+                <>
+                  {playersTrend.vsMarket && (
+                    <span className="block text-ink-primary/80" data-testid="players-vs-market">
+                      {playersTrend.vsMarket}
+                    </span>
+                  )}
+                  {totalPlayersNow != null ? `${fmtCompact(totalPlayersNow)} playing now` : "games measured in both weeks"}
+                  <span className="mt-0.5 block text-ink-primary/45">
+                    Every measured game in the niche
+                    {players?.n_games_panel != null ? ` (${fmtInt(players.n_games_panel)})` : ""} — this tile ignores the
+                    window and review-floor controls above.
+                  </span>
+                </>
+              )
+            }
+          />
         </div>
 
         {/* The one caption that makes the strip readable left to right: which population it
             is judged on (the board's), that the chips below do NOT move it, and — when the
-            board would not draw this niche at all — why (the verdict is still computed the
-            same way; only the dot is missing). */}
+            board would not draw this niche at all — why. */}
         <p className="text-[11px] text-ink-muted">
           The Radar&rsquo;s dossier, judged at the board&rsquo;s own cut — last 24 months · ≥50 reviews — whichever
           cut the chips below select; the panels below follow the chips.
@@ -933,46 +1162,24 @@ export default function NicheDetail() {
             " This niche isn't scored at that cut (fewer than 30 qualifying games there), so the verdict is judged on the selected cut instead."}
           {absence !== null && ` ${absence}`}
         </p>
+
+        {/* NEVER A LONE SCORE (owner rule): the score above is one click from this, the
+            blend the mart actually computes — each part, its weight, its points, the supply
+            brake — worked through with this niche's own numbers. */}
+        {/* px-2 below sm: at 390px the breakdown's four columns need every pixel, and the
+            wider padding pushed its Points column behind the scroller's fade. */}
+        <div id="opportunity-breakdown" className="scroll-mt-20 border border-ink-primary/20 px-2 py-3 sm:px-4">
+          <OpportunityBreakdown row={dossierVariant} title={`How the Opportunity score adds up — ${dossierCutLabel}`} />
+          <p className="mt-2 text-[11px] text-ink-muted">
+            The score ranks niches; the verdict above is the call. A high score never overrides a failed check.
+          </p>
+        </div>
       </section>
 
-      {/* MOVED here from below the top-games table (2026-09-01). This card carries the
-          counter-argument to the verdict in the strip directly above it — "Release pipeline
-          shrinking 7.4%/yr — 'low competition' here is everyone leaving, not an open
-          market" against an Enter now (then: an OPPORTUNITY V2 of 87). On /niches/tag/Action
-          RTS at 1440 the score sat at y≈228 and this box at y≈1066 of a 1233px page: a
-          reader had to scroll past the whole overview and the table to find the sentence
-          that qualifies the headline, and most never did. A falsification the reader
-          doesn't reach is not a falsification. It also leaves the overview tab, because the
-          strip it argues with is on every tab. */}
-      <Card title="Read this first">
-        {flags.length > 0 ? (
-          <div className="flex flex-col gap-1.5">
-            {flags.map((f) => (
-              <div key={f.text} className="flex items-start gap-2 text-xs text-ink-secondary">
-                <span
-                  aria-hidden
-                  className={clsx(
-                    "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
-                    f.serious ? "bg-[var(--text-primary)]" : "bg-[color-mix(in_srgb,var(--text-primary)_50%,transparent)]",
-                  )}
-                />
-                {f.text}
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="text-xs text-ink-secondary">
-            No decline flags at this cut — pipeline, entrant economics, concentration and solo-viability all read
-            normal.
-          </div>
-        )}
-      </Card>
-
-      {/* The materialized cuts, as links — MOVED under the dossier and the flags (2026-09-09):
-          the headline above is pinned to the Radar's cut and does not follow these chips;
-          everything from here down (top games, distributions, the games table) does. Sitting
-          above the strip they read as its controls, which they no longer are. The cut is URL
-          state, so a shared link opens on the same population the sender was reading. */}
+      {/* The materialized cuts, as links — under the dossier and the flags (2026-09-09): the
+          headline above is pinned to the Radar's cut and does not follow these chips;
+          everything from here down (top games, distributions, the games table) does. The cut
+          is URL state, so a shared link opens on the same population the sender was reading. */}
       {detail.variants.length > 1 && (
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="mr-1 text-[11px] text-ink-muted">Panels below read</span>
@@ -984,6 +1191,7 @@ export default function NicheDetail() {
                 type="button"
                 aria-pressed={active}
                 onClick={() => setParam({ win: v.window, min_reviews: v.min_reviews, offset: null })}
+                title={`${fmtInt(v.n_games)} games in this cut`}
                 className={clsx(
                   "border px-2.5 py-1 text-[11px] font-medium transition-colors",
                   active ? "border-brand text-brand" : "border-ink-primary/20 text-ink-muted hover:text-ink-secondary",
@@ -1028,358 +1236,103 @@ export default function NicheDetail() {
         )}
       </div>
 
-      {/* §4b's composition ends at the "Top games" table below — everything the app carries
-          beyond that mockup (this bearish-flags read, the Detailed-view cards, and the whole
-          Games & distribution tab) sits AFTER it rather than interleaved above it. */}
       {tab === "overview" && (
         <>
-          <div className="flex flex-col gap-[22px]">
-            {/* Demand vs pipeline. §4b specs a 24-month MONTHLY two-series chart (review
-                velocity vs releases); no endpoint here carries that granularity — the only
-                real releases-vs-demand series in the mart is yearly (saturation_trend, already
-                the "Saturation trend" card below). Reused that same real data/hook in the new
-                two-line visual language rather than a monthly figure the API doesn't serve.
-                Full width since 2026-09-09: the "Why <score>" blend panel that shared this
-                row is gone with the score headline (the dossier above explains the verdict
-                in the board's own terms; the score's parts ride the API rows and the docs). */}
-            <div className="blueprint relative border-ink-primary/25 px-6 py-5">
-              <i className="bp-corner" />
-              <div className="mb-3.5 flex items-baseline gap-4">
-                <h3 className="text-ink-primary">Demand vs. pipeline, by year</h3>
-                <div className="ml-auto flex gap-4 text-[11px] text-ink-primary/60">
-                  {/* Line keys, not colour bars: the Releases series is DASHED, and its
-                      old `bg-ink-primary/45` swatch rendered as nothing at all (Tailwind's
-                      opacity modifier does not apply to a var()-valued colour), so the
-                      chart had two lines and one visible key. */}
-                  <span className="inline-flex items-center gap-1.5">
-                    <svg width="16" height="6" viewBox="0 0 16 6" aria-hidden className="shrink-0">
-                      <line x1="0" y1="3" x2="16" y2="3" stroke="var(--brand)" strokeWidth="2" />
-                    </svg>
-                    {hasP90Trend ? "P90 revenue" : "Median revenue"} ($, left)
-                  </span>
-                  <span className="inline-flex items-center gap-1.5">
-                    <svg width="16" height="6" viewBox="0 0 16 6" aria-hidden className="shrink-0">
-                      <line
-                        x1="0"
-                        y1="3"
-                        x2="16"
-                        y2="3"
-                        stroke={TREND_RELEASES_STROKE}
-                        strokeWidth="2"
-                        strokeDasharray="4 3"
-                      />
-                    </svg>
-                    Releases (count, right)
-                  </span>
-                </div>
-              </div>
-              {detail.saturation_trend.length === 0 ? (
-                <div className="flex h-[180px] items-center justify-center text-xs text-ink-muted">
-                  No yearly trend for this niche.
-                </div>
-              ) : (
-                (() => {
-                  // TWO SERIES, TWO UNITS, so TWO LABELLED AXES. This chart shipped with
-                  // `hide` on both y-axes: dollars and release counts were drawn against no
-                  // ticks and no units at all, which makes the crossing point read as a
-                  // meeting of two quantities when it is an artifact of two invisible
-                  // scales. Each axis now prints its own ticks in its own unit, through the
-                  // shared single-unit axis formatter (lib/format.ts).
-                  const revKey = hasP90Trend ? "p90_rev" : "median_rev";
-                  const revMax = Math.max(
-                    0,
-                    ...detail.saturation_trend.map((p) => (typeof p[revKey] === "number" ? (p[revKey] as number) : 0)),
-                  );
-                  const relMax = Math.max(0, ...detail.saturation_trend.map((p) => p.n_releases ?? 0));
-                  const revAxis = axisScale(revMax, "usd", 4);
-                  const relAxis = axisScale(relMax, "count", 4);
-                  const partialYear = partialTrendYear(detail.saturation_trend);
-                  return (
-                    <>
-                      <ZoomFrame zoomed={yearZoom.zoomed} dragging={yearZoom.dragging} outOfRange={yearZoom.outOfRange} onReset={yearZoom.reset}>
-                        <ResponsiveContainer width="100%" height={180}>
-                          <LineChart data={yearZoom.data} margin={{ top: 4, right: 4, left: 0, bottom: 0 }} {...yearZoom.handlers}>
-                          <CartesianGrid stroke="var(--gridline)" vertical={false} />
-                          <XAxis
-                            dataKey="year"
-                            tick={{ fontSize: 10 }}
-                            tickLine={false}
-                            axisLine={{ stroke: "var(--baseline)" }}
-                          />
-                          <YAxis
-                            yAxisId="revenue"
-                            tick={{ fontSize: 10 }}
-                            ticks={revAxis.ticks}
-                            interval={0}
-                            domain={revAxis.domain}
-                            tickFormatter={(v: number) => revAxis.format(v)}
-                            tickLine={false}
-                            axisLine={false}
-                            width={48}
-                          />
-                          <YAxis
-                            yAxisId="releases"
-                            orientation="right"
-                            tick={{ fontSize: 10 }}
-                            ticks={relAxis.ticks}
-                            interval={0}
-                            domain={relAxis.domain}
-                            tickFormatter={(v: number) => relAxis.format(v)}
-                            tickLine={false}
-                            axisLine={false}
-                            width={38}
-                          />
-                          {/* The current calendar year is a PARTIAL year in a yearly series:
-                              its release count and revenue are a few months of data drawn
-                              beside twelve-month points, which is what produces the "cliff"
-                              at the right edge. Shade it and say so rather than let the drop
-                              read as a market collapse. */}
-                          {partialYear !== null && (
-                            <ReferenceLine
-                              yAxisId="revenue"
-                              x={partialYear}
-                              stroke="var(--text-muted)"
-                              strokeDasharray="2 3"
-                              label={{
-                                value: "PARTIAL",
-                                position: "insideTopLeft",
-                                fontSize: 9,
-                                fill: "var(--text-muted)",
-                                // Dropped clear of the right-hand axis' top tick, which
-                                // sits at the same height as this line's own top.
-                                dy: 14,
-                                dx: -2,
-                              }}
-                            />
-                          )}
-                          <Tooltip
-                            cursor={{ stroke: "var(--baseline)" }}
-                            content={({ active, payload, label }) => {
-                              if (!active || !payload || payload.length === 0) return null;
-                              const p = payload[0].payload as TrendPoint;
-                              return (
-                                <TooltipPanel
-                                  title={`${label}${p.year === partialYear ? " · partial year" : ""}`}
-                                  rows={[
-                                    {
-                                      label: hasP90Trend ? "P90 revenue" : "Median revenue",
-                                      value: fmtUsd(hasP90Trend ? (p.p90_rev ?? null) : p.median_rev),
-                                      color: "var(--brand)",
-                                    },
-                                    { label: "Releases", value: fmtCompact(p.n_releases) },
-                                  ]}
-                                />
-                              );
-                            }}
-                          />
-                          <Line
-                            yAxisId="revenue"
-                            type="linear"
-                            dataKey={revKey}
-                            stroke="var(--brand)"
-                            strokeWidth={1.5}
-                            dot={false}
-                            connectNulls
-                          />
-                          <Line
-                            yAxisId="releases"
-                            type="linear"
-                            dataKey="n_releases"
-                            stroke={TREND_RELEASES_STROKE}
-                            strokeWidth={1.5}
-                            strokeDasharray="4 3"
-                            dot={false}
-                          />
-                          {yearZoom.selection && (
-                            <ReferenceArea yAxisId="revenue" x1={yearZoom.selection.x1} x2={yearZoom.selection.x2} {...SELECTION_AREA_PROPS} />
-                          )}
-                          </LineChart>
-                        </ResponsiveContainer>
-                      </ZoomFrame>
-                      <p className="mt-2 text-[11px] text-ink-muted">
-                        Two units, two scales — the left axis is dollars, the right is a count of releases. Where the
-                        lines cross means nothing; only each line&apos;s own slope does.
-                        {partialYear !== null &&
-                          ` ${partialYear} is a partial year (marked) — its drop is months of data missing, not a cliff.`}
-                      </p>
-                    </>
-                  );
-                })()
-              )}
-            </div>
-
+          {/* Releases and revenue, by year — two aligned small multiples, each with its own
+              takeaway (components/charts/SaturationTrend.tsx). This replaced a dual-axis
+              chart whose caption had to apologise that "where the lines cross means nothing". */}
+          <div className="blueprint relative border-ink-primary/25 px-6 py-5">
+            <i className="bp-corner" />
+            <h3 className="mb-3 text-ink-primary">Releases and revenue, by year</h3>
+            <SaturationTrend points={detail.saturation_trend} asOf={dataAge.asOf} />
           </div>
 
-          {/* Top games in the niche — the top five OF THIS CUT, off the same
+          {/* Top games in the niche — the top five OF THIS CUT AND SCOPE, off the same
               /niches/:dimension/:key/games endpoint the Games & distribution table reads.
               It used to render detail.representative_games, i.e. mart_niche_top: ONE
-              cut-independent top-8 per (dimension, key), under a header that names the cut.
-              Live API, tag/Souls-like at win=24m min_reviews=50 (header: "window 24m · ≥50
-              reviews", tile: "223 scored games") it listed Black Myth $2.2B and ELDEN RING
-              $2.1B — appids 2358720 and 1245620, neither of which is in those 223 at all:
-              ask that cut for its own top by revenue desc and the first row back is Clair
-              Obscur, which those two would outrank 5:1 if they were members. So the cut's
-              real top game is Clair Obscur at $414.3M, and the panel's
-              top-1 read 5.24x the truth and its top-5 sum 4.82x, and the same five rows were
-              served under all six selectable cuts — only the "All N →" label moved. The
-              games tab's table was already right (Clair Obscur, Silksong, NIGHTREIGN, PoE2,
-              Stellar Blade); this panel now shares its data path, so the two surfaces cannot
-              disagree again. */}
-          <div className="blueprint relative border-ink-primary/25">
-            <i className="bp-corner" />
-            <div className="flex items-baseline gap-2 px-5 pb-2.5 pt-3.5">
-              <h3 className="text-ink-primary">Top games in the niche</h3>
-              <button
-                type="button"
-                onClick={() => setParam({ tab: "games" })}
-                className="ml-auto text-xs font-medium text-brand hover:underline"
-              >
-                All {fmtInt(activeVariant.n_games)} →
-              </button>
-            </div>
-            {topGamesQ.isLoading ? (
-              <div className="border-t border-ink-primary/20 px-5 py-6 text-center text-xs text-ink-muted">
-                Loading top games…
-              </div>
-            ) : topGamesDegraded && detail.representative_games.length === 0 ? (
-              <div className="border-t border-ink-primary/20 px-5 py-6 text-center text-xs text-ink-muted">
-                No games for this cut yet.
-              </div>
-            ) : (
-              // Six fixed columns don't reflow at phone widths — scroll horizontally instead
-              // of squeezing them (same convention as the Games & distribution tab's table).
-              <TableScroll>
-                <div className="min-w-[640px]">
-                  {/* The game mart only lands on a nightly REBUILD, so for a few hours after
-                      a deploy there is no cut-aware list. Falling back to mart_niche_top is
-                      still the best list we have — but it is the population this panel was
-                      just fixed for showing silently, so in that state it has to say so. */}
-                  {topGamesDegraded && (
-                    <div className="border-t border-ink-primary/20 px-5 py-2 text-[11px] leading-snug text-ink-primary/50">
-                      The per-cut list needs the nightly game mart, which hasn’t landed yet — these are the niche’s
-                      biggest games all-time at every review count, not the {variantLabel(activeVariant).toLowerCase()}{" "}
-                      cut.
-                    </div>
-                  )}
-                  <div className="grid grid-cols-[60px_2fr_1fr_1fr_1fr_1fr] items-center gap-3.5 border-t border-ink-primary/20 px-5 py-2.5">
-                    <span />
-                    <span className="kicker text-[11px] text-ink-primary/55">Game</span>
-                    <span className="kicker text-[11px] text-ink-primary/55">Released</span>
-                    <span className="kicker text-[11px] text-ink-primary/55">Est. revenue</span>
-                    <span className="kicker text-[11px] text-ink-primary/55">Reviews</span>
-                    <span className="kicker text-[11px] text-ink-primary/55">Players now</span>
-                  </div>
-                  {(topGamesDegraded
-                    ? detail.representative_games.slice(0, TOP_GAMES_PANEL_SIZE).map((g) => ({
-                        appid: g.appid,
-                        name: g.name,
-                        release_year: g.release_year,
-                        price_initial: g.price_initial,
-                        est_revenue: g.est_rev_reviews,
-                        positive_ratio: g.positive_ratio,
-                        total_reviews: g.total_reviews,
-                        header_image: g.header_image,
-                        // mart_niche_top carries no CCU column, and the fallback must not
-                        // reach back into players.distribution.top_games for it — that is a
-                        // top-8-BY-PLAYERS ranking, and using it as a lookup is precisely
-                        // what made DARK SOULS III read "—" here and 3,849 on /games/374320.
-                        live_players: null as number | null,
-                      }))
-                    : topGames
-                  ).map((g) => (
-                    <Link
-                      key={g.appid}
-                      to={`/games/${g.appid}`}
-                      className="grid grid-cols-[60px_2fr_1fr_1fr_1fr_1fr] items-center gap-3.5 border-t border-ink-primary/10 px-5 py-2.5 text-sm transition-colors hover:bg-ink-primary/[0.04]"
-                    >
-                      {g.header_image ? (
-                        <img src={g.header_image} alt="" className="h-[26px] w-full object-cover" loading="lazy" />
-                      ) : (
-                        <span
-                          aria-hidden
-                          className="h-[26px] w-full"
-                          style={{
-                            backgroundImage:
-                              "repeating-linear-gradient(45deg, color-mix(in srgb, var(--text-primary) 12%, transparent), color-mix(in srgb, var(--text-primary) 12%, transparent) 4px, transparent 4px, transparent 8px)",
-                          }}
-                        />
-                      )}
-                      <span className="truncate font-medium text-ink-primary">{g.name ?? `App ${g.appid}`}</span>
-                      <span className="tabular text-ink-primary/70">{g.release_year ?? "—"}</span>
-                      <span className="tabular text-ink-primary/70">
-                        {fmtRevenue(g.est_revenue, isFreeTitle(g))}
-                      </span>
-                      <span className="tabular text-ink-primary/70">
-                        {fmtPct(g.positive_ratio)} · {fmtInt(g.total_reviews)}
-                      </span>
-                      {/* Per-row live CCU from the game mart — the same column /api/games/
-                          {appid} serves, not a rank-8 leaderboard join. */}
-                      <span className="tabular text-brand">
-                        {g.live_players != null ? fmtCompact(g.live_players) : "—"}
-                      </span>
-                    </Link>
-                  ))}
-                </div>
-              </TableScroll>
-            )}
-          </div>
+              cut-independent top-8 per (dimension, key), under a header that named the cut —
+              on tag/Souls-like at 24m/≥50 its top row was 5.24× the cut's real top game.
+              Indie-first since 2026-09-23 (see DEFAULT_SCOPE). */}
+          <TopGamesPanel
+            wide={wide}
+            loading={topGamesQ.isLoading}
+            degraded={topGamesDegraded}
+            games={
+              topGamesDegraded
+                ? detail.representative_games.slice(0, TOP_GAMES_PANEL_SIZE).map((g) => ({
+                    appid: g.appid,
+                    name: g.name,
+                    release_year: g.release_year,
+                    price_initial: g.price_initial,
+                    is_free: g.is_free,
+                    est_revenue: g.est_rev_reviews,
+                    total_reviews: g.total_reviews,
+                    owners_est: null,
+                    positive_ratio: g.positive_ratio,
+                    header_image: g.header_image,
+                    // mart_niche_top carries no CCU column, and the fallback must not reach
+                    // back into players.distribution.top_games for it — that is a top-8-BY-
+                    // PLAYERS ranking, and using it as a lookup is what made one fact read two
+                    // ways.
+                    live_players: null,
+                  }))
+                : topGames
+            }
+            fallbackEmpty={detail.representative_games.length === 0}
+            cutLabel={cutLabel}
+            scope={scope}
+            applied={topScope}
+            total={topGamesQ.data?.total ?? null}
+            nScopeUnknown={topGamesQ.data?.n_scope_unknown}
+            onScope={setScope}
+            onSeeAll={() => setParam({ tab: "games" })}
+          />
 
           {/* The chart-heavy expert cards live under the Detailed toggle; Simple keeps the
-              plain-language reads (header, stat tiles, flags, opportunity) only — same split
-              as GameProfile. */}
+              plain-language reads (verdict, flags, headline numbers, the score's parts). */}
           {view === "detailed" && (
             <>
-              {/* Everything in this card — the tiles, the series, the monthly history, the
-                  holders list and the histogram — comes from the mart_niche_players family,
-                  which is keyed by (dimension, key, date) with NO window/review-floor
-                  dimension. The whole card therefore answers for one fixed panel while the
-                  controls at the top of the page move; saying so once, in the subtitle, is
-                  cheaper for the reader than a caveat per tile. */}
+              {/* Everything in this card comes from the mart_niche_players family, keyed by
+                  (dimension, key, date) with NO window/review-floor dimension — it answers for
+                  one fixed panel while the controls at the top of the page move. Said once, in
+                  the subtitle. No clock time: a schedule is true for one deployment only; the
+                  data's age is what a reader needs (lib/dataAge.ts). */}
               <Card
                 title="Live players — is this niche hot right now"
-                subtitle="Nightly ~21–22:00 UTC point samples, not daily peaks; each game's last capture carries forward up to 7 days so the capture rotation doesn't read as audience dips. Whole measured niche: this card ignores the window and review-floor controls above."
+                subtitle={`Each game's latest nightly point sample${
+                  dataAge.asOfLabel ? ` (data as of ${dataAge.asOfLabel})` : ""
+                }, not its daily peak; a capture carries forward up to 7 days so the capture rotation doesn't read as audience dips. Whole measured niche: this card ignores the window and review-floor controls above.`}
               >
                 <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
                   <StatTile
-                    help="Summed current concurrent players across every game in the niche the CCU collector has measured — NOT the cut selected above. Dominated by the niche's biggest games."
-                    label="Playing now"
+                    term="niche_players_now"
                     value={players?.total_players_now != null ? fmtCompact(players.total_players_now) : "—"}
+                    sentinel={players?.total_players_now == null ? "no data" : undefined}
                     sub={
                       players?.n_games_panel != null ? (
                         <>
                           {fmtInt(players.n_games_panel)} games measured
-                          {/* On tag/Souls-like this is 798 against a header that says 223 —
-                              the panel is not any of the six cuts, so the count has to be
-                              readable as its own population, not as the cut's. */}
                           <span className="mt-0.5 block text-ink-muted">whole niche, not the selected cut</span>
                         </>
                       ) : undefined
                     }
                   />
                   <StatTile
-                    help="Last 7 days vs the 7 before, counting only games measured in BOTH windows — growing data coverage can't fake an audience trend."
-                    label="7-day trend"
-                    // Trend verdict → mono steel (up = accent, down recedes to muted ink;
-                    // "never red/green"), matching every other ▲/▼ verdict in the app.
-                    valueClassName={
-                      players?.players_trend_7d_pct == null
-                        ? undefined
-                        : players.players_trend_7d_pct >= 0
-                          ? "text-brand"
-                          : "text-ink-muted"
-                    }
-                    value={
-                      players?.players_trend_7d_pct != null
-                        ? `${players.players_trend_7d_pct >= 0 ? "+" : ""}${players.players_trend_7d_pct.toFixed(1)}%`
-                        : "—"
-                    }
-                    sub="same-panel vs prior 7d"
+                    term={playersTrend.hasMarket ? "players_trend_7d_vs_market" : "players_trend_7d_pct"}
+                    label="7-day players trend"
+                    // Trend verdict → mono steel (up = accent, down recedes to muted ink).
+                    valueClassName={playersTrend.up == null ? undefined : playersTrend.up ? "text-brand" : "text-ink-muted"}
+                    value={playersTrend.value ?? "—"}
+                    worked={playersTrend.worked ?? undefined}
+                    info={playersTrend.hasMarket ? undefined : { notes: noMarketNote() }}
+                    sentinel={playersTrend.value === null ? "no data" : undefined}
+                    sub={playersTrend.vsMarket ?? "games measured in both weeks · no market figure yet"}
                   />
                   <StatTile
-                    help="Share of the playing-now total that was actually measured in the last 2 days (the rest is carried forward from recent captures). Low coverage = trust the total less."
-                    label="Coverage"
+                    term="players_coverage"
                     value={players?.players_coverage != null ? fmtPct(players.players_coverage) : "—"}
-                    sub="measured fresh (≤2d)"
+                    sentinel={players?.players_coverage == null ? "no data" : undefined}
+                    sub="measured in the last 2 days"
                   />
                 </div>
                 <PlayersSeriesChart points={players?.series ?? []} />
@@ -1389,67 +1342,74 @@ export default function NicheDetail() {
                     <div className="mb-1 text-xs text-ink-muted">
                       Niche audience over the years — summed monthly average players
                     </div>
-                    <ZoomFrame zoomed={playersMonthlyZoom.zoomed} dragging={playersMonthlyZoom.dragging} outOfRange={playersMonthlyZoom.outOfRange} onReset={playersMonthlyZoom.reset}>
+                    <ZoomFrame
+                      zoomed={playersMonthlyZoom.zoomed}
+                      dragging={playersMonthlyZoom.dragging}
+                      outOfRange={playersMonthlyZoom.outOfRange}
+                      onReset={playersMonthlyZoom.reset}
+                    >
                       <ResponsiveContainer width="100%" height={150}>
-                        <LineChart data={playersMonthlyZoom.data} margin={{ top: 6, right: 8, left: 0, bottom: 0 }} {...playersMonthlyZoom.handlers}>
-                        <CartesianGrid stroke="var(--gridline)" vertical={false} />
-                        <XAxis
-                          dataKey="month"
-                          tick={{ fontSize: 10 }}
-                          tickFormatter={(v: string) => v.slice(0, 7)}
-                          interval="preserveStartEnd"
-                          minTickGap={40}
-                          tickLine={false}
-                          axisLine={{ stroke: "var(--baseline)" }}
-                        />
-                        {(() => {
-                          const y = axisScale(
-                            Math.max(0, ...(players?.monthly ?? []).map((p) => p.avg_players_sum ?? 0)),
-                            "count",
-                          );
-                          return (
-                            <YAxis
-                              tick={{ fontSize: 10 }}
-                              ticks={y.ticks}
-                              interval={0}
-                              domain={y.domain}
-                              tickFormatter={(v: number) => y.format(v)}
-                              tickLine={false}
-                              axisLine={false}
-                              width={44}
-                            />
-                          );
-                        })()}
-                        <Tooltip
-                          cursor={{ stroke: "var(--baseline)" }}
-                          content={({ active, payload, label }) => {
-                            if (!active || !payload || payload.length === 0) return null;
-                            const p = payload[0].payload as NichePlayersMonthlyPoint;
+                        <LineChart
+                          data={playersMonthlyZoom.data}
+                          margin={{ top: 6, right: 8, left: 0, bottom: 0 }}
+                          {...playersMonthlyZoom.handlers}
+                        >
+                          <CartesianGrid stroke="var(--gridline)" vertical={false} />
+                          <XAxis
+                            dataKey="month"
+                            tick={{ fontSize: 10 }}
+                            tickFormatter={(v: string) => v.slice(0, 7)}
+                            interval="preserveStartEnd"
+                            minTickGap={40}
+                            tickLine={false}
+                            axisLine={{ stroke: "var(--baseline)" }}
+                          />
+                          {(() => {
+                            const y = axisScale(
+                              Math.max(0, ...(players?.monthly ?? []).map((p) => p.avg_players_sum ?? 0)),
+                              "count",
+                            );
                             return (
-                              <TooltipPanel
-                                title={String(label).slice(0, 7)}
-                                rows={[
-                                  {
-                                    label: "Avg players (sum)",
-                                    value: fmtCompact(p.avg_players_sum),
-                                    color: CSS_VAR.demand,
-                                  },
-                                  { label: "Games measured", value: fmtInt(p.n_games_measured) },
-                                ]}
+                              <YAxis
+                                tick={{ fontSize: 10 }}
+                                ticks={y.ticks}
+                                interval={0}
+                                domain={y.domain}
+                                tickFormatter={(v: number) => y.format(v)}
+                                tickLine={false}
+                                axisLine={false}
+                                width={44}
                               />
                             );
-                          }}
-                        />
-                        <Line
-                          type="linear"
-                          dataKey="avg_players_sum"
-                          stroke={CSS_VAR.demand}
-                          strokeWidth={2}
-                          dot={false}
-                        />
-                        {playersMonthlyZoom.selection && (
-                          <ReferenceArea x1={playersMonthlyZoom.selection.x1} x2={playersMonthlyZoom.selection.x2} {...SELECTION_AREA_PROPS} />
-                        )}
+                          })()}
+                          <Tooltip
+                            cursor={{ stroke: "var(--baseline)" }}
+                            content={({ active, payload, label }) => {
+                              if (!active || !payload || payload.length === 0) return null;
+                              const p = payload[0].payload as NichePlayersMonthlyPoint;
+                              return (
+                                <TooltipPanel
+                                  title={String(label).slice(0, 7)}
+                                  rows={[
+                                    {
+                                      label: "Avg players (sum)",
+                                      value: fmtCompact(p.avg_players_sum),
+                                      color: CSS_VAR.demand,
+                                    },
+                                    { label: "Games measured", value: fmtInt(p.n_games_measured) },
+                                  ]}
+                                />
+                              );
+                            }}
+                          />
+                          <Line type="linear" dataKey="avg_players_sum" stroke={CSS_VAR.demand} strokeWidth={2} dot={false} />
+                          {playersMonthlyZoom.selection && (
+                            <ReferenceArea
+                              x1={playersMonthlyZoom.selection.x1}
+                              x2={playersMonthlyZoom.selection.x2}
+                              {...SELECTION_AREA_PROPS}
+                            />
+                          )}
                         </LineChart>
                       </ResponsiveContainer>
                     </ZoomFrame>
@@ -1472,9 +1432,7 @@ export default function NicheDetail() {
                           <>
                             {" "}
                             · the top 5 games hold{" "}
-                            <b className="tabular text-verdict-serious">
-                              {fmtPct(players.distribution.players_top5_share)}
-                            </b>
+                            <b className="tabular text-verdict-serious">{fmtPct(players.distribution.players_top5_share)}</b>
                           </>
                         )}
                       </div>
@@ -1492,10 +1450,7 @@ export default function NicheDetail() {
                           <div className="relative h-3 flex-1 overflow-hidden rounded bg-surface2">
                             <span
                               className="absolute inset-y-0 left-0 rounded"
-                              style={{
-                                width: `${Math.max(1, (g.share ?? 0) * 100)}%`,
-                                backgroundColor: CSS_VAR.demand,
-                              }}
+                              style={{ width: `${Math.max(1, (g.share ?? 0) * 100)}%`, backgroundColor: CSS_VAR.demand }}
                             />
                           </div>
                           <span className="tabular w-24 shrink-0 text-right text-ink-secondary">
@@ -1507,28 +1462,19 @@ export default function NicheDetail() {
                     {players.distribution.histogram.length > 0 && (
                       <div className="mt-3">
                         <div className="mb-1 text-[11px] text-ink-muted">
-                          Concurrent players across {fmtInt(players.distribution.n_games_now)} games in the niche (log
-                          scale)
+                          Concurrent players across {fmtInt(players.distribution.n_games_now)} games in the niche (log scale)
                         </div>
-                        <Histogram
-                          buckets={players.distribution.histogram}
-                          color={CSS_VAR.competition}
-                          xKind="count"
-                          height={140}
-                        />
+                        <Histogram buckets={players.distribution.histogram} color={CSS_VAR.competition} xKind="count" height={140} />
                       </div>
                     )}
                   </div>
                 )}
 
-                {(activeVariant.lifetime_survival_12m != null ||
-                  activeVariant.lifetime_median_dead_months != null) && (
+                {(activeVariant.lifetime_survival_12m != null || activeVariant.lifetime_median_dead_months != null) && (
                   <div className="mt-3 flex flex-wrap items-baseline justify-between gap-2">
-                    <div
-                      className="text-xs text-ink-muted"
-                      title="Lifetime = months from a game's first month averaging 100+ concurrent players to its first full month under 10. Fixed-horizon survival counts only games whose 100+ month is at least 12 months old; steamcharts top-8k coverage."
-                    >
+                    <div className="inline-flex items-center gap-1 text-xs text-ink-muted">
                       How long games live here
+                      <InfoTip term="lifetime_survival_12m" />
                     </div>
                     <div className="text-xs text-ink-secondary">
                       {activeVariant.lifetime_survival_12m != null && (
@@ -1537,13 +1483,10 @@ export default function NicheDetail() {
                           <b className="tabular">{fmtPct(activeVariant.lifetime_survival_12m)}</b>
                         </>
                       )}
-                      {activeVariant.lifetime_survival_12m != null &&
-                        activeVariant.lifetime_median_dead_months != null &&
-                        " · "}
+                      {activeVariant.lifetime_survival_12m != null && activeVariant.lifetime_median_dead_months != null && " · "}
                       {activeVariant.lifetime_median_dead_months != null && (
                         <>
-                          dead ones lasted ~
-                          <b className="tabular">{fmtMonths(activeVariant.lifetime_median_dead_months)}</b>
+                          dead ones lasted ~<b className="tabular">{fmtMonths(activeVariant.lifetime_median_dead_months)}</b>
                         </>
                       )}
                     </div>
@@ -1555,116 +1498,9 @@ export default function NicheDetail() {
                 </p>
               </Card>
 
-              <Card
-                title="Revenue spread and entry economics"
-                subtitle="Estimated lifetime GROSS per game (reviews × 30 owners-per-review × launch price — one flat ratio, not fitted per genre) — not net of Steam's cut, refunds or discounts."
-              >
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <StatTile
-                    help="Half the niche's scored games earn less than this. What a REALISTIC entry should expect — not what the hits earn."
-                    label="Median revenue"
-                    value={fmtUsd(activeVariant.median_rev)}
-                    sub="the typical outcome"
-                  />
-                  <StatTile
-                    help="A quarter of the niche's games earn more than this — a good-but-not-exceptional outcome."
-                    label="P75 revenue"
-                    value={fmtUsd(activeVariant.p75_rev)}
-                  />
-                  <StatTile
-                    help="Only 1 game in 10 earns more than this — what the niche's successful titles make."
-                    label="P90 revenue"
-                    value={activeVariant.p90_rev != null ? fmtUsd(activeVariant.p90_rev) : "—"}
-                    sub="the successful tail"
-                  />
-                </div>
-                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <StatTile
-                    help="Estimated copies owned across all the niche's scored games — the size of the pie. Big pie + weak median = people play the hits; it doesn't hand a new entrant players."
-                    label="Total owners"
-                    value={fmtCompact(activeVariant.total_owners)}
-                    sub={
-                      activeVariant.market_size != null
-                        ? `market size p${Math.round(activeVariant.market_size)}`
-                        : undefined
-                    }
-                  />
-                  <StatTile
-                    help="Median revenue of games released in the last 24 months vs the niche's all-time median. The catalog-wide norm is ~1.08×, so read against that: meaningfully below 1 = recent entrants genuinely underearn the back catalog."
-                    label="Newcomers earn"
-                    value={activeVariant.entrant_ratio != null ? `${activeVariant.entrant_ratio.toFixed(2)}×` : "—"}
-                    sub="of the back catalog's median (norm ~1.08×)"
-                  />
-                  <StatTile
-                    help="Share of the niche's scored games that are playable single-player (catalog norm ~90%). Below ~80% the niche leans multiplayer — netcode, servers and a live player base become table stakes."
-                    label="Solo viability"
-                    value={fmtPct(activeVariant.solo_viability)}
-                    sub="playable single-player (norm ~90%)"
-                  />
-                </div>
-              </Card>
+              <RevenueCard variant={activeVariant} variants={detail.variants} cutLabel={cutLabel} ownersAsOf={detail.owners_as_of ?? null} />
 
-              <Card
-                title="Hit rates vs. benchmark"
-                subtitle="The odds a serious title clears each revenue bar here, against the catalog-wide reference mark."
-              >
-                <div className="flex flex-col gap-3">
-                  <BulletMeter
-                    label="Hit rate ≥ $200K"
-                    value={activeVariant.hit_rate_200k}
-                    benchmark={catalogHitRateBenchmark}
-                    benchmarkLabel={
-                      catalogHitRateBenchmark !== undefined
-                        ? `Catalog-wide: ${fmtPct(catalogHitRateBenchmark)} of ALL releases clear $100K (lower bar, cited for scale)`
-                        : undefined
-                    }
-                    color={CSS_VAR.demand}
-                    valueLabel={fmtPct(activeVariant.hit_rate_200k)}
-                  />
-                  <BulletMeter
-                    label="Hit rate ≥ $500K"
-                    value={activeVariant.hit_rate_500k}
-                    benchmark={catalogHitRateBenchmark}
-                    benchmarkLabel={
-                      catalogHitRateBenchmark !== undefined
-                        ? `Catalog-wide: ${fmtPct(catalogHitRateBenchmark)} of ALL releases clear $100K (lower bar, cited for scale)`
-                        : undefined
-                    }
-                    color={CSS_VAR.demand}
-                    valueLabel={fmtPct(activeVariant.hit_rate_500k)}
-                  />
-                  <BulletMeter
-                    label="Beatable share (thin/weak competitors)"
-                    value={activeVariant.beatable_share}
-                    color={CSS_VAR.qualityGap}
-                    valueLabel={fmtPct(activeVariant.beatable_share)}
-                  />
-                  <BulletMeter
-                    label="Winner concentration (top 5% revenue share)"
-                    value={activeVariant.winner_concentration}
-                    color={CSS_VAR.competition}
-                    valueLabel={fmtPct(activeVariant.winner_concentration)}
-                  />
-                </div>
-              </Card>
-
-              <Card
-                title="Saturation trend"
-                subtitle="Releases per year against what they earned — a shrinking pipeline is decline even when competition looks invitingly low."
-              >
-                <SaturationTrend points={detail.saturation_trend} />
-                {activeVariant.saturation_yoy != null && (
-                  // Same disclosure as the KPI tile: this chart and this percentage are the
-                  // whole niche at every review floor, unlike everything else on the page.
-                  <p className="mt-1.5 text-[11px] text-ink-muted">
-                    Releases {fmtSigned(activeVariant.saturation_yoy, 0)} year-over-year
-                    {activeVariant.n_recent_year != null && activeVariant.n_prior_year != null
-                      ? ` (${fmtInt(activeVariant.n_recent_year)} last full year vs ${fmtInt(activeVariant.n_prior_year)} the year before)`
-                      : ""}
-                    . Whole niche, every review count — not the “{variantLabel(activeVariant)}” cut selected above.
-                  </p>
-                )}
-              </Card>
+              <HitRatesCard detail={detail} variant={activeVariant} cut={cut} />
 
               {detail.themes.length > 0 && (
                 <Card
@@ -1678,7 +1514,12 @@ export default function NicheDetail() {
                           <th className="px-2 py-1.5 font-medium">Aspect</th>
                           <th className="px-2 py-1.5 font-medium">Praise</th>
                           <th className="px-2 py-1.5 font-medium">Complaints</th>
-                          <th className="px-2 py-1.5 font-medium">vs catalog</th>
+                          <th
+                            className="px-2 py-1.5 font-medium"
+                            title="Praise share vs the whole catalog's for this aspect, in percentage points"
+                          >
+                            Praise vs catalog
+                          </th>
                           <th className="px-2 py-1.5 font-medium">Mentions</th>
                         </tr>
                       </thead>
@@ -1686,9 +1527,8 @@ export default function NicheDetail() {
                         {detail.themes.map((t) => (
                           <tr key={t.aspect} className="border-b border-chartborder/60 last:border-0">
                             <td className="px-2 py-1.5 font-medium text-ink-primary">{t.aspect}</td>
-                            {/* Aspect sentiment is mono steel per the handoff (4c: "positive
-                                accent-300, negative paper 50%") — red/green stays reserved
-                                for real error/status states, not data verdicts. */}
+                            {/* Aspect sentiment is mono steel per the handoff — red/green stays
+                                reserved for real error/status states, not data verdicts. */}
                             <td className="tabular px-2 py-1.5 text-brand">{fmtPct(t.praise_share)}</td>
                             <td className="tabular px-2 py-1.5 text-ink-muted">{fmtPct(t.complaint_share)}</td>
                             <td
@@ -1696,12 +1536,9 @@ export default function NicheDetail() {
                                 "tabular px-2 py-1.5",
                                 (t.praise_delta_vs_catalog ?? 0) >= 0 ? "text-brand" : "text-ink-muted",
                               )}
-                              title="Praise share vs the all-catalog baseline for this aspect"
                             >
                               {t.praise_delta_vs_catalog != null
-                                ? `${t.praise_delta_vs_catalog >= 0 ? "+" : ""}${(
-                                    t.praise_delta_vs_catalog * 100
-                                  ).toFixed(1)}pp`
+                                ? `${t.praise_delta_vs_catalog >= 0 ? "+" : "−"}${Math.abs(t.praise_delta_vs_catalog * 100).toFixed(1)} pts`
                                 : "—"}
                             </td>
                             <td className="tabular px-2 py-1.5 text-ink-secondary">{fmtCompact(t.total_mentions)}</td>
@@ -1713,12 +1550,20 @@ export default function NicheDetail() {
                 </Card>
               )}
 
-              {detail.press && detail.press.timeline.length > 0 && (
+              {detail.press && pressPoints.length > 0 && (
                 <Card
                   title="Press coverage"
-                  subtitle={`${fmtInt(detail.press.total_articles)} dated press mentions of this niche's games, by month — journalist coverage only (Steam News excluded).`}
+                  subtitle={`${fmtInt(detail.press.total_articles)} dated press mentions of this niche's games, by month (a month with none shows as zero) — journalist coverage only, Steam News excluded.`}
                 >
-                  <NichePressChart points={detail.press.timeline} />
+                  {/* The shared press chart, on a gap-free month series (see
+                      nichePressTimeline) — this page's own copy of it is gone. */}
+                  <PressTimelineChart points={pressPoints} />
+                  {pressPartial && (
+                    <p className="mt-1 text-[11px] text-ink-muted" data-testid="press-partial-month">
+                      {pressPartial} is the current month — its bar holds only the days up to{" "}
+                      {dataAge.asOfLabel ?? "the data's date"}.
+                    </p>
+                  )}
                   {detail.press.top_outlets.length > 0 && (
                     <TableScroll className="mt-3 rounded-card border border-chartborder">
                       <table className="w-full min-w-[420px] text-xs">
@@ -1742,9 +1587,8 @@ export default function NicheDetail() {
                     </TableScroll>
                   )}
                   <p className="mt-2 text-[11px] italic text-ink-muted">
-                    Fuzzy-matched with a confidence floor; an article covering two of the niche's games counts once per
-                    game. Press follows games that are already notable — read this as the niche's visibility and who to
-                    pitch, not as what caused the sales.
+                    Fuzzy-matched with a confidence floor. Press follows games that are already notable — read this as
+                    the niche's visibility and who to pitch, not as what caused the sales.
                   </p>
                 </Card>
               )}
@@ -1755,6 +1599,16 @@ export default function NicheDetail() {
 
       {tab === "games" && (
         <>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] text-ink-muted">List</span>
+            <ScopeToggle scope={scope} onChange={setScope} />
+            <span className="text-[11px] text-ink-muted">
+              {scope === "indie"
+                ? "Steam-Indie-flagged games only — the comparables a small team can learn from."
+                : "Every game in the niche, big publishers included."}
+            </span>
+          </div>
+
           {hasSelection && (
             <div className="flex flex-wrap items-center gap-2 rounded-card border border-brand bg-brand-tint px-3 py-2 text-xs">
               <span className="font-medium text-ink-primary">Filtered by</span>
@@ -1789,18 +1643,22 @@ export default function NicheDetail() {
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
             <Card
               title="Revenue distribution"
-              subtitle="Every game in this cut, bucketed by estimated lifetime revenue (log scale). Select buckets to filter the table below."
+              subtitle={`Every ${scope === "indie" ? "indie " : ""}game in this cut (${cutLabel}) with a price, bucketed by estimated lifetime revenue (log scale) — free and unknown-price games have no revenue estimate, so they are not in it${
+                scope === "all" && activeVariant.n_free != null
+                  ? ` (${paidOnlyNote(activeVariant)?.replace(/^paid games only — /, "").replace(/^excludes /, "") ?? "none left out"})`
+                  : ""
+              }. Select buckets to filter the table below.`}
             >
               {revenueDistDegraded ? (
                 // Not a blank card: the niche detail already carries a (static, non-brushable)
-                // revenue histogram, so the revenue SHAPE survives the mart rebuild window —
-                // only the click-to-filter interaction is missing.
+                // revenue histogram, so the revenue SHAPE survives the rebuild window — only
+                // the click-to-filter interaction is missing.
                 <>
                   <Histogram buckets={detail.revenue_histogram} color={CSS_VAR.demand} xKind="usd" height={200} />
                   <DegradedNote
                     what="Bucket filtering"
                     status={revenueDistQ.error instanceof ApiError ? revenueDistQ.error.status : null}
-                    extra="Showing the niche's precomputed all-time ≥50-review revenue spread meanwhile — the shape, without the click-to-filter."
+                    extra="Showing the niche's all-time revenue spread (games with ≥50 reviews, every game regardless of the indie filter) meanwhile — the shape, without the click-to-filter."
                   />
                 </>
               ) : (
@@ -1817,17 +1675,14 @@ export default function NicheDetail() {
 
             <Card
               title="Price distribution"
-              subtitle="Launch price across the niche's games — where the field actually prices, and where it doesn't."
+              subtitle={`Launch price across the cut's ${scope === "indie" ? "indie " : ""}games — where the field actually prices, and where it doesn't.`}
             >
               {priceDistDegraded ? (
-                // No static price histogram exists anywhere in the mart, so this one really
-                // does have nothing to fall back to — say so plainly instead of an empty box.
+                // No static price histogram exists, so this one really has nothing to fall
+                // back to — say so plainly instead of an empty box.
                 <div className="flex h-[240px] flex-col items-center justify-center gap-1 px-4 text-center">
                   <span className="text-xs text-ink-muted">No price distribution for this cut yet.</span>
-                  <DegradedNote
-                    what="The price histogram"
-                    status={priceDistQ.error instanceof ApiError ? priceDistQ.error.status : null}
-                  />
+                  <DegradedNote what="The price histogram" status={priceDistQ.error instanceof ApiError ? priceDistQ.error.status : null} />
                 </div>
               ) : (
                 <NicheDistribution
@@ -1845,11 +1700,16 @@ export default function NicheDetail() {
           <Card
             title="Games in this niche"
             subtitle={
-              gamesQ.data && !gamesUnavailable
-                ? `${fmtInt(gamesQ.data.total)} game${gamesQ.data.total === 1 ? "" : "s"} in ${variantLabel(activeVariant)}${
-                    hasSelection ? " matching the selected buckets" : ""
-                  }`
-                : undefined
+              gamesQ.data && !gamesUnavailable ? (
+                <ScopeLine
+                  total={gamesQ.data.total}
+                  scope={gamesScope.scope}
+                  unsupported={gamesScope.unsupported}
+                  nScopeUnknown={gamesQ.data.n_scope_unknown}
+                  population={cutLabel}
+                  filtered={hasSelection}
+                />
+              ) : undefined
             }
           >
             {gamesQ.isLoading && <div className="text-xs text-ink-muted">Loading games…</div>}
@@ -1861,7 +1721,7 @@ export default function NicheDetail() {
                   status={gamesErrorStatus}
                   extra={
                     detail.representative_games.length > 0
-                      ? "Showing the niche's top representative games from the existing mart meanwhile."
+                      ? "Showing the niche's biggest games all-time (every game, any review count) meanwhile."
                       : undefined
                   }
                 />
@@ -1874,15 +1734,10 @@ export default function NicheDetail() {
                           <th className="px-2 py-1.5 font-medium">Game</th>
                           <th className="px-2 py-1.5 font-medium">Year</th>
                           <th className="px-2 py-1.5 font-medium">Price</th>
-                          {/* The degraded fallback shipped the SAME mixed-estimator row as the
-                              live table above — owners_mid beside est_rev_reviews — so it gets
-                              the same fix. A reader who lands here during a mart rebuild has to
-                              get the same arithmetic, not a second answer. */}
-                          <th
-                            className="px-2 py-1.5 font-medium"
-                            title="Est. revenue ÷ launch price — the same reviews-based (Boxleiter) estimator as the revenue column, so the row multiplies out."
-                          >
-                            Est. units
+                          {/* The same fix as the live table: units from the revenue's own
+                              estimator, so the row multiplies out. */}
+                          <th className="px-2 py-1.5 font-medium">
+                            <HeaderLabel term="units" label="Est. units" style={{ fontSize: 11, fontWeight: 500 }} />
                           </th>
                           <th className="px-2 py-1.5 font-medium">Reviews</th>
                           <th className="px-2 py-1.5 font-medium">Positive</th>
@@ -1907,14 +1762,16 @@ export default function NicheDetail() {
                               </Link>
                             </td>
                             <td className="tabular px-2 py-1.5">{g.release_year ?? "—"}</td>
-                            <td className="tabular px-2 py-1.5">{fmtPrice(g.price_initial)}</td>
+                            <td className="tabular px-2 py-1.5">
+                              <PriceText row={g} />
+                            </td>
                             <td className="tabular px-2 py-1.5">
                               {fmtCompact(estimatedUnits(g.est_rev_reviews, g.price_initial, g.total_reviews))}
                             </td>
                             <td className="tabular px-2 py-1.5">{fmtInt(g.total_reviews)}</td>
                             <td className="tabular px-2 py-1.5">{fmtPct(g.positive_ratio)}</td>
                             <td className="tabular px-2 py-1.5">
-                              {fmtRevenue(g.est_rev_reviews, isFreeTitle(g))}
+                              <RevenueText row={g} value={g.est_rev_reviews} />
                             </td>
                           </tr>
                         ))}
@@ -1928,8 +1785,12 @@ export default function NicheDetail() {
             {!gamesUnavailable && gamesQ.data && gamesQ.data.items.length === 0 && (
               <EmptyState
                 className="py-6"
-                title="No games match the selected buckets"
-                description="Every game in this niche falls outside the brushed revenue/price range."
+                title={hasSelection ? "No games match the selected buckets" : `No ${scope === "indie" ? "indie " : ""}games in this cut`}
+                description={
+                  hasSelection
+                    ? "Every game in this niche falls outside the brushed revenue/price range."
+                    : "Switch the list to All games to see the whole niche."
+                }
                 action={
                   hasSelection ? (
                     <button
@@ -1942,6 +1803,14 @@ export default function NicheDetail() {
                     >
                       Clear filters
                     </button>
+                  ) : scope === "indie" ? (
+                    <button
+                      type="button"
+                      onClick={() => setScope("all")}
+                      className="rounded-md border border-chartborder px-2.5 py-1 text-xs font-medium text-ink-secondary transition-colors hover:border-brand hover:text-brand"
+                    >
+                      Show all games
+                    </button>
                   ) : undefined
                 }
               />
@@ -1950,83 +1819,41 @@ export default function NicheDetail() {
             {!gamesUnavailable && gamesQ.data && gamesQ.data.items.length > 0 && (
               <>
                 <TableScroll
-                  className={clsx(
-                    "rounded-card border border-chartborder",
-                    gamesQ.isFetching && "opacity-90 transition-opacity",
-                  )}
+                  className={clsx("rounded-card border border-chartborder", gamesQ.isFetching && "opacity-90 transition-opacity")}
                 >
                   <table className="w-full min-w-[640px] text-xs">
                     <thead>
                       <tr className="border-b border-chartborder text-left text-ink-muted">
                         <th className="px-2 py-1.5">
-                          <GameSortLabel
-                            label="Game"
-                            col="name"
-                            active={gamesParams.sort === "name"}
-                            order={gamesParams.order}
-                            onSort={onGameSort}
-                          />
+                          <GamesHeader label="Game" col="name" params={gamesParams} onSort={onGameSort} />
                         </th>
                         <th className="px-2 py-1.5">
-                          <GameSortLabel
-                            label="Year"
-                            col="release_year"
-                            active={gamesParams.sort === "release_year"}
-                            order={gamesParams.order}
-                            onSort={onGameSort}
-                          />
+                          <GamesHeader label="Year" col="release_year" params={gamesParams} onSort={onGameSort} />
                         </th>
                         <th className="px-2 py-1.5">
-                          <GameSortLabel
-                            label="Price"
-                            col="price"
-                            active={gamesParams.sort === "price"}
-                            order={gamesParams.order}
-                            onSort={onGameSort}
-                          />
+                          <GamesHeader label="Price" term="launch_price" col="price" params={gamesParams} onSort={onGameSort} />
                         </th>
                         <th className="px-2 py-1.5">
-                          <GameSortLabel
-                            label="Reviews"
-                            col="reviews"
-                            active={gamesParams.sort === "reviews"}
-                            order={gamesParams.order}
-                            onSort={onGameSort}
-                          />
+                          <GamesHeader label="Reviews" term="reviews" col="reviews" params={gamesParams} onSort={onGameSort} />
                         </th>
                         {/* Units, NOT SteamSpy owners. This row prints a price, a copy count and
                             a revenue side by side, so the copy count has to be the one that
-                            closes the arithmetic a reader does ACROSS the row. It used to be
-                            mart_game.owners_mid (owners-based) beside est_rev_reviews
-                            (reviews-based) — two different estimators in one row, so revenue ÷
-                            copies contradicted the price two cells to the left. Live API,
-                            tag/Souls-like win=24m min_reviews=50 sorted by revenue desc
-                            (2026-09-01): Path of Exile 2 read $202,068,121 over 35.0M owners =
-                            $5.77 a copy against a $29.99 price; Clair Obscur $414,290,625 over
-                            3.5M = $118.37 against $49.99; Silksong showed 10.9M owners here while
-                            /compare printed "Est. units 12.6M" for that same game.
-                            Same helper and same reasoning as /compare and the game profile's
-                            Estimates panel — lib/estimates.ts explains why the reviews-based
-                            estimator is the one that stays. The owners-based figure is not
-                            reprinted here: the profile can afford to carry it on a sub-line
-                            labelled "different method", a 25-row table has no such slot and a
-                            header read once cannot un-teach a division the cells invite 25 times.
-                            Still absent from the API's sort whitelist, so still an inert header
-                            rather than a control that 422s — and nothing is lost by that: at a
-                            fixed price units is strictly increasing in est_revenue, so the
-                            "Est. revenue" control already orders this column. */}
-                        <th
-                          className="px-2 py-1.5 font-medium"
-                          title="Estimated copies sold on the SAME reviews-based (Boxleiter) estimator as Est. revenue — est. revenue ÷ launch price, exactly. The owners-based SteamSpy estimate is a different method; it's on each game's profile, labelled as such."
-                        >
-                          Est. units
+                            closes the arithmetic a reader does ACROSS the row: est. revenue ÷
+                            launch price, exactly (lib/estimates.ts). It used to be owners_mid
+                            beside est_rev_reviews — two estimators in one row, so Path of Exile 2
+                            read $5.77 a copy against a $29.99 price. Not in the API's sort
+                            whitelist, so an inert header — and at a fixed price units rank
+                            exactly like Est. revenue, which is sortable. */}
+                        <th className="px-2 py-1.5">
+                          <GamesHeader label="Est. units" term="units" params={gamesParams} onSort={onGameSort} />
                         </th>
                         <th className="px-2 py-1.5">
-                          <GameSortLabel
+                          <GamesHeader
                             label="Est. revenue"
+                            term="est_revenue"
+                            notes={EST_REVENUE_NOTES}
                             col="revenue"
-                            active={gamesParams.sort === "revenue"}
-                            order={gamesParams.order}
+                            params={gamesParams}
                             onSort={onGameSort}
                           />
                         </th>
@@ -2051,18 +1878,24 @@ export default function NicheDetail() {
                             </Link>
                           </td>
                           <td className="tabular px-2 py-1.5">{g.release_year ?? "—"}</td>
-                          <td className="tabular px-2 py-1.5">{fmtPrice(g.price_initial)}</td>
+                          <td className="tabular px-2 py-1.5">
+                            <PriceText row={g} />
+                          </td>
                           <td className="tabular px-2 py-1.5">{fmtInt(g.total_reviews)}</td>
                           <td className="tabular px-2 py-1.5">
                             {fmtCompact(estimatedUnits(g.est_revenue, g.price_initial, g.total_reviews))}
                           </td>
                           <td className="tabular px-2 py-1.5">
-                            <span
-                              className="rounded px-1.5 py-0.5"
-                              style={heatStyle(g.est_revenue, ...heatDomain(all, (x) => x.est_revenue))}
-                            >
-                              {fmtRevenue(g.est_revenue, isFreeTitle(g))}
-                            </span>
+                            {hasRevenueFigure(g, g.est_revenue) ? (
+                              <span
+                                className="rounded px-1.5 py-0.5"
+                                style={heatStyle(g.est_revenue, ...heatDomain(all, (x) => x.est_revenue))}
+                              >
+                                <RevenueText row={g} value={g.est_revenue} />
+                              </span>
+                            ) : (
+                              <RevenueText row={g} value={g.est_revenue} />
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -2071,8 +1904,7 @@ export default function NicheDetail() {
                 </TableScroll>
                 <div className="mt-2 flex items-center justify-between text-xs text-ink-muted">
                   <span>
-                    {rangeStart.toLocaleString()}–{rangeEnd.toLocaleString()} of{" "}
-                    {gamesQ.data.total.toLocaleString()}
+                    {rangeStart.toLocaleString()}–{rangeEnd.toLocaleString()} of {gamesQ.data.total.toLocaleString()}
                   </span>
                   <div className="flex items-center gap-2">
                     <button
@@ -2102,24 +1934,429 @@ export default function NicheDetail() {
   );
 }
 
+/** A games-table header: the column name (sortable when the API can sort it) plus the ⓘ. */
+function GamesHeader({
+  label,
+  term,
+  notes,
+  col,
+  params,
+  onSort,
+}: {
+  label: string;
+  term?: GlossaryKey;
+  /** Replaces the glossary's notes paragraph (the Est. revenue column adds the price-unknown
+   * sentinel's meaning). */
+  notes?: string;
+  col?: NicheGameSortKey;
+  params: NicheGamesParams;
+  onSort: (col: NicheGameSortKey) => void;
+}) {
+  return (
+    <HeaderLabel
+      label={label}
+      term={term}
+      info={notes ? { notes } : undefined}
+      sort={col ? { col, active: params.sort === col, order: params.order, onSort } : undefined}
+      style={{ fontFamily: CONDENSED, fontSize: 11, letterSpacing: ".06em", fontWeight: 600 }}
+    />
+  );
+}
+
 /**
- * The honest degraded-state line. These two endpoints are served by a mart that only lands on
- * a REBUILD, so for a few hours after a deploy they legitimately answer 503 — saying so beats
- * an infinite spinner or a silent empty table.
+ * The overview's top games — a table on a wide screen, cards below 640px (2026-09-23: at
+ * 390px the six fixed columns scrolled inside a 340px box and only the thumbnail and the
+ * name were visible). Indie-first, with the scope and its population stated.
  */
-function DegradedNote({ what, status, extra }: { what: string; status: number | null; extra?: string }) {
+function TopGamesPanel({
+  wide,
+  loading,
+  degraded,
+  games,
+  fallbackEmpty,
+  cutLabel,
+  scope,
+  applied,
+  total,
+  nScopeUnknown,
+  onScope,
+  onSeeAll,
+}: {
+  wide: boolean;
+  loading: boolean;
+  degraded: boolean;
+  games: NicheGameRow[];
+  fallbackEmpty: boolean;
+  cutLabel: string;
+  scope: NicheScope;
+  applied: { scope: NicheScope; unsupported: boolean };
+  total: number | null;
+  nScopeUnknown: number | null | undefined;
+  onScope: (s: NicheScope) => void;
+  onSeeAll: () => void;
+}) {
+  const shownScope = degraded ? "all" : applied.scope;
+  return (
+    <div className="blueprint relative border-ink-primary/25" data-testid="top-games-panel">
+      <i className="bp-corner" />
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1.5 px-5 pb-2.5 pt-3.5">
+        <h3 className="text-ink-primary">Top {shownScope === "indie" ? "indie " : ""}games in the niche</h3>
+        <ScopeToggle scope={scope} onChange={onScope} />
+        <button type="button" onClick={onSeeAll} className="ml-auto text-xs font-medium text-brand hover:underline">
+          {total != null && !degraded
+            ? `All ${fmtInt(total)} ${shownScope === "indie" ? "indie " : ""}game${total === 1 ? "" : "s"} →`
+            : "All games →"}
+        </button>
+        <div className="basis-full">
+          {!degraded && (
+            <ScopeLine
+              total={total}
+              scope={applied.scope}
+              unsupported={applied.unsupported}
+              nScopeUnknown={nScopeUnknown}
+              population={cutLabel}
+            />
+          )}
+        </div>
+      </div>
+      {loading ? (
+        <div className="border-t border-ink-primary/20 px-5 py-6 text-center text-xs text-ink-muted">Loading top games…</div>
+      ) : degraded && fallbackEmpty ? (
+        <div className="border-t border-ink-primary/20 px-5 py-6 text-center text-xs text-ink-muted">No games for this cut yet.</div>
+      ) : !degraded && games.length === 0 ? (
+        <div className="border-t border-ink-primary/20 px-5 py-6 text-center text-xs text-ink-muted">
+          No {scope === "indie" ? "indie " : ""}games in this cut.{" "}
+          {scope === "indie" && (
+            <button type="button" onClick={() => onScope("all")} className="font-medium text-brand hover:underline">
+              Show all games
+            </button>
+          )}
+        </div>
+      ) : (
+        <>
+          {/* The per-cut list needs data that lands on a nightly REBUILD, so for a few hours
+              after a deploy there is none. Falling back to the niche's overall top list is
+              still the best list we have — but it is a different population, so it says so. */}
+          {degraded && (
+            <div className="border-t border-ink-primary/20 px-5 py-2 text-[11px] leading-snug text-ink-primary/50">
+              The per-cut list isn’t ready yet (it is rebuilt a few hours after each data update) — these are the
+              niche’s biggest games all-time at every review count, not the {cutLabel} cut, and not filtered to indie.
+            </div>
+          )}
+          {wide ? <TopGamesTable games={games} /> : <TopGamesCards games={games} />}
+        </>
+      )}
+    </div>
+  );
+}
+
+function GameThumb({ src }: { src: string | null | undefined }) {
+  return src ? (
+    <img src={src} alt="" className="h-[26px] w-full object-cover" loading="lazy" />
+  ) : (
+    <span
+      aria-hidden
+      className="block h-[26px] w-full"
+      style={{
+        backgroundImage:
+          "repeating-linear-gradient(45deg, color-mix(in srgb, var(--text-primary) 12%, transparent), color-mix(in srgb, var(--text-primary) 12%, transparent) 4px, transparent 4px, transparent 8px)",
+      }}
+    />
+  );
+}
+
+/** "95.3% positive · 276,249 reviews" — a reviews cell that says what both numbers are. */
+export function reviewsText(g: Pick<NicheGameRow, "positive_ratio" | "total_reviews">): string {
+  return `${fmtPct(g.positive_ratio)} positive · ${fmtInt(g.total_reviews)} reviews`;
+}
+
+function TopGamesTable({ games }: { games: NicheGameRow[] }) {
+  const COLS = "grid grid-cols-[60px_2fr_.8fr_1fr_1.6fr_1fr] items-center gap-3.5";
+  return (
+    <TableScroll>
+      <div className="min-w-[680px]">
+        <div className={clsx(COLS, "border-t border-ink-primary/20 px-5 py-2.5")}>
+          <span />
+          <span className="kicker text-[11px] text-ink-primary/55">Game</span>
+          <span className="kicker text-[11px] text-ink-primary/55">Released</span>
+          <span className="kicker inline-flex items-center gap-1 text-[11px] text-ink-primary/55">
+            Est. revenue <InfoTip term="est_revenue" notes={EST_REVENUE_NOTES} />
+          </span>
+          <span className="kicker inline-flex items-center gap-1 text-[11px] text-ink-primary/55">
+            Reviews <InfoTip term="positive_ratio" />
+          </span>
+          <span className="kicker inline-flex items-center gap-1 text-[11px] text-ink-primary/55">
+            Players now <InfoTip term="players_now" />
+          </span>
+        </div>
+        {games.map((g) => (
+          <Link
+            key={g.appid}
+            to={`/games/${g.appid}`}
+            className={clsx(COLS, "border-t border-ink-primary/10 px-5 py-2.5 text-sm transition-colors hover:bg-ink-primary/[0.04]")}
+          >
+            <GameThumb src={g.header_image} />
+            <span className="truncate font-medium text-ink-primary">{g.name ?? `App ${g.appid}`}</span>
+            <span className="tabular text-ink-primary/70">{g.release_year ?? "—"}</span>
+            <span className="tabular text-ink-primary/70">
+              <RevenueText row={g} value={g.est_revenue} />
+            </span>
+            <span className="tabular text-ink-primary/70">{reviewsText(g)}</span>
+            {/* Per-row live CCU from the games list — the same column /api/games/{appid}
+                serves, not a rank-8 leaderboard join. A game outside the capture says so. */}
+            <span className="tabular text-brand">
+              {g.live_players != null ? fmtCompact(g.live_players) : <SentinelTag>not measured</SentinelTag>}
+            </span>
+          </Link>
+        ))}
+      </div>
+    </TableScroll>
+  );
+}
+
+function TopGamesCards({ games }: { games: NicheGameRow[] }) {
+  return (
+    <ul className="flex flex-col" data-testid="top-games-cards">
+      {games.map((g) => (
+        <li key={g.appid} className="border-t border-ink-primary/10">
+          <Link to={`/games/${g.appid}`} className="flex gap-3 px-4 py-3 transition-colors hover:bg-ink-primary/[0.04]">
+            <span className="w-[72px] shrink-0 pt-0.5">
+              <GameThumb src={g.header_image} />
+            </span>
+            <span className="flex min-w-0 flex-col gap-0.5">
+              <span className="truncate text-sm font-medium text-ink-primary">{g.name ?? `App ${g.appid}`}</span>
+              <span className="tabular text-[12px] text-ink-secondary">
+                {g.release_year ?? "—"} · <RevenueText row={g} value={g.est_revenue} />
+                {priceKind(g) === "paid" && g.est_revenue != null ? " est. revenue" : ""}
+              </span>
+              <span className="tabular text-[12px] text-ink-muted">
+                {reviewsText(g)}
+                {g.live_players != null ? ` · ${fmtCompact(g.live_players)} playing now` : ""}
+              </span>
+            </span>
+          </Link>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * Median / top-25% / top-10% revenue, market size, newcomer earnings and singleplayer share,
+ * each with its glossary ⓘ and — where the row carries the inputs — its own numbers worked
+ * through the formula. Plain labels: "P25/P75/P90" and "market size p52" were the review's
+ * jargon. Revenue figures count PAID games only and are withheld below 30 of them.
+ */
+function RevenueCard({
+  variant,
+  variants,
+  cutLabel,
+  ownersAsOf,
+}: {
+  variant: NicheRow;
+  variants: NicheRow[];
+  cutLabel: string;
+  ownersAsOf: string | null;
+}) {
+  const paid = paidCount(variant);
+  const note = paidOnlyNote(variant);
+  const basis = `${fmtInt(paid ?? variant.n_games)}${paid !== null ? " paid" : ""} games`;
+  const pctWorked = (p: number, value: number | null | undefined) =>
+    isFiniteNumber(value) ? `${p}th percentile of Est. revenue across ${basis} = ${fmtUsd(value)}` : undefined;
+  // Newcomer earnings = median revenue of the last-24-month games ÷ the whole back catalog's
+  // median AT THE SAME REVIEW FLOOR — both medians are served as the two windows' own rows,
+  // so the ratio can be worked when they reproduce it.
+  const recent = findNicheVariant(variants, { win: "24m", min_reviews: variant.min_reviews });
+  const all = findNicheVariant(variants, { win: "all", min_reviews: variant.min_reviews });
+  const er = variant.entrant_ratio;
+  let erWorked: string | undefined;
+  if (recent?.median_rev != null && all?.median_rev != null && all.median_rev > 0 && er != null) {
+    const rec = recent.median_rev / all.median_rev;
+    if (Math.abs(rec - er) <= 0.006)
+      erWorked = `${fmtUsd(recent.median_rev)} (median, games from the last 24 months) ÷ ${fmtUsd(all.median_rev)} (median, all games, same review floor) = ${rec.toFixed(2)}×`;
+  }
+  const solo = variant.solo_viability;
+  const n = variant.n_games;
+  return (
+    <Card
+      title="Revenue spread and entry economics"
+      subtitle={`Estimated lifetime GROSS per game — reviews × 30 owners-per-review × launch price, one flat ratio, not fitted per genre — before Steam's cut, refunds and discounts. ${cutLabel}${
+        note ? `; ${note}` : ""
+      }.`}
+    >
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <StatTile
+          term="median_rev"
+          value={fmtUsd(variant.median_rev)}
+          sub="the typical outcome"
+          worked={pctWorked(50, variant.median_rev)}
+          sentinel={paidStatSentinel(variant, variant.median_rev)}
+        />
+        <StatTile
+          term="p75_rev"
+          value={fmtUsd(variant.p75_rev)}
+          sub="a good-but-not-exceptional outcome"
+          worked={pctWorked(75, variant.p75_rev)}
+          sentinel={paidStatSentinel(variant, variant.p75_rev)}
+        />
+        <StatTile
+          term="p90_rev"
+          value={fmtUsd(variant.p90_rev)}
+          sub="what the successful tail earns"
+          worked={pctWorked(90, variant.p90_rev)}
+          sentinel={paidStatSentinel(variant, variant.p90_rev)}
+        />
+      </div>
+      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <StatTile
+          term="total_owners"
+          value={fmtCompact(variant.total_owners)}
+          sentinel={variant.total_owners == null ? "no data" : undefined}
+          sub={
+            <>
+              {variant.market_size != null
+                ? `market size rank ${Math.round(variant.market_size)} of 100 — bigger than ${Math.round(variant.market_size)}% of niches`
+                : "market size rank unknown"}
+              {ownersAsOf && <span className="mt-0.5 block text-ink-muted">SteamSpy snapshot of {ownersAsOf}</span>}
+            </>
+          }
+        />
+        <StatTile
+          term="entrant_ratio"
+          value={er != null ? `${er.toFixed(2)}×` : "—"}
+          sub={`vs ~${ENTRANT_RATIO_CATALOG_NORM}× catalog norm — below it, newcomers underearn`}
+          worked={erWorked}
+          sentinel={er == null ? paidStatSentinel(variant, er) : undefined}
+        />
+        <StatTile
+          term="singleplayer_share"
+          value={fmtPct(solo)}
+          sub="most niches: 95–99% — under 80% leans multiplayer"
+          worked={
+            solo != null && n > 0 ? `≈ ${fmtInt(Math.round(solo * n))} of ${fmtInt(n)} games playable single-player = ${fmtPct(solo)}` : undefined
+          }
+          sentinel={solo == null ? "no data" : undefined}
+        />
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * Hit rates against MATCHING benchmarks (2026-09-23). The ≥$200K and ≥$500K meters used to
+ * carry the catalog's ≥$100K rate as their tick — a lower bar, so every niche looked like it
+ * beat the "benchmark". The tick is now the SAME bar for this niche's headline population
+ * (all time · ≥50 reviews, `hit_rates`), labelled with that cut — or, when the niche is too
+ * small for it, with the fallback cut the API reports (`hit_rates_cut.fallback`), flagged.
+ * The catalog's ≥$100K figure stays as a line of context, never as a tick on another bar.
+ */
+function HitRatesCard({
+  detail,
+  variant,
+  cut,
+}: {
+  detail: NicheDetailData;
+  variant: NicheRow;
+  cut: { win: Window; min_reviews: number };
+}) {
+  const hc = detail.hit_rates_cut;
+  const headLabel = hc ? cutPopulationLabel(hc.window, hc.min_reviews) : "all time · ≥50 reviews";
+  // A tick equal to the value itself says nothing: drop it when the selected cut IS the
+  // headline cut.
+  const sameCut = hc ? hc.window === cut.win && hc.min_reviews === cut.min_reviews : cut.win === "all" && cut.min_reviews === 50;
+  const paid = paidCount(variant);
+  const base = paid ?? variant.n_games;
+  const cutLabel = cutPopulationLabel(cut.win, cut.min_reviews);
+  const worked = (rate: number | null, bar: string) =>
+    rate != null && base > 0
+      ? `≈ ${fmtInt(Math.round(rate * base))} of ${fmtInt(base)}${paid !== null ? " paid" : ""} games (${cutLabel}) earn over ${bar} = ${fmtPct(rate)}`
+      : undefined;
+  const tick = (value: number | null | undefined) => (sameCut || value == null ? undefined : value);
+  const tickLabel = (value: number | null | undefined) =>
+    sameCut || value == null ? undefined : `this niche, ${headLabel}: ${fmtPct(value)}`;
+  return (
+    <Card
+      title="Hit rates — how often a game here earns real money"
+      subtitle={`Share of the cut's ${paid !== null ? "paid " : ""}games (${cutLabel}) clearing each revenue bar${
+        sameCut ? "" : `; the tick is the same bar for this niche ${headLabel}`
+      }.`}
+    >
+      <div className="flex flex-col gap-3">
+        <BulletMeter
+          term="hit_rate_200k"
+          value={variant.hit_rate_200k}
+          benchmark={tick(detail.hit_rates.hit_rate_200k)}
+          benchmarkLabel={tickLabel(detail.hit_rates.hit_rate_200k)}
+          color={CSS_VAR.demand}
+          valueLabel={fmtPct(variant.hit_rate_200k)}
+          worked={worked(variant.hit_rate_200k, "$200K")}
+          sentinel={paidStatSentinel(variant, variant.hit_rate_200k)}
+        />
+        <BulletMeter
+          term="hit_rate_500k"
+          value={variant.hit_rate_500k}
+          benchmark={tick(detail.hit_rates.hit_rate_500k)}
+          benchmarkLabel={tickLabel(detail.hit_rates.hit_rate_500k)}
+          color={CSS_VAR.demand}
+          valueLabel={fmtPct(variant.hit_rate_500k)}
+          worked={worked(variant.hit_rate_500k, "$500K")}
+          sentinel={paidStatSentinel(variant, variant.hit_rate_500k)}
+        />
+        <BulletMeter
+          term="beatable_share"
+          label="Beatable share (weakly reviewed or thin games)"
+          value={variant.beatable_share}
+          color={CSS_VAR.qualityGap}
+          valueLabel={fmtPct(variant.beatable_share)}
+          worked={
+            variant.beatable_share != null && variant.n_games > 0
+              ? `≈ ${fmtInt(Math.round(variant.beatable_share * variant.n_games))} of ${fmtInt(variant.n_games)} games under 80% positive, under 50 reviews or unrated = ${fmtPct(variant.beatable_share)}`
+              : undefined
+          }
+          sentinel={variant.beatable_share == null ? "no data" : undefined}
+        />
+        <BulletMeter
+          term="winner_concentration"
+          value={variant.winner_concentration}
+          benchmark={WC_WINNER_TAKE_MOST}
+          benchmarkLabel={`${fmtPct(WC_WINNER_TAKE_MOST, 0)} — above it the niche is winner-take-most`}
+          color={CSS_VAR.competition}
+          valueLabel={fmtPct(variant.winner_concentration)}
+          sentinel={paidStatSentinel(variant, variant.winner_concentration)}
+        />
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-ink-muted" data-testid="hit-rates-cut">
+        {hc?.fallback ? (
+          <>
+            <span>Ticks:</span>
+            <SentinelTag>{headLabel} — too few games for the all-time ≥50-review cut</SentinelTag>
+          </>
+        ) : !sameCut ? (
+          <span>Ticks: this niche, {headLabel}.</span>
+        ) : null}
+        <span>For scale: about 8.5% of all Steam releases clear $100K (cited, first-year, all releases).</span>
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * The honest degraded-state line. The per-game niche data is rebuilt a few hours after each
+ * data update, and until then these panels legitimately have nothing — saying so beats an
+ * infinite spinner or a silent empty table. (Plain words: this used to name internal table
+ * names and HTTP status codes.)
+ */
+function DegradedNote({ what, status, extra }: { what: string; status: number | null; extra?: ReactNode }) {
   const because =
-    status === 503
-      ? " (the API is answering 503 until then)"
-      : status === 422
-        ? " (this window / review-floor cut isn't in the rebuilt mart yet — try another cut above)"
-        : status === 404
-          ? " (no rows for this cut yet)"
-          : "";
+    status === 422
+      ? " — this window and review floor aren't built for it yet; try another cut above"
+      : status === 404
+        ? " — nothing for this cut yet"
+        : "";
   return (
     <p className="mt-2 text-[11px] text-ink-muted">
-      {what} needs the per-niche game mart, which is rebuilt a few hours after a deploy{because}.
-      {extra ? ` ${extra}` : ""} Everything else on this page is live.
+      {what} needs the per-game data for this niche, which is rebuilt a few hours after each data update{because}.
+      {extra ? <> {extra}</> : null} Everything else on this page is live.
     </p>
   );
 }

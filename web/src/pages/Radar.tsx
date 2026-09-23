@@ -2,10 +2,19 @@ import { useCallback, useMemo } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import clsx from "clsx";
 
-import { RadarBoard, RADAR_REGIONS, type RadarBoardBlip, type RadarRegion, type RadarSector } from "../components/RadarBoard";
+import {
+  RadarBoard,
+  RADAR_REGIONS,
+  radarBlipFromRow,
+  type RadarBoardBlip,
+  type RadarRegion,
+  type RadarSector,
+} from "../components/RadarBoard";
+import { StartHere } from "../components/StartHere";
+import { InfoTipBase } from "../components/ui/InfoTipBase";
 import { Loading } from "../components/ui/Loading";
 import { useNiches, type NicheRow } from "../lib/api";
-import { RING_ORDER, SOLO_FRIENDLY_MIN, radarVerdictTrace } from "../lib/radarVerdict";
+import { RING_ORDER, SOLO_FRIENDLY_PCT, SOLO_LENS_LABEL, soloBucket } from "../lib/radarVerdict";
 import type { RadarRing } from "../lib/radarVerdict";
 import { usePageTitle } from "../lib/usePageTitle";
 
@@ -16,7 +25,14 @@ import { usePageTitle } from "../lib/usePageTitle";
  * /api/niches/radar) is gone: movers are the trend % on every rail row and ring position,
  * emerging is the dashed-halo band and its own EMERGING rail group, and the hero was a
  * re-statement of the top riser the list already leads with. The /api/niches/radar
- * endpoint itself is untouched (MCP and external consumers).
+ * endpoint is gone as well — it 404s; api/app/routers/niches.py serves the list, /combined,
+ * a niche's detail, /games, /distribution and /export.csv, and this board reads the list.
+ *
+ * THE FIRST 30 SECONDS (2026-09-23 review). The page used to open on a kicker reading
+ * "VERDICT RINGS · BEST IN THE MIDDLE · THREE CLASS SECTORS · …" and six lines of legend. It
+ * now asks the question the board answers, says in one line how to read it, and puts the
+ * three-step <StartHere/> path and the guide link above it; the legend is two lines and the
+ * detail sits behind an ⓘ and the Methodology disclosure.
  *
  * THE INSTRUMENT (RadarBoardSection) — a single frame: the CONCENTRIC-RING DIAL on the
  * left (RadarBoard.tsx — the verdict as a ring band, best in the middle; the niche CLASS
@@ -48,16 +64,20 @@ import { usePageTitle } from "../lib/usePageTitle";
  * doc. The methodology paragraph is a collapsed-by-default <details> disclosure so the
  * board breathes (full text one click away, never gone).
  *
- * POPULATION (user directive, 2026-08-26): the page is SOLO-FIRST — the board defaults
- * to solo-friendly niches only (singleplayer share solo_viability >= 0.8, filtered
- * SERVER-side via the API's solo_only param; NULL = unknown = excluded). Solo never
- * moves a ring in either mode — see lib/radarVerdict.ts.
+ * POPULATION (user directive, 2026-08-26): the page is SOLO-FIRST — the board defaults to
+ * the "Singleplayer only" lens (singleplayer share solo_viability >= 0.8; NULL = unknown =
+ * excluded). Named for exactly what it does since 2026-09-23 — it was "Solo-friendly only",
+ * a buildability promise the share can't keep; on the 2026-09-21 cut it removes 8 of 228
+ * niches. Solo never moves a ring in either mode — see lib/radarVerdict.ts.
  *
  * FETCH SHAPE (the search directive): each cut asks for the endpoint's MAX limit
  * (POPULATION_LIMIT), not Top-N — the rail's search must cover the FULL radar population
- * at the active cut + solo setting (~213 rows solo-on), never just the plotted dots. The
- * Top-N cap became a pure client-side slice, so flipping it re-plots instantly with no
- * refetch. See the `pool` memo.
+ * at the active cut, never just the plotted dots. The Top-N cap is a pure client-side
+ * slice, and since 2026-09-23 so is the singleplayer lens (it used to be the API's
+ * solo_only param): the whole population fits under the limit (228 rows across both cuts),
+ * filtering it here costs nothing, flipping the lens no longer refetches, and the legend can
+ * say what the lens really removed ("220 of 228 kept"). Same bar as the API's
+ * RADAR_SOLO_FRIENDLY_MIN. See the `pool` memo.
  */
 
 /**
@@ -176,10 +196,9 @@ function pickAcrossRings<T extends { verdict: { ring: RadarRing } }>(rows: T[], 
   });
 }
 
-/** The page-level population toggle (default ON — the radar is solo-first). ON asks the
- * SERVER (solo_only) for solo-friendly niches only (singleplayer share >= 0.8, unknown
- * excluded); OFF reveals the full population, where the solo lens draws team-scale dots
- * hollow. */
+/** The page-level population toggle (default ON — the radar is solo-first). ON keeps the
+ * niches whose singleplayer share is >= 0.8 (unknown excluded); OFF reveals the full
+ * population, where the lens draws multiplayer-dependent dots hollow. */
 const SOLO_ONLY_OPTIONS: { v: "on" | "off"; label: string }[] = [
   { v: "on", label: "On" },
   { v: "off", label: "Off" },
@@ -190,18 +209,24 @@ const SOLO_ONLY_OPTIONS: { v: "on" | "off"; label: string }[] = [
  * option value so numeric (Top N) and string (solo lens) rows share one control. */
 function SegRow<V extends string | number>({
   label,
+  info,
   options,
   value,
   onChange,
 }: {
   label: string;
+  /** An ⓘ explaining the control, beside its label. */
+  info?: React.ReactNode;
   options: { v: V; label: string }[];
   value: V;
   onChange: (v: V) => void;
 }) {
   return (
     <div className="flex items-center gap-2">
-      <span className="kicker text-[10px] tracking-[.1em] text-ink-muted">{label}</span>
+      <span className="kicker inline-flex items-center gap-1 text-[10px] tracking-[.1em] text-ink-muted">
+        {label}
+        {info}
+      </span>
       <div className="inline-flex border border-ink-primary/30">
         {options.map((o, i) => (
           <button
@@ -246,9 +271,11 @@ function RadarBoardSection({
   onSelect,
   zoom,
   onZoom,
+  soloCounts,
 }: {
   blips: RadarBoardBlip[];
   pool: RadarBoardBlip[];
+  soloCounts: { shown: number; total: number };
   plotCap: number;
   loading: boolean;
   bothFailed: boolean;
@@ -271,22 +298,45 @@ function RadarBoardSection({
       {/* Header: identity left, THE toolbar right — every board control lives here; the
           class picker leads (it is the "what am I researching" control). */}
       <div className="flex flex-wrap items-end gap-x-6 gap-y-3 pb-5">
-        <div className="flex flex-col gap-1.5">
+        <div className="flex min-w-0 max-w-[720px] flex-col gap-1.5">
           <div className="kicker text-[10px] tracking-[.12em] text-brand">
-            Verdict rings · best in the middle · three class sectors · last 24 months · {CLASS_KICKER[boardClass]}
-            {soloOnly ? " · solo-friendly only" : ""}
+            Niche radar · {CLASS_KICKER[boardClass]}
           </div>
           {/* h1, not h2: this is the index route's only heading, and a page whose
-              document outline starts at h2 has no top level at all. Styled identically —
-              index.css gives every h1–h6 the same condensed face, so only the tag changed. */}
-          <h1 className="text-[26px] text-ink-primary sm:text-[30px]">Niche radar</h1>
+              document outline starts at h2 has no top level at all. It asks the question
+              the board answers (2026-09-23) instead of naming the instrument. */}
+          <h1 className="text-[24px] leading-tight text-ink-primary sm:text-[30px]">
+            Which niches are worth building in right now?
+          </h1>
+          <p className="text-[13px] leading-relaxed text-ink-secondary" data-testid="radar-how-to-read">
+            Each dot is a niche. The closer to the centre, the stronger the case for starting a game there today —
+            judged on the last 24 months of games with 50+ reviews. Click a dot or a row to see the checks behind
+            its ring.{" "}
+            <Link to="/docs#radar" className="font-medium text-brand transition-colors hover:text-brand-hover">
+              How to read the Radar →
+            </Link>
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 sm:ml-auto">
           {/* "Emphasis", not "Class": the control no longer decides what is on the board —
               every class is — it decides which sector reads at full strength. */}
           <SegRow label="Emphasis" options={CLASS_OPTIONS} value={boardClass} onChange={onBoardClass} />
+          {/* Named for what it does (2026-09-23): a singleplayer-share cut that removes a
+              handful of multiplayer-dependent niches — not a judgement of solo buildability. */}
           <SegRow
-            label="Solo-friendly only"
+            label={SOLO_LENS_LABEL}
+            info={
+              <InfoTipBase
+                label={SOLO_LENS_LABEL}
+                ariaLabel={`About ${SOLO_LENS_LABEL}`}
+                meaning={`Keeps only niches where at least ${SOLO_FRIENDLY_PCT} of the games can be played single-player; a niche whose share is unknown is left out. Most niches pass — it removes the multiplayer-dependent few (party, MMO, battle royale), and says nothing about how big a game is to build.`}
+                formula={`keep a niche when singleplayer share ≥ ${SOLO_FRIENDLY_PCT}`}
+                worked={`On this cut: ${soloCounts.shown} of ${soloCounts.total} niches kept, ${
+                  soloCounts.total - soloCounts.shown
+                } hidden.`}
+                notes="It never changes a verdict: with it off, the hidden niches return (drawn hollow) in the same ring."
+              />
+            }
             options={SOLO_ONLY_OPTIONS}
             value={soloOnly ? "on" : "off"}
             onChange={(v) => onSoloOnly(v === "on")}
@@ -310,6 +360,7 @@ function RadarBoardSection({
           pool={pool}
           plotCap={plotCap}
           soloOnly={soloOnly}
+          soloCounts={soloCounts}
           emphasis={boardClass}
           selectedId={selectedId}
           onSelect={onSelect}
@@ -345,14 +396,16 @@ function RadarBoardSection({
           solo-friendly niches than the tag classes, so that wedge is genuinely sparser — it is not padded. Blips are
           placed by a short, seeded force relaxation clamped inside their own band and wedge (the same technique the
           reference radar uses), so segments fill evenly and a niche still lands in exactly the same spot on every
-          visit. Inside a band, distance encodes opportunity v2 — nearer the centre = higher — as the RANK within
-          the band, not the raw score; the score itself stays in the tooltip and the dossier, where it can carry its
-          supply brake with it. Dot area = P90 revenue; the number in a dot is its rank in the rail list beside the
-          board; dot colour repeats the verdict the band already names (green = enter, steel = watch, violet =
-          emerging, amber = crowded, terracotta = declining — reinforcement only, every meaning survives grayscale);
-          a hollow dot is team-scale under the solo lens and a dotted ring means the verdict is hedged. Verdicts:
-          Enter now = demand past +40% / 24m without a flooding release pipeline · Watch = demand holding or
-          softening, or score-only evidence · Emerging = no comparable demand base — either a young label (≥80% of its
+          visit. Inside a band, distance encodes the Opportunity score — nearer the centre = higher — as the RANK
+          within the band, not the raw score; the score itself stays in the tooltip and the dossier, where it always
+          carries its parts and its supply brake. Dot area = top-10% revenue; the number in a dot is its row in the
+          list beside the board; dot colour repeats the verdict the band already names (green = enter, steel = watch,
+          violet = emerging, amber = crowded, terracotta = declining — reinforcement only, every meaning survives
+          grayscale); a hollow dot is multiplayer-dependent (shown only with {SOLO_LENS_LABEL} off) and a dotted ring
+          means the verdict rests on thin evidence. Verdicts:
+          Enter now = demand past +40% / 24m without a flooding release pipeline and without winner-take-most
+          revenue (the top 5% of games taking more than 85%) · Watch = demand holding or softening, demand surging
+          but one of those two checks failing (the dossier names which), or score-only evidence · Emerging = no comparable demand base — either a young label (≥80% of its
           reviews from games released in the last 24 months) or a prior base too small for a % read, so no trustworthy
           trend % exists and the rail shows absolute 24-month volume instead of a percentage · Crowded = releases up
           &gt;15% YoY against flat-to-down demand, or winner-take-most · Declining = demand down ≥30% per 24 months.
@@ -365,8 +418,8 @@ function RadarBoardSection({
           plotted dot across all three sectors, and its search covers the whole population of the cut — past the plot
           cap (while zoomed, the search reads within the zoomed ring).{" "}
           {soloOnly
-            ? `Population: solo-friendly niches only (singleplayer share ≥ ${SOLO_FRIENDLY_MIN}, filtered server-side; a niche with no solo reading is excluded — unknown is not a claim). Singleplayer share is a no-netcode proxy, not a production-scope measure — the dossier's solo row shows the member evidence behind it. Solo never changes a verdict.`
-            : `Population: all niches — the solo lens restyles team-scale dots (hollow, singleplayer share < ${SOLO_FRIENDLY_MIN}) without ever changing a verdict. Singleplayer share is a no-netcode proxy, not a production-scope measure — the dossier's solo row shows the member evidence behind it.`}
+            ? `Population: ${SOLO_LENS_LABEL} — niches whose singleplayer share is ≥ ${SOLO_FRIENDLY_PCT} (${soloCounts.shown} of ${soloCounts.total} on this cut; a niche with no reading is left out — unknown is not a claim). Singleplayer share says the games skip netcode, not that they are small builds — the dossier's singleplayer row shows the member evidence behind it. It never changes a verdict.`
+            : `Population: all niches — multiplayer-dependent ones (singleplayer share under ${SOLO_FRIENDLY_PCT}) are drawn hollow, in the same ring the market evidence puts them. Singleplayer share says the games skip netcode, not that they are small builds — the dossier's singleplayer row shows the member evidence behind it.`}
         </p>
       </details>
     </section>
@@ -431,17 +484,15 @@ export default function Radar() {
 
   // The board population: the two cuts that make up the three sectors. Each query asks
   // for the endpoint's max rows by opportunity_v2 — the full population the rail search
-  // spans; the plotted Top-N is sliced client-side below. solo_only is SERVER-side (the
-  // shared list endpoint's opt-in param — non-radar consumers stay unfiltered): filtering
-  // before the limit means a solo-only board always fills back up instead of thinning out.
-  const soloParam = soloOnly ? (1 as const) : undefined;
+  // spans; the plotted Top-N and the singleplayer lens are both applied client-side below
+  // (see FETCH SHAPE above), so neither control refetches. These are exactly the params the
+  // Niche Finder uses for its pinned-cut verdicts, so the two pages share one cache entry.
   const genreQ = useNiches({
     dimension: "genre",
     window: BOARD_WINDOW,
     min_reviews: BOARD_MIN_REVIEWS,
     sort: "opportunity_v2",
     order: "desc",
-    solo_only: soloParam,
     limit: POPULATION_LIMIT,
     offset: 0,
   });
@@ -452,65 +503,36 @@ export default function Radar() {
     sort: "opportunity_v2",
     order: "desc",
     tiers: "micro,theme",
-    solo_only: soloParam,
     limit: POPULATION_LIMIT,
     offset: 0,
   });
 
-  /** The FULL population at this cut + solo setting, both dimensions merged, opportunity
-   * order — the rail search's scope. `blips` (what the board plots) is its Top-N head. */
-  const pool = useMemo<RadarBoardBlip[]>(() => {
+  /** EVERY board-class niche at this cut, both dimensions merged, opportunity order — before
+   * the singleplayer lens. One row -> one blip through radarBlipFromRow (the same mapping
+   * the parity oracle uses), so the ring and the dossier trace come from one evaluation. */
+  const allBlips = useMemo<RadarBoardBlip[]>(() => {
     const rows: RadarBoardBlip[] = [];
     const push = (row: NicheRow) => {
-      const sector: RadarSector | null =
-        row.dimension === "genre" ? "genre" : row.tier === "micro" ? "micro" : row.tier === "theme" ? "theme" : null;
-      if (!sector) return; // tag tiers outside micro/theme have no sector on this board
-      // ?? null: the field is absent (undefined) on marts that predate the demand columns.
-      const demandTrendPct = row.demand_trend_24m_pct ?? null;
-      const demandEmerging = row.demand_emerging === true;
-      // One evaluation produces BOTH the ring and the dossier trace (radarVerdictTrace —
-      // same booleans, same body), so the panel can never disagree with the dot position.
-      const { checks, ...verdict } = radarVerdictTrace({
-        demand_trend_24m_pct: demandTrendPct,
-        demand_emerging: demandEmerging,
-        saturation_yoy: row.saturation_yoy,
-        winner_concentration: row.winner_concentration,
-        opportunity_v2: row.opportunity_v2,
-        entrant_ratio: row.entrant_ratio,
-        solo_viability: row.solo_viability ?? null,
-        // Solo-evidence trio — the member profile the dossier's solo row renders inline
-        // ("0.98 singleplayer · 50% self-pub · 71% indie · median 5.7h content"). Absent
-        // (undefined -> null) on marts that predate it: the row omits the evidence.
-        self_published_share: row.self_published_share ?? null,
-        indie_share: row.indie_share ?? null,
-        med_playtime_h: row.med_playtime_h ?? null,
-        reviews_24m: row.reviews_24m ?? null,
-        reviews_prev_24m: row.reviews_prev_24m ?? null,
-        reviews_24m_new_share: row.reviews_24m_new_share ?? null,
-      });
-      rows.push({
-        dimension: row.dimension,
-        key: row.key,
-        tier: row.tier,
-        sector,
-        n_games: row.n_games,
-        p90_rev: row.p90_rev ?? null,
-        opportunity_v2: row.opportunity_v2,
-        demandTrendPct,
-        saturationYoy: row.saturation_yoy,
-        demandEmerging,
-        reviews24m: row.reviews_24m ?? null,
-        reviewsPrev24m: row.reviews_prev_24m ?? null,
-        solo_viability: row.solo_viability ?? null,
-        verdict,
-        trace: checks,
-      });
+      const blip = radarBlipFromRow(row);
+      if (blip) rows.push(blip); // tag tiers outside micro/theme have no sector on this board
     };
     for (const r of genreQ.data?.items ?? []) push(r);
     for (const r of tagQ.data?.items ?? []) push(r);
     rows.sort((a, b) => (b.opportunity_v2 ?? -1) - (a.opportunity_v2 ?? -1) || a.key.localeCompare(b.key));
     return rows;
   }, [genreQ.data, tagQ.data]);
+
+  /** The population the board and the rail search read: under the singleplayer lens the
+   * niches with share >= SOLO_FRIENDLY_MIN (unknown excluded — the API's solo_only rule,
+   * applied here so the legend can count what it removed). */
+  const pool = useMemo<RadarBoardBlip[]>(
+    () => (soloOnly ? allBlips.filter((b) => soloBucket(b.solo_viability) === "solo") : allBlips),
+    [allBlips, soloOnly],
+  );
+  const soloCounts = useMemo(
+    () => ({ shown: allBlips.filter((b) => soloBucket(b.solo_viability) === "solo").length, total: allBlips.length }),
+    [allBlips],
+  );
 
   /**
    * The plotted board: EVERY class, each cut to its OWN Top N/3 by opportunity (see
@@ -553,9 +575,13 @@ export default function Radar() {
     // fills the ONE shared page container (App.tsx PAGE_CONTAINER) like every other page.
     // The old 1180px self-cap was exactly the "pages are different sizes" complaint.
     <div className="flex flex-col gap-5">
+      {/* The three-step path for a first visit (dismissible, remembered) — above the board,
+          so a new reader meets the order of play before the dense instrument. */}
+      <StartHere />
       <RadarBoardSection
         blips={blips}
         pool={pool}
+        soloCounts={soloCounts}
         plotCap={perClassCap(topN)}
         loading={loading}
         bothFailed={bothFailed}

@@ -1,18 +1,48 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DOSSIER_LABEL,
   EMERGING_DEMAND_LABEL,
   RING_COLOR,
   RING_LABEL,
   RING_ORDER,
   SOLO_FRIENDLY_MIN,
+  cutPopulationLabel,
   fmtDemandTrend24m,
   radarBoardAbsence,
   radarDossier,
   radarSector,
   radarVerdictTrace,
 } from "./radarVerdict";
+import { glossary } from "./glossary";
 import { MONO } from "./palette";
+
+describe("DOSSIER_LABEL — the glossary's plain names, held without importing the glossary", () => {
+  // The Radar is the eager index route and must not ship lib/glossary.ts on first paint, so
+  // the board's row labels are plain strings in radarVerdict.ts. This pins them to the
+  // glossary's canonical labels so a rename there cannot leave the board behind.
+  it("matches the canonical label of every metric it names", () => {
+    expect(DOSSIER_LABEL.demand).toBe(glossary("demand_trend_24m_pct").label);
+    expect(DOSSIER_LABEL.reviews24m).toBe(glossary("reviews_24m").label);
+    expect(DOSSIER_LABEL.releases).toBe(glossary("saturation_yoy").label);
+    expect(DOSSIER_LABEL.p90).toBe(glossary("p90_rev").label);
+    expect(DOSSIER_LABEL.games).toBe(glossary("n_games").label);
+    expect(DOSSIER_LABEL.opportunity).toBe(glossary("opportunity_v2").label);
+    expect(DOSSIER_LABEL.singleplayer).toBe(glossary("singleplayer_share").label);
+  });
+
+  it("never prints the retired jargon", () => {
+    for (const label of Object.values(DOSSIER_LABEL)) expect(label).not.toMatch(/Opp v2|P90|24m\b|YoY/);
+  });
+
+  it("names the population a count describes", () => {
+    expect(cutPopulationLabel("24m", 50)).toBe("last 24 months · ≥50 reviews");
+    expect(cutPopulationLabel("all", 0)).toBe("all time · every game");
+    expect(cutPopulationLabel("all", 100)).toBe("all time · ≥100 reviews");
+    expect(radarDossier({ n_games: 227, window: "24m", min_reviews: 50 }).population).toBe("last 24 months · ≥50 reviews");
+    expect(radarDossier({ n_games: 227 }).population).toBeNull();
+  });
+});
 
 /**
  * The niche pages print the Radar tooltip's rows through radarDossier() (2026-09-09). The
@@ -44,8 +74,8 @@ describe("radarDossier — the tooltip's rows, as strings", () => {
     expect(d.releasesYoy).toBe("-7%");
     expect(d.p90Revenue).toBe("$9.7M");
     expect(d.games).toBe("86");
-    expect(d.oppV2).toBe("86.7");
-    expect(d.singleplayerShare).toBe("0.98");
+    expect(d.opportunity).toBe("86.7");
+    expect(d.singleplayerShare).toBe("98%");
     expect(d.reviews24m).toBe("120,000");
     expect(d.emerging).toBe(false);
   });
@@ -83,7 +113,7 @@ describe("radarDossier — the tooltip's rows, as strings", () => {
     const d = radarDossier({});
     expect(d.p90Revenue).toBe("—");
     expect(d.games).toBe("—");
-    expect(d.oppV2).toBe("—");
+    expect(d.opportunity).toBe("—");
     expect(d.reviews24m).toBeNull();
   });
 
@@ -118,15 +148,16 @@ describe("radarBoardAbsence — why a niche has no dot on the default board", ()
 
   it("names the class rule for umbrella/meta/untiered tags", () => {
     expect(radarBoardAbsence({ dimension: "tag", tier: "umbrella", solo_viability: 0.99 })).toBe(
-      "Not on the Radar board: it plots micro-genre and theme tags only, and this tag is umbrella tier.",
+      "Not on the Radar board: of the community tags it plots only game types and themes, and this tag is a broad genre.",
     );
-    expect(radarBoardAbsence({ dimension: "tag", tier: null, solo_viability: 0.99 })).toMatch(/is untiered\.$/);
+    expect(radarBoardAbsence({ dimension: "tag", tier: null, solo_viability: 0.99 })).toMatch(/is not sorted into a type yet\.$/);
   });
 
-  it("names the solo filter, with the share and the bar, and how to see the dot anyway", () => {
+  it("names the singleplayer filter, with the share and the bar, and how to see the dot anyway", () => {
     const line = radarBoardAbsence({ dimension: "tag", tier: "micro", solo_viability: 0.353 });
-    expect(line).toMatch(/singleplayer share 0\.35 is under the 0\.8 solo-friendly bar/);
-    expect(line).toMatch(/Solo-friendly only/);
+    expect(line).toMatch(/singleplayer share 35% is under the 80% bar of the board's “Singleplayer only” filter/);
+    expect(line).toMatch(/with that filter off/);
+    expect(line).not.toMatch(/solo-friendly/i); // the lens's old, over-promising name
     expect(radarBoardAbsence({ dimension: "tag", tier: "micro", solo_viability: null })).toMatch(
       /singleplayer share is unknown/,
     );

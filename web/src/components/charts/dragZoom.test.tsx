@@ -108,6 +108,7 @@ describe("drag-to-zoom on a time axis", () => {
     const years: TrendPoint[] = Array.from({ length: 12 }, (_, i) => ({
       year: 2014 + i,
       n_releases: 100 + i,
+      n_scored: 50, // every year clears the revenue panel's thin-year bar (TREND_REV_MIN_SCORED)
       median_rev: 1000 * (i + 1),
       p90_rev: 9000 * (i + 1),
     })) as TrendPoint[];

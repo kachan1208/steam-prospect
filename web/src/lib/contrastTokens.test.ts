@@ -128,7 +128,9 @@ describe("/niches/combined — the funnel tile on its brand-tinted panel", () =>
   });
 
   it("labels the funnel tile with a token that passes AA there", () => {
-    const line = COMBINED.match(/^\s*<div className="([^"]*)">\n\s*\{mode === "intersect" \? "In all of them"/m);
+    // The label's expression may span lines ("In both" for two niches, "In all of them" past
+    // that) — match up to its first string without crossing the closing brace.
+    const line = COMBINED.match(/^\s*<div className="([^"]*)">\n\s*\{mode === "intersect"[^}]*"In all of them"/m);
     if (!line) throw new Error("could not find the funnel tile's label classes");
     const token = line[1].includes("text-ink-secondary")
       ? "text-secondary"

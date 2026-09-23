@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { MemoryRouter, Route, Routes, useParams, useSearchParams } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-import { EMERGING_DEMAND_LABEL, RING_COLOR, type RadarRing } from "../lib/radarVerdict";
+import { DOSSIER_LABEL, EMERGING_DEMAND_LABEL, RING_COLOR, type RadarRing } from "../lib/radarVerdict";
 import { radarListRow, readRadarTooltip } from "../test/radarTooltip";
 
 import NicheDetail, {
@@ -53,13 +53,9 @@ describe("niche detail URL round-trip", () => {
   // family, and genre keys generally) — a slash would otherwise split into a third path
   // segment and never match /niches/:dimension/:key at all. The link builder must encode
   // and React Router must hand back the original string, byte for byte.
-  const KEYS = [
-    "Action Roguelike",
-    "Massively Multiplayer/RPG",
-    "Free to Play",
-    "RPG/Adventure/Indie",
-    "Rogue-like",
-  ];
+  // (A hyphenated CANONICAL key. "Rogue-like" used to stand in here, but since 2026-09-23 it is
+  // an alias of "Roguelike" — the page redirects it, tested in its own block below.)
+  const KEYS = ["Action Roguelike", "Massively Multiplayer/RPG", "Free to Play", "RPG/Adventure/Indie", "Souls-like"];
 
   for (const key of KEYS) {
     it(`round-trips ${JSON.stringify(key)} through the route`, () => {
@@ -175,7 +171,7 @@ describe("bucket selection <-> query params", () => {
 describe("games request defaults", () => {
   const cut = { win: "all", min_reviews: 100 } as const;
 
-  it("defaults to revenue desc on the cut from the page, not from the URL", () => {
+  it("defaults to revenue desc on the cut from the page, not from the URL — indie games first", () => {
     expect(readGamesParams(new URLSearchParams(), cut)).toEqual({
       win: "all",
       min_reviews: 100,
@@ -187,7 +183,14 @@ describe("games request defaults", () => {
       rev_max: undefined,
       price_min: undefined,
       price_max: undefined,
+      scope: "indie",
     });
+  });
+
+  it("reads ?scope=all as the All games toggle, and anything else as the indie default", () => {
+    expect(readGamesParams(new URLSearchParams("scope=all"), cut).scope).toBe("all");
+    expect(readGamesParams(new URLSearchParams("scope=indie"), cut).scope).toBe("indie");
+    expect(readGamesParams(new URLSearchParams("scope=wizards"), cut).scope).toBe("indie");
   });
 
   it("honours a whitelisted sort key and rejects anything else", () => {
@@ -290,12 +293,15 @@ describe("NicheDetail — the Releases YoY tile disowns the cut controls", () =>
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        const body = url.includes("/niches/tag/")
-          ? DETAIL
-          : url.includes("/market/benchmarks")
-            ? { cited: { pct_new_releases_over_100k: 0.085, revenue_benchmark_marks: [], dev_tiers: [] } }
-            : {};
+        const url = new URL(String(input), "http://test.local");
+        // The games list answers for the cut it was asked for — its total is that cut's size.
+        const body = url.pathname.endsWith("/games")
+          ? gamesFor(VARIANTS, url)
+          : url.pathname.includes("/niches/tag/")
+            ? DETAIL
+            : url.pathname.includes("/market/benchmarks")
+              ? { cited: { pct_new_releases_over_100k: 0.085, revenue_benchmark_marks: [], dev_tiers: [] } }
+              : {};
         return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
       }),
     );
@@ -336,10 +342,10 @@ describe("NicheDetail — the Releases YoY tile disowns the cut controls", () =>
     // dossier.
     const dossier = await screen.findByTestId("radar-dossier");
     expect(within(dossier).getByText("223")).toBeTruthy();
-    expect(await screen.findByText("All 223 →")).toBeTruthy();
+    expect(await screen.findByText("All 223 indie games →")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Last 24m · ≥0 reviews" }));
-    expect(await screen.findByText("All 624 →")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Last 24 months · every game" }));
+    expect(await screen.findByText("All 624 indie games →")).toBeTruthy();
     expect(within(dossier).getByText("223")).toBeTruthy();
     // Same tile, same three numbers, disclosure still on screen.
     expect(screen.getByText(/346 released last full year vs 340 the year before/)).toBeTruthy();
@@ -348,13 +354,28 @@ describe("NicheDetail — the Releases YoY tile disowns the cut controls", () =>
       screen.getByText(/Whole niche, every review count — this tile ignores the window and review-floor controls above/),
     ).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "All-time · ≥50 reviews" }));
-    expect(await screen.findByText("All 739 →")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "All time · ≥50 reviews" }));
+    expect(await screen.findByText("All 739 indie games →")).toBeTruthy();
     expect(within(dossier).getByText("223")).toBeTruthy();
     expect(screen.getByText(/346 released last full year vs 340 the year before/)).toBeTruthy();
     expect(screen.getByText("+2%")).toBeTruthy();
   });
 });
+
+/** A /games answer for the cut in `url`, sized to that cut's n_games (indie scope, no rows). */
+function gamesFor(variants: { window: string; min_reviews: number; n_games: number }[], url: URL) {
+  const v = variants.find(
+    (x) => x.window === url.searchParams.get("win") && String(x.min_reviews) === url.searchParams.get("min_reviews"),
+  );
+  return {
+    total: v?.n_games ?? 0,
+    items: [],
+    limit: Number(url.searchParams.get("limit") ?? 5),
+    offset: 0,
+    scope: url.searchParams.get("scope") ?? "all",
+    n_scope_unknown: 0,
+  };
+}
 
 /**
  * The overview's "Top games in the niche" panel, and the KPI strip's live-player cell.
@@ -455,12 +476,15 @@ describe("NicheDetail — the overview Top games panel is the SELECTED CUT's top
     },
   };
 
-  function gamesPage(cut: string) {
+  /** `scope` is echoed the way the live API does; `legacyApi` omits it, like an API that
+   * predates the scope param (it then served every game regardless). */
+  function gamesPage(cut: string, scope: string | null, legacyApi = false) {
     const page = CUT_GAMES[cut] ?? { total: 0, items: [] };
     return {
       total: page.total,
       limit: 5,
       offset: 0,
+      ...(legacyApi ? {} : { scope: scope ?? "all", n_scope_unknown: scope === "indie" ? 4 : null }),
       items: (page.items as [number, string, number, number, number, number, number, number][]).map(
         ([appid, name, release_year, price_initial, est_revenue, total_reviews, positive_ratio, live_players]) => ({
           appid,
@@ -521,15 +545,21 @@ describe("NicheDetail — the overview Top games panel is the SELECTED CUT's top
     return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
   }
 
-  /** `gamesStatus` simulates the hours-after-deploy state: mart_niche_game not rebuilt yet. */
-  function stubApi(gamesStatus?: number) {
+  /** `gamesStatus` simulates the hours-after-deploy state: mart_niche_game not rebuilt yet.
+   * Every /games URL is recorded in `gamesUrls`. */
+  let gamesUrls: URL[] = [];
+  function stubApi(gamesStatus?: number, legacyApi = false) {
+    gamesUrls = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = new URL(String(input), "http://test.local");
         if (url.pathname.endsWith("/games")) {
+          gamesUrls.push(url);
           if (gamesStatus) return json({ detail: "mart_niche_game is missing — run task etl" }, gamesStatus);
-          return json(gamesPage(`${url.searchParams.get("win")}:${url.searchParams.get("min_reviews")}`));
+          return json(
+            gamesPage(`${url.searchParams.get("win")}:${url.searchParams.get("min_reviews")}`, url.searchParams.get("scope"), legacyApi),
+          );
         }
         if (url.pathname.includes("/market/benchmarks")) {
           return json({ cited: { pct_new_releases_over_100k: 0.085, revenue_benchmark_marks: [], dev_tiers: [] } });
@@ -576,24 +606,24 @@ describe("NicheDetail — the overview Top games panel is the SELECTED CUT's top
     expect(screen.getByText("$414.3M")).toBeTruthy();
     expect(screen.queryByText("$2.2B")).toBeNull();
     // The reviews column survived the data-source switch (positive_ratio now rides /games).
-    expect(screen.getByText(/95\.3% · 276,249/)).toBeTruthy();
+    expect(screen.getByText("95.3% positive · 276,249 reviews")).toBeTruthy();
   });
 
   it("re-reads the panel when the cut changes, instead of relabelling the same five rows", async () => {
     stubApi();
     renderNiche();
     expect(await screen.findByText("Clair Obscur: Expedition 33")).toBeTruthy();
-    expect(screen.getByText("All 223 →")).toBeTruthy();
+    expect(screen.getByText("All 223 indie games →")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "All-time · ≥50 reviews" }));
+    fireEvent.click(screen.getByRole("button", { name: "All time · ≥50 reviews" }));
     // All-time IS the cut mart_niche_top happens to describe, so this is where the old panel
     // was right — the rows must arrive here, and only here.
     expect(await screen.findByText("Black Myth: Wukong")).toBeTruthy();
     expect(screen.getByText("ELDEN RING")).toBeTruthy();
     expect(screen.getByText("$2.2B")).toBeTruthy();
-    expect(screen.getByText("All 739 →")).toBeTruthy();
+    expect(screen.getByText("All 739 indie games →")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Last 24m · ≥50 reviews" }));
+    fireEvent.click(screen.getByRole("button", { name: "Last 24 months · ≥50 reviews" }));
     expect(await screen.findByText("Hollow Knight: Silksong")).toBeTruthy();
     expect(screen.queryByText("Black Myth: Wukong")).toBeNull();
     expect(screen.queryByText("ELDEN RING")).toBeNull();
@@ -607,7 +637,7 @@ describe("NicheDetail — the overview Top games panel is the SELECTED CUT's top
     // while /api/games/1903340 answered 6,453 for the same moment.
     expect(await screen.findByText("6,453")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "All-time · ≥50 reviews" }));
+    fireEvent.click(screen.getByRole("button", { name: "All time · ≥50 reviews" }));
     // Same for DARK SOULS III (3,849 on /games/374320) and Sekiro (2,716 on /games/814380).
     expect(await screen.findByText("3,849")).toBeTruthy();
     expect(screen.getByText("2,716")).toBeTruthy();
@@ -622,12 +652,12 @@ describe("NicheDetail — the overview Top games panel is the SELECTED CUT's top
     const disclosure = /Every measured game in the niche \(798\) — this tile ignores the window and review-floor controls above/;
     expect(await screen.findByText(disclosure)).toBeTruthy();
     expect(screen.getByText(/207\.0K playing now/)).toBeTruthy();
-    expect(screen.getByText("All 223 →")).toBeTruthy();
+    expect(screen.getByText("All 223 indie games →")).toBeTruthy();
 
     // The top-games count moves 223 -> 739 with the chip; the players figure is the same 207.0K
     // over the same 798 games, and still says so.
-    fireEvent.click(screen.getByRole("button", { name: "All-time · ≥50 reviews" }));
-    expect(await screen.findByText("All 739 →")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "All time · ≥50 reviews" }));
+    expect(await screen.findByText("All 739 indie games →")).toBeTruthy();
     expect(screen.getByText(/207\.0K playing now/)).toBeTruthy();
     expect(screen.getByText(disclosure)).toBeTruthy();
   });
@@ -643,6 +673,52 @@ describe("NicheDetail — the overview Top games panel is the SELECTED CUT's top
     // And it must NOT fall back to the players top-8 for the players column: that ranking is
     // exactly what made the same fact read two ways.
     expect(screen.queryByText("32.1K")).toBeNull();
+  });
+
+  it("lists INDIE games by default, says which games and how many flags were unknown, and toggles to all", async () => {
+    stubApi();
+    renderNiche();
+    expect(await screen.findByText("Clair Obscur: Expedition 33")).toBeTruthy();
+    // The request asked for the indie scope…
+    expect(gamesUrls.at(-1)!.searchParams.get("scope")).toBe("indie");
+    // …and the panel names its population, the unknown flags included.
+    expect(screen.getByRole("heading", { name: "Top indie games in the niche" })).toBeTruthy();
+    expect(screen.getByTestId("games-scope-line").textContent).toBe(
+      "223 indie games · last 24 months · ≥50 reviews · 4 with an unknown indie flag left out",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "All games" }));
+    await screen.findByRole("heading", { name: "Top games in the niche" });
+    expect(gamesUrls.at(-1)!.searchParams.get("scope")).toBe("all");
+    expect(screen.getByTestId("games-scope-line").textContent).toBe("223 games · last 24 months · ≥50 reviews");
+  });
+
+  it("never calls the list indie when the API ignored the scope — it says all games are shown", async () => {
+    stubApi(undefined, true);
+    renderNiche();
+    expect(await screen.findByText("Clair Obscur: Expedition 33")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Top games in the niche" })).toBeTruthy();
+    expect(screen.getByText("all games — indie filter not in this data build")).toBeTruthy();
+  });
+
+  it("turns the table into cards on a phone — every figure stays readable at 390px", async () => {
+    const setViewport = (w: number) => {
+      Object.defineProperty(window, "innerWidth", { value: w, configurable: true, writable: true });
+      window.dispatchEvent(new Event("resize"));
+    };
+    setViewport(390);
+    try {
+      stubApi();
+      renderNiche();
+      const cards = await screen.findByTestId("top-games-cards");
+      const first = within(cards).getAllByRole("link")[0];
+      expect(first.textContent).toContain("Clair Obscur: Expedition 33");
+      expect(first.textContent).toContain("$414.3M est. revenue");
+      expect(first.textContent).toContain("95.3% positive · 276,249 reviews");
+      expect(first.textContent).toContain("6,453 playing now");
+    } finally {
+      setViewport(1024);
+    }
   });
 });
 
@@ -807,13 +883,16 @@ describe("NicheDetail — the games table multiplies out across the row", () => 
     expect(silksong).not.toContain("10.9M");
   });
 
-  it("names the column for what it now is, and disowns the owners method in the header", async () => {
+  it("names the column for what it now is, and disowns the owners method in its ⓘ", async () => {
     renderGamesTab();
-    const header = await screen.findByText("Est. units");
+    await screen.findByText("Est. units");
     expect(screen.queryByText("Owners (est.)")).toBeNull();
-    // The header says which estimator the number came from and where the other one lives.
-    expect(header.getAttribute("title")).toMatch(/est\. revenue ÷ launch price/i);
-    expect(header.getAttribute("title")).toMatch(/different method/i);
+    // The header's ⓘ (reachable by tap and keyboard, not a hover-only title) says which
+    // estimator the number came from and that the owners figure is a different method.
+    fireEvent.click(screen.getByRole("button", { name: "About Est. units sold" }));
+    const tip = screen.getByRole("tooltip").textContent ?? "";
+    expect(tip).toMatch(/Est\. revenue ÷ launch price/);
+    expect(tip).toMatch(/different method/);
   });
 
   it("holds price × units === the revenue printed in the same row, for every row", async () => {
@@ -836,16 +915,17 @@ describe("NicheDetail — the games table multiplies out across the row", () => 
 });
 
 /**
- * B4 — "Demand vs. pipeline, by year" plotted DOLLARS and RELEASE COUNTS against no axis
- * at all: both <YAxis> carried `hide`, so there were no ticks, no units and no way to
- * tell which line was which (the dashed Releases key rendered no swatch, because a
- * Tailwind opacity modifier on a var()-valued colour produces nothing). The crossing
- * point of two invisible scales means nothing, and the final year is a partial one —
- * which is where the "2026 cliff" comes from.
+ * RELEASES AND REVENUE, BY YEAR (2026-09-23). This was B4's dual-axis "Demand vs. pipeline"
+ * chart — dollars and release counts on two scales in one frame, with a caption apologising
+ * that "where the lines cross means nothing", and a partial-year note that called the final
+ * year a "drop" even when it was already the biggest year on record. It is two aligned
+ * single-unit panels now, each with a computed takeaway, and the partial year is described by
+ * what it actually does.
  *
- * Fixture is the real GET /api/niches/tag/Action%20RTS saturation_trend (2026-09-01).
+ * Fixture: the real GET /api/niches/tag/Action%20RTS saturation_trend (2026-09-01) — whose
+ * partial 2026 (189 releases) already exceeds 2025 (176): the old copy's "drop" was false.
  */
-describe("NicheDetail — demand vs. pipeline has two labelled axes (B4)", () => {
+describe("NicheDetail — releases and revenue by year are two single-unit panels", () => {
   const TREND = [
     { year: 2019, n_releases: 12, n_scored: 5, median_rev: 136_063.8, p90_rev: 781_295.04 },
     { year: 2020, n_releases: 12, n_scored: 8, median_rev: 73_701.75, p90_rev: 1_462_368.99 },
@@ -895,11 +975,14 @@ describe("NicheDetail — demand vs. pipeline has two labelled axes (B4)", () =>
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        const body = url.includes("/niches/tag/")
-          ? DETAIL
-          : url.includes("/market/benchmarks")
-            ? { cited: { pct_new_releases_over_100k: 0.085, revenue_benchmark_marks: [], dev_tiers: [] } }
-            : {};
+        const body = url.includes("/health")
+          ? // The data's own date pins the partial year — not the viewer's clock.
+            { status: "ok", mart_version: "20260921", built_at: "2026-09-21T22:28:20+00:00", source_db: null, data_as_of: "2026-09-21" }
+          : url.includes("/niches/tag/")
+            ? DETAIL
+            : url.includes("/market/benchmarks")
+              ? { cited: { pct_new_releases_over_100k: 0.085, revenue_benchmark_marks: [], dev_tiers: [] } }
+              : {};
         return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
       }),
     );
@@ -926,63 +1009,43 @@ describe("NicheDetail — demand vs. pipeline has two labelled axes (B4)", () =>
     );
   }
 
-  /** The chart under test is the first recharts wrapper on the page. */
-  function trendChart(container: HTMLElement): HTMLElement {
-    return container.querySelector<HTMLElement>(".recharts-wrapper")!;
-  }
-
-  it("draws a LEFT dollar axis with ticks, not a hidden one", async () => {
+  it("draws two charts with ONE labelled y-axis each: counts, then dollars", async () => {
     const { container } = renderNiche();
-    expect(await screen.findByText("Demand vs. pipeline, by year")).toBeTruthy();
-    const ticks = axisTicks(trendChart(container), "y", 0);
-    expect(ticks.length).toBeGreaterThan(1);
-    for (const t of ticks) expect(t.startsWith("$")).toBe(true);
+    const panel = await screen.findByTestId("yearly-trend");
+    const charts = panel.querySelectorAll<HTMLElement>(".recharts-wrapper");
+    expect(charts).toHaveLength(2);
+    for (const c of charts) expect(c.querySelectorAll(".recharts-yAxis")).toHaveLength(1);
+    const counts = axisTicks(charts[0], "y", 0);
+    const dollars = axisTicks(charts[1], "y", 0);
+    expect(counts.length).toBeGreaterThan(1);
+    expect(dollars.length).toBeGreaterThan(1);
+    for (const t of counts) expect(t.startsWith("$")).toBe(false);
+    for (const t of dollars) expect(t.startsWith("$")).toBe(true);
+    // No dual-axis chart remains anywhere on the overview.
+    for (const c of container.querySelectorAll(".recharts-wrapper")) {
+      expect(c.querySelectorAll(".recharts-yAxis").length).toBeLessThanOrEqual(1);
+    }
   });
 
-  it("draws a RIGHT count axis with ticks, in its own unit", async () => {
-    const { container } = renderNiche();
-    expect(await screen.findByText("Demand vs. pipeline, by year")).toBeTruthy();
-    const ticks = axisTicks(trendChart(container), "y", 1);
-    expect(ticks.length).toBeGreaterThan(1);
-    for (const t of ticks) expect(t.startsWith("$")).toBe(false);
-  });
-
-  it("names each series' unit and side in the legend", async () => {
+  it("says what each panel shows, and drops the dual-axis apology", async () => {
     renderNiche();
-    expect(await screen.findByText(/P90 revenue \(\$, left\)/)).toBeTruthy();
-    expect(screen.getByText(/Releases \(count, right\)/)).toBeTruthy();
-  });
-
-  it("gives the DASHED releases series a dashed line swatch, not a blank span", async () => {
-    const { container } = renderNiche();
-    expect(await screen.findByText(/Releases \(count, right\)/)).toBeTruthy();
-    const key = screen.getByText(/Releases \(count, right\)/).closest("span")!.querySelector("svg line");
-    expect(key).not.toBeNull();
-    expect(key!.getAttribute("stroke-dasharray")).toBe("4 3");
-    // And the key matches the line: exactly one of the two curves is dashed.
-    // (recharts expands the pattern while its draw-on animation runs, so match the
-    // leading "4 3" rather than the whole attribute.)
-    // And the key's stroke is the line's stroke: each legend entry maps onto exactly one
-    // of the two curves. (The curves' own stroke-dasharray is unreadable here — recharts'
-    // draw-on animation parks it at "0px 0px" under jsdom's frameless clock — so the
-    // pairing is asserted on colour, which is stable.)
-    const curveStrokes = Array.from(container.querySelectorAll("path.recharts-line-curve")).map((p) =>
-      p.getAttribute("stroke"),
+    expect((await screen.findByTestId("takeaway-releases")).textContent).toBe(
+      "Releases are falling: 176 in 2025 vs 190 in 2024 (−7%).",
     );
-    expect(curveStrokes).toHaveLength(2);
-    expect(new Set(curveStrokes).size).toBe(2);
-    expect(curveStrokes).toContain(key!.getAttribute("stroke"));
+    expect(screen.getByTestId("takeaway-revenue").textContent).toMatch(
+      /^Top-10% revenue of each year's releases rose: \$11\.2M for 2025 vs \$5\.9M for 2024/,
+    );
+    expect(screen.queryByText(/Where the lines cross means nothing/)).toBeNull();
+    expect(screen.queryByText(/Two units, two scales/)).toBeNull();
   });
 
-  it("says out loud that the crossing point is an artifact of two scales", async () => {
+  it("describes the partial year by what it does — 2026 is already above 2025, not a drop", async () => {
     renderNiche();
-    expect(await screen.findByText(/Where the lines cross means nothing/)).toBeTruthy();
-  });
-
-  it("flags the partial final year rather than letting its drop read as a cliff", async () => {
-    renderNiche();
-    expect(await screen.findByText(/2026 is a partial year \(marked\)/)).toBeTruthy();
-    expect(screen.getByText(/months of data missing, not a cliff/)).toBeTruthy();
+    const partial = await screen.findByTestId("takeaway-partial");
+    expect(partial.textContent).toBe(
+      "2026 is a partial year (to Sep 21), and its 189 releases already exceed 2025's 176 — the pipeline is still growing.",
+    );
+    expect(partial.textContent).not.toMatch(/drop|cliff/);
   });
 });
 
@@ -1147,16 +1210,18 @@ describe("NicheDetail — the headline is the Radar's dossier", () => {
     };
   }
 
-  function stub(detail: object) {
+  function stub(detail: { variants: object[] }) {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        const body = url.includes("/niches/tag/")
-          ? detail
-          : url.includes("/market/benchmarks")
-            ? { cited: { pct_new_releases_over_100k: 0.085, revenue_benchmark_marks: [], dev_tiers: [] } }
-            : {};
+        const url = new URL(String(input), "http://test.local");
+        const body = url.pathname.endsWith("/games")
+          ? gamesFor(detail.variants as { window: string; min_reviews: number; n_games: number }[], url)
+          : url.pathname.includes("/niches/tag/")
+            ? detail
+            : url.pathname.includes("/market/benchmarks")
+              ? { cited: { pct_new_releases_over_100k: 0.085, revenue_benchmark_marks: [], dev_tiers: [] } }
+              : {};
         return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
       }),
     );
@@ -1185,25 +1250,36 @@ describe("NicheDetail — the headline is the Radar's dossier", () => {
   it("renders the verdict and every axis string exactly as the board's tooltip renders them for the same row", async () => {
     // The oracle first (it unmounts itself), then the page.
     const tip = readRadarTooltip(RADAR_ROW);
-    expect(tip.rows["Verdict"]).toBe("Enter now"); // the legend word, read off the real board
+    expect(tip.rows[DOSSIER_LABEL.verdict]).toBe("Enter now"); // the legend word, read off the real board
     stub(detailOf([RADAR_ROW, OTHER_ROW]));
     renderNiche();
 
     const dossier = await screen.findByTestId("radar-dossier");
     const chip = within(dossier).getByTestId("radar-verdict-chip");
-    expect(chip.textContent).toBe(tip.rows["Verdict"]);
+    expect(chip.textContent).toBe(tip.rows[DOSSIER_LABEL.verdict]);
     // The chip paints with the board's dot colour — the same token, read off the real dot.
     const ring = chip.getAttribute("data-verdict") as RadarRing;
     expect(ring).toBe("enter");
     expect(RING_COLOR[ring]).toBe(tip.dotFill);
-    // The two axes, P90, games, the small score and the solo share — label for label.
-    for (const label of ["Demand 24m", "Releases YoY", "P90 revenue", "Games", "Opp v2", "Singleplayer share"]) {
+    // The two axes, the top-10% revenue, the score and the singleplayer share — label for
+    // label, under the glossary's plain names.
+    for (const label of [
+      DOSSIER_LABEL.demand,
+      DOSSIER_LABEL.releases,
+      DOSSIER_LABEL.p90,
+      DOSSIER_LABEL.opportunity,
+      DOSSIER_LABEL.singleplayer,
+    ]) {
       expect(tip.rows[label], label).toBeTruthy();
-      expect(within(dossier).getByText(tip.rows[label]!), label).toBeTruthy();
+      expect(within(dossier).getAllByText(tip.rows[label]!).length, label).toBeGreaterThan(0);
     }
-    expect(tip.rows["Demand 24m"]).toBe("▲ +74.1%");
-    expect(tip.rows["Releases YoY"]).toBe("-7%");
-    expect(tip.rows["Opp v2"]).toBe("86.7");
+    // Games: the tooltip names the population ("86 · last 24 months · ≥50 reviews"); the tile
+    // prints the count and names the same population beside it.
+    expect(tip.rows[DOSSIER_LABEL.games]).toBe("86 · last 24 months · ≥50 reviews");
+    expect(within(dossier).getByText("86")).toBeTruthy();
+    expect(tip.rows[DOSSIER_LABEL.demand]).toBe("▲ +74.1%");
+    expect(tip.rows[DOSSIER_LABEL.releases]).toBe("-7%");
+    expect(tip.rows[DOSSIER_LABEL.opportunity]).toBe("86.7");
     // ...and the verdict's reason, in the board's words.
     expect(within(dossier).getByText("demand in structural growth, supply not flooding")).toBeTruthy();
     // On the board, so no absence line; and the link back selects this niche there.
@@ -1218,7 +1294,7 @@ describe("NicheDetail — the headline is the Radar's dossier", () => {
     renderNiche("/niches/tag/Action%20RTS?win=24m&min_reviews=0");
     const dossier = await screen.findByTestId("radar-dossier");
     // The URL asked for the ≥0 cut: the panels get it (300 games); the dossier does not.
-    expect(await screen.findByText("All 300 →")).toBeTruthy();
+    expect(await screen.findByText("All 300 indie games →")).toBeTruthy();
     expect(within(dossier).getByTestId("radar-verdict-chip").textContent).toBe("Enter now");
     expect(within(dossier).getByText("86")).toBeTruthy();
     expect(within(dossier).getByText("86.7")).toBeTruthy();
@@ -1226,8 +1302,8 @@ describe("NicheDetail — the headline is the Radar's dossier", () => {
     expect(within(dossier).getByText(/judged at the board.s own cut — last 24 months · ≥50 reviews/)).toBeTruthy();
 
     // Flipping the chip moves the panel and leaves the headline where it was.
-    fireEvent.click(screen.getByRole("button", { name: "Last 24m · ≥50 reviews" }));
-    expect(await screen.findByText("All 86 →")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Last 24 months · ≥50 reviews" }));
+    expect(await screen.findByText("All 86 indie games →")).toBeTruthy();
     expect(within(dossier).getByTestId("radar-verdict-chip").textContent).toBe("Enter now");
     expect(within(dossier).getByText("86.7")).toBeTruthy();
   });
@@ -1239,7 +1315,7 @@ describe("NicheDetail — the headline is the Radar's dossier", () => {
     expect(within(dossier).getByTestId("radar-verdict-chip").textContent).toBe("Enter now");
     expect(
       within(dossier).getByText(
-        /Not on the Radar board: it plots micro-genre and theme tags only, and this tag is umbrella tier\./,
+        /Not on the Radar board: of the community tags it plots only game types and themes, and this tag is a broad genre\./,
       ),
     ).toBeTruthy();
   });
@@ -1248,25 +1324,47 @@ describe("NicheDetail — the headline is the Radar's dossier", () => {
     stub(detailOf([radarListRow({ key: "Action RTS", solo_viability: 0.353 })]));
     renderNiche();
     const dossier = await screen.findByTestId("radar-dossier");
-    expect(within(dossier).getByText(/singleplayer share 0\.35 is under the 0\.8 solo-friendly bar/)).toBeTruthy();
-    expect(within(dossier).getByText("0.35")).toBeTruthy(); // the tooltip's Singleplayer share row
+    expect(within(dossier).getByText(/singleplayer share 35% is under the 80% bar of the board's “Singleplayer only” filter/)).toBeTruthy();
+    expect(within(dossier).getByText("35%")).toBeTruthy(); // the tooltip's Singleplayer share row
     expect(within(dossier).getByRole("link", { name: "See on the Radar →" }).getAttribute("href")).toBe(
       "/radar?solo=off&niche=tag%3AAction+RTS",
     );
   });
 
-  it("no longer prints the score headline, the supply brake or the Why blend — the score is one small number", async () => {
-    stub(detailOf([RADAR_ROW]));
+  it("never prints the score alone — its parts, weights and brake are one click away, in plain words", async () => {
+    // 2026-09-23 owner rule: no lone score. The 2026-09-09 fix removed the score's headline
+    // treatment ("OPPORTUNITY V2 87 after supply brake ×1.00"); the score stays small, but it
+    // now always links to the blend the mart computes.
+    stub(
+      detailOf([
+        {
+          ...RADAR_ROW,
+          momentum: 96.16,
+          market_pull: 72.3,
+          revenue_spread: 100,
+          quality_gap: 70.2,
+          supply_room: 100,
+          supply_brake: 1,
+          demand: 70,
+          market_size: 75,
+          opportunity_v2: 86.69,
+        },
+      ]),
+    );
     renderNiche();
     await screen.findByTestId("radar-dossier");
-    expect(screen.queryByText("Opportunity v2")).toBeNull();
-    expect(screen.queryByText(/supply brake/i)).toBeNull();
-    expect(screen.queryByText(/^Why /)).toBeNull();
+    const link = screen.getByTestId("opportunity-link");
+    expect(link.textContent).toBe("Opportunity score 86.7 — how it adds up ↓");
+    expect(link.getAttribute("href")).toBe("#opportunity-breakdown");
+    const breakdown = screen.getByTestId("opportunity-breakdown");
+    expect(breakdown.closest("#opportunity-breakdown")).toBeTruthy();
+    for (const part of ["Momentum", "Market pull", "Revenue spread", "Quality gap"]) {
+      expect(within(breakdown).getByText(part)).toBeTruthy();
+    }
+    expect(within(breakdown).getByText(/Supply brake/)).toBeTruthy();
+    // Retired jargon is gone from the page.
+    expect(screen.queryByText(/Opp v2/)).toBeNull();
     expect(screen.queryByText("Saturation YoY")).toBeNull();
-    expect(screen.queryByText(/Momentum/)).toBeNull();
-    expect(screen.queryByText(/Market pull/)).toBeNull();
-    // The numbers sit in their own spans (the outer span's own text is the two labels).
-    expect(screen.getByText(/^Opp v2 · Singleplayer share$/).textContent).toBe("Opp v2 86.7 · Singleplayer share 0.98");
   });
 
   it("never headlines an emerging niche's % — the board's phrase and its volume instead", async () => {
@@ -1277,14 +1375,14 @@ describe("NicheDetail — the headline is the Radar's dossier", () => {
       reviews_24m_new_share: 0.9,
     });
     const tip = readRadarTooltip(row);
-    expect(tip.rows["Verdict"]).toBe("Emerging");
-    expect(tip.rows["Demand 24m"]).toBe(EMERGING_DEMAND_LABEL);
+    expect(tip.rows[DOSSIER_LABEL.verdict]).toBe("Emerging");
+    expect(tip.rows[DOSSIER_LABEL.demand]).toBe(EMERGING_DEMAND_LABEL);
     stub(detailOf([row]));
     renderNiche();
     const dossier = await screen.findByTestId("radar-dossier");
-    expect(within(dossier).getByTestId("radar-verdict-chip").textContent).toBe(tip.rows["Verdict"]);
+    expect(within(dossier).getByTestId("radar-verdict-chip").textContent).toBe(tip.rows[DOSSIER_LABEL.verdict]);
     expect(within(dossier).getByTitle(EMERGING_DEMAND_LABEL).textContent).toBe("emerging");
     expect(within(dossier).queryByText(/4775/)).toBeNull();
-    expect(within(dossier).getByText(/120,000 reviews \/ 24m/)).toBeTruthy();
+    expect(within(dossier).getByText(/120,000 reviews in the last 24 months/)).toBeTruthy();
   });
 });

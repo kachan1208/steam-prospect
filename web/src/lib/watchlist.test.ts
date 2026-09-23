@@ -12,6 +12,7 @@ import {
   getWatchlist,
   isGameWatchlisted,
   isNicheWatchlisted,
+  METRIC_META,
   metricIsSigned,
   nicheWatchlistId,
   removeFromWatchlist,
@@ -187,15 +188,19 @@ describe("formatRuleLabel", () => {
       "players 7d ▼ > −10%",
     );
     expect(formatRuleLabel({ metric: "saturation_yoy", comparator: "gt", threshold: 0 })).toBe(
-      "saturation YoY turns positive",
+      "releases YoY turn positive",
     );
     expect(formatRuleLabel({ metric: "saturation_yoy", comparator: "lt", threshold: 0 })).toBe(
-      "saturation YoY turns negative",
+      "releases YoY turn negative",
     );
-    expect(formatRuleLabel({ metric: "opportunity_v2", comparator: "gt", threshold: 85 })).toBe("opp v2 crosses 85");
+    expect(formatRuleLabel({ metric: "opportunity_v2", comparator: "gt", threshold: 85 })).toBe(
+      "Opportunity score crosses 85",
+    );
     expect(formatRuleLabel({ metric: "opportunity_v2", comparator: "lt", threshold: 40 })).toBe(
-      "opp v2 drops below 40",
+      "Opportunity score drops below 40",
     );
+    // No retired jargon in any rule label or metric name.
+    for (const m of Object.values(METRIC_META)) expect(m.label).not.toMatch(/Opp v2|Saturation/);
     expect(formatRuleLabel({ metric: "price_initial", comparator: "lt", threshold: 14.99 })).toBe(
       "price drops below $14.99",
     );

@@ -13,6 +13,10 @@ export type DistributionBucket = {
   x_min: number;
   x_max: number;
   count: number;
+  /** The lowest band of a log histogram, into which the marts clamp everything under $1 —
+   * $0 included. Its lower edge (served as 0) is a floor sentinel: the band reads
+   * "< $3.16 (incl. $0)", never "$0 – $3.16". */
+  floored?: boolean;
 };
 
 /**
@@ -113,12 +117,18 @@ export function selectedCount(ordered: DistributionBucket[], selection: BucketSe
  * "$0.00 / $5.00 / $10 / $1.9K". A price axis keeps its cents when any edge needs them
  * ($19.99 must not round to $20) and drops them for every tick when none do.
  */
-type EdgeFmt = (v: number) => string;
+export type EdgeFmt = (v: number) => string;
 
-function makeFmtEdge(edges: number[]): EdgeFmt {
+export function makeFmtEdge(edges: number[]): EdgeFmt {
   // maxDecimals 2: a price axis has to be able to say $19.99.
   const fmt = axisFormatter(edges, "usd", 2);
   return (v: number) => (v === 0 ? "$0" : fmt(v));
+}
+
+/** A floored band's ceiling, 10^0.5 = $3.162…: the axis vocabulary would round it to "$3",
+ * but as the upper bound of a "<" it needs its three significant digits ("<$3.16"). */
+function floorEdge(v: number, edge: EdgeFmt): string {
+  return Number.isInteger(v) ? edge(v) : `$${Number(v.toPrecision(3))}`;
 }
 
 /** True for the degenerate [0, 0] bucket the price mart emits for free-to-play titles. */
@@ -126,15 +136,18 @@ function isFreeBucket(metric: DistributionMetric, b: DistributionBucket): boolea
   return metric === "price" && b.x_min === 0 && b.x_max === 0;
 }
 
-/** The tick under a band: its lower edge, except free-to-play, which is named, not numbered. */
-function bucketTick(metric: DistributionMetric, b: DistributionBucket, edge: EdgeFmt): string {
+/** The tick under a band: its lower edge, except free-to-play, which is named, not numbered,
+ * and a floored band, which has no real lower edge — it reads "<$3.16". */
+export function bucketTick(metric: DistributionMetric, b: DistributionBucket, edge: EdgeFmt): string {
   if (isFreeBucket(metric, b)) return "Free";
+  if (b.floored) return `<${floorEdge(b.x_max, edge)}`;
   return edge(b.x_min);
 }
 
 /** The full range, for tooltips and accessible names. */
-function bucketRange(metric: DistributionMetric, b: DistributionBucket, edge: EdgeFmt): string {
+export function bucketRange(metric: DistributionMetric, b: DistributionBucket, edge: EdgeFmt): string {
   if (isFreeBucket(metric, b)) return "Free ($0)";
+  if (b.floored) return `< ${floorEdge(b.x_max, edge)} (incl. $0)`;
   if (b.x_min === b.x_max) return edge(b.x_min);
   return `${edge(b.x_min)} – ${edge(b.x_max)}`;
 }
@@ -177,6 +190,11 @@ function axisNote(metric: DistributionMetric, ordered: DistributionBucket[], edg
     } else if (ordered[0]?.x_min === 0) {
       parts.push("Note: free-to-play ($0) is inside the first band, not broken out.");
     }
+  }
+
+  const floor = ordered.find((b) => b.floored);
+  if (floor) {
+    parts.push(`The first band holds every game under ${floorEdge(floor.x_max, edge)}, $0 included — a log scale can’t reach zero.`);
   }
 
   if (ordered.some((b) => b.count === 0)) {

@@ -370,3 +370,26 @@ describe("selection algebra", () => {
     expect(selectedCount(PRICE, { min: 0, max: 0 })).toBe(18);
   });
 });
+
+describe("NicheDistribution — the floored revenue band (2026-09-23)", () => {
+  // The marts bin revenue with GREATEST(v, 1): everything under $1, $0 included, lands in the
+  // first half-decade band, served with x_min 0 and floored=true.
+  const FLOORED: DistributionBucket[] = [
+    { bucket_index: 0, x_min: 0, x_max: 3.1622776601683795, count: 69, floored: true },
+    { bucket_index: 6, x_min: 1_000, x_max: 3_162.2776601683795, count: 10 },
+    { bucket_index: 7, x_min: 3_162.2776601683795, x_max: 10_000, count: 36 },
+  ];
+
+  it("names the band by what it holds — never '$0 – $3.16' — and explains it under the chart", () => {
+    render(<NicheDistribution metric="revenue" buckets={FLOORED} selection={null} onSelectionChange={() => {}} />);
+    const first = bands()[0];
+    expect(first.getAttribute("aria-label")).toBe("< $3.16 (incl. $0): 69 games");
+    expect(screen.getByText(/The first band holds every game under \$3\.16, \$0 included/)).toBeTruthy();
+  });
+
+  it("still filters from $0, so the $0 games stay in the selection", () => {
+    const { onSelectionChange } = renderChart({ buckets: FLOORED });
+    fireEvent.click(bands()[0]);
+    expect(onSelectionChange).toHaveBeenCalledWith({ min: 0, max: 3.1622776601683795 });
+  });
+});

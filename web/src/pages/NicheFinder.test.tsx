@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import NicheFinder from "./NicheFinder";
 import { parseCombineMode, parseNicheSelection } from "../lib/nicheSelection";
-import { RING_COLOR } from "../lib/radarVerdict";
+import { DOSSIER_LABEL, RING_COLOR } from "../lib/radarVerdict";
 import { ThemeProvider } from "../lib/theme";
 import { radarListRow, readRadarTooltip } from "../test/radarTooltip";
 
@@ -247,7 +247,8 @@ describe("NicheFinder multi-select", () => {
 describe("NicheFinder — the whole view is shareable", () => {
   /** The most recent /api/niches request — what the table is actually showing. */
   const lastNichesRequest = (): string => {
-    const hits = requests.filter((u) => u.startsWith("/api/niches?"));
+    // The TABLE's request (limit=50) — not the pinned-cut verdict query (limit=500).
+    const hits = requests.filter((u) => u.startsWith("/api/niches?") && u.includes("limit=50&"));
     return hits[hits.length - 1] ?? "";
   };
   const url = (): string => `${lastLocation.pathname}${lastLocation.search}`;
@@ -316,7 +317,7 @@ describe("NicheFinder — the whole view is shareable", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Games/ }));
     await waitFor(() => expect(url()).toContain("sort=n_games"));
 
-    fireEvent.click(screen.getByRole("button", { name: "umbrella" }));
+    fireEvent.click(screen.getByRole("button", { name: "Broad genres" }));
     await waitFor(() => expect(url()).toContain("tiers=micro%2Ctheme%2Cumbrella"));
 
     fireEvent.click(screen.getByRole("button", { name: /More metrics/ }));
@@ -396,33 +397,48 @@ describe("NicheFinder — the whole view is shareable", () => {
  * oracle for "the same" is a real RadarBoard tooltip (src/test/radarTooltip.tsx).
  */
 describe("NicheFinder — ranked and labelled as on the Radar", () => {
-  const lastNichesRequest = (): string => requests.filter((u) => u.startsWith("/api/niches?")).at(-1) ?? "";
+  const lastNichesRequest = (): string =>
+    requests.filter((u) => u.startsWith("/api/niches?") && u.includes("limit=50&")).at(-1) ?? "";
 
-  it("draws the board's axes and verdict, and drops the meters and the brake suffix", async () => {
+  it("draws the verdict's inputs, the verdict and the score, each header with a plain name and an ⓘ", async () => {
     renderFinder();
     await screen.findByText("Massively Multiplayer");
-    for (const name of ["Niche", "Games", "P90 rev", "Demand 24m", "Releases YoY", "Opp v2", "Players 7d"]) {
+    for (const name of ["Niche", "Games", "Top 10% rev", "Demand 24m", "Releases YoY", "Opportunity", "Players 7d"]) {
       expect(screen.getByRole("button", { name }), name).toBeTruthy();
+    }
+    // Every header explains itself in place (not a hover-only title): the glossary's ⓘ.
+    for (const about of [
+      "About Games",
+      "About Top-10% revenue",
+      "About Demand trend, 24 months",
+      "About Releases, year over year",
+      "About Radar verdict",
+      "About Opportunity score",
+    ]) {
+      expect(screen.getByRole("button", { name: about }), about).toBeTruthy();
     }
     // The verdict is the board's call, computed per row — a label, not a sort button.
     expect(screen.getByText("Verdict")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Verdict" })).toBeNull();
-    for (const gone of ["Demand", "Competition", "Quality gap"]) {
+    for (const gone of ["Opp v2", "P90 rev", "Competition", "Quality gap"]) {
       expect(screen.queryByRole("button", { name: gone }), gone).toBeNull();
     }
-    expect(screen.queryByText(/×0\.\d\d/)).toBeNull();
-    expect(screen.queryByText(/supply brake/i)).toBeNull();
-    expect(screen.getByText(/ranked and labelled as on the Radar/)).toBeTruthy();
-    expect(screen.getByText(/on its own cut \(last 24 months · ≥50 reviews\)/)).toBeTruthy();
+    // The Releases/Demand ⓘ never calls them the Radar's axes any more (the board is a dial).
+    fireEvent.click(screen.getByRole("button", { name: "About Demand trend, 24 months" }));
+    expect(screen.getByRole("tooltip").textContent).not.toMatch(/axis/i);
+    expect(screen.getByTestId("finder-summary").textContent).toContain(
+      "numbers for last 24 months · ≥50 reviews · ranked by Opportunity score · verdicts judged at the Radar’s cut (last 24 months · ≥50 reviews)",
+    );
     // Saturation YoY left the More-metrics panel: it is the grid's Releases YoY column now.
     fireEvent.click(screen.getByRole("button", { name: /More metrics/ }));
     expect(await screen.findByRole("button", { name: "Longevity" })).toBeTruthy();
     expect(screen.queryByText("Saturation YoY")).toBeNull();
+    expect(screen.queryByText(/21–22:00 UTC/)).toBeNull();
   });
 
-  it("prints each row's verdict, Demand 24m, Releases YoY and Opp v2 exactly as the board's tooltip does", async () => {
+  it("prints each row's verdict, demand, releases and score exactly as the board's tooltip does", async () => {
     // -12.3% / 24m is "softening": a Watch with no caution — a verdict the fixture's 42.5 score
-    // alone would never produce, so the column is visibly reading the axes.
+    // alone would never produce, so the column is visibly reading the inputs.
     const row = radarListRow({
       ...nicheRow("Massively Multiplayer"),
       demand_trend_24m_pct: -12.3,
@@ -433,7 +449,7 @@ describe("NicheFinder — ranked and labelled as on the Radar", () => {
       opportunity_v2: 42.5,
     });
     const tip = readRadarTooltip(row);
-    expect(tip.rows["Verdict"]).toBe("Watch");
+    expect(tip.rows[DOSSIER_LABEL.verdict]).toBe("Watch");
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -445,18 +461,42 @@ describe("NicheFinder — ranked and labelled as on the Radar", () => {
     renderFinder();
     await screen.findByText("Massively Multiplayer");
 
-    const verdictCell = screen.getByText(tip.rows["Verdict"]!).closest("[data-verdict]")!;
+    const verdictCell = screen.getByText(tip.rows[DOSSIER_LABEL.verdict]!).closest("[data-verdict]")!;
     expect(verdictCell.getAttribute("data-verdict")).toBe("watch");
     expect(RING_COLOR.watch).toBe(tip.dotFill);
-    expect(screen.getByText(tip.rows["Demand 24m"]!)).toBeTruthy();
-    expect(tip.rows["Demand 24m"]).toBe("▼ −12.3%");
-    expect(screen.getByText(tip.rows["Releases YoY"]!)).toBeTruthy();
-    expect(tip.rows["Releases YoY"]).toBe("+2%");
-    expect(screen.getByText(tip.rows["Opp v2"]!)).toBeTruthy();
-    expect(tip.rows["Opp v2"]).toBe("42.5");
+    expect(screen.getByText(tip.rows[DOSSIER_LABEL.demand]!)).toBeTruthy();
+    expect(tip.rows[DOSSIER_LABEL.demand]).toBe("▼ −12.3%");
+    expect(screen.getByText(tip.rows[DOSSIER_LABEL.releases]!)).toBeTruthy();
+    expect(tip.rows[DOSSIER_LABEL.releases]).toBe("+2%");
+    expect(screen.getAllByText(tip.rows[DOSSIER_LABEL.opportunity]!).length).toBeGreaterThan(0);
+    expect(tip.rows[DOSSIER_LABEL.opportunity]).toBe("42.5");
   });
 
-  it("sorts by the board's axes through the URL — the same contract as every other column", async () => {
+  it("never prints the score alone — its parts ride beside it", async () => {
+    const row = radarListRow({
+      ...nicheRow("Massively Multiplayer"),
+      momentum: 61.2,
+      market_pull: 44,
+      revenue_spread: 80,
+      quality_gap: 30,
+      supply_room: 50,
+      supply_brake: 0.675,
+      opportunity_v2: 36.1,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const body = String(input).startsWith("/api/niches?") ? { items: [row], total: 1, limit: 50, offset: 0 } : {};
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    renderFinder();
+    const compact = await screen.findByTestId("opportunity-breakdown-compact");
+    expect(compact.textContent).toContain("Momentum 61.2");
+    expect(compact.textContent).toContain("supply brake ×0.68");
+  });
+
+  it("sorts by the verdict's inputs through the URL — the same contract as every other column", async () => {
     renderFinder();
     await screen.findByText("Massively Multiplayer");
     fireEvent.click(screen.getByRole("button", { name: "Releases YoY" }));
@@ -474,11 +514,127 @@ describe("NicheFinder — ranked and labelled as on the Radar", () => {
     expect(lastNichesRequest()).not.toContain("sort=competition");
   });
 
-  it("says the verdicts are judged on this cut when the chips leave the board's", async () => {
+  it("keeps every verdict at the Radar's cut when the chips leave it — All-time never flips a verdict", async () => {
+    // Roguelike Deckbuilder's reported flip: on the All-time cut its row is winner-take-most
+    // (a Crowded read), while at the Radar's cut (24m × ≥50) it is surging into a flooding
+    // pipeline — Watch. The column must print the Radar's call, whichever chip is lit.
+    const allTime = radarListRow({
+      ...nicheRow("Roguelike Deckbuilder"),
+      window: "all",
+      n_games: 459,
+      demand_trend_24m_pct: 196,
+      saturation_yoy: 0.409,
+      winner_concentration: 0.93,
+    });
+    const pinned = { ...allTime, window: "24m", n_games: 210, winner_concentration: 0.836 };
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        urls.push(url);
+        const body = url.includes("window=all")
+          ? { items: [allTime], total: 1, limit: 50, offset: 0 }
+          : url.startsWith("/api/niches?")
+            ? { items: [pinned], total: 1, limit: 500, offset: 0 }
+            : {};
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
     renderFinder("/niches?win=all");
-    expect(
-      await screen.findByText(/judged on this cut \(the board itself pins last 24 months · ≥50 reviews\)/),
-    ).toBeTruthy();
-    expect(screen.queryByText(/on its own cut/)).toBeNull();
+    await screen.findByText("Roguelike Deckbuilder");
+    const cell = await waitFor(() => {
+      const el = document.querySelector("[data-verdict]");
+      if (!el) throw new Error("no verdict yet");
+      return el;
+    });
+    expect(cell.getAttribute("data-verdict")).toBe("watch");
+    // …read from the pinned-cut list, the Radar's own query.
+    expect(urls.some((u) => u.includes("window=24m") && u.includes("min_reviews=50") && u.includes("limit=500"))).toBe(true);
+    expect(screen.getByTestId("finder-summary").textContent).toContain("numbers for all time · ≥50 reviews");
+    expect(screen.getByTestId("finder-summary").textContent).toContain("— not this table's");
+  });
+
+  it("a niche with no row at the Radar's cut gets a sentinel, never a verdict from another cut", async () => {
+    const allOnly = radarListRow({ ...nicheRow("Tiny Niche"), window: "all" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        const body = url.includes("window=all")
+          ? { items: [allOnly], total: 1, limit: 50, offset: 0 }
+          : url.startsWith("/api/niches?")
+            ? { items: [], total: 0, limit: 500, offset: 0 }
+            : {};
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    renderFinder("/niches?win=all");
+    expect(await screen.findByText("not scored at the Radar’s cut")).toBeTruthy();
+    expect(document.querySelector("[data-verdict]")).toBeNull();
+  });
+
+  it("reads the players trend against the market when the data has it", async () => {
+    const row = radarListRow({
+      ...nicheRow("Massively Multiplayer"),
+      players_trend_7d_pct: -10.66,
+      players_trend_7d_market_pct: 0.75,
+      players_trend_7d_rel_pct: -11.41,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const body = String(input).startsWith("/api/niches?") ? { items: [row], total: 1, limit: 50, offset: 0 } : {};
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    renderFinder();
+    expect(await screen.findByText("▼ −10.7%")).toBeTruthy();
+    expect(screen.getByText("−11.4 pts vs market")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "About 7-day players trend vs market" })).toBeTruthy();
+  });
+
+  it("marks revenue the mart withheld for too few paid games — never a bare dash", async () => {
+    const row = radarListRow({ ...nicheRow("MOBA"), n_games: 33, n_paid: 12, n_free: 20, n_price_unknown: 1, p90_rev: null });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const body = String(input).startsWith("/api/niches?") ? { items: [row], total: 1, limit: 50, offset: 0 } : {};
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    renderFinder();
+    expect(await screen.findByText("withheld: only 12 paid games")).toBeTruthy();
+  });
+});
+
+describe("NicheFinder — cards below 640px", () => {
+  function setViewport(width: number) {
+    Object.defineProperty(window, "innerWidth", { value: width, configurable: true, writable: true });
+    window.dispatchEvent(new Event("resize"));
+  }
+  afterEach(() => setViewport(1024));
+
+  it("shows each niche as a card that leads with the verdict, demand and the score's parts", async () => {
+    setViewport(390);
+    renderFinder();
+    const card = await screen.findByTestId("finder-card-Massively Multiplayer");
+    expect(within(card).getByText("Massively Multiplayer")).toBeTruthy();
+    expect(card.querySelector("[data-verdict]")).toBeTruthy();
+    expect(card.textContent).toContain("Demand");
+    expect(card.textContent).toContain("Opportunity");
+    expect(card.textContent).toContain("120 games · last 24 months · ≥50 reviews");
+    // No 980px grid squeezed into a phone.
+    expect(screen.queryByRole("table")).toBeNull();
+  });
+
+  it("sorts from a control, since there are no headers to click", async () => {
+    setViewport(390);
+    renderFinder();
+    await screen.findByTestId("finder-cards");
+    fireEvent.change(screen.getByLabelText("Sort by"), { target: { value: "demand_trend_24m_pct" } });
+    await waitFor(() => expect(new URLSearchParams(lastLocation.search).get("sort")).toBe("demand_trend_24m_pct"));
+    fireEvent.click(screen.getByRole("button", { name: /Sorted high to low/ }));
+    await waitFor(() => expect(new URLSearchParams(lastLocation.search).get("order")).toBe("asc"));
   });
 });

@@ -96,3 +96,26 @@ describe("Histogram — the price-distribution axes speak one language each", ()
     expect(axisTicks(container, "y")).not.toContain("7,000");
   });
 });
+
+describe("Histogram — the floored bucket (2026-09-23)", () => {
+  // A niche's live-players histogram: the marts clamp every game under 1 player into bucket 0,
+  // served as x_min 0 with floored=true. Its lower edge is a sentinel, not a measurement.
+  const PLAYERS = [
+    { bucket_index: 0, x_min: 0, x_max: 3.1622776601683795, count: 531, floored: true },
+    { bucket_index: 1, x_min: 3.1622776601683795, x_max: 10, count: 70, floored: false },
+    { bucket_index: 2, x_min: 10, x_max: 31.622776601683793, count: 67, floored: false },
+  ];
+
+  it("labels the floored band by its upper edge, never as starting at 0", () => {
+    const { container } = render(<Histogram buckets={PLAYERS} color="#fff" xKind="count" height={200} />);
+    const ticks = axisTicks(container, "x");
+    expect(ticks[0]).toBe("<3.16");
+    expect(ticks).not.toContain("0");
+  });
+
+  it("leaves an unfloored histogram exactly as it was", () => {
+    const plain = PLAYERS.map((b) => ({ ...b, floored: false, x_min: b.bucket_index === 0 ? 1 : b.x_min }));
+    const { container } = render(<Histogram buckets={plain} color="#fff" xKind="count" height={200} />);
+    expect(axisTicks(container, "x")[0]).toBe("1");
+  });
+});

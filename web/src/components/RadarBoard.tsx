@@ -1,23 +1,35 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link } from "react-router-dom";
 import clsx from "clsx";
 
 import { trackEvent } from "../lib/analytics";
+import type { NicheRow } from "../lib/api";
 import { fmtInt, fmtSigned, fmtUsd } from "../lib/format";
+import { fmtMultiplier, opportunityBreakdown, type OpportunityInputs } from "../lib/opportunity";
 import { MONO } from "../lib/palette";
 import {
   BLIP_R_MAX,
   BLIP_R_MIN,
+  DOSSIER_LABEL,
+  EMERGING_DEMAND_LABEL,
   RING_LABEL,
   RING_ORDER,
-  SOLO_FRIENDLY_MIN,
+  SOLO_FRIENDLY_PCT,
+  SOLO_LENS_LABEL,
   blipRadius,
+  cutPopulationLabel,
+  radarSector,
+  radarVerdictTrace,
+  sharePct,
   soloBucket,
   type RadarRing,
   type RadarVerdict,
   type VerdictCheck,
 } from "../lib/radarVerdict";
+import { useCoarsePointer } from "../lib/useMediaQuery";
+import { PAID_MIN, paidCount } from "../lib/nichePaid";
 import { TooltipPanel } from "./charts/TooltipPanel";
+import { InfoTipBase } from "./ui/InfoTipBase";
 import { nicheDetailPath } from "../lib/nichePath";
 import {
   CLASS_LABEL,
@@ -176,6 +188,8 @@ const SECTOR_LABEL = CLASS_LABEL;
 /** One-letter class marker for rail rows — the rail carries all three classes now, so every
  * row names its own ("Roguelike" the tag vs "Roguelike" the genre). */
 const SECTOR_SHORT: Record<RadarSector, string> = { genre: "G", micro: "M", theme: "T" };
+/** The phone's one-line sector caption (the rim labels' words, without the rim). */
+const SECTOR_CAPTION: Record<RadarSector, string> = { genre: "Genres", micro: "Micro-genres", theme: "Themes" };
 
 export interface RadarBoardBlip {
   dimension: string;
@@ -214,7 +228,94 @@ export interface RadarBoardBlip {
   /** The verdict's decomposition (radarVerdictTrace's checks — produced by the SAME
    * evaluation as `verdict`); rendered by the rail dossier when the dot is selected. */
   trace: VerdictCheck[];
+  /** The Opportunity score's parts (the list row itself satisfies OpportunityInputs). The
+   * score is never printed alone: the tooltip lists these parts and the dossier draws the
+   * breakdown. Optional — a blip without it shows the score with a "no parts" note. */
+  opp?: OpportunityInputs;
+  /** The population `n_games` counts, e.g. "last 24 months · ≥50 reviews". */
+  population?: string;
+  /** Paid games in the cut (rebuilt mart): below 30 the revenue figures are withheld, and the
+   * tooltip says so instead of printing a bare dash. */
+  n_paid?: number | null;
 }
+
+/**
+ * One /api/niches list row -> the blip the board plots, or null when the row has no board
+ * class (umbrella/meta tags). THE one mapping — pages/Radar.tsx's pool and the parity oracle
+ * in src/test/radarTooltip.tsx both call it, so the dot, the rail and the niche pages cannot
+ * read the same row two ways. The ring comes from radarVerdictTrace on the row's own fields.
+ */
+export function radarBlipFromRow(row: NicheRow): RadarBoardBlip | null {
+  const sector = radarSector(row.dimension, row.tier);
+  if (!sector) return null;
+  // ?? null: the fields are absent (undefined) on marts that predate them.
+  const demandTrendPct = row.demand_trend_24m_pct ?? null;
+  const demandEmerging = row.demand_emerging === true;
+  // One evaluation produces BOTH the ring and the dossier trace (radarVerdictTrace — same
+  // booleans, same body), so the panel can never disagree with the dot position.
+  const { checks, ...verdict } = radarVerdictTrace({
+    demand_trend_24m_pct: demandTrendPct,
+    demand_emerging: demandEmerging,
+    saturation_yoy: row.saturation_yoy,
+    winner_concentration: row.winner_concentration,
+    opportunity_v2: row.opportunity_v2,
+    entrant_ratio: row.entrant_ratio,
+    solo_viability: row.solo_viability ?? null,
+    // Solo-evidence trio — the member profile the dossier's singleplayer row renders inline.
+    self_published_share: row.self_published_share ?? null,
+    indie_share: row.indie_share ?? null,
+    med_playtime_h: row.med_playtime_h ?? null,
+    reviews_24m: row.reviews_24m ?? null,
+    reviews_prev_24m: row.reviews_prev_24m ?? null,
+    reviews_24m_new_share: row.reviews_24m_new_share ?? null,
+    // Worked-number inputs only (never read by the ring decision).
+    n_recent_year: row.n_recent_year ?? null,
+    n_prior_year: row.n_prior_year ?? null,
+    n_games: row.n_games,
+    n_paid: paidCount(row),
+  });
+  return {
+    dimension: row.dimension,
+    key: row.key,
+    tier: row.tier,
+    sector,
+    n_games: row.n_games,
+    p90_rev: row.p90_rev ?? null,
+    opportunity_v2: row.opportunity_v2,
+    demandTrendPct,
+    saturationYoy: row.saturation_yoy,
+    demandEmerging,
+    reviews24m: row.reviews_24m ?? null,
+    reviewsPrev24m: row.reviews_prev_24m ?? null,
+    solo_viability: row.solo_viability ?? null,
+    verdict,
+    trace: checks,
+    opp: row,
+    population: row.window != null ? cutPopulationLabel(row.window, row.min_reviews) : undefined,
+    n_paid: paidCount(row),
+  };
+}
+
+/** A revenue figure for the board: the amount, or — when it is NULL — WHY ("withheld: only
+ * 12 paid games" on the rebuilt mart, else "no data"), never a bare dash. */
+function revenueOrWhy(value: number | null | undefined, nPaid: number | null | undefined): string {
+  if (value != null && Number.isFinite(value)) return fmtUsd(value);
+  return nPaid != null && nPaid < PAID_MIN ? `withheld: only ${fmtInt(nPaid)} paid games` : "no data";
+}
+
+// ---- the glossary-backed explanations, loaded after first paint ------------------------
+//
+// The ⓘ that explains a metric in place reads lib/glossary.ts, which the entry chunk (this
+// board is the eagerly loaded index route) deliberately does not carry — see
+// components/radarExplain.tsx. They load lazily; until then a same-size placeholder holds
+// the ⓘ's 14px slot, so nothing moves when they arrive.
+const TermInfo = lazy(() => import("./radarExplain").then((m) => ({ default: m.TermInfo })));
+const RadarOpportunity = lazy(() => import("./radarExplain").then((m) => ({ default: m.RadarOpportunity })));
+const TIP_SLOT = <span aria-hidden className="inline-block h-3.5 w-3.5 shrink-0" />;
+
+/** The dot hit radius on a touch screen: 12 viewBox units = a 24px target (1 unit = 1 CSS
+ * px — see ringGeom), the WCAG 2.2 minimum. The visible dot keeps its P90-revenue size. */
+export const TOUCH_TARGET_R = 12;
 
 // ---- regions ------------------------------------------------------------------------------
 
@@ -356,15 +457,25 @@ function cellFitScale(
 }
 
 /**
- * THE LAYOUT IS MEMOISED ON THE ROW SET, not recomputed per render. The relaxation is a
+ * THE PLACEMENT IS MEMOISED ON THE ROW SET, not recomputed per render. The relaxation is a
  * force simulation now — cheap (~3ms for 120 blips) but not free, and React will call the
  * render path for a hover, a search keystroke or a rail scroll. RadarBoard's useMemo already
  * guards the common case; this one-slot cache also covers the callers that don't memoise
  * (tests, and any future consumer), keyed on everything the placement reads: the ids, their
  * rings and sectors, their scores and sizes, plus the plate width and the zoom.
+ *
+ * Only the POSITIONS are cached (2026-09-23). The cache used to hand back the whole previous
+ * layout, dots included — and a dot carries its whole row (trace, singleplayer share, the
+ * score's parts), none of which is in the key. A row whose placement inputs were unchanged
+ * but whose other fields had moved came back with the OLD fields. The dots are now rebuilt
+ * from the current rows on every call, over the cached positions.
  */
-let layoutCache: { key: string; value: RingBoardLayout } | null = null;
-
+let placementCache: {
+  key: string;
+  placed: Map<string, RingPlaced>;
+  sectors: SectorSpan[];
+  geom: RingGeom;
+} | null = null;
 function layoutKey(blips: RadarBoardBlip[], plateW: number | undefined, zoom: RadarRegion | null): string {
   const rows = blips
     .map((b) => `${b.dimension}:${b.key}|${b.verdict.ring}|${b.sector}|${b.opportunity_v2 ?? "x"}|${b.p90_rev ?? "x"}`)
@@ -380,7 +491,6 @@ function layoutKey(blips: RadarBoardBlip[], plateW: number | undefined, zoom: Ra
 export function layoutBoard(blips: RadarBoardBlip[], opts: LayoutOpts = {}): RingBoardLayout {
   const zoom = opts.zoom ?? null;
   const key = layoutKey(blips, opts.plateW, zoom);
-  if (layoutCache && layoutCache.key === key) return layoutCache.value;
 
   // Rail numbering — UNCHANGED from the XY plate: ring order, then opportunity desc, then
   // key. The dial draws these same numbers inside the dots, so rail and board are one list.
@@ -396,24 +506,27 @@ export function layoutBoard(blips: RadarBoardBlip[], opts: LayoutOpts = {}): Rin
   // wedge with an honest "· 0" at the rim, never a wedge that quietly disappears.
   const sectorCount = new Map<RadarClass, number>(CLASS_ORDER.map((c) => [c, 0]));
   for (const b of ordered) sectorCount.set(b.sector, (sectorCount.get(b.sector) ?? 0) + 1);
-  const sectors = sectorSpans();
-  const geom = ringGeom(opts.plateW, zoom);
 
-  const maxP90 = blips.reduce<number>((m, b) => Math.max(m, b.p90_rev ?? 0), 0);
-  const inputs = ordered.map((b) => ({
-    id: `${b.dimension}:${b.key}`,
-    ring: b.verdict.ring,
-    sector: b.sector,
-    opportunity: b.opportunity_v2,
-    r: dialBlipR(b.p90_rev, maxP90, geom.R),
-  }));
-  // THE CROWD FIT (see cellFitScale): one bounded scale over every blip so the tightest
-  // cell has room to separate. Applied to all of them together, so the P90-revenue AREA
-  // ratios between any two dots are exactly what they were — the whole board just breathes
-  // down a notch on a phone, or when Top 120 packs a band that Top 40 left airy.
-  const fit = cellFitScale(inputs, geom, sectors);
-  if (fit < 1) for (const i of inputs) i.r *= fit;
-  const placed: Map<string, RingPlaced> = layoutRings(inputs, geom, sectors);
+  if (!placementCache || placementCache.key !== key) {
+    const sectors = sectorSpans();
+    const geom = ringGeom(opts.plateW, zoom);
+    const maxP90 = blips.reduce<number>((m, b) => Math.max(m, b.p90_rev ?? 0), 0);
+    const inputs = ordered.map((b) => ({
+      id: `${b.dimension}:${b.key}`,
+      ring: b.verdict.ring,
+      sector: b.sector,
+      opportunity: b.opportunity_v2,
+      r: dialBlipR(b.p90_rev, maxP90, geom.R),
+    }));
+    // THE CROWD FIT (see cellFitScale): one bounded scale over every blip so the tightest
+    // cell has room to separate. Applied to all of them together, so the P90-revenue AREA
+    // ratios between any two dots are exactly what they were — the whole board just breathes
+    // down a notch on a phone, or when Top 120 packs a band that Top 40 left airy.
+    const fit = cellFitScale(inputs, geom, sectors);
+    if (fit < 1) for (const i of inputs) i.r *= fit;
+    placementCache = { key, placed: layoutRings(inputs, geom, sectors), sectors, geom };
+  }
+  const { placed, sectors, geom } = placementCache;
 
   const dots: PlacedBlip[] = ordered.map((b, i) => {
     const id = `${b.dimension}:${b.key}`;
@@ -438,9 +551,7 @@ export function layoutBoard(blips: RadarBoardBlip[], opts: LayoutOpts = {}): Rin
     };
   });
 
-  const value: RingBoardLayout = { dots, sectors, sectorCount, geom, vbH: geom.vbH };
-  layoutCache = { key, value };
-  return value;
+  return { dots, sectors, sectorCount, geom, vbH: geom.vbH };
 }
 
 // ---- rendering ------------------------------------------------------------------------------
@@ -506,6 +617,33 @@ const CAPTION_ALPHA_LIT = 0.95;
 function fmtTrendPct(v: number | null): string {
   if (v === null) return "no demand data";
   return `${v >= 0 ? "▲ +" : "▼ −"}${Math.abs(v).toFixed(1)}%`;
+}
+
+/**
+ * The tooltip's Opportunity rows: the score, then each part with its weight, then the brake
+ * (lib/opportunity.ts — the same model OpportunityBreakdown draws in the dossier). A row with
+ * no parts (a mart that predates them) says so instead of printing the score bare.
+ */
+function opportunityRows(b: RadarBoardBlip): { label: string; value: string }[] {
+  const score = b.opportunity_v2 != null ? b.opportunity_v2.toFixed(1) : "—";
+  const m = opportunityBreakdown(b.opp ?? { opportunity_v2: b.opportunity_v2 });
+  if (!m.available) {
+    return [
+      { label: DOSSIER_LABEL.opportunity, value: score },
+      { label: "↳ its parts", value: "not in this data build" },
+    ];
+  }
+  return [
+    { label: DOSSIER_LABEL.opportunity, value: score },
+    ...m.parts.map((p) => ({
+      label: `↳ ${p.label} ×${p.weight.toFixed(2)}`,
+      value: p.value === null ? "not scored" : p.value.toFixed(1),
+    })),
+    {
+      label: "↳ Supply brake",
+      value: m.brake === null ? "—" : `×${fmtMultiplier(m.brake)}${m.brakeKnown ? "" : " (unknown)"}`,
+    },
+  ];
 }
 
 function MoveGlyph({ trendPct }: { trendPct: number | null }) {
@@ -591,12 +729,16 @@ function CheckGlyph({ pass }: { pass: boolean | null }) {
  */
 function DossierBody({ blip, plotCap }: { blip: RailBlip; plotCap: number }) {
   const v = blip.verdict;
+  // Plain words, each count with its population (2026-09-23): this line used to read
+  // "reviews 24m … · P90 rev … · 227 games · opp v2 74.7".
   const context = [
-    blip.reviews24m != null ? `reviews 24m ${fmtInt(blip.reviews24m)}` : null,
-    blip.reviewsPrev24m != null ? `prior 24m ${fmtInt(blip.reviewsPrev24m)}` : null,
-    `P90 rev ${fmtUsd(blip.p90_rev)}`,
-    `${fmtInt(blip.n_games)} games`,
-    blip.opportunity_v2 != null ? `opp v2 ${blip.opportunity_v2.toFixed(1)}` : null,
+    blip.reviews24m != null
+      ? `${fmtInt(blip.reviews24m)} reviews in the last 24 months${
+          blip.reviewsPrev24m != null ? ` vs ${fmtInt(blip.reviewsPrev24m)} in the 24 before` : ""
+        }`
+      : null,
+    `top-10% revenue ${revenueOrWhy(blip.p90_rev, blip.n_paid)}`,
+    `${fmtInt(blip.n_games)} games${blip.population ? ` (${blip.population})` : ""}`,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -628,13 +770,18 @@ function DossierBody({ blip, plotCap }: { blip: RailBlip; plotCap: number }) {
       </p>
 
       {blip.trace.map((c) => (
-        <div key={c.id} className="border-b border-chartborder py-2">
+        <div key={c.id} className="border-b border-chartborder py-2" data-testid={`dossier-check-${c.id}`}>
           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
             <CheckGlyph pass={c.pass} />
             <span className="sr-only">{c.pass === null ? "unknown" : c.pass ? "passes" : "fails"}</span>
             <span className="kicker text-[10px] tracking-[.08em] text-ink-muted">
               {c.decides ? c.label : `${c.label} · context`}
             </span>
+            {/* The check explains itself in place: meaning, formula and — when the row
+                carries the inputs — its own numbers worked through it. */}
+            <Suspense fallback={TIP_SLOT}>
+              <TermInfo term={c.term} label={c.label} worked={c.worked ?? undefined} />
+            </Suspense>
           </div>
           {/* Value and the bar it was judged against share one line in the widened rail
               (flex-wrap, no truncation: at narrow widths the bar clause drops to its own
@@ -646,6 +793,24 @@ function DossierBody({ blip, plotCap }: { blip: RailBlip; plotCap: number }) {
           <div className="pt-0.5 text-[11px] leading-snug text-ink-secondary">{c.note}</div>
         </div>
       ))}
+
+      {/* The score is never alone (owner rule): its four parts, their weights and the supply
+          brake ride right under it, and the ⓘ adds them up with this niche's numbers. */}
+      <div className="border-b border-chartborder py-2" data-testid="dossier-opportunity">
+        <div className="kicker pb-1 text-[10px] tracking-[.08em] text-ink-muted">Opportunity score · context</div>
+        <Suspense
+          fallback={
+            <span className="tabular text-[12px] text-ink-primary">
+              {blip.opportunity_v2 != null ? blip.opportunity_v2.toFixed(1) : "—"}
+            </span>
+          }
+        >
+          <RadarOpportunity row={blip.opp ?? { opportunity_v2: blip.opportunity_v2 }} />
+        </Suspense>
+        <div className="pt-1 text-[11px] leading-snug text-ink-secondary">
+          ranks niches inside a ring — it never moves the ring itself
+        </div>
+      </div>
 
       <div className="flex flex-col gap-2 pb-1 pt-3">
         <Link
@@ -894,10 +1059,14 @@ export function RadarBoard({
   onSelect,
   zoom,
   onZoom,
+  soloCounts,
 }: {
   /** What the dial plots: the top N/3 of EVERY class by opportunity (the page slices per
    * class — see pages/Radar.tsx), so all three wedges are filled from their own ranking. */
   blips: RadarBoardBlip[];
+  /** Under the singleplayer lens: how many niches of the cut it keeps (`shown`) out of all
+   * of them (`total`) — the legend states the lens's real effect in numbers. */
+  soloCounts?: { shown: number; total: number };
   /** The FULL population at this cut + solo setting, ALL classes merged, opportunity order —
    * the rail search's scope. A superset of `blips`: search must reach every niche of the
    * cut, never just the plotted class or its Top-N. */
@@ -944,6 +1113,8 @@ export function RadarBoard({
   const [activeIdx, setActiveIdx] = useState(0);
   // Side-by-side (≥lg): dossier in the rail pane. Stacked (<lg): dossier as the drawer.
   const isDesktop = useIsDesktop();
+  // A finger needs a ≥ 24px target; the smallest dots are 11px across (TOUCH_TARGET_R).
+  const coarsePointer = useCoarsePointer();
 
   // The plate's MEASURED width — the viewBox is rebuilt from it (1 unit = 1 CSS px, see
   // ringGeom). jsdom measures 0, so the DEFAULT_PLATE_W fallback is the test geometry.
@@ -1113,7 +1284,7 @@ export function RadarBoard({
   if (blips.length === 0) {
     return (
       <div className="py-10 text-center text-sm text-ink-muted">
-        {soloOnly ? "No solo-friendly niches match this cut." : "No niches match this cut."}
+        {soloOnly ? "No singleplayer niches match this cut." : "No niches match this cut."}
       </div>
     );
   }
@@ -1290,6 +1461,29 @@ export function RadarBoard({
             />
           )}
 
+          {/* TOUCH TARGETS (2026-09-23). On a coarse pointer every dot gets an invisible
+              ≥ 24px hit circle — the smallest dots are 11px across, under half a fingertip.
+              They sit in their OWN group ABOVE the band hit areas (a tap beside a dot opens
+              the dot, it doesn't zoom the ring) and BELOW every visible dot (where two halos
+              overlap a neighbour's dot, the dot itself still wins). Mouse users keep the
+              exact dot edges, where a halo would make neighbours steal each other's hover. */}
+          {coarsePointer && (
+            <g data-testid="radar-touch-targets">
+              {visible.map((b) => (
+                <circle
+                  key={`touch-${b.id}`}
+                  data-testid={`radar-blip-touch-${b.id}`}
+                  cx={b.x}
+                  cy={b.y}
+                  r={Math.max(TOUCH_TARGET_R, b.r)}
+                  fill="transparent"
+                  style={{ cursor: "pointer" }}
+                  onClick={() => onSelect(b.id)}
+                />
+              ))}
+            </g>
+          )}
+
           {/* DOTS — the rail carries the accessible buttons, these are mouse conveniences.
               Solo lens as dot STYLE: team-scale (singleplayer share < SOLO_FRIENDLY_MIN)
               draws hollow — ring-coloured stroke over a `transparent` fill (transparent, not
@@ -1413,14 +1607,16 @@ export function RadarBoard({
                  becomes one honest caption line under the dial, reading clockwise from 12,
                  with the emphasised class marked. */
               <HaloText testId="radar-sector-legend" x={cx} y={geom.vbH - 6} anchor="middle" size={8}>
-                {`↻ FROM 12 · ${layout.sectors
+                {/* Spelled out (2026-09-23 review): "↻ FROM 12 · G 9 · ▸M 27 · T 24 ·
+                    G=GENRES M=MICRO T=THEMES" was a cipher with its own key. */}
+                {`CLOCKWISE FROM THE TOP: ${layout.sectors
                   .map(
                     (s) =>
-                      `${emphasis === s.sector ? "▸" : ""}${SECTOR_SHORT[s.sector]} ${
+                      `${emphasis === s.sector ? "▸ " : ""}${SECTOR_CAPTION[s.sector]} ${
                         layout.sectorCount.get(s.sector) ?? 0
                       }`,
                   )
-                  .join(" · ")} · G=GENRES M=MICRO T=THEMES`}
+                  .join(" · ")}`}
               </HaloText>
             ) : (
               /* SECTOR RIM LABELS — the class each wedge holds and its honest count, at the
@@ -1467,44 +1663,16 @@ export function RadarBoard({
           </g>
         </svg>
 
-        {/* Legend. Under the default solo-only population the hollow/filled lens encoding is
-            redundant (every dot is solo-friendly by construction), so the legend states the
-            POPULATION RULE instead of drawing lens samples — the UI must never imply
-            team-scale niches might be hiding on the board. The metric is named honestly:
-            solo_viability IS the niche's singleplayer share (a no-netcode proxy, not a
-            production-scope measure — the dossier's solo row carries the member evidence).
-            The sample circles are plain aria-hidden glyphs, never click targets. */}
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-2 text-[11px] text-ink-muted">
-          {soloOnly ? (
-            <span className="inline-flex items-center gap-1.5">
-              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="pointer-events-none shrink-0">
-                <circle cx="5" cy="5" r="4" fill="currentColor" />
-              </svg>
-              <span>
-                population: solo-friendly only · singleplayer share ≥ {SOLO_FRIENDLY_MIN} (server-filtered; unknown
-                excluded)
-              </span>
-            </span>
-          ) : (
-            <>
-              <span className="inline-flex items-center gap-1.5">
-                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="pointer-events-none shrink-0">
-                  <circle cx="5" cy="5" r="4" fill="currentColor" />
-                </svg>
-                solo-friendly (singleplayer share ≥ {SOLO_FRIENDLY_MIN}) or unknown
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="pointer-events-none shrink-0">
-                  <circle cx="5" cy="5" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
-                </svg>
-                team-scale (&lt; {SOLO_FRIENDLY_MIN})
-              </span>
-            </>
-          )}
-          {/* The verdict hue key (2026-08-27 color amendment) — every hue is doubled by a word
-              right here AND by the band caption it sits in, so the mapping survives grayscale
-              and any CVD. Listed inner ring first, which is also the order of the dial. */}
+        {/* THE LEGEND, CUT TO WHAT A FIRST READ NEEDS (2026-09-23 review: six lines of
+            fine print under the dial). Two lines: the ring order with its hues (every hue
+            doubled by its word and by the band caption, so it survives grayscale), and the
+            three dot encodings. Everything else — the sectors' per-class Top N, the
+            within-band rank, zooming, why nothing clamps — lives behind the ⓘ and in the
+            Methodology disclosure, one tap away and never gone. The sample circles are
+            plain aria-hidden glyphs, never click targets. */}
+        <div className="flex flex-col gap-1 pt-2 text-[11px] text-ink-muted" data-testid="radar-legend">
           <span data-testid="verdict-color-key" className="inline-flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="text-ink-secondary">Rings, from the centre out:</span>
             {RING_ORDER.map((ring, i) => (
               <span key={ring} className="inline-flex items-center gap-1.5">
                 <span className="inline-block h-2 w-2 shrink-0" style={{ backgroundColor: RING_FILL[ring] }} aria-hidden />
@@ -1512,15 +1680,59 @@ export function RadarBoard({
               </span>
             ))}
           </span>
-          <span>
-            ring = the verdict, best in the middle · the number in a dot is its rail rank · inside a band, nearer the
-            centre = higher opportunity v2 (the rank, not the score — the score is in the tooltip and the dossier) ·
-            the three sectors are the niche classes, each showing its OWN top {plotCap} by opportunity · the Class
-            control emphasises a sector, it never empties the board · dot area = P90 revenue · colour repeats the
-            verdict the band already names (reinforcement, never the only channel) · nothing clamps here: a ring board
-            has no axis to fall off · click a ring&rsquo;s empty space to zoom into it and filter the rail (Esc, the
-            rail chip&rsquo;s ✕, or a background click exits)
+          <span className="inline-flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span>dot size = top-10% revenue</span>
+            <span>number = the niche&rsquo;s row in the list</span>
+            <span className="inline-flex items-center gap-1.5">
+              <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden className="pointer-events-none shrink-0">
+                <circle cx="6" cy="6" r="3.5" fill="currentColor" />
+                <circle cx="6" cy="6" r="5.3" fill="none" stroke="currentColor" strokeWidth="0.8" strokeDasharray="1.2 1.6" />
+              </svg>
+              dotted ring = verdict on thin evidence
+            </span>
+            {!soloOnly && (
+              <span className="inline-flex items-center gap-1.5">
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="pointer-events-none shrink-0">
+                  <circle cx="5" cy="5" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
+                </svg>
+                hollow = multiplayer-dependent (singleplayer share under {SOLO_FRIENDLY_PCT})
+              </span>
+            )}
+            <span className="inline-flex items-center gap-1">
+              how to read the board
+              <InfoTipBase
+                label="How to read the board"
+                ariaLabel="How to read the board"
+                meaning={
+                  <>
+                    The RING is the verdict, best in the middle: Enter now → Watch → Emerging → Crowded → Declining. The
+                    three SECTORS are the niche classes — Genres, Micro-genres, Themes — each ranked only against its own
+                    kind and showing its own top {plotCap} by Opportunity score; the Emphasis control lights one sector
+                    and dims the other two, it never empties the board.
+                  </>
+                }
+                notes={
+                  <>
+                    Inside a ring, nearer the centre = a higher Opportunity score (its rank within the ring, not the raw
+                    number — the tooltip and the dossier print the score with its parts). Dot colour repeats the ring
+                    (reinforcement only). Nothing clamps: a ring board has no axis to fall off. Click a ring&rsquo;s
+                    empty space to zoom into it and filter the list; Esc, the list chip&rsquo;s ✕ or a background click
+                    zooms back out.
+                  </>
+                }
+              />
+            </span>
           </span>
+          {soloOnly && (
+            <span data-testid="radar-solo-population">
+              {SOLO_LENS_LABEL}:{" "}
+              {soloCounts
+                ? `${fmtInt(soloCounts.shown)} of ${fmtInt(soloCounts.total)} niches kept — the other ${fmtInt(
+                    soloCounts.total - soloCounts.shown,
+                  )} have a singleplayer share under ${SOLO_FRIENDLY_PCT} (or unknown)`
+                : `niches with a singleplayer share ≥ ${SOLO_FRIENDLY_PCT} (unknown left out)`}
+            </span>
+          )}
         </div>
 
         {/* Hover tooltip — HTML over the SVG, same TooltipPanel language as every chart.
@@ -1543,7 +1755,7 @@ export function RadarBoard({
               title={`${hovered.n}. ${hovered.key} — ${SECTOR_LABEL[hovered.sector]}`}
               rows={[
                 {
-                  label: "Verdict",
+                  label: DOSSIER_LABEL.verdict,
                   value: `${RING_LABEL[hovered.verdict.ring]}${hovered.verdict.caution ? " · caution" : ""}`,
                   color: RING_FILL[hovered.verdict.ring],
                 },
@@ -1552,23 +1764,27 @@ export function RadarBoard({
                 // absolute volume.
                 ...(hovered.demandEmerging
                   ? [
-                      { label: "Demand 24m", value: "emerging — no comparable % base" },
+                      { label: DOSSIER_LABEL.demand, value: EMERGING_DEMAND_LABEL },
                       {
-                        label: "Reviews 24m",
+                        label: DOSSIER_LABEL.reviews24m,
                         value: hovered.reviews24m != null ? fmtInt(hovered.reviews24m) : "—",
                       },
                     ]
-                  : [{ label: "Demand 24m", value: fmtTrendPct(hovered.demandTrendPct) }]),
+                  : [{ label: DOSSIER_LABEL.demand, value: fmtTrendPct(hovered.demandTrendPct) }]),
                 {
-                  label: "Releases YoY",
+                  label: DOSSIER_LABEL.releases,
                   value: hovered.saturationYoy != null ? fmtSigned(hovered.saturationYoy, 0) : "unknown",
                 },
-                { label: "P90 revenue", value: fmtUsd(hovered.p90_rev) },
-                { label: "Games", value: fmtInt(hovered.n_games) },
-                { label: "Opp v2", value: hovered.opportunity_v2 != null ? hovered.opportunity_v2.toFixed(1) : "—" },
+                { label: DOSSIER_LABEL.p90, value: revenueOrWhy(hovered.p90_rev, hovered.n_paid) },
                 {
-                  label: "Singleplayer share",
-                  value: hovered.solo_viability != null ? hovered.solo_viability.toFixed(2) : "unknown",
+                  label: DOSSIER_LABEL.games,
+                  value: `${fmtInt(hovered.n_games)}${hovered.population ? ` · ${hovered.population}` : ""}`,
+                },
+                // Never a lone score: the parts, their weights and the brake ride right under it.
+                ...opportunityRows(hovered),
+                {
+                  label: DOSSIER_LABEL.singleplayer,
+                  value: hovered.solo_viability != null ? sharePct(hovered.solo_viability) : "unknown",
                 },
               ]}
             />
@@ -1644,6 +1860,32 @@ export function RadarBoard({
               </span>
               <span className="ml-auto text-[10px] text-ink-muted">
                 {q ? "Esc clears · ↑↓ + Enter opens" : "click a dot or row for its dossier"}
+              </span>
+            </div>
+            {/* THE LIST'S COLUMNS, NAMED (2026-09-23 review: the right-hand "▲ 85%" had no
+                header, and the M / T / G letters no key). */}
+            <div
+              data-testid="radar-rail-columns"
+              className="flex items-center gap-2 pt-1.5 text-[10px] text-ink-muted"
+            >
+              <span className="w-6 shrink-0 text-right">#</span>
+              <span className="min-w-0">
+                Niche ·{" "}
+                <span title="M = micro-genre: a specific game type you can build (e.g. Colony Sim) · T = theme: a setting or look (e.g. Cyberpunk) · G = one of Steam's own broad genres (e.g. Strategy)">
+                  class: <b className="font-medium text-ink-secondary">M</b> micro-genre ·{" "}
+                  <b className="font-medium text-ink-secondary">T</b> theme · <b className="font-medium text-ink-secondary">G</b>{" "}
+                  genre
+                </span>
+              </span>
+              <span className="ml-auto inline-flex shrink-0 items-center gap-1 pl-2">
+                Demand, 24 months
+                <Suspense fallback={TIP_SLOT}>
+                  <TermInfo
+                    term="demand_trend_24m_pct"
+                    ariaLabel="About the list's demand column"
+                    notes="The ▲ / ▼ figure on each row, rounded to a whole percent. An emerging niche shows NEW and its review count instead: its prior 24 months are too thin for a percentage."
+                  />
+                </Suspense>
               </span>
             </div>
             <div className="lg:relative lg:min-h-0 lg:flex-1">
