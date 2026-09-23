@@ -341,10 +341,11 @@ describe("Compare metric grid", () => {
     renderCompare("/compare?ids=11,12");
     await screen.findByLabelText("Remove Market Laggard from comparison");
     const row = rowOf("players_7d");
-    // +0.36% is UP, but 0.39 pts behind Steam's +0.75%: the arrow says ▼ and it isn't accented.
-    const laggard = within(row).getByText("▼ +0.4%");
-    expect(laggard.className).toContain("text-ink-muted");
-    expect(within(row).getByText("vs Steam +0.8%: −0.4 pts")).toBeTruthy();
+    // +0.36% is UP (its arrow matches the printed number), but 0.39 pts behind Steam's +0.75%:
+    // the relative note carries its own ▼ so the week still reads as trailing the market.
+    const laggard = within(row).getByText("▲ +0.4%");
+    expect(laggard.className).toContain("text-brand");
+    expect(within(row).getByText("vs Steam +0.8%: ▼ −0.4 pts")).toBeTruthy();
     expect(within(row).getByText("▲ +1.8%").className).toContain("text-brand");
     fireEvent.click(within(row).getByRole("button", { name: "About 7-day players trend" }));
     expect((await screen.findByRole("tooltip")).textContent).toContain("Market Laggard: +0.4% − Steam +0.8% = −0.4 pts");

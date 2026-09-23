@@ -281,22 +281,23 @@ const STAT_ROWS: StatRowDef[] = [
     label: glossary("players_trend_7d_pct").label,
     term: "players_trend_7d_pct",
     verdict: true,
-    // The arrow and its colour follow the MARKET-RELATIVE reading when the data carries it
-    // (a +0.4% week in a +0.8% Steam week is an underperformance); the raw % stays printed.
+    // Each arrow matches the number printed next to it — "▼ +0.4%" read as a contradiction.
+    // The MARKET-RELATIVE reading (a +0.4% week in a +0.8% Steam week is an
+    // underperformance) gets its own arrow in the note, and leads the page's takeaway line.
     cell: (p) => {
       const v = p.players_trend_7d_pct;
       if (v == null) return tagged("not measured");
       const rel = p.players_trend_7d_rel_pct;
       const market = p.players_trend_7d_market_pct;
-      const dir = rel ?? v;
+      const arrow = (x: number) => (x > 0 ? "▲" : x < 0 ? "▼" : "■");
       return {
-        node: `${dir > 0 ? "▲" : dir < 0 ? "▼" : "■"} ${signedPct(v)}`,
+        node: `${arrow(v)} ${signedPct(v)}`,
         shown: signedPct(v),
-        num: dir,
+        num: v,
         note:
           rel != null && market != null ? (
             <span className="text-[11px] text-ink-muted">
-              vs Steam {signedPct(market)}: {signedPts(rel)}
+              vs Steam {signedPct(market)}: {arrow(rel)} {signedPts(rel)}
             </span>
           ) : undefined,
       };
