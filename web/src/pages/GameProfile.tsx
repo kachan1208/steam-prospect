@@ -123,6 +123,59 @@ function useIsLg(): boolean {
   return useSyncExternalStore(subscribeLg, isLgNow, () => true);
 }
 
+/** A playtime percentile off the reviews-summary list ("p25" -> minutes), or null. */
+function pctile(points: { pctile: string; value: number }[], key: string): number | null {
+  const hit = points.find((q) => q.pctile.toLowerCase() === key);
+  return hit ? hit.value : null;
+}
+
+/** "25th percentile 29.0h; 50th 85.4h; 75th 291h" for a playtime ⓘ. */
+function playtimeWorked(rows: [string, number | null | undefined][]): string | undefined {
+  const known = rows.filter((r): r is [string, number] => typeof r[1] === "number");
+  if (known.length === 0) return undefined;
+  return known.map(([k, v], i) => `${k}${i === 0 ? " percentile" : ""} ${fmtMinutes(v)}`).join("; ");
+}
+
+/** One playtime distribution in words: "Median 85.4h · middle half 29.0h–291h", plus the tails
+ * when known ("· 10% under 5.8h · 10% over 837h"). */
+function PlaytimeLine({
+  p10,
+  p25,
+  p50,
+  p75,
+  p90,
+}: {
+  p10?: number | null;
+  p25?: number | null;
+  p50?: number | null;
+  p75?: number | null;
+  p90?: number | null;
+}) {
+  const v = (x: number | null | undefined) => (typeof x === "number" ? fmtMinutes(x) : null);
+  const parts: ReactNode[] = [];
+  if (v(p50)) parts.push(<span key="m">Median <span className="tabular font-medium text-ink-primary">{v(p50)}</span></span>);
+  if (v(p25) && v(p75)) {
+    parts.push(
+      <span key="h">
+        middle half <span className="tabular font-medium text-ink-primary">{v(p25)}–{v(p75)}</span>
+      </span>,
+    );
+  }
+  if (v(p10)) parts.push(<span key="lo">10% under <span className="tabular font-medium text-ink-primary">{v(p10)}</span></span>);
+  if (v(p90)) parts.push(<span key="hi">10% over <span className="tabular font-medium text-ink-primary">{v(p90)}</span></span>);
+  if (parts.length === 0) return <SentinelTag>no playtime in our sample</SentinelTag>;
+  return (
+    <div className="flex flex-wrap gap-x-1.5 gap-y-1 text-xs text-ink-secondary">
+      {parts.map((part, i) => (
+        <span key={i}>
+          {i > 0 && <span aria-hidden="true">· </span>}
+          {part}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 /** Comparables header type: the table's own 11px muted weight, in the HeaderLabel's shape. */
 const COMPARABLE_HEADER: CSSProperties = { fontSize: 11, letterSpacing: "0.02em", textTransform: "none", fontWeight: 500 };
 
@@ -1303,46 +1356,59 @@ export default function GameProfile() {
               {reviewsQ.data && <LanguageSplitChart data={reviewsQ.data.language_split} />}
             </BlueprintPanel>
 
+            {/* PLAIN WORDS, NOT P25 / P75 (2026-09-23): "P25 29.0h" is the jargon the glossary
+                retires. Each line is the median, the middle half, and — at review time — the
+                tails, with the percentiles behind them in the ⓘ. */}
             <BlueprintPanel title="Playtime">
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
-                  <div className="mb-1 text-xs text-ink-muted">Total playtime, sampled reviewers (all-time)</div>
-                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
-                    <span>
-                      <span className="text-ink-muted">P25</span>{" "}
-                      <span className="tabular font-medium text-ink-primary">{fmtMinutes(profile.playtime_p25)}</span>
-                    </span>
-                    <span>
-                      <span className="text-ink-muted">P50</span>{" "}
-                      <span className="tabular font-medium text-ink-primary">{fmtMinutes(profile.playtime_p50)}</span>
-                    </span>
-                    <span>
-                      <span className="text-ink-muted">P75</span>{" "}
-                      <span className="tabular font-medium text-ink-primary">{fmtMinutes(profile.playtime_p75)}</span>
-                    </span>
+                  <div className="mb-1 flex items-center gap-1 text-xs text-ink-muted">
+                    Total playtime of the reviewers we sampled (all-time)
+                    <InfoTip
+                      label="Total playtime"
+                      meaning="How long the reviewers in our sample have played in total — a read on how much game players find here. Our sample leans to recent and to popular reviews."
+                      formula="median and the 25th–75th percentile of each sampled reviewer's total playtime"
+                      worked={playtimeWorked([
+                        ["25th", profile.playtime_p25],
+                        ["50th", profile.playtime_p50],
+                        ["75th", profile.playtime_p75],
+                      ])}
+                    />
                   </div>
+                  <PlaytimeLine p25={profile.playtime_p25} p50={profile.playtime_p50} p75={profile.playtime_p75} />
                 </div>
                 <div>
-                  <div className="mb-1 text-xs text-ink-muted">Playtime at the time of review</div>
-                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
-                    {reviewsQ.data?.playtime_at_review.map((p) => (
-                      <span key={p.pctile}>
-                        <span className="text-ink-muted">{p.pctile.toUpperCase()}</span>{" "}
-                        <span className="tabular font-medium text-ink-primary">{fmtMinutes(p.value)}</span>
-                      </span>
-                    ))}
-                    {reviewsQ.data && reviewsQ.data.playtime_at_review.length === 0 && (
-                      <span className="text-ink-muted">Not enough sampled reviews.</span>
-                    )}
-                    {reviewsQ.isError && (
-                      <InlineError
-                        what="playtime at review"
-                        error={reviewsQ.error}
-                        onRetry={() => void reviewsQ.refetch()}
-                        className="w-full"
+                  <div className="mb-1 flex items-center gap-1 text-xs text-ink-muted">
+                    Playtime when they wrote the review
+                    {reviewsQ.data && reviewsQ.data.playtime_at_review.length > 0 && (
+                      <InfoTip
+                        label="Playtime at review"
+                        meaning="How long reviewers had played when they posted — early reviews on little playtime judge the first hours, long ones the whole game."
+                        formula="percentiles of playtime-at-review across sampled reviews"
+                        worked={playtimeWorked(reviewsQ.data.playtime_at_review.map((q) => [q.pctile.replace(/^p/i, "") + "th", q.value]))}
                       />
                     )}
                   </div>
+                  {reviewsQ.data && reviewsQ.data.playtime_at_review.length > 0 && (
+                    <PlaytimeLine
+                      p10={pctile(reviewsQ.data.playtime_at_review, "p10")}
+                      p25={pctile(reviewsQ.data.playtime_at_review, "p25")}
+                      p50={pctile(reviewsQ.data.playtime_at_review, "p50")}
+                      p75={pctile(reviewsQ.data.playtime_at_review, "p75")}
+                      p90={pctile(reviewsQ.data.playtime_at_review, "p90")}
+                    />
+                  )}
+                  {reviewsQ.data && reviewsQ.data.playtime_at_review.length === 0 && (
+                    <span className="text-xs text-ink-muted">Not enough sampled reviews to say.</span>
+                  )}
+                  {reviewsQ.isError && (
+                    <InlineError
+                      what="playtime at review"
+                      error={reviewsQ.error}
+                      onRetry={() => void reviewsQ.refetch()}
+                      className="w-full"
+                    />
+                  )}
                 </div>
               </div>
             </BlueprintPanel>

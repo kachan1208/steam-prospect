@@ -1,4 +1,4 @@
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import type { LanguageShare } from "../../lib/api";
 import { fmtCompact, fmtPct } from "../../lib/format";
@@ -57,7 +57,7 @@ export function LanguageSplitChart({ data, height }: { data: LanguageShare[]; he
   const h = height ?? Math.max(120, sorted.length * 24);
   return (
     <ResponsiveContainer width="100%" height={h}>
-      <BarChart data={sorted} layout="vertical" margin={{ top: 4, right: 28, left: 8, bottom: 4 }}>
+      <BarChart data={sorted} layout="vertical" margin={{ top: 4, right: 40, left: 8, bottom: 4 }}>
         <CartesianGrid stroke="var(--gridline)" horizontal={false} />
         <XAxis
           type="number"
@@ -66,6 +66,8 @@ export function LanguageSplitChart({ data, height }: { data: LanguageShare[]; he
           tickLine={false}
           axisLine={{ stroke: "var(--baseline)" }}
         />
+        {/* interval={0}: every language keeps its name — recharts' default thinning labelled
+            every other bar ("English, —, Russian, —, Spanish…"). */}
         <YAxis
           type="category"
           dataKey="language"
@@ -74,6 +76,7 @@ export function LanguageSplitChart({ data, height }: { data: LanguageShare[]; he
           tickLine={false}
           axisLine={false}
           width={112}
+          interval={0}
         />
         <Tooltip
           cursor={{ fill: "var(--gridline)", opacity: 0.5 }}
@@ -91,7 +94,16 @@ export function LanguageSplitChart({ data, height }: { data: LanguageShare[]; he
             );
           }}
         />
-        <Bar dataKey="share" fill={CSS_VAR.competition} radius={[0, 4, 4, 0]} maxBarSize={18} />
+        <Bar dataKey="share" fill={CSS_VAR.competition} radius={[0, 4, 4, 0]} maxBarSize={18} isAnimationActive={false}>
+          {/* Each bar says its share, so the split reads without hovering. */}
+          <LabelList
+            dataKey="share"
+            position="right"
+            className="language-share-label"
+            formatter={(v: number) => fmtPct(v, v < 0.1 ? 1 : 0)}
+            style={{ fontSize: 10, fill: "var(--text-secondary)" }}
+          />
+        </Bar>
       </BarChart>
     </ResponsiveContainer>
   );

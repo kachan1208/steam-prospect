@@ -510,6 +510,57 @@ const COMPARABLES = {
   ],
 };
 
+describe("GameProfile — Detailed cards in plain words", () => {
+  it("reads playtime as a median and a middle half, not P25 / P50 / P75", async () => {
+    serve(/\/reviews-summary/, {
+      appid: 1145360,
+      eligible: true,
+      timeline: [],
+      language_split: [],
+      playtime_at_review: [
+        { pctile: "p10", value: 194 },
+        { pctile: "p25", value: 416 },
+        { pctile: "p50", value: 1066 },
+        { pctile: "p75", value: 2751 },
+        { pctile: "p90", value: 5439.4 },
+      ],
+      launch_curve: [],
+    });
+    renderDetailed();
+    const card = (await screen.findByText("Playtime", { selector: "h5" })).closest(".blueprint") as HTMLElement;
+    await waitForText(card, "10% over");
+    // 836.75 / 2,255 / 4,290 minutes = 13.9h / 37.6h / 71.5h.
+    expect(card.textContent).toContain("Median 37.6h· middle half 13.9h–71.5h");
+    expect(card.textContent).toContain("Median 17.8h· middle half 6.9h–45.9h· 10% under 3.2h· 10% over 90.7h");
+    expect(card.textContent).not.toMatch(/\bP(10|25|50|75|90)\b/);
+  });
+
+  it("names every language in the split and prints its share", async () => {
+    serve(/\/reviews-summary/, {
+      appid: 1145360,
+      eligible: true,
+      timeline: [],
+      language_split: [
+        { language: "english", n: 2400, share: 0.48 },
+        { language: "russian", n: 700, share: 0.14 },
+        { language: "schinese", n: 600, share: 0.12 },
+        { language: "spanish", n: 400, share: 0.08 },
+        { language: "koreana", n: 150, share: 0.03 },
+      ],
+      playtime_at_review: [],
+      launch_curve: [],
+    });
+    const { container } = renderDetailed();
+    await screen.findByText("Language split", { selector: "h5" });
+    await waitForText(container as HTMLElement, "Korean");
+    const card = screen.getByText("Language split", { selector: "h5" }).closest(".blueprint") as HTMLElement;
+    const names = Array.from(card.querySelectorAll(".recharts-yAxis .recharts-cartesian-axis-tick-value")).map((t) => t.textContent);
+    expect(names).toEqual(["English", "Russian", "Chinese (Simp.)", "Spanish", "Korean"]);
+    const shares = Array.from(card.querySelectorAll(".language-share-label text, text.language-share-label")).map((t) => t.textContent);
+    expect(shares).toEqual(["48%", "14%", "12%", "8.0%", "3.0%"]);
+  });
+});
+
 describe("GameProfile — an Early Access graduate's 1.0 on the velocity chart", () => {
   it("marks the 1.0 even when the event feed dropped it (CS2: beta review, then the Aug 2012 launch)", async () => {
     const month = (period: string, n: number) => ({
