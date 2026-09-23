@@ -10,9 +10,15 @@ import {
   fmtMinutes,
   fmtMonths,
   fmtPct,
+  fmtPercentile,
   fmtPrice,
   fmtSigned,
   fmtUsd,
+  formatWith,
+  isFiniteNumber,
+  MISSING,
+  MISSING_REASON_TEXT,
+  missingReason,
   monthName,
   niceAxisTicks,
   titleCase,
@@ -394,5 +400,225 @@ describe("isFreeTitle", () => {
     expect(isFreeTitle({ price_initial: null })).toBe(false);
     expect(isFreeTitle({ price_initial: null, is_free: 0 })).toBe(false);
     expect(fmtRevenue(null, isFreeTitle({ price_initial: null }))).toBe("—");
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────────────
+ * THE UNIT IS CHOSEN AFTER ROUNDING (2026-09-22 code review).
+ *
+ * The first case of every block is the exact string the old formatter printed; each test
+ * fails against the pick-the-unit-then-round implementation.
+ * ───────────────────────────────────────────────────────────────────────────────────── */
+
+const NON_FINITE = [null, undefined, NaN, Infinity, -Infinity];
+
+describe("unit after rounding — fmtUsd", () => {
+  it("never prints $1000.0K / $1000 — a value that rounds up takes the bigger unit", () => {
+    expect(fmtUsd(999_950)).toBe("$1.0M"); // was "$1000.0K"
+    expect(fmtUsd(999.6)).toBe("$1.0K"); // was "$1000"
+    expect(fmtUsd(999.5)).toBe("$1.0K");
+    expect(fmtUsd(999_999_999)).toBe("$1.0B"); // was "$1000.0M"
+    expect(fmtUsd(999_950_000_000)).toBe("$1.0T");
+  });
+
+  it("stays in the smaller unit when rounding does not reach the boundary", () => {
+    expect(fmtUsd(999.4)).toBe("$999");
+    expect(fmtUsd(999_949)).toBe("$999.9K");
+    expect(fmtUsd(999_949_999)).toBe("$999.9M");
+    expect(fmtUsd(1_000)).toBe("$1.0K");
+    expect(fmtUsd(1_000_000)).toBe("$1.0M");
+  });
+
+  it("drops the cents once a price rounds to $10 — $9.999 is $10, not $10.00", () => {
+    expect(fmtUsd(9.999)).toBe("$10"); // was "$10.00"
+    expect(fmtUsd(9.994)).toBe("$9.99");
+    expect(fmtUsd(10)).toBe("$10");
+  });
+
+  it("decides the sign after rounding and mirrors the ladder for negatives", () => {
+    expect(fmtUsd(-999_950)).toBe("-$1.0M");
+    expect(fmtUsd(-0.001)).toBe("$0.00"); // not "-$0.00"
+  });
+
+  it("prints the missing dash for every non-finite input — never $InfinityB", () => {
+    for (const v of NON_FINITE) expect(fmtUsd(v)).toBe(MISSING);
+    expect(fmtRevenue(Infinity, false)).toBe(MISSING);
+  });
+});
+
+describe("unit after rounding — fmtCompact", () => {
+  it("never prints 1000.0K or 10,000", () => {
+    expect(fmtCompact(999_960)).toBe("1.0M"); // was "1000.0K"
+    expect(fmtCompact(9_999.5)).toBe("10.0K"); // was "10,000"
+    expect(fmtCompact(999_950_000)).toBe("1.0B"); // was "1000.0M"
+  });
+
+  it("stays put below the boundary", () => {
+    expect(fmtCompact(9_999.4)).toBe("9,999");
+    expect(fmtCompact(999_949)).toBe("999.9K");
+    expect(fmtCompact(1_500_000_000)).toBe("1.5B"); // was "1500.0M"
+  });
+
+  it("handles negatives and non-finite input", () => {
+    expect(fmtCompact(-999_960)).toBe("-1.0M");
+    expect(fmtCompact(-0.3)).toBe("0");
+    for (const v of NON_FINITE) expect(fmtCompact(v)).toBe(MISSING);
+  });
+});
+
+describe("unit after rounding — axis formatters keep to three integer digits", () => {
+  it("fmtAxisCompact never prints 100.0K / 1000K / 1000M", () => {
+    expect(fmtAxisCompact(99_960)).toBe("100K"); // was "100.0K" — six glyphs on a 40px axis
+    expect(fmtAxisCompact(999_600)).toBe("1.0M"); // was "1000K"
+    expect(fmtAxisCompact(99_960_000)).toBe("100M"); // was "100.0M"
+    expect(fmtAxisCompact(999_600_000)).toBe("1.0B"); // was "1000M"
+  });
+
+  it("fmtAxisCompact stays put below each boundary", () => {
+    expect(fmtAxisCompact(99_949)).toBe("99.9K");
+    expect(fmtAxisCompact(999_499)).toBe("999K");
+    expect(fmtAxisCompact(250e9)).toBe("250B");
+  });
+
+  it("fmtAxisUsd follows the same ladder with a $ prefix", () => {
+    expect(fmtAxisUsd(999.6)).toBe("$1.0K"); // was "$1000"
+    expect(fmtAxisUsd(99_960)).toBe("$100K"); // was "$100.0K"
+    expect(fmtAxisUsd(999_600)).toBe("$1.0M"); // was "$1000K"
+    expect(fmtAxisUsd(999_600_000)).toBe("$1.0B"); // was "$1000M"
+    for (const v of NON_FINITE) expect(fmtAxisUsd(v)).toBe(MISSING);
+    for (const v of NON_FINITE) expect(fmtAxisCompact(v)).toBe(MISSING);
+  });
+
+  it("axisFormatter's formatters treat ±Infinity like NaN", () => {
+    expect(axisFormatter([0, 10, 20])(Infinity)).toBe(MISSING);
+    expect(axisFormatter([0, 10, 20], "pct")(-Infinity)).toBe(MISSING);
+    expect(axisFormatter([0, 1_000, 1e6, 1e8], "usd")(Infinity)).toBe(MISSING); // log branch
+  });
+});
+
+describe("unit after rounding — a sweep across every boundary", () => {
+  // Values approaching each threshold from below at shrinking distances. Whatever unit the
+  // formatter lands on, the mantissa must be BELOW the next unit's size: a "1000" in front
+  // of a K/M/B/T suffix is the bug this block exists for.
+  const thresholds = [10, 1e3, 1e4, 1e5, 1e6, 1e8, 1e9, 1e11, 1e12];
+  const values = thresholds.flatMap((t) => [0.5, 0.05, 0.005, 0.0005, 0].map((d) => t * (1 - d / 100)));
+  const mantissa = (s: string) => Number(s.replace(/^-?\$?/, "").replace(/[KMBT]$/, "").replace(/,/g, ""));
+
+  it("fmtUsd / fmtCompact never print a 1000+ mantissa beside a unit suffix", () => {
+    for (const v of values) {
+      for (const out of [fmtUsd(v), fmtCompact(v)]) {
+        if (/[KMBT]$/.test(out)) expect(mantissa(out), `${v} -> ${out}`).toBeLessThan(1000);
+      }
+    }
+  });
+
+  it("axis formatters never print more than three integer digits beside a suffix", () => {
+    for (const v of values) {
+      for (const out of [fmtAxisCompact(v), fmtAxisUsd(v)]) {
+        if (/[KMBT]$/.test(out)) {
+          expect(mantissa(out), `${v} -> ${out}`).toBeLessThan(1000);
+          const integerDigits = out.replace(/^-?\$?/, "").replace(/[KMBT]$/, "").split(".")[0];
+          expect(integerDigits.length, `${v} -> ${out}`).toBeLessThanOrEqual(3);
+        }
+      }
+    }
+  });
+});
+
+describe("unit after rounding — durations", () => {
+  it("fmtMinutes: 59.6 minutes is an hour, not 60m", () => {
+    expect(fmtMinutes(59.6)).toBe("1.0h"); // was "60m"
+    expect(fmtMinutes(59.4)).toBe("59m");
+    expect(fmtMinutes(60)).toBe("1.0h");
+  });
+
+  it("fmtMinutes: 99.95+ hours drops to whole hours, never 100.0h", () => {
+    expect(fmtMinutes(5_997)).toBe("100h"); // was "100.0h"
+    expect(fmtMinutes(5_996.9)).toBe("99.9h");
+    for (const v of NON_FINITE) expect(fmtMinutes(v)).toBe(MISSING);
+  });
+
+  it("fmtMonths: 23.6 months is 2.0 yr, never 24 mo", () => {
+    expect(fmtMonths(23.6)).toBe("2.0 yr"); // was "24 mo"
+    expect(fmtMonths(23.4)).toBe("23 mo");
+    for (const v of NON_FINITE) expect(fmtMonths(v)).toBe(MISSING);
+  });
+});
+
+describe("percent and integer formatters — sign after rounding, non-finite guard", () => {
+  it("a change that rounds to zero carries no sign", () => {
+    expect(fmtSigned(0.0004)).toBe("0.0%"); // was "+0.0%"
+    expect(fmtSigned(-0.0004)).toBe("0.0%"); // was "-0.0%"
+    expect(fmtPct(-0.0004)).toBe("0.0%"); // was "-0.0%"
+    expect(fmtSigned(0.0006)).toBe("+0.1%");
+    expect(fmtPct(-0.05)).toBe("-5.0%");
+  });
+
+  it("fmtInt never prints -0", () => {
+    expect(fmtInt(-0.4)).toBe("0"); // was "-0"
+    expect(fmtInt(-0.6)).toBe("-1");
+  });
+
+  it("every one of them prints the missing dash for ±Infinity", () => {
+    for (const v of NON_FINITE) {
+      expect(fmtPct(v)).toBe(MISSING);
+      expect(fmtSigned(v)).toBe(MISSING);
+      expect(fmtInt(v)).toBe(MISSING);
+      expect(fmtPrice(v)).toBe(MISSING);
+    }
+  });
+});
+
+describe("fmtPercentile — floors, and never claims P100", () => {
+  it("prints the top end as 'top 1%' — 99.6 is not P100", () => {
+    expect(fmtPercentile(99.6)).toBe("top 1%"); // Math.round printed "P100"
+    expect(fmtPercentile(99)).toBe("top 1%");
+    expect(fmtPercentile(100)).toBe("top 1%");
+  });
+
+  it("floors everything in between", () => {
+    expect(fmtPercentile(98.99)).toBe("P98");
+    expect(fmtPercentile(73.9)).toBe("P73");
+    expect(fmtPercentile(50)).toBe("P50");
+    expect(fmtPercentile(1)).toBe("P1");
+  });
+
+  it("prints the bottom end as words — a bare P0 reads as missing data", () => {
+    expect(fmtPercentile(0.4)).toBe("bottom 1%");
+    expect(fmtPercentile(0)).toBe("bottom 1%");
+  });
+
+  it("clamps out-of-range input and dashes non-finite input", () => {
+    expect(fmtPercentile(120)).toBe("top 1%");
+    expect(fmtPercentile(-5)).toBe("bottom 1%");
+    for (const v of NON_FINITE) expect(fmtPercentile(v)).toBe(MISSING);
+  });
+});
+
+describe("the sentinel-friendly API", () => {
+  it("missingReason says WHY a value is not printable", () => {
+    expect(missingReason(null)).toBe("missing");
+    expect(missingReason(undefined)).toBe("missing");
+    expect(missingReason(NaN)).toBe("not-a-number");
+    expect(missingReason(Infinity)).toBe("infinite");
+    expect(missingReason(-Infinity)).toBe("infinite");
+    expect(missingReason(0)).toBeNull(); // zero IS data — it must never be read as missing
+  });
+
+  it("formatWith keeps the reason next to the text", () => {
+    expect(formatWith(1_234, fmtUsd)).toEqual({ text: "$1.2K", missing: null });
+    expect(formatWith(0, fmtUsd)).toEqual({ text: "$0.00", missing: null });
+    expect(formatWith(null, fmtUsd)).toEqual({ text: MISSING, missing: "missing" });
+    expect(formatWith(1 / 0, fmtUsd)).toEqual({ text: MISSING, missing: "infinite" });
+    expect(MISSING_REASON_TEXT[formatWith(NaN, fmtPct).missing!]).toBe("not computable");
+  });
+
+  it("isFiniteNumber is a proper guard", () => {
+    expect(isFiniteNumber(0)).toBe(true);
+    expect(isFiniteNumber(-2.5)).toBe(true);
+    expect(isFiniteNumber(NaN)).toBe(false);
+    expect(isFiniteNumber(Infinity)).toBe(false);
+    expect(isFiniteNumber("12")).toBe(false);
+    expect(isFiniteNumber(null)).toBe(false);
   });
 });

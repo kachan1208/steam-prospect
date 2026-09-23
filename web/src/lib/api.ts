@@ -240,6 +240,18 @@ export interface Health {
   mart_version: string | null;
   built_at: string | null;
   source_db: string | null;
+  // Data-age fields (2026-09-22) — optional: an API that predates them sends only the four
+  // above, and lib/dataAge.ts falls back to built_at / mart_version. Read, never required.
+  /** Hours since the served data was produced, computed server-side. */
+  age_hours?: number | null;
+  /** ISO date or timestamp the served data is "as of" — preferred over built_at. */
+  data_as_of?: string | null;
+  /** Mart version the API process has LOADED (mart_version is its older alias). */
+  loaded_mart_version?: string | null;
+  /** Newest mart version built on disk; differs from the loaded one while a reload is pending. */
+  target_mart_version?: string | null;
+  /** ISO date of the SteamSpy owners snapshot every Owners figure comes from. */
+  owners_as_of?: string | null;
 }
 
 export function useHealth() {
@@ -614,7 +626,7 @@ function retryUnlessUnavailable(failureCount: number, error: unknown): boolean {
 
 /** One retry for genuinely transient failures — network errors (fetch TypeError) and 5xx —
  * nothing else: 4xx are stable answers, and a cancelled fetch must never be re-issued. Used
- * by the additive-overlay queries (catalog events, marketing events, price history) whose
+ * by the additive-overlay queries (catalog events, price history) whose
  * queryFns swallow only the stable misses, so a blip gets one shot before settling — and,
  * since it encodes exactly the policy every query wants by default, as the QueryClient's
  * `retry` in main.tsx. */
@@ -693,8 +705,9 @@ export function useNicheDistribution(
 
 // NOTE: the Radar feed client (useRadarFeed + RadarFeed/RadarHero/RadarNicheCard/
 // RadarSparklinePoint) was removed 2026-08-27 with the signal-feed section — the board +
-// rail answer the same questions. The /api/niches/radar ENDPOINT still exists and serves
-// MCP/external consumers; only this web client stopped calling it.
+// rail answer the same questions. The /api/niches/radar endpoint it read is gone too (it
+// 404s; api/app/routers/niches.py serves the list, /combined, a niche's detail, /games,
+// /distribution and /export.csv). The Radar board reads the plain /api/niches list.
 
 /** Build a download URL for the niches CSV export (GET, triggered via <a download>). */
 export function nicheExportCsvUrl(params: {
@@ -1543,35 +1556,6 @@ export function gamePlayersQueryOptions(appid: number) {
     queryFn: ({ signal }: { signal: AbortSignal }) =>
       request<GamePlayersResponse>(`/games/${appid}/players${qs({ days: 90 })}`, { signal }),
     staleTime: 5 * 60_000,
-  };
-}
-
-// ---- marketing events (the org's own marketing log — chart annotations; no chart reads
-// them since GameTrendsChart's removal on 2026-09-19, kept for the next overlay) ----------
-export interface MarketingEvent {
-  id: number;
-  appid: number;
-  event_date: string; // 'YYYY-MM-DD'
-  kind: string; // trailer | festival | press | update | other
-  note: string | null;
-}
-
-/** "My marketing events" overlay (GET /api/inputs/events?appid=…) — additive on the same
- * contract as the catalog events: a stable miss resolves to [], transient failures get one
- * retry, and a cancelled fetch never resolves to data. */
-export function gameMarketingEventsQueryOptions(appid: number) {
-  return {
-    queryKey: ["game-events", appid] as const,
-    queryFn: async ({ signal }: { signal: AbortSignal }) => {
-      try {
-        return await request<MarketingEvent[]>(`/inputs/events${qs({ appid })}`, { signal });
-      } catch (error) {
-        if (isMissingOverlay(error)) return [] as MarketingEvent[];
-        throw error; // transient → retryed once (retryTransientOnce); AbortError → never data
-      }
-    },
-    staleTime: 5 * 60_000,
-    retry: retryTransientOnce,
   };
 }
 

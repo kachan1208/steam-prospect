@@ -3,10 +3,10 @@ import Radar from "./pages/Radar";
 import clsx from "clsx";
 import { Suspense, lazy, useEffect, type ReactNode } from "react";
 
-import { useHealth } from "./lib/api";
 import { initAnalytics, trackPageview } from "./lib/analytics";
 import { NICHE_ROUTE_PATH } from "./lib/nichePath";
 import { CompareTray } from "./components/CompareTray";
+import { DataAge, DataAgeBanner } from "./components/DataAge";
 import { ZoomBanner } from "./components/charts/ZoomBanner";
 import { ZoomRangeProvider } from "./lib/zoomRange";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -183,32 +183,14 @@ function Header() {
   );
 }
 
-/** The data-freshness signal, relocated from the old sidebar into the footer. Hover for
- * the exact mart version + build timestamp — the authoritative "data as of". */
-function HealthRow() {
-  const { data, isError, isLoading } = useHealth();
-  const ok = !!data && data.status === "ok";
-  const color = isLoading ? "var(--text-muted)" : isError || !ok ? "var(--status-critical)" : "var(--status-good)";
-  const label = isLoading ? "Checking API…" : isError ? "API unreachable" : ok ? "API connected" : "API degraded";
-  const title = data
-    ? `${label}${data.mart_version ? ` — mart ${data.mart_version}` : ""}${data.built_at ? ` (built ${data.built_at})` : ""}`
-    : label;
-  return (
-    <div className="flex items-center gap-2 text-[11px] text-ink-muted" title={title}>
-      <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-      <span className="truncate">
-        {label}
-        {data?.mart_version && <span> · mart {data.mart_version}</span>}
-      </span>
-    </div>
-  );
-}
-
 function Footer() {
   return (
     <footer className="border-t border-chartborder bg-page">
       <div className={clsx(PAGE_CONTAINER, "flex flex-wrap items-center justify-between gap-x-6 gap-y-1.5 py-3")}>
-        <HealthRow />
+        {/* The data-freshness readout: API status + "Data as of <date> · N days old", with
+            the build details (mart version, build time, SteamSpy snapshot) in its ⓘ. It
+            replaced "API connected · mart 20260921" — a build id, not an age. */}
+        <DataAge />
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-ink-muted">
           <Link to="/datalog" className="hover:text-ink-secondary">
             Data log
@@ -246,6 +228,11 @@ function AppShell() {
     <ZoomRangeProvider>
     <div className="flex min-h-full flex-col bg-page">
       <Header />
+      {/* Renders nothing unless the served data is over three days old — then every page
+          says so, once per session per build (dismissible). */}
+      <div className={clsx(PAGE_CONTAINER, "empty:hidden")}>
+        <DataAgeBanner className="mt-4" />
+      </div>
       <main className="flex-1">
         <div className={clsx(PAGE_CONTAINER, "py-8")}>
           <ErrorBoundary resetKey={pathname}>

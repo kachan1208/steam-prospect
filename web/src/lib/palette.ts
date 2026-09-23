@@ -35,7 +35,8 @@ import type { Theme } from "./theme";
  * sentiment are MONO STEEL, never hue-coded ("Up = accent-300, down/flat = paper 55%.
  * Never red/green" · 4c: aspect bars "positive accent-300, negative paper 50%"). Two
  * independent mockup screens (4a's Niche Finder D/C/Q bars and 4b's "Why 87.4" panel —
- * both rendered by OpportunityBars.tsx) confirm this extends to the demand/competition/
+ * once rendered by OpportunityBars.tsx, retired 2026-09-22 with the v1 score it drew; its
+ * successor is components/OpportunityBreakdown.tsx) confirm this extends to the demand/competition/
  * quality_gap trio too: demand and quality_gap (both "good for the opportunity score")
  * render accent-300; competition (crowding — the downside) renders paper ~50%. Every
  * mark in every mockup screen is either accent-300 or a paper alpha EXCEPT marketing-
@@ -47,8 +48,8 @@ import type { Theme } from "./theme";
  *   "good" (demand, quality_gap, praise, scatter points) -> accent-300
  *   "muted/downside" (competition, complaint)             -> paper ~50%
  * This never collides: no chart plots demand AND quality_gap as two marks needing to be
- * told apart (they're always separate single-series charts, or — in OpportunityBars —
- * intentionally the same color because they share the same polarity), and every chart
+ * told apart (they're always separate single-series charts, or — in OpportunityBreakdown's
+ * part bars — intentionally the same color because they share the same polarity), and every chart
  * that plots demand/qualityGap concurrently WITH competition (GameMetricDrilldown's
  * avg/peak players, TimingBars' congestion chart) keeps its two
  * series distinguishable because paper-alpha and accent-300 are never the same value.

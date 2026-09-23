@@ -2,7 +2,9 @@
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;700&family=Barlow+Condensed:wght@400;600&display=swap');
+/* Fonts are self-hosted from @fontsource (imported in main.tsx), not a Google Fonts
+   @import: an @import placed after the @tailwind directives is dropped by the build, which
+   is how the app shipped in the system font. */
 
 /* ---------------------------------------------------------------------------------
  * Prospect palette — the "Industry" blueprint identity (design_handoff_prospect_dark_ui).

@@ -1,10 +1,11 @@
 // Measures the Compare-page multi-series line chart: resolved stroke colours, dash
 // patterns, legend swatches, and adjacent-series contrast ratios (WCAG 1.4.11 wants >=3:1).
-// Usage: node scripts/audit/measure-compare.mjs <baseUrl> <outPrefix>
+// Usage: node scripts/audit/measure-compare.mjs [baseUrl] [outPrefix]
+//   baseUrl: argv, else $BASE_URL, else the local dev server (http://127.0.0.1:5173).
 import { chromium } from "playwright";
 import { parseColor, composite, contrast, hex } from "./color.mjs";
 
-const BASE = process.argv[2] || "https://142-93-49-69.nip.io";
+const BASE = process.argv[2] || process.env.BASE_URL || "http://127.0.0.1:5173";
 const PREFIX = process.argv[3] || "/tmp/pw/compare";
 const VIEWPORTS = [
   { width: 1440, height: 1100, name: "1440" },
