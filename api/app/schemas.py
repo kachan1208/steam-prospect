@@ -242,6 +242,11 @@ class GameSearchList(BaseModel):
     # When the owners estimates (owners_mid) were taken — a frozen SteamSpy-era snapshot,
     # far older than the mart. None until the mart stamps mart_meta.owners_as_of.
     owners_as_of: Optional[str] = None
+    # The population scope applied (app/scope.py). Under scope=indie, n_scope_unknown is how
+    # many games matched every other filter but have NO indie flag (unknown != indie, so
+    # they were left out) — show it; None when scope=all.
+    scope: Literal["all", "indie"] = "all"
+    n_scope_unknown: Optional[int] = None
 
 
 class TagSuggestion(BaseModel):
@@ -872,6 +877,11 @@ class NicheGameList(BaseModel):
     canonical_key: str
     requested_key: str
     alias_of: Optional[str] = None
+    # Population scope (app/scope.py): under scope=indie `total`/`items` are the cut's
+    # Indie-flagged members and n_scope_unknown counts the members left out because their
+    # flag is unknown; None under scope=all.
+    scope: Literal["all", "indie"] = "all"
+    n_scope_unknown: Optional[int] = None
 
 
 class NicheDistribution(BaseModel):
@@ -909,6 +919,9 @@ class NicheDistribution(BaseModel):
     canonical_key: str
     requested_key: str
     alias_of: Optional[str] = None
+    # Population scope; scope=indie is always computed so the buckets round-trip into
+    # /games?scope=indie exactly.
+    scope: Literal["all", "indie"] = "all"
 
 
 class NicheCombinedInput(BaseModel):
@@ -950,6 +963,11 @@ class NicheCombined(BaseModel):
     items: list[NicheGameRow] = Field(default_factory=list)
     limit: int
     offset: int
+    # Population scope: under scope=indie EVERY number above (inputs' n_games, the set, its
+    # percentiles) is over Indie-flagged members only; n_scope_unknown counts the games of
+    # the unscoped set left out because their flag is unknown. None under scope=all.
+    scope: Literal["all", "indie"] = "all"
+    n_scope_unknown: Optional[int] = None
 
 
 class HeadlineCut(BaseModel):

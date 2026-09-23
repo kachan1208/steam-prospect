@@ -39,6 +39,8 @@ import duckdb
 from fastapi import APIRouter, HTTPException, Query, Response
 
 from .. import aliases, analytics_db, histograms, paging
+from .. import scope as scope_mod
+from ..scope import Scope
 from ..schemas import (
     HeadlineCut,
     HistBucket,
@@ -564,6 +566,44 @@ def _like_escape(q: str) -> str:
     return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+# The member-profile filters on the niche list — "niches made of games like mine": how
+# indie / how self-published the cut's games are, what they cost, how long they are. Each
+# compares a mart_niche column over the SAME per-cut population as the row's other figures.
+# NULL (unmeasured) never satisfies a bound — the same stance as solo_only's NULL rule.
+# indie_share and med_playtime_h ship with the solo-evidence columns, so they are gated on
+# them; self_pub_share and median_price are in every mart.
+_PROFILE_BOUNDS = (
+    # (param, column, operator, needs the solo-evidence columns)
+    ("min_indie_share", "indie_share", ">=", True),
+    ("min_self_pub_share", "self_pub_share", ">=", False),
+    ("min_median_price", "median_price", ">=", False),
+    ("max_median_price", "median_price", "<=", False),
+    ("min_med_playtime_h", "med_playtime_h", ">=", True),
+    ("max_med_playtime_h", "med_playtime_h", "<=", True),
+)
+
+
+def _profile_filters(bounds: dict[str, float | None]) -> tuple[str, list]:
+    for lo, hi in (("min_median_price", "max_median_price"),
+                   ("min_med_playtime_h", "max_med_playtime_h")):
+        if bounds.get(lo) is not None and bounds.get(hi) is not None and bounds[lo] > bounds[hi]:
+            raise HTTPException(status_code=422, detail=f"{lo} must not exceed {hi}")
+    sql, params = "", []
+    for name, col, op, gated in _PROFILE_BOUNDS:
+        value = bounds.get(name)
+        if value is None:
+            continue
+        if gated and not _has_solo_evidence():
+            raise HTTPException(
+                status_code=503,
+                detail=f"mart_niche predates the {col} column (the solo-evidence columns) — "
+                "rebuild the marts (task etl).",
+            )
+        sql += f" AND {col} {op} ?"
+        params.append(value)
+    return sql, params
+
+
 def _build_filters(
     dimension: str,
     window: str,
@@ -637,6 +677,21 @@ def list_niches(
     # so the radar's population rule must never filter it globally — the Radar board is
     # the consumer that passes solo_only=1.
     solo_only: bool = Query(False, description=_SOLO_ONLY_DESC + " Default off."),
+    # Member-profile filters (see _PROFILE_BOUNDS). NULL (unmeasured) never passes.
+    min_indie_share: float | None = Query(
+        None, ge=0, le=1, description="Floor on indie_share (share of the cut's games Steam-Indie-flagged)."
+    ),
+    min_self_pub_share: float | None = Query(
+        None, ge=0, le=1, description="Floor on self_pub_share (share of the cut's games self-published)."
+    ),
+    min_median_price: float | None = Query(None, ge=0, description="Floor on median_price (USD)."),
+    max_median_price: float | None = Query(None, ge=0, description="Ceiling on median_price (USD)."),
+    min_med_playtime_h: float | None = Query(
+        None, ge=0, description="Floor on med_playtime_h (median member playtime, hours)."
+    ),
+    max_med_playtime_h: float | None = Query(
+        None, ge=0, description="Ceiling on med_playtime_h (median member playtime, hours)."
+    ),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> NicheList:
@@ -646,6 +701,12 @@ def list_niches(
     where, params = _build_filters(
         dimension, window, min_reviews, q, tiers_arg, min_total_players, min_total_owners
     )
+    psql, pparams = _profile_filters({
+        "min_indie_share": min_indie_share, "min_self_pub_share": min_self_pub_share,
+        "min_median_price": min_median_price, "max_median_price": max_median_price,
+        "min_med_playtime_h": min_med_playtime_h, "max_med_playtime_h": max_med_playtime_h,
+    })
+    where, params = where + psql, params + pparams
     if solo_only:
         where, params = _apply_solo_only(where, params)
     total = analytics_db.scalar(f"SELECT COUNT(*) FROM mart_niche {where}", params)
@@ -683,6 +744,7 @@ def niches_combined(
     min_reviews: int = Query(50, ge=0, le=100000),
     sort: str = Query("revenue", pattern="^(revenue|price|reviews|release_year|name)$"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
+    scope: Scope = Query("all", description=scope_mod.SCOPE_DESC),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0, le=50000),
 ) -> NicheCombined:
@@ -726,11 +788,18 @@ def niches_combined(
     # Per-input contribution. Counted straight off mart_niche_game, whose per-cut row count
     # is guaranteed equal to mart_niche.n_games — so this is the same number the list page
     # shows, not a re-derivation that could disagree with it.
+    # scope=indie narrows the MEMBERSHIP itself, so every number below (per-input sizes,
+    # the combined set, its percentiles) describes the same indie population.
+    scope_sql = (
+        f" AND appid IN (SELECT appid FROM mart_game WHERE {scope_mod.game_condition()})"
+        if scope == "indie" else ""
+    )
     per_niche = {
         (r["dimension"], r["key"]): int(r["n"])
         for r in _mq(
             "SELECT dimension, key, COUNT(*) AS n FROM mart_niche_game "
-            f"WHERE win = ? AND min_reviews = ? AND ({pair_sql}) GROUP BY dimension, key",
+            f"WHERE win = ? AND min_reviews = ? AND ({pair_sql}){scope_sql} "
+            "GROUP BY dimension, key",
             cut_params + pair_params,
         )
     }
@@ -747,15 +816,31 @@ def niches_combined(
     # _parse_niche_specs, and 'tag'/'genre' can't collide across the ':' join, so
     # COUNT(DISTINCT dimension || ':' || key) is injective here.
     threshold = len(pairs) if mode == "intersect" else 1
-    sel_cte = (
-        "WITH hits AS ("
-        " SELECT appid, COUNT(DISTINCT dimension || ':' || key) AS n_hit"
-        " FROM mart_niche_game"
-        f" WHERE win = ? AND min_reviews = ? AND ({pair_sql})"
-        " GROUP BY appid"
-        "), sel AS (SELECT appid FROM hits WHERE n_hit >= ?) "
-    )
+
+    def _sel_cte(extra: str) -> str:
+        return (
+            "WITH hits AS ("
+            " SELECT appid, COUNT(DISTINCT dimension || ':' || key) AS n_hit"
+            " FROM mart_niche_game"
+            f" WHERE win = ? AND min_reviews = ? AND ({pair_sql}){extra}"
+            " GROUP BY appid"
+            "), sel AS (SELECT appid FROM hits WHERE n_hit >= ?) "
+        )
+
+    sel_cte = _sel_cte(scope_sql)
     sel_params = cut_params + pair_params + [threshold]
+    n_scope_unknown: int | None = None
+    if scope == "indie":
+        # Games in the UNSCOPED combined set whose indie flag is unknown — left out, counted.
+        n_scope_unknown = int(
+            _mscalar(
+                _sel_cte("")
+                + "SELECT COUNT(*) AS n FROM sel s JOIN mart_game g ON g.appid = s.appid "
+                f"WHERE {scope_mod.game_unknown('g.')}",
+                sel_params,
+            )
+            or 0
+        )
 
     stats = _mq(
         sel_cte
@@ -793,6 +878,8 @@ def niches_combined(
         items=[NicheGameRow(**r) for r in rows],
         limit=limit,
         offset=offset,
+        scope=scope,
+        n_scope_unknown=n_scope_unknown,
     )
 
 
@@ -845,6 +932,7 @@ def niche_games(
     rev_max: float | None = Query(None, description="Cross-filter: est_revenue < this"),
     price_min: float | None = Query(None, description="Cross-filter: price_initial >= this"),
     price_max: float | None = Query(None, description="Cross-filter: price_initial < this"),
+    scope: Scope = Query("all", description=scope_mod.SCOPE_DESC),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0, le=50000),
 ) -> NicheGameList:
@@ -872,6 +960,18 @@ def niche_games(
     )
     params: list = [dimension, key, win, min_reviews]
     bsql, bparams = _bucket_filters(rev_min, rev_max, price_min, price_max)
+    n_scope_unknown: int | None = None
+    if scope == "indie":
+        # Members matching the cut + cross-filter whose indie flag is unknown — excluded
+        # by the scope, and counted so the page can say so.
+        n_scope_unknown = int(
+            _mscalar(
+                f"SELECT COUNT(*) AS n {base}{bsql} AND {scope_mod.game_unknown('g.')}",
+                params + bparams,
+            )
+            or 0
+        )
+        bsql += f" AND {scope_mod.game_condition('g.')}"
 
     total = _mscalar(f"SELECT COUNT(*) AS n {base}{bsql}", params + bparams)
     rows = _mq(
@@ -884,6 +984,8 @@ def niche_games(
         limit=limit,
         offset=offset,
         owners_as_of=analytics_db.mart_meta().get("owners_as_of"),
+        scope=scope,
+        n_scope_unknown=n_scope_unknown,
         **ident,
     )
 
@@ -896,6 +998,7 @@ def niche_distribution(
     win: str = Query("all", pattern="^(all|24m)$"),
     window: str | None = Query(None, pattern="^(all|24m)$", description=_WINDOW_ALIAS_DESC),
     min_reviews: int = Query(50, ge=0, le=100000),
+    scope: Scope = Query("all", description=scope_mod.SCOPE_DESC),
 ) -> NicheDistribution:
     """Revenue or price histogram for one niche cut. See schemas.NicheDistribution for the
     bucket contract; the short version is that buckets are half-open [x_min, x_max) and
@@ -904,13 +1007,18 @@ def niche_distribution(
     revenue on the default cut is the one thing on this surface that works WITHOUT
     mart_niche_game — mart_niche_hist already ships it — so the charts light up the moment
     the API deploys, hours before the rebuild.
+
+    `scope` takes the same values as /games' and keeps the round trip intact under it:
+    scope=indie histograms count exactly the rows /games?scope=indie returns per bucket (so
+    it is always computed — mart_niche_hist is an all-games histogram).
     """
     win = window or win  # `window` is an accepted alias — see _WINDOW_ALIAS_DESC
     _require_dimension(dimension)
-    ident = _identity(dimension, key)
+    ident = {**_identity(dimension, key), "scope": scope}
     key = ident["canonical_key"]
+    scope_sql = f" AND {scope_mod.game_condition('g.')}" if scope == "indie" else ""
 
-    if metric == "revenue":
+    if metric == "revenue" and scope == "all":
         # Prefer the precomputed mart when the request matches the ONE cut it materialises
         # (win='all', min_reviews=MIN_REVIEWS_DEFAULT — see _HIST_CUT): it is a small keyed
         # lookup instead of a millions-row join, and it is the exact same binning, so the
@@ -959,7 +1067,7 @@ def niche_distribution(
             f"pow(10, ({bkt} + 1) / 2.0) AS x_max, "
             "COUNT(*) AS count "
             "FROM m JOIN mart_game g ON g.appid = m.appid "
-            "WHERE g.est_rev_reviews IS NOT NULL "
+            f"WHERE g.est_rev_reviews IS NOT NULL{scope_sql} "
             "GROUP BY 1, 2, 3 ORDER BY 1"
         )
         buckets = histograms.log_buckets(_mq(sql, params))
@@ -988,7 +1096,7 @@ def niche_distribution(
         f"CAST(CASE WHEN {bkt} = -1 THEN 0.01 ELSE ({bkt} + 1) * 2.5 END AS DOUBLE) AS x_max, "
         "COUNT(*) AS count "
         "FROM m JOIN mart_game g ON g.appid = m.appid "
-        "WHERE g.price_initial IS NOT NULL "
+        f"WHERE g.price_initial IS NOT NULL{scope_sql} "
         "GROUP BY 1, 2, 3 ORDER BY 1"
     )
     buckets = [HistBucket(**b) for b in _mq(sql, params)]
@@ -1211,16 +1319,28 @@ def export_csv(
     order: str = Query("desc", pattern="^(asc|desc)$"),
     q: str | None = Query(None),
     tiers: str | None = Query("micro,theme"),
+    min_indie_share: float | None = Query(None, ge=0, le=1),
+    min_self_pub_share: float | None = Query(None, ge=0, le=1),
+    min_median_price: float | None = Query(None, ge=0),
+    max_median_price: float | None = Query(None, ge=0),
+    min_med_playtime_h: float | None = Query(None, ge=0),
+    max_med_playtime_h: float | None = Query(None, ge=0),
     limit: int = Query(1000, ge=1, le=5000),
 ) -> Response:
     # The SAME capability gates as list_niches — the export is the list in CSV clothes,
     # so a request the list would answer with a specific 503 must not fall through to
     # _niche_query's generic (and here misleading) v2-columns 503. Same cut validation too:
-    # an unknown min_reviews used to download a header-only CSV.
+    # an unknown min_reviews used to download a header-only CSV. Same profile filters.
     _require_list_capabilities(sort, min_reviews)
     _require_list_cut(window, min_reviews)
     tiers_arg = tiers if tiers else None
     where, params = _build_filters(dimension, window, min_reviews, q, tiers_arg, None, None)
+    psql, pparams = _profile_filters({
+        "min_indie_share": min_indie_share, "min_self_pub_share": min_self_pub_share,
+        "min_median_price": min_median_price, "max_median_price": max_median_price,
+        "min_med_playtime_h": min_med_playtime_h, "max_med_playtime_h": max_med_playtime_h,
+    })
+    where, params = where + psql, params + pparams
     rows = _niche_query(where, params, sort, order, limit, None)
 
     fields = ["window" if c == "win" else c for c in _cols()]

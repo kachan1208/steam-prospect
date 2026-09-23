@@ -23,6 +23,8 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from .. import analytics_db, paging
+from .. import scope as scope_mod
+from ..scope import Scope
 
 router = APIRouter(prefix="/api/entities", tags=["entities"])
 
@@ -124,6 +126,9 @@ class EntitySearchRow(BaseModel):
     p90_rev: float | None = None  # absent on marts that predate it
     hit_rate_200k: float | None
     top_genres: list[str]
+    # Share of the entity's FLAGGED games that are Steam Indie-flagged — the measure the
+    # indie scope keeps on (>= 0.5). Computed only under scope=indie; null otherwise.
+    indie_share: float | None = None
 
 
 class EntitySearchList(BaseModel):
@@ -131,6 +136,10 @@ class EntitySearchList(BaseModel):
     total: int
     limit: int
     offset: int = 0
+    # Population scope (app/scope.py). Under scope=indie, n_scope_unknown counts the
+    # entities that matched everything else but have no flagged game (unknown != indie).
+    scope: Scope = "all"
+    n_scope_unknown: int | None = None
 
 
 class EntitySummary(BaseModel):
@@ -198,6 +207,7 @@ def search_entities(
         "then n_games, then name, so a page order is stable across requests."
     ),
     order: str = Query("desc", pattern="^(asc|desc)$"),
+    scope: Scope = Query("all", description=scope_mod.ENTITY_SCOPE_DESC),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0, le=MAX_OFFSET),
 ) -> EntitySearchList:
@@ -216,6 +226,29 @@ def search_entities(
     if role:
         where.append("role = ?")
         params.append(role)
+
+    # scope=indie: mart_entity carries no indie measure of its own, so each entity's share
+    # of Indie-flagged games is aggregated here (mart_entity_games x mart_game — ~20ms on
+    # the real mart, paid only when the scope is asked for) and the entity kept when at
+    # least half of its FLAGGED games are indie. Unflagged-only entities are unknown:
+    # excluded and counted. See app/scope.py for the definition and why self-publishing
+    # alone is not a size signal.
+    source, share_col = "mart_entity", ""
+    n_scope_unknown: int | None = None
+    if scope == "indie":
+        source = (
+            "(SELECT e.*, s.indie_share FROM mart_entity e LEFT JOIN ("
+            " SELECT eg.role, eg.name, AVG(CAST(g.is_indie AS DOUBLE)) AS indie_share"
+            " FROM mart_entity_games eg JOIN mart_game g ON g.appid = eg.appid"
+            " GROUP BY eg.role, eg.name) s ON s.role = e.role AND s.name = e.name) ent"
+        )
+        share_col = ", indie_share"
+        unknown_where = "WHERE " + " AND ".join([*where, "indie_share IS NULL"])
+        n_scope_unknown = int(
+            _q(f"SELECT COUNT(*) AS n FROM {source} {unknown_where}", params)[0]["n"] or 0
+        )
+        where.append("indie_share >= ?")
+        params.append(scope_mod.ENTITY_INDIE_MIN_SHARE)
     where_sql = "WHERE " + " AND ".join(where)
 
     # `total` rides on every row as a window count, so the page and its count come out of
@@ -231,8 +264,8 @@ def search_entities(
         unique=("name", "role"),
     )
     rows = _q(
-        f"SELECT {_search_cols()}, COUNT(*) OVER () AS total_n FROM mart_entity {where_sql} "
-        f"{order_sql} LIMIT ? OFFSET ?",
+        f"SELECT {_search_cols()}{share_col}, COUNT(*) OVER () AS total_n FROM {source} "
+        f"{where_sql} {order_sql} LIMIT ? OFFSET ?",
         params + [limit, offset],
     )
     if rows:
@@ -240,7 +273,7 @@ def search_entities(
     else:
         # An empty page has no row to read the window count from — nothing matched, or the
         # offset ran past the end — so this is the one case that pays for a count scan.
-        total = int(_q(f"SELECT COUNT(*) AS n FROM mart_entity {where_sql}", params)[0]["n"] or 0)
+        total = int(_q(f"SELECT COUNT(*) AS n FROM {source} {where_sql}", params)[0]["n"] or 0)
     items = [
         EntitySearchRow(**{
             **{k: v for k, v in r.items() if k != "total_n"},
@@ -248,7 +281,10 @@ def search_entities(
         })
         for r in rows
     ]
-    return EntitySearchList(items=items, total=total, limit=limit, offset=offset)
+    return EntitySearchList(
+        items=items, total=total, limit=limit, offset=offset,
+        scope=scope, n_scope_unknown=n_scope_unknown,
+    )
 
 
 @router.get("/profile", response_model=EntityProfileResponse)

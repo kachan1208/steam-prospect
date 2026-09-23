@@ -7,6 +7,8 @@ import duckdb
 from fastapi import APIRouter, HTTPException, Query
 
 from .. import aliases, analytics_db, paging, signals_db
+from .. import scope as scope_mod
+from ..scope import Scope
 from ..schemas import (
     AspectReviewExcerpt,
     AspectReviewsResponse,
@@ -244,6 +246,7 @@ def search_games(
         "(Steam links a Metacritic page for few games), so this drops the vast majority — "
         "use it to benchmark against critically-reviewed titles, not to filter a whole niche.",
     ),
+    scope: Scope = Query("all", description=scope_mod.SCOPE_DESC),
     sort: str = Query("total_reviews"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(25, ge=1, le=100),
@@ -253,6 +256,12 @@ def search_games(
 ) -> GameSearchList:
     if sort not in SORTABLE:
         raise HTTPException(status_code=400, detail=f"sort must be one of {sorted(SORTABLE)}")
+    if scope == "indie" and indie is False:
+        raise HTTPException(
+            status_code=422,
+            detail="scope=indie and indie=false contradict each other (scope=indie IS indie=true "
+            "plus a count of the games whose indie flag is unknown)",
+        )
     if (sort == "lifetime_months" or min_lifetime_months is not None or lifetime_alive is not None) \
             and not _has_lifetime_game():
         raise HTTPException(
@@ -353,6 +362,15 @@ def search_games(
     if min_metacritic is not None:
         where.append("metacritic_score >= ?")
         params.append(min_metacritic)
+    n_scope_unknown: int | None = None
+    if scope == "indie":
+        # How many games matched EVERY other filter but carry no indie flag (added after
+        # the catalog's analysis snapshot) — excluded by the scope, and said so.
+        unknown_sql = "WHERE " + " AND ".join([*where, scope_mod.game_unknown()])
+        n_scope_unknown = int(
+            analytics_db.scalar(f"SELECT COUNT(*) FROM mart_game {unknown_sql}", params) or 0
+        )
+        where.append(scope_mod.game_condition())
     where_sql = "WHERE " + " AND ".join(where)
 
     total = analytics_db.scalar(f"SELECT COUNT(*) FROM mart_game {where_sql}", params)
@@ -372,6 +390,8 @@ def search_games(
         offset=offset,
         data_as_of=data_as_of,
         owners_as_of=analytics_db.mart_meta().get("owners_as_of"),
+        scope=scope,
+        n_scope_unknown=n_scope_unknown,
     )
 
 
