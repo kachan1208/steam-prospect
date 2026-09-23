@@ -10,7 +10,7 @@ import {
 } from "recharts";
 
 import type { EntityGameRow } from "../../lib/api";
-import { axisScale, fmtUsd } from "../../lib/format";
+import { axisScale, fmtUsd, PRICE_UNKNOWN, priceKind } from "../../lib/format";
 import { CSS_VAR } from "../../lib/palette";
 import { useDragZoom } from "../../lib/useDragZoom";
 import { SELECTION_AREA_PROPS, ZoomFrame } from "./ZoomFrame";
@@ -96,11 +96,24 @@ export function EntityReleaseBars({
           content={({ active, payload }) => {
             if (!active || !payload || payload.length === 0) return null;
             const g = payload[0].payload as (typeof data)[number];
+            // A bar at zero is one of three different things, and the tooltip says which:
+            // a free release (no box revenue), a price we don't know (no estimate made), or a
+            // paid release the estimate doesn't cover. Printing "$0.00" for all three read as
+            // "this game earned nothing".
+            const kind = priceKind(g);
+            const revenue =
+              kind === "free"
+                ? "Free — no box revenue"
+                : kind === "unknown"
+                  ? `${PRICE_UNKNOWN} — no estimate`
+                  : g.est_rev_reviews == null
+                    ? "no estimate"
+                    : fmtUsd(g.est_rev_reviews);
             return (
               <TooltipPanel
                 title={`${g.name ?? `App ${g.appid}`}${g.release_year != null ? ` (${g.release_year})` : ""}`}
                 rows={[
-                  { label: "Est. revenue", value: fmtUsd(g.rev), color: CSS_VAR.demand },
+                  { label: "Est. revenue", value: revenue, color: CSS_VAR.demand },
                   { label: "Release #", value: String(g.seq) },
                 ]}
               />

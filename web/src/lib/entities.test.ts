@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   ENTITY_MIN_ESTIMATED_FOR_VERDICT,
+  ENTITY_MIN_FOR_ANY_RATE,
   gamesSub,
+  hitCount,
+  hitCountLabel,
   hitRateSub,
   medianRevSub,
   revenueEstimateBase,
+  sampleSize,
   splitEntities,
   totalRevSub,
 } from "./entities";
@@ -131,7 +135,7 @@ describe("revenue tile sub-labels", () => {
     expect(medianRevSub("$3.9M", base)).toBe(
       "median $3.9M — both over the 33 of 50 releases with an estimate",
     );
-    expect(totalRevSub(base)).toBe("Boxleiter gross over the 33 of 50 releases with an estimate");
+    expect(totalRevSub(base)).toBe("Summed over the 33 of 50 releases with an estimate");
     expect(gamesSub(base)).toBe("17 with no revenue estimate");
   });
 
@@ -142,7 +146,7 @@ describe("revenue tile sub-labels", () => {
     expect(hitRateSub(base)).toBe("Share of all 12 releases clearing $200K est.");
     expect(hitRateSub(base)).not.toContain("have none");
     expect(medianRevSub("$155.9M", base)).toBe("median $155.9M per release");
-    expect(totalRevSub(base)).toBe("Boxleiter gross across the catalog");
+    expect(totalRevSub(base)).toBe("Summed over all 12 releases");
     // Nothing to disclose on the Games tile, so it stays the bare count it has always been.
     expect(gamesSub(base)).toBeUndefined();
   });
@@ -151,6 +155,35 @@ describe("revenue tile sub-labels", () => {
     const base = revenueEstimateBase([{ est_rev_reviews: null }, { est_rev_reviews: null }]);
     expect(hitRateSub(base)).toBe("No release has a revenue estimate");
     expect(totalRevSub(base)).toBe("No release has a revenue estimate");
+  });
+});
+
+describe("sampleSize / hitCount — a rate over one release is a count, not a percent", () => {
+  it("grades the estimated base: none, tiny (< 3), small (< 10), ok", () => {
+    expect(sampleSize(0)).toBe("none");
+    expect(sampleSize(1)).toBe("tiny");
+    expect(sampleSize(2)).toBe("tiny");
+    expect(sampleSize(3)).toBe("small");
+    expect(sampleSize(9)).toBe("small");
+    expect(sampleSize(10)).toBe("ok");
+    expect(ENTITY_MIN_FOR_ANY_RATE).toBe(3);
+  });
+
+  it("recovers the count from the rate and its exact base", () => {
+    // Hooded Horse: 0.9090… × 33 = 30 releases over $200K.
+    const hh = revenueEstimateBase(HOODED_HORSE);
+    expect(hitCount(0.9090909090909091, hh)).toBe(30);
+    expect(hitCountLabel(30, hh)).toBe("30 of 33 releases");
+    // LocalThunk: Balatro alone — "100%" was the whole record.
+    const one = revenueEstimateBase([{ est_rev_reviews: 89_400_000 }]);
+    expect(hitCount(1, one)).toBe(1);
+    expect(hitCountLabel(1, one)).toBe("1 of 1 release");
+    expect(hitCount(null, one)).toBeNull();
+    expect(hitCount(1, revenueEstimateBase([]))).toBeNull();
+  });
+
+  it("names a single release plainly on the total tile", () => {
+    expect(totalRevSub(revenueEstimateBase([{ est_rev_reviews: 1 }]))).toBe("Its one release");
   });
 });
 

@@ -1643,12 +1643,15 @@ export interface EntitySearchParams {
 
 /**
  * Search OR browse entities. An empty/absent `q` is the API's BROWSE mode, so the query is
- * always enabled. `total` counts the whole match set (not the page), so the caller can page.
+ * enabled by default. `total` counts the whole match set (not the page), so the caller can
+ * page. `enabled: false` holds a lookup until its inputs exist (the entity profile's
+ * other-role probe).
  */
-export function useEntitySearch(params: EntitySearchParams) {
+export function useEntitySearch(params: EntitySearchParams, opts: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: ["entity-search", params],
     queryFn: ({ signal }) => request<EntitySearchList>(`/entities/search${qs(params)}`, { signal }),
+    enabled: opts.enabled ?? true,
     placeholderData: keepPreviousData,
     staleTime: 5 * 60_000, // nightly mart data — back-navigation shouldn't refetch
     // 503 means "marts not built yet" — a stable answer; surface the refreshing state
