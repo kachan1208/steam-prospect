@@ -17,13 +17,20 @@ import prospect_mcp as srv
 ENVELOPE_KEYS = ("data_as_of", "mart_version", "score_version", "warnings")
 
 
+def envelope_lead(obj) -> list:
+    """The payload's leading keys with the OPTIONAL owners_as_of envelope key set aside (it is
+    only present on marts whose mart_meta carries it, and sits before warnings)."""
+    keys = [k for k in list(obj)[: len(ENVELOPE_KEYS) + 1] if k != "owners_as_of"]
+    return keys[: len(ENVELOPE_KEYS)]
+
+
 def show(title: str, obj) -> None:
     print(f"\n=== {title} ===")
     print(json.dumps(obj, indent=2, default=str))
     # Every tool response (errors included) must lead with the envelope, so a stale or
     # pre-v2 mart can never answer silently.
     if isinstance(obj, dict):
-        assert list(obj)[:4] == list(ENVELOPE_KEYS), f"{title}: envelope missing/out of order: {list(obj)[:5]}"
+        assert envelope_lead(obj) == list(ENVELOPE_KEYS), f"{title}: envelope missing/out of order: {list(obj)[:6]}"
         assert obj["score_version"] in ("v2", "v1-legacy")
         assert isinstance(obj["warnings"], list)
 
@@ -47,7 +54,7 @@ def check_wire_contract() -> None:
         parsed = json.loads(text)
         assert text == json.dumps(parsed, ensure_ascii=False, separators=(",", ":")), \
             "wire JSON must be compact (no indent, no spaces after separators)"
-        assert list(parsed)[:4] == list(ENVELOPE_KEYS)
+        assert envelope_lead(parsed) == list(ENVELOPE_KEYS), list(parsed)[:6]
         return {t.name: len(t.description or "") for t in tools}
 
     lengths = asyncio.run(run())
