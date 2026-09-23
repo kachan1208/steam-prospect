@@ -624,7 +624,7 @@ _FLAG_RULES: dict[str, str] = {
     "expect the median outcome, not the winners. The Radar never rings it 'enter' (it rings "
     "'watch': demand surging, but winner-take-most revenue).",
     "low_newcomer_economics": "entrant_ratio < 1.0 — games from the last 24 months earn less "
-    "than the niche's back catalog (catalog norm ~1.08); require >= 1.0.",
+    "than the niche's back catalog (catalog norm ~0.79); require >= 1.0.",
     "newcomer_economics_unverified": "entrant_ratio unknown — recent-entrant pay is "
     "unverified; do not assume it passes.",
     "supply_flooding": "releases up > 15% YoY (the Radar's crowding bar) — entrants arriving "
@@ -661,7 +661,7 @@ _OWNER_RULES = [
     "window='all' is history.",
     "Negative saturation_yoy + low competition = DECLINE (everyone stopped entering), not "
     "an opportunity.",
-    "Verify recent-entrant economics: entrant_ratio >= 1.0 (catalog norm ~1.08).",
+    "Verify recent-entrant economics: entrant_ratio >= 1.0 (catalog norm ~0.79).",
     "Headline picks are micro-genres. Themes are modifiers to attach to a pick (tag_combos "
     "finds pairings); umbrella and meta tags are never picks.",
     "Multiplayer-dependent niches (solo_tier 'team', singleplayer share < 0.80) are out "
@@ -1019,7 +1019,7 @@ For each niche (a Steam community `tag` or a Steam `genre`), computed at 6 cuts 
   never a penalty). **supply_room** is the WORSE of two supply reads, so either alone can
   sink a score: the release pipeline's growth measured AGAINST demand growth (50 when
   supply outgrows demand by the Radar's +15%/yr flooding bar), and entrant_room (0 at
-  entrant_ratio 0.5, 100 at the catalog norm 1.08, capped there).
+  entrant_ratio 0.5, 100 at the catalog norm 0.79, capped there).
 
   READ THE PARTS, NOT JUST THE TOTAL: "Deckbuilding 71.9" is momentum 99 + supply_room 100
   (demand +119%/24m outrunning a +36% release pipeline), while "Hunting 77.2" is momentum
@@ -1066,10 +1066,11 @@ _DOCS["fields"] = """## Niche fields (mart_niche)
   median entrant. Sortable.
 - **entrant_ratio** = (24m median_rev) / (all-time median_rev) for the same (dimension,
   key, min_reviews) — same value on both window rows. INTERPRET AGAINST THE NORM: the
-  catalog-median tag sits at ~1.08 (price inflation + the review floor filters recent
-  releases harder), so ~1.0-1.3 is unremarkable; < 1 is a real warning that newcomers earn
-  less than the back catalog did; a high ratio over a SHRINKING pipeline (few self-selected
-  survivors) is not health. NULL = no 24m cut or a zero/missing all-time median.
+  catalog-median tag sits at ~0.79 (with Early Access graduates dated from their EA
+  launch, recent entrants typically earn less than a niche's back catalog), so >= 1.0 —
+  the owner's bar — is genuinely good, ~0.8-1.0 is typical, and well under ~0.8 is a real
+  warning that newcomers earn less than the back catalog did; a high ratio over a
+  SHRINKING pipeline (few self-selected survivors) is not health. NULL = no 24m cut or a zero/missing all-time median.
 - **solo_viability** = share of the cut's scored games playable single-player (Steam's own
   `categories` field, community-tag fallback), per cut. **A FLAG, NOT A SCALE.** Measured
   over 219 live niches (tag / 24m / min50):
@@ -1118,7 +1119,7 @@ _DOCS["falsification"] = """## Falsification rules — how each metric lies
    Naval/Transportation/Diplomacy at the top of the old ranking). Still your job under v2:
    a niche whose demand AND supply are both falling nets out neutral on supply_room, and
    only momentum catches it — read momentum, not just the total.
-2. entrant_ratio reads AGAINST THE NORM (~1.08), not against 1.0 alone; a high ratio over
+2. entrant_ratio reads AGAINST THE NORM (~0.79), not against 1.0 alone; a high ratio over
    a shrinking pipeline (few, self-selected survivors) is NOT health.
 3. Verify recent entrants actually get paid: with window="24m", median_rev IS the
    recent-entrant median. Cross-check hit_rate_200k and n_games (a great median over 30
@@ -1537,7 +1538,7 @@ def find_niches(
     - Bearish reading first: state every flag before any score.
     - Never quote opportunity_v2 alone: give momentum, market_pull, revenue_spread, quality_gap and supply_brake, and say which carried it.
     - Negative saturation_yoy + low competition = DECLINE, not opportunity (decline_signature).
-    - Recent entrants must get paid: entrant_ratio >= 1.0 (catalog norm ~1.08).
+    - Recent entrants must get paid: entrant_ratio >= 1.0 (catalog norm ~0.79).
     - winner_concentration > 0.85 = winner-take-most: red flag; the Radar never rings it 'enter'.
     - Solo devs: drop solo_tier 'team' (multiplayer_dependent), or pass solo_only=true.
     - Headline picks are micro-genres (the default include_tiers). Themes are modifiers to attach to a pick; umbrella/meta tags are never picks.

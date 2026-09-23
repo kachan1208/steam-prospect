@@ -36,7 +36,7 @@ function martRow(i: {
   const sg = i.sat === null || emerging ? null : Math.log(Math.max(1 + i.sat, 0.001));
   const momentum = dg === null ? null : 50 + 50 * Math.tanh(dg / (Math.log(1 + 40 / 100) / 2));
   const flood = sg === null ? null : 100 * (1 - clamp01((sg - (dg ?? 0)) / (2 * Math.log(1 + 0.15))));
-  const entrant = i.er === null || emerging ? null : 100 * clamp01((i.er - 0.5) / (1.08 - 0.5));
+  const entrant = i.er === null || emerging ? null : 100 * clamp01((i.er - 0.5) / (0.79 - 0.5));
   const spread = i.wc === null ? null : 100 * clamp01((1 - i.wc) / (2 * (1 - 0.85)));
   const pull = 0.6 * i.typical + 0.4 * i.size;
   const room = flood === null ? entrant : entrant === null ? flood : Math.min(flood, entrant);
@@ -82,9 +82,9 @@ describe("the part formulas agree with mart_niche.sql's anchors", () => {
     expect(floodRoom(-0.3, 0)).toBe(100); // a shrinking pipeline earns no bonus above "calm"
   });
 
-  it("entrant room: 0 at half the back catalog, 100 at the 1.08× norm and capped there", () => {
+  it("entrant room: 0 at half the back catalog, 100 at the 0.79× norm and capped there", () => {
     expect(entrantRoom(0.5)).toBe(0);
-    expect(entrantRoom(1.08)).toBeCloseTo(100, 9);
+    expect(entrantRoom(0.79)).toBeCloseTo(100, 9);
     expect(entrantRoom(3.3)).toBe(100);
   });
 
@@ -120,7 +120,7 @@ describe("opportunityBreakdown — bearish reading first, every number worked", 
     const m = opportunityBreakdown(row);
     expect(m.binding).toBe("entrant");
     expect(m.brakeWorked).toBe(`0.35 + 0.65 × ${row.supply_room!.toFixed(2)} ÷ 100 = ×${fmtMultiplier(row.supply_brake!)}`);
-    expect(m.headline).toMatch(/^Held back by the supply brake \(×0\.48\): newcomers earn 0\.62× the back catalog's median, under the 1\.08× norm/);
+    expect(m.headline).toMatch(/^Held back by the supply brake \(×0\.62\): newcomers earn 0\.62× the back catalog's median, under the 0\.79× norm/);
     expect(m.reproduces).toBe(true);
   });
 

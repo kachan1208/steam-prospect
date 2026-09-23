@@ -23,7 +23,7 @@
  *   - ONE canonical name per concept. `replaces` lists the retired names so the page agents
  *     can find and swap them.
  *
- * Constants quoted in formulas (0.40 / 0.22 / 0.20 / 0.18, 0.35, 1.08, 0.85, +40%, +15%, 30
+ * Constants quoted in formulas (0.40 / 0.22 / 0.20 / 0.18, 0.35, 0.79, 0.85, +40%, +15%, 30
  * owners per review …) mirror etl/build_marts.py; keep them in lockstep with it.
  */
 
@@ -34,7 +34,7 @@ export type GlossaryUnit =
   | "count"
   | "percent" // a share or a change, printed as %
   | "percentPoints"
-  | "ratio" // e.g. 1.08×
+  | "ratio" // e.g. 0.79×
   | "players"
   | "hours"
   | "months"
@@ -204,8 +204,8 @@ export const GLOSSARY = {
   entrant_room: {
     label: "Entrant room",
     short: "Entrant room",
-    meaning: "Do recent entrants earn? 0 when newcomers earn half the back catalog's median or less, 100 at the 1.08× catalog norm.",
-    formula: "100 × clamp( (Newcomer earnings − 0.5) ÷ (1.08 − 0.5), 0, 1 )",
+    meaning: "Do recent entrants earn? 0 when newcomers earn half the back catalog's median or less, 100 at the 0.79× catalog norm.",
+    formula: "100 × clamp( (Newcomer earnings − 0.5) ÷ (0.79 − 0.5), 0, 1 )",
     unit: "score",
     notes: "Capped at 100 at the norm: above it is a survivor artifact, not evidence, so it earns no bonus.",
     computed: true,
@@ -388,7 +388,7 @@ export const GLOSSARY = {
     label: "Newcomer earnings",
     short: "Newcomers earn",
     meaning:
-      "What games released in the last 24 months earn compared with the niche's whole back catalog. Read it against the ~1.08× catalog norm, not 1.0: below it, recent entrants underearn the games already there.",
+      "What games released in the last 24 months earn compared with the niche's whole back catalog. The typical niche sits at ~0.79× (the catalog norm): recent entrants usually earn less than a niche's back catalog. At or above 1.0 newcomers match the games already there — the bar the dossier checks; well under 0.79× is worse than typical.",
     formula:
       "median Est. revenue of games released in the last 24 months ÷ median Est. revenue of all the niche's games (same review floor)",
     unit: "ratio",
