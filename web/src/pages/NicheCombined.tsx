@@ -83,7 +83,7 @@ export function parseOffset(raw: string | null): number {
 function modeSentence(mode: NicheCombineMode, names: string[]): string {
   const joined = names.join(mode === "intersect" ? " AND " : " OR ");
   return mode === "intersect"
-    ? `Every game counted below carries ALL ${names.length} niches — ${joined}.`
+    ? `Every game counted below carries ${names.length === 2 ? "BOTH niches" : `ALL ${names.length} niches`} — ${joined}.`
     : `Every game counted below carries AT LEAST ONE of these ${names.length} niches — ${joined}.`;
 }
 
@@ -549,7 +549,15 @@ export default function NicheCombined() {
         <>
           <div className="grid grid-cols-1 gap-px border border-ink-primary/20 bg-ink-primary/20 sm:grid-cols-2 lg:grid-cols-4">
             <KpiCell
-              label={mode === "intersect" ? `Games in ALL ${selection.length} niches` : `Games in ANY of ${selection.length} niches`}
+              label={
+                mode === "intersect"
+                  ? selection.length === 2
+                    ? "Games in BOTH niches"
+                    : `Games in ALL ${selection.length} niches`
+                  : selection.length === 2
+                    ? "Games in EITHER niche"
+                    : `Games in ANY of ${selection.length} niches`
+              }
               term="n_games"
               value={fmtInt(data.n_games)}
               valueClassName="text-brand"
@@ -757,7 +765,13 @@ function PerNicheFunnel({
             /studios inactive tab had, from the same token on a lighter-than-usual panel.
             Measured 2026-09-01; ink-secondary reads 4.86:1 here. */}
         <div className="text-xs font-medium text-ink-secondary">
-          {mode === "intersect" ? "In all of them" : "In any of them"}
+          {mode === "intersect"
+            ? perNiche.length === 2
+              ? "In both"
+              : "In all of them"
+            : perNiche.length === 2
+              ? "In either"
+              : "In any of them"}
         </div>
         <div
           className={clsx(

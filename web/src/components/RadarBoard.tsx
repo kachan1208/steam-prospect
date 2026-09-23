@@ -188,6 +188,8 @@ const SECTOR_LABEL = CLASS_LABEL;
 /** One-letter class marker for rail rows — the rail carries all three classes now, so every
  * row names its own ("Roguelike" the tag vs "Roguelike" the genre). */
 const SECTOR_SHORT: Record<RadarSector, string> = { genre: "G", micro: "M", theme: "T" };
+/** The phone's one-line sector caption (the rim labels' words, without the rim). */
+const SECTOR_CAPTION: Record<RadarSector, string> = { genre: "Genres", micro: "Micro-genres", theme: "Themes" };
 
 export interface RadarBoardBlip {
   dimension: string;
@@ -1605,14 +1607,16 @@ export function RadarBoard({
                  becomes one honest caption line under the dial, reading clockwise from 12,
                  with the emphasised class marked. */
               <HaloText testId="radar-sector-legend" x={cx} y={geom.vbH - 6} anchor="middle" size={8}>
-                {`↻ FROM 12 · ${layout.sectors
+                {/* Spelled out (2026-09-23 review): "↻ FROM 12 · G 9 · ▸M 27 · T 24 ·
+                    G=GENRES M=MICRO T=THEMES" was a cipher with its own key. */}
+                {`CLOCKWISE FROM THE TOP: ${layout.sectors
                   .map(
                     (s) =>
-                      `${emphasis === s.sector ? "▸" : ""}${SECTOR_SHORT[s.sector]} ${
+                      `${emphasis === s.sector ? "▸ " : ""}${SECTOR_CAPTION[s.sector]} ${
                         layout.sectorCount.get(s.sector) ?? 0
                       }`,
                   )
-                  .join(" · ")} · G=GENRES M=MICRO T=THEMES`}
+                  .join(" · ")}`}
               </HaloText>
             ) : (
               /* SECTOR RIM LABELS — the class each wedge holds and its honest count, at the

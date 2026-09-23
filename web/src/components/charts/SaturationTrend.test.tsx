@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 
-import { SaturationTrend, partialTrendYear, trendTakeaways } from "./SaturationTrend";
+import {
+  SaturationTrend,
+  TREND_REV_MIN_SCORED,
+  partialTrendYear,
+  trendTakeaways,
+  yearRanges,
+} from "./SaturationTrend";
 import { axisTicks, installChartLayout } from "../../test/recharts";
 import type { TrendPoint } from "../../lib/api";
 
@@ -82,5 +88,82 @@ describe("SaturationTrend — two single-unit panels, no dual axis", () => {
     expect(screen.queryByText(/Where the lines cross means nothing/)).toBeNull();
     expect(screen.getByTestId("takeaway-releases").textContent).toContain("Releases are rising");
     expect(screen.getByTestId("takeaway-partial").textContent).toContain("still growing");
+  });
+});
+
+/**
+ * THIN YEARS (2026-09-23 visual check): Roguelike's 2012 had 9 games with 50+ reviews, so its
+ * "top 10%" ($27.8M) was one hit — and it set the axis, pressing every later year flat.
+ */
+describe("thin years — a top-10% figure off one or two games is never plotted", () => {
+  // The real GET /api/niches/tag/Roguelike saturation_trend, 2026-09-23 mart (trimmed).
+  const ROGUELIKE: TrendPoint[] = [
+    { year: 2012, n_releases: 10, n_scored: 9, median_rev: 217_522.5, p90_rev: 27_774_577.62 },
+    { year: 2013, n_releases: 31, n_scored: 31, median_rev: 1_035_681.9, p90_rev: 7_127_455.5 },
+    { year: 2024, n_releases: 1477, n_scored: 469, median_rev: 58_792.95, p90_rev: 986_135.28 },
+    { year: 2025, n_releases: 1781, n_scored: 504, median_rev: 73_966.2, p90_rev: 866_086.74 },
+    { year: 2026, n_releases: 2000, n_scored: 369, median_rev: 59_205.9, p90_rev: 605_206.26 },
+  ];
+  // Naval Combat-shaped: most years under the bar, including 2025.
+  const SMALL: TrendPoint[] = [
+    { year: 2022, n_releases: 35, n_scored: 16, median_rev: 279_966, p90_rev: 1_410_541 },
+    { year: 2023, n_releases: 42, n_scored: 13, median_rev: 87_655, p90_rev: 2_303_795 },
+    { year: 2024, n_releases: 49, n_scored: 21, median_rev: 274_326, p90_rev: 3_384_312 },
+    { year: 2025, n_releases: 49, n_scored: 12, median_rev: 89_349, p90_rev: 21_524_773 },
+    { year: 2026, n_releases: 53, n_scored: 1, median_rev: 240_174, p90_rev: 42_917_317 },
+  ];
+
+  it("names the thin year and its count, and plots the rest", () => {
+    const t = trendTakeaways(ROGUELIKE, AS_OF);
+    expect(TREND_REV_MIN_SCORED).toBe(20);
+    expect(t.thinYears).toEqual([2012]);
+    expect(t.plottedYears).toEqual([2013, 2024, 2025, 2026]);
+    expect(t.thinNote).toBe(
+      "Not plotted: 2012 — only 9 games with 50+ reviews; under 20, a year's top 10% is just its one or two biggest games.",
+    );
+    // The full-year comparison is unaffected: both years are well sampled.
+    expect(t.revenue).toMatch(/^Top-10% revenue of each year's releases fell: \$866\.1K for 2025 vs \$986\.1K for 2024/);
+  });
+
+  it("refuses a year-over-year read when either year is thin, and lists many thin years as ranges", () => {
+    const t = trendTakeaways(SMALL, AS_OF);
+    expect(t.revenue).toBe(
+      "Too few games with 50+ reviews for a year-over-year revenue read: 2025 has 12, 2024 has 21 — a year needs 20.",
+    );
+    expect(t.thinYears).toEqual([2022, 2023, 2025, 2026]);
+    expect(t.thinNote).toBe(
+      "Not plotted: 2022–2023, 2025–2026 — each has fewer than 20 games with 50+ reviews; under 20, a year's top 10% is just its one or two biggest games.",
+    );
+    expect(yearRanges([2016, 2012, 2013, 2014])).toBe("2012–2014, 2016");
+    expect(yearRanges([])).toBe("");
+  });
+
+  describe("drawn", () => {
+    let restore: () => void;
+    beforeEach(() => {
+      restore = installChartLayout(900, 320);
+    });
+    afterEach(() => {
+      cleanup();
+      restore();
+    });
+
+    it("scales the revenue axis on the plotted years — the one-hit 2012 no longer sets it", () => {
+      const { container } = render(<SaturationTrend points={ROGUELIKE} asOf={AS_OF} />);
+      const charts = container.querySelectorAll<HTMLElement>(".recharts-wrapper");
+      expect(charts).toHaveLength(2);
+      const top = axisTicks(charts[1], "y", 0).at(-1)!;
+      // 2013's $7.1M is the largest plotted figure; the axis tops out just above it, not at $30M.
+      expect(top).toMatch(/^\$(7\.5|8|10)M$/);
+      expect(screen.getByTestId("takeaway-thin").textContent).toContain("2012 — only 9 games");
+    });
+
+    it("draws no revenue line at all when fewer than two years clear the bar — and says why", () => {
+      const { container } = render(<SaturationTrend points={SMALL} asOf={AS_OF} />);
+      expect(container.querySelectorAll(".recharts-wrapper")).toHaveLength(1); // releases only
+      expect(screen.getByTestId("revenue-not-drawn").textContent).toBe(
+        "No yearly revenue line: only 2024 has 20 games with 50+ reviews — too few for a year-by-year read in a niche this size.",
+      );
+    });
   });
 });

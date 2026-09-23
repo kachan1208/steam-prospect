@@ -235,7 +235,7 @@ describe("NicheCombined page", () => {
     stubFetch(() => jsonResponse(combinedBody()));
     renderPage(TWO);
 
-    await screen.findByText("Games in ALL 2 niches");
+    await screen.findByText("Games in BOTH niches");
     expect(screen.getByText("40")).toBeTruthy();
     // The drop (8,000 and 3,000 -> 40) is the insight, so both inputs are on screen.
     const funnel = screen.getByTestId("per-niche-funnel");
@@ -243,7 +243,7 @@ describe("NicheCombined page", () => {
     expect(funnel.textContent).toContain("3,000 games");
     expect(funnel.textContent).toContain("40 games");
     // ...and the mode is stated in words, not just implied by a toggle.
-    expect(document.body.textContent).toContain("carries ALL 2 niches — Roguelike AND Deckbuilding");
+    expect(document.body.textContent).toContain("carries BOTH niches — Roguelike AND Deckbuilding");
     expect(screen.getByText("Slay the Spire")).toBeTruthy();
   });
 
@@ -251,12 +251,12 @@ describe("NicheCombined page", () => {
     stubFetch(() => jsonResponse(combinedBody({ n_games: 10500 })));
     renderPage(TWO);
 
-    await screen.findByText("Games in ALL 2 niches");
+    await screen.findByText("Games in BOTH niches");
     expect(combinedCalls[0]).toContain("mode=intersect");
 
     fireEvent.click(screen.getByText("Union (any)"));
 
-    await screen.findByText("Games in ANY of 2 niches");
+    await screen.findByText("Games in EITHER niche");
     expect(new URLSearchParams(lastLocation.search).get("mode")).toBe("union");
     await waitFor(() => expect(combinedCalls.some((u) => u.includes("mode=union"))).toBe(true));
     expect(document.body.textContent).toContain("carries AT LEAST ONE of these 2 niches");
@@ -283,7 +283,7 @@ describe("NicheCombined page", () => {
     const fetchMock = stubFetch(() => jsonResponse({ ...rest, inputs: [] }));
     renderPage(TWO);
 
-    await screen.findByText("Games in ALL 2 niches");
+    await screen.findByText("Games in BOTH niches");
     await waitFor(() => expect(screen.getByTestId("per-niche-funnel").textContent).toContain("8,000 games"));
     // Through the shared query factory: every fallback request carries an abort signal.
     const detailCalls = (fetchMock.mock.calls as unknown as [RequestInfo | URL, RequestInit | undefined][]).filter(([u]) =>
@@ -296,7 +296,7 @@ describe("NicheCombined page", () => {
   it("without min_reviews opens the ≥50-review default — Number(null) is 0, the All-games cut", async () => {
     stubFetch(() => jsonResponse(combinedBody()));
     renderPage("?niches=tag%3ARoguelike&niches=tag%3ADeckbuilding&mode=intersect");
-    await screen.findByText("Games in ALL 2 niches");
+    await screen.findByText("Games in BOTH niches");
     expect(combinedCalls[0]).toContain("min_reviews=50");
     expect(combinedCalls[0]).toContain("win=24m");
     // …and the count says which games it counts.
@@ -306,7 +306,7 @@ describe("NicheCombined page", () => {
   it("keeps the page in the URL, and a change to what is asked re-pages to the top", async () => {
     stubFetch(() => jsonResponse(combinedBody({ n_games: 80, total: 80 })));
     renderPage(`${TWO}&offset=25`);
-    await screen.findByText("Games in ALL 2 niches");
+    await screen.findByText("Games in BOTH niches");
     expect(combinedCalls.at(-1)).toContain("offset=25");
     expect(document.body.textContent).toContain("26–50 of 80");
 
@@ -330,7 +330,7 @@ describe("NicheCombined page", () => {
       ),
     );
     renderPage("?niches=tag%3ARogue-like&niches=tag%3ADeckbuilding&mode=intersect&win=24m&min_reviews=50");
-    await screen.findByText("Games in ALL 2 niches");
+    await screen.findByText("Games in BOTH niches");
     const funnel = screen.getByTestId("per-niche-funnel");
     expect(funnel.textContent).toContain("Roguelike");
     expect(funnel.textContent).toContain("was ‘Rogue-like’ — merged on Steam");
@@ -362,7 +362,7 @@ describe("NicheCombined page", () => {
     await screen.findByText(/be computed yet/);
     // No spinner, no blank page, no invented numbers — but it still shows what the
     // combination WOULD be, including each input's own size from the live marts.
-    expect(document.body.textContent).toContain("carries ALL 2 niches — Roguelike AND Deckbuilding");
+    expect(document.body.textContent).toContain("carries BOTH niches — Roguelike AND Deckbuilding");
     await waitFor(() =>
       expect(screen.getByTestId("per-niche-funnel").textContent).toContain("8,000 games"),
     );
