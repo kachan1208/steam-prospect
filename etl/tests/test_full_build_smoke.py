@@ -200,7 +200,7 @@ def test_full_build_runs_every_mart_file_and_swaps(published):
         con.close()
     # A representative table from each mart family, so a whole family going missing fails here.
     for expected in ("mart_game", "mart_niche", "mart_entity", "mart_market_pct",
-                     "mart_game_trends", "mart_game_event", "mart_lang",
+                     "mart_game_trends", "mart_game_event",
                      "mart_game_review_aspects", "mart_press_author", "mart_buzz_trends",
                      "mart_channel_mix", "mart_channel_buzz", "mart_tag_lift",
                      "mart_niche_themes", "mart_niche_press", "mart_meta"):

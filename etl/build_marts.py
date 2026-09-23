@@ -519,7 +519,7 @@ TIMING_DECAY_MIN_GAMES = 30      # a (genre) needs >= this many eligible games f
 # Phase 2 — game deep-dive tunables.
 TOP_TAGS_PER_GAME = 10           # tag-vector length stored per game (drives on-demand comparables)
 GAME_DETAIL_MIN_REVIEWS = 10     # sampled reviews a game needs for mart_game_reviews_* facets
-LANG_TOP_N = 15                  # top languages kept per genre (mart_lang) / per game (mart_game_reviews_lang)
+LANG_TOP_N = 15                  # top languages kept per game (mart_game_reviews_lang)
 
 # Phase 3 — Game Teardown tunables (review-aspect mining + press footprint).
 TEARDOWN_MIN_REVIEWS = 20        # sampled English reviews (w/ text) a game needs for mart_game_review_aspects
@@ -1093,7 +1093,9 @@ MART_FILES = [
                          # existing consumers.
     "mart_game_reviews.sql",
     "mart_game_trends.sql",
-    "mart_lang.sql",
+    # mart_lang.sql RETIRED 2026-09-22: no reader in api/, mcp/ or web/ (grepped), so it
+    # was a full per-review scan every night for a table nobody opened. The per-GAME
+    # language split (mart_game_reviews_lang) is unaffected. See RETIRED_MART_TABLES.
     "mart_game_teardown.sql",
     "mart_game_aspect_reviews.sql",
     "mart_press.sql",
@@ -1619,7 +1621,7 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
           AND datediff('day', g.release_date, CAST(to_timestamp(r.timestamp_created) AS DATE)) BETWEEN 0 AND 365;
 
         -- Phase 2: broad per-review staging (all games, not just >=365d old), powers the
-        -- game-deep-dive marts (mart_game velocity/playtime, mart_game_reviews_*, mart_lang).
+        -- game-deep-dive marts (mart_game velocity/playtime, mart_game_reviews_*).
         -- NOTE: `reviews` is a per-game SAMPLE (not Steam's full review set), so counts here
         -- describe the sample, not true totals — downstream marts/API must label them as such.
         CREATE TEMP TABLE stg_review AS
@@ -4311,6 +4313,15 @@ ABSENT_SOURCE_EMPTY_MARTS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Mart tables deliberately NO LONGER BUILT. The gate fails a table that "had rows and is gone"
+# — right for an accident, wrong for a retirement, which would otherwise fail the first nightly
+# after the retiring merge and every one after it until someone reached for --skip-validation.
+# Listed here, a table may vanish (only vanish: one that is still built is compared as usual).
+# Value = why, printed in the gate's report.
+RETIRED_MART_TABLES: dict[str, str] = {
+    "mart_lang": "retired 2026-09-22 — no reader in api/, mcp/ or web/",
+}
+
 
 def _validate_max_drop_pct() -> float:
     raw = os.environ.get("PROSPECT_VALIDATE_MAX_DROP_PCT", "").strip()
@@ -4389,7 +4400,8 @@ def validate_mart(new_path: Path, prev_path: Path | None) -> list[str]:
     failures (empty = pass):
 
       - absolute floors (VALIDATE_MIN_ROWS) checked on every build, previous mart or not;
-      - any table that had >0 rows in the previous mart and has 0 (or is gone) now;
+      - any table that had >0 rows in the previous mart and has 0 (or is gone) now — unless
+        it is in RETIRED_MART_TABLES and gone, which is a deliberate retirement;
       - any table that dropped more than the max-drop threshold vs the previous mart;
       - any table that GREW to more than VALIDATE_MAX_GROWTH_X times its previous row count
         (join-fan-out protection — see the constant's comment);
@@ -4454,6 +4466,10 @@ def validate_mart(new_path: Path, prev_path: Path | None) -> list[str]:
             new_n = new_counts.get(tbl, 0)
             if prev_n is None:
                 print(f"        {tbl:32s} {'—':>12s} {new_n:>12,} {'NEW':>9s}")
+                continue
+            if tbl in RETIRED_MART_TABLES and tbl not in new_counts:
+                print(f"        {tbl:32s} {prev_n:>12,} {'—':>12s} {'RETIRED':>9s}  "
+                      f"({RETIRED_MART_TABLES[tbl]})")
                 continue
             pct = ((new_n - prev_n) * 100.0 / prev_n) if prev_n > 0 else 0.0
             flag = ""
