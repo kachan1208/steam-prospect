@@ -122,6 +122,20 @@ BOXLEITER_OWNERS_PER_REVIEW_MIN = 20   # mirrors api/app/benchmarks.py's "New Bo
 BOXLEITER_OWNERS_PER_REVIEW_MID = 30   # 20-55 owners/review band -- used here to floor
 BOXLEITER_OWNERS_PER_REVIEW_MAX = 55   # owners_mid when SteamSpy reports zero. Keep in sync.
 
+# Early Access reconciliation (2026-09-22) — see _stg_game_reconciled in create_staging().
+# Steam's store release date is the 1.0 date for an Early Access graduate, so SCUM (public and
+# reviewed since 2018-08, 1.0 in 2025-06), My Summer Car (2016 -> 2025-01) and Hades II counted
+# as brand-new releases. Measured on the 2026-09-21 mart: 1,113 of the 9,711 games with >= 50
+# reviews and a store date inside the 24-month window had been public for years, with a median
+# revenue of $137K against $56K for real newcomers and 12.2% of the cohort's revenue — inflating
+# every "recent entrant" read (24m median_rev, entrant_ratio, hit rates, supply counts).
+# release_date now means FIRST PUBLIC: the earlier of the store date and the first review. A
+# game counts as public early only when its first review provably precedes the store date by at
+# least this many days — a deluxe-edition head start or a review stamped the night before
+# launch is not an Early Access period, and must not drag an exact store date back to a
+# month-start estimate.
+EA_PUBLIC_MIN_DAYS = 30
+
 # Opportunity score weights for the ORIGINAL v1 `opportunity` (also documented in
 # benchmarks.py). v1 is frozen: opportunity_v2 no longer derives from it (see below).
 W_DEMAND = 0.50
@@ -1198,6 +1212,7 @@ def build_params() -> dict[str, str]:
         "BOXLEITER_MIN": BOXLEITER_OWNERS_PER_REVIEW_MIN,
         "BOXLEITER_MID": BOXLEITER_OWNERS_PER_REVIEW_MID,
         "BOXLEITER_MAX": BOXLEITER_OWNERS_PER_REVIEW_MAX,
+        "EA_PUBLIC_MIN_DAYS": EA_PUBLIC_MIN_DAYS,
         "W_DEMAND": W_DEMAND,
         "W_COMPETITION": W_COMPETITION,
         "W_QUALITY": W_QUALITY,
@@ -1336,6 +1351,23 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         "COALESCE(NULLIF(regexp_replace(lower(s), '[^\\p{L}\\p{N}]+', '', 'g'), ''), lower(s))"
     )
 
+    # First non-zero month of Steam's own review histogram — the cheap, uncapped half of the
+    # first-public-date evidence (see _stg_game_reconciled). Guarded like the other optional
+    # tables: without review_histogram the reconciliation falls back to the review sample alone.
+    if _sqlite_table_exists(con, "review_histogram"):
+        con.execute(
+            """
+            CREATE TEMP TABLE _stg_first_review_month AS
+            SELECT appid, MIN(TRY_CAST(period || '-01' AS DATE)) AS first_review_month
+            FROM src.review_histogram
+            WHERE COALESCE(recommendations_up, 0) + COALESCE(recommendations_down, 0) > 0
+              AND TRY_CAST(period || '-01' AS DATE) IS NOT NULL
+            GROUP BY appid
+            """
+        )
+    else:
+        con.execute("CREATE TEMP TABLE _stg_first_review_month(appid INTEGER, first_review_month DATE)")
+
     staging_sql = render(
         """
         -- Single normalized read of src.game_tags. Every tag consumer reads the CANONICAL
@@ -1393,12 +1425,20 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         -- Review-count reconciliation source: per-appid counts from the actual scraped
         -- `reviews` table (already deduped at scrape time -- recommendationid PK / unique
         -- content_hash), independent of stg_game so it can seed the reconciliation below.
+        -- first_review_ts rides the same scan (it reads the same row pages the voted_up column
+        -- already forces): the earliest SAMPLED review, i.e. a day-precision point by which the
+        -- game was provably public. See _stg_game_reconciled. A timestamp older than Steam's
+        -- review system (recommendations launched 2010-10; the source's earliest review is from
+        -- that month) can only be corrupt, so it is skipped rather than allowed to date a game
+        -- to 1970 and drop it out of every window.
         CREATE TEMP TABLE stg_reviews_agg AS
         SELECT
             r.appid,
             COUNT(*) AS reviews_table_count,
             SUM(CASE WHEN r.voted_up = 1 THEN 1 ELSE 0 END) AS reviews_table_positive,
-            SUM(CASE WHEN r.voted_up = 0 THEN 1 ELSE 0 END) AS reviews_table_negative
+            SUM(CASE WHEN r.voted_up = 0 THEN 1 ELSE 0 END) AS reviews_table_negative,
+            MIN(r.timestamp_created) FILTER (
+                WHERE r.timestamp_created >= epoch(TIMESTAMP '2010-01-01')) AS first_review_ts
         FROM src.reviews r
         GROUP BY r.appid;
 
@@ -1429,6 +1469,31 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         -- analysis_games' stale value would strand a $0 revenue estimate on every game
         -- this fixes, which is exactly the bug. est_rev_owners is untouched here; see the
         -- owners floor in stg_game below, which only overwrites the true SteamSpy zeros.
+        --
+        -- RELEASE DATES — FIRST PUBLIC, NOT THE STORE DATE (2026-09-22). See EA_PUBLIC_MIN_DAYS.
+        -- Evidence that a game was public, earliest first:
+        --   first_review_month  Steam's review histogram: the first month with >= 1 review.
+        --                       Uncapped truth for every game with >= 50 reviews, but only to
+        --                       the MONTH.
+        --   first_review_day    the earliest review in our own sample. Day-precise, but a
+        --                       sample: for a big game it can start years late (Stardew's
+        --                       starts 2021), so it only refines a histogram month it lands
+        --                       in; for a game with no histogram (< 50 reviews, where the
+        --                       sample is near-complete) it stands alone.
+        -- release_date = the store date, unless that is missing, in the future, or provably at
+        -- least @EA_PUBLIC_MIN_DAYS@ days later than the first review — then the first review.
+        -- The store date stays as store_release_date (for an Early Access graduate, its 1.0
+        -- date); release_date_source says which one won and at what precision:
+        --   'store'               the store page's date (day precision)
+        --   'first_review'        the first review's day
+        --   'first_review_month'  the 1st of the first review's month — an ESTIMATE, only good
+        --                         to the month; weekday/day-since-release reads must skip it
+        -- is_ea_graduate: public at least @EA_PUBLIC_MIN_DAYS@ days before a store date that is
+        -- now in the past — an Early Access 1.0, or the rarer public beta / same-appid relaunch.
+        -- A game still IN Early Access is not a graduate: its store date is its EA launch.
+        -- Measured (2026-09-21 source): 8,711 graduates (5,143 with >= 50 reviews); 86 games
+        -- with >= 50 reviews and no usable store date are dated from their reviews instead of
+        -- vanishing from every windowed read.
         CREATE TEMP TABLE _stg_game_reconciled AS
         WITH base AS (
             -- UNIVERSE = the LIVE `games` catalog (type='game', or an un-enriched stub with
@@ -1441,23 +1506,25 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
             -- carry NULL/0 for the analysis-only fields (owners, playtime, self_published, ...).
             SELECT
                 g.appid, COALESCE(ag.name, g.name) AS name,
-                -- Release date: analysis_games' ISO date where present, else parse the raw
-                -- appdetails string on the live games row ("Jul 30, 2026" / "30 Jul, 2026").
-                -- analysis_games is a frozen one-off snapshot, so EVERY game released after
-                -- it would otherwise carry NULL release_date/year forever (found via appid
-                -- 4108000, released Jul 30 2026: reviews/price flowed through their own
-                -- fallbacks below while the date stayed blank). Placeholders ("Q3 2026",
-                -- "Coming soon") don't parse -> NULL, which release_valid already guards.
+                -- STORE release date: the live appdetails string first ("Jul 30, 2026" /
+                -- "30 Jul, 2026"), analysis_games' ISO date only as the fallback. That order
+                -- flipped 2026-09-22: analysis_games is a frozen July snapshot, so it still
+                -- holds the Early Access date of every game that went 1.0 since, and the
+                -- pre-delay date of every announcement that slipped (776 games disagree, the
+                -- live row newer in every case sampled). Placeholders ("Q3 2026", "Coming
+                -- soon") don't parse -> NULL, which release_valid already guards.
                 COALESCE(
-                    ag.release_year,
-                    EXTRACT(year FROM try_strptime(g.release_date,
-                        ['%b %d, %Y', '%d %b, %Y', '%B %d, %Y', '%d %B, %Y']))
-                ) AS release_year,
-                COALESCE(
-                    TRY_CAST(ag.release_date_iso AS DATE),
                     CAST(try_strptime(g.release_date,
-                        ['%b %d, %Y', '%d %b, %Y', '%B %d, %Y', '%d %B, %Y']) AS DATE)
-                ) AS release_date,
+                        ['%b %d, %Y', '%d %b, %Y', '%B %d, %Y', '%d %B, %Y']) AS DATE),
+                    TRY_CAST(ag.release_date_iso AS DATE)
+                ) AS store_release_date,
+                -- Year-only announcements ("2027", "Q4 2026") carry a year and no date; kept as
+                -- the release_year of a game with no date at all, exactly as before.
+                ag.release_year AS announced_year,
+                -- (pre-2010 review evidence is corrupt by construction — see stg_reviews_agg)
+                CAST(to_timestamp(ra.first_review_ts) AS DATE) AS first_review_day,
+                CASE WHEN fm.first_review_month >= DATE '2010-01-01'
+                     THEN fm.first_review_month END AS first_review_month,
                 -- SteamSpy price, falling back to Steam's own appdetails price (games.price_initial,
                 -- stored in cents) for brand-new games SteamSpy hasn't indexed yet -- so revenue
                 -- estimates immediately instead of stranding a blank $ on every fresh release.
@@ -1487,10 +1554,57 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
             LEFT JOIN src.analysis_games ag ON ag.appid = g.appid
             LEFT JOIN stg_reviews_agg ra ON ra.appid = g.appid
             LEFT JOIN src.review_summary rs ON rs.appid = g.appid
+            LEFT JOIN _stg_first_review_month fm ON fm.appid = g.appid
             WHERE (g.type = 'game' OR g.type IS NULL) AND g.name IS NOT NULL AND g.name <> ''
+        ),
+        first_review AS (
+            SELECT *,
+                -- The sample's day refines the histogram's month only when it lands in (or
+                -- before) that month; otherwise the month start is the best evidence there is.
+                (first_review_month IS NOT NULL
+                    AND NOT COALESCE(first_review_day < first_review_month + INTERVAL 1 MONTH,
+                                     FALSE)) AS first_review_month_only,
+                CASE WHEN first_review_month IS NULL THEN first_review_day
+                     WHEN first_review_day < first_review_month + INTERVAL 1 MONTH
+                          THEN first_review_day
+                     ELSE first_review_month END AS first_review_date
+            FROM base
+        ),
+        dated AS (
+            SELECT *,
+                COALESCE(store_release_date <= CURRENT_DATE, FALSE) AS store_released,
+                -- Public early only on PROOF: the LATEST day the first review can have fallen on
+                -- (a month-only estimate could be as late as the month's last day) must still
+                -- be >= @EA_PUBLIC_MIN_DAYS@ days before the store date.
+                COALESCE(
+                    store_release_date <= CURRENT_DATE
+                    AND CASE WHEN first_review_month_only
+                             THEN first_review_date + INTERVAL 1 MONTH - INTERVAL 1 DAY
+                             ELSE first_review_date END
+                        <= store_release_date - INTERVAL @EA_PUBLIC_MIN_DAYS@ DAY,
+                    FALSE) AS is_ea_graduate
+            FROM first_review
+        ),
+        public AS (
+            SELECT *,
+                -- a store date that is missing or still ahead, on a game that already has reviews
+                (NOT store_released AND first_review_date <= CURRENT_DATE) AS dated_by_reviews,
+                CAST(CASE WHEN is_ea_graduate THEN first_review_date
+                          WHEN store_released THEN store_release_date
+                          WHEN first_review_date <= CURRENT_DATE THEN first_review_date
+                          ELSE store_release_date END AS DATE) AS release_date
+            FROM dated
         )
         SELECT
-            appid, name, release_year, release_date,
+            appid, name,
+            COALESCE(CAST(year(release_date) AS INTEGER), announced_year) AS release_year,
+            release_date, store_release_date,
+            CASE WHEN release_date IS NULL THEN NULL
+                 WHEN is_ea_graduate OR COALESCE(dated_by_reviews, FALSE)
+                      THEN CASE WHEN first_review_month_only THEN 'first_review_month'
+                                ELSE 'first_review' END
+                 ELSE 'store' END AS release_date_source,
+            is_ea_graduate,
             price_initial, is_free, developers, publishers,
             self_published, dev_game_count, is_indie,
             metacritic_score, achievements_count,
@@ -1519,7 +1633,7 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
                                ELSE NULL END
                 ELSE ss_positive_ratio END AS positive_ratio,
             COALESCE(api_total_reviews, GREATEST(ss_total_reviews, reviews_table_count)) * 30 * price_initial AS est_rev_reviews
-        FROM base;
+        FROM public;
 
         -- =====================================================================================
         -- CANONICAL NICHE NAMES. One display name per twin key, per dimension: the spelling
@@ -1723,7 +1837,11 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
             LEFT JOIN stg_genre_boxleiter ab ON ab.genre = '__all__'
         )
         SELECT
+            -- release_date is the FIRST-PUBLIC date (see _stg_game_reconciled), so every window
+            -- below and in the marts — is_recent, the 24m cut, release-year supply counts,
+            -- days-since-release — measures from when the game actually reached players.
             g.appid, g.name, g.release_year, g.release_date,
+            g.store_release_date, g.release_date_source, g.is_ea_graduate,
             (g.release_date IS NOT NULL
                 AND g.release_date <= CURRENT_DATE
                 AND g.release_date >= DATE '1997-01-01') AS release_valid,
@@ -1779,6 +1897,8 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         GROUP BY r.appid, g.total_reviews
         HAVING COUNT(*) >= 0.95 * g.total_reviews;
 
+        -- Day-since-release curves need a release DAY: a first-public date known only to the
+        -- month (release_date_source 'first_review_month') would smear day 0 across ~30 days.
         CREATE TEMP TABLE stg_review_dsr AS
         SELECT r.appid,
             datediff('day', g.release_date, CAST(to_timestamp(r.timestamp_created) AS DATE)) AS dsr
@@ -1786,6 +1906,7 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         JOIN stg_game g ON g.appid = r.appid
         JOIN _complete_sample cs ON cs.appid = r.appid
         WHERE g.release_valid
+          AND g.release_date_source IS DISTINCT FROM 'first_review_month'
           AND g.release_date <= CURRENT_DATE - INTERVAL 365 DAY
           AND r.timestamp_created IS NOT NULL
           AND datediff('day', g.release_date, CAST(to_timestamp(r.timestamp_created) AS DATE)) BETWEEN 0 AND 365;

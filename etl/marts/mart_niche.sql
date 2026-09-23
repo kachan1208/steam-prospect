@@ -452,12 +452,15 @@ agg AS (
     HAVING COUNT(*) >= @MIN_NICHE_GAMES@
 ),
 sat AS (
+    -- Supply by FIRST-PUBLIC year (an Early Access game entered the market at its EA launch,
+    -- not at its 1.0), counting only games that actually released: a year-only announcement
+    -- ("Q4 2025") that never shipped carries a release_year but is not supply.
     SELECT m.dimension, m.key,
         COUNT(*) FILTER (WHERE g.release_year = @RECENT_YEAR@) AS n_recent_year,
         COUNT(*) FILTER (WHERE g.release_year = @PRIOR_YEAR@) AS n_prior_year
     FROM membership m
     JOIN stg_game g ON g.appid = m.appid
-    WHERE g.release_year IS NOT NULL AND g.release_year <= @CUR_YEAR@
+    WHERE g.release_valid AND g.release_year IS NOT NULL AND g.release_year <= @CUR_YEAR@
     GROUP BY m.dimension, m.key
 ),
 opp AS (
@@ -769,6 +772,9 @@ WITH membership AS (
     SELECT 'genre' AS dimension, genre AS key, appid FROM stg_genre_membership
 ),
 counts AS ( SELECT dimension, key, COUNT(*) n FROM membership GROUP BY 1,2 HAVING COUNT(*) >= @MIN_NICHE_GAMES@ )
+-- Releases per FIRST-PUBLIC year, released games only (same supply rule as mart_niche's `sat`
+-- CTE — an announcement is not a release). median_rev/p90_rev are over the paid games
+-- (est_rev_reviews is NULL otherwise); n_scored still counts every >= floor game.
 SELECT m.dimension, m.key, g.release_year AS year,
     COUNT(*) AS n_releases,
     COUNT(*) FILTER (WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@) AS n_scored,
@@ -777,7 +783,8 @@ SELECT m.dimension, m.key, g.release_year AS year,
 FROM membership m
 JOIN stg_game g ON g.appid = m.appid
 JOIN counts c ON c.dimension = m.dimension AND c.key = m.key
-WHERE g.release_year IS NOT NULL
+WHERE g.release_valid
+  AND g.release_year IS NOT NULL
   AND g.release_year BETWEEN @TREND_START_YEAR@ AND @CUR_YEAR@
 GROUP BY m.dimension, m.key, g.release_year;
 

@@ -25,14 +25,28 @@ DROP TABLE IF EXISTS mart_game_event;
 
 CREATE TABLE mart_game_event AS
 WITH ev AS (
-    -- Release: one per game, the anchor every other event is read against.
+    -- Release: one per game, the anchor every other event is read against. It sits at the
+    -- FIRST-PUBLIC date (stg_game.release_date, 2026-09-22), so an Early Access graduate's
+    -- anchor is its EA launch and says so; one dated only to the month says that too.
     SELECT g.appid,
            g.release_date AS event_date,
            'release'      AS kind,
-           'Released'     AS title,
+           CASE WHEN g.is_ea_graduate THEN 'Early Access launch'
+                ELSE 'Released' END
+               || CASE WHEN g.release_date_source = 'first_review_month'
+                       THEN ' (month approximate)' ELSE '' END AS title,
            CAST(NULL AS VARCHAR) AS url
     FROM stg_game g
     WHERE g.release_valid AND g.release_date IS NOT NULL
+
+    UNION ALL
+
+    -- ...and the graduate's 1.0 launch, which is usually the second-biggest spike on its
+    -- chart and was otherwise unexplained. kind 'update' (a developer release, not a second
+    -- anchor): the API contract keeps exactly one 'release' per game.
+    SELECT g.appid, g.store_release_date, 'update', '1.0 release', CAST(NULL AS VARCHAR)
+    FROM stg_game g
+    WHERE g.is_ea_graduate AND g.store_release_date IS NOT NULL
 
     UNION ALL
 

@@ -89,8 +89,17 @@ SELECT
     -- every call (~2.3x faster end-to-end — see api/app/routers/games.py). Accent-insensitive
     -- matching is NOT provided (same as the old ILIKE); only case is folded, once, at build.
     lower(g.name) AS name_lower,
+    -- FIRST-PUBLIC date and its year (2026-09-22; build_marts.py _stg_game_reconciled): the
+    -- earlier of the store date and the first review, so an Early Access graduate is dated
+    -- from its EA launch. store_release_date keeps what the Steam store page says (the 1.0
+    -- date for a graduate). release_date_source: 'store' | 'first_review' | 'first_review_month'
+    -- — the last is only good to the MONTH (the 1st of the first review's month): label it
+    -- "~<Mon YYYY>", never as an exact day. NULL = no date at all.
     g.release_year,
     CAST(g.release_date AS VARCHAR) AS release_date,
+    CAST(g.store_release_date AS VARCHAR) AS store_release_date,
+    g.release_date_source,
+    g.is_ea_graduate,
     g.price_initial, g.is_free,
     pg.primary_genre,
     g.developers, g.publishers, g.self_published, g.is_indie,

@@ -44,8 +44,10 @@ DROP TABLE IF EXISTS mart_timing_decay;
 
 -- Histogram rows joined to release dates once; month_since_release in whole calendar
 -- months (both sides truncated to month start, so datediff counts exact months).
--- Negative rows (histogram months before the recorded release month — EA date fixups,
--- playtest reviews) exist and are excluded by every consumer below.
+-- release_date is the FIRST-PUBLIC date (2026-09-22), so an Early Access graduate's months
+-- count from its EA launch — its 1.0 no longer restarts the decay clock with years of EA
+-- reviews at negative months. Negative rows still exist (a head start shorter than
+-- EA_PUBLIC_MIN_DAYS, playtest reviews) and are excluded by every consumer below.
 CREATE TEMP TABLE _timing_hist AS
 SELECT h.appid, h.period_month, h.n_reviews,
     datediff('month', date_trunc('month', g.release_date), h.period_month) AS month_since_release
