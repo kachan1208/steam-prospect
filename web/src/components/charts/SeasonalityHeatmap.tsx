@@ -75,7 +75,7 @@ export function SeasonalityHeatmap({ cells }: { cells: SeasonalityCell[] }) {
               label="Median revenue by release day"
               meaning="The typical outcome of the games that SHIPPED on that weekday of that month — what past releases there earned, not a forecast for yours. A bright cell can simply be where bigger games choose to launch."
               formula="median Est. revenue (reviews × 30 × launch price) of the paid games released on that month × weekday that have 50+ reviews, pooled over recent years"
-              worked={`${min > 0 ? fmtUsd(min) : "—"} (dimmest cell) to ${fmtUsd(max)} (brightest)`}
+              worked={`${fmtUsd(min)} (dimmest cell) to ${fmtUsd(max)} (brightest)`}
               notes={`A cell resting on fewer than ${HEATMAP_MIN_SCORED} games is flagged. Dates are first-public dates (an Early Access game counts at its EA launch); a date known only to the month is left out of the weekday grid.`}
             />
           ) : (

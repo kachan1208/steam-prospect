@@ -67,7 +67,7 @@ const nf = new Intl.NumberFormat("en-US");
 
 function relTime(iso: string): string {
   const t = Date.parse(iso);
-  if (Number.isNaN(t)) return iso || "—";
+  if (Number.isNaN(t)) return iso ? iso : "at an unrecorded time";
   const s = Math.round((Date.now() - t) / 1000);
   if (s < 60) return "just now";
   const m = Math.round(s / 60);
