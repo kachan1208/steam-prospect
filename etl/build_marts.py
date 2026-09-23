@@ -291,7 +291,16 @@ OPP_WINNER_TAKE_MOST = 0.85      # == WC_WINNER_TAKE_MOST -> revenue_spread 50. 
                                  # 2026-09-22 the ring also refuses "enter" above it ("demand
                                  # surging, but winner-take-most revenue" -> watch); pinned by
                                  # test_opportunity_ordering.radar_ring
-OPP_ENTRANT_NORM = 1.08          # == ENTRANT_RATIO_CATALOG_NORM -> entrant_room 100 (capped)
+OPP_ENTRANT_NORM = 1.08          # == ENTRANT_RATIO_CATALOG_NORM -> entrant_room 100 (capped).
+                                 # NOW STALE (2026-09-22): it was the catalog median (1.07 on
+                                 # the 2026-09-21 mart), but first-public dates + paid-only
+                                 # revenue moved that median to 0.79 (tag/24m/min50, validation
+                                 # build), so the median niche now scores entrant_room ~50 and
+                                 # the whole board ~10 points lower (median opp_v2 47.8 at a
+                                 # 0.79 norm vs 38.3 at 1.08; ring ordering holds at both).
+                                 # Left at 1.08 on purpose — the bearish side — until it is
+                                 # re-measured on a full production build and changed together
+                                 # with its web (ENTRANT_RATIO_CATALOG_NORM) and MCP mirrors.
 OPP_ENTRANT_FULL = 0.5           # entrant_ratio <= 0.5 -> entrant_room 0 (same bar the
                                  # retired gate used, kept so the two agree on "as bad as
                                  # newcomer economics get")

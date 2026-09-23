@@ -19,9 +19,12 @@
 --                   recent entrants outearn the niche's history; <1 = newcomers earn less
 --                   than the back catalog did. NULL-safe: NULL when the all-time median is
 --                   0/NULL or the 24m cut didn't materialise (under the MIN_NICHE_GAMES
---                   floor). CAVEAT: the catalog-median tag sits at ~1.08 (price inflation +
+--                   floor). CAVEAT: the catalog-median tag sat at ~1.08 (price inflation +
 --                   the review floor filters recent releases harder), so read it against
---                   that norm, not against 1.0.
+--                   that norm, not against 1.0. Since the 2026-09-22 population fixes (Early
+--                   Access graduates dated from their EA launch, free games out of revenue)
+--                   the median is ~0.79 — see OPP_ENTRANT_NORM in build_marts.py, which has
+--                   not been re-fitted yet.
 --   solo_viability  share of the cut's scored games that are playable single-player
 --                   (stg_game.is_singleplayer: Steam's own `categories` field, community-
 --                   tag fallback — see build_marts.py). Computed PER CUT from that cut's
