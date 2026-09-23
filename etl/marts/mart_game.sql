@@ -140,6 +140,10 @@ SELECT
     -- trend vs the prior 7d. NULL until a game has measured days (see mart_players.sql).
     gps.players_7d_avg,
     round(gps.players_trend_7d_pct, 2) AS players_trend_7d_pct,
+    -- The catalog's same-panel trend over the same windows (one value on every row), and this
+    -- game's move net of it in percentage points — see mart_players.sql's _pl_market_trend.
+    round(gps.players_trend_7d_market_pct, 2) AS players_trend_7d_market_pct,
+    round(gps.players_trend_7d_pct - gps.players_trend_7d_market_pct, 2) AS players_trend_7d_rel_pct,
     -- Lifetime (steamcharts monthly, top-8k coverage; mart_players.sql _game_lifetime):
     -- months from the first 100+-avg month to the first full month under 10 avg players.
     -- NULL = never reached 100+ OR outside steamcharts coverage — "unknown", never zero.

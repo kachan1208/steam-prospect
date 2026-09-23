@@ -263,6 +263,8 @@ def _meta_fixture(with_new_staging: bool) -> duckdb.DuckDBPyConnection:
                   "(4, 10, NULL, 0.0, 'free')")
         c.execute("CREATE TABLE stg_owners_vintage AS SELECT DATE '2026-07-05' AS owners_as_of_min,"
                   " DATE '2026-07-07' AS owners_as_of, 2 AS n_games_matched")
+        c.execute("CREATE TABLE _pl_market_trend AS SELECT -4.3076 AS players_trend_7d_market_pct,"
+                  " 42658 AS n_games_trend")
     else:
         c.execute("INSERT INTO stg_game VALUES (1, 100, 5000.0, 9.99)")
     c.execute("CREATE TABLE stg_genre_boxleiter(genre VARCHAR, slope DOUBLE)")
@@ -284,6 +286,7 @@ def test_write_meta_publishes_the_vintage_and_the_revenue_exclusions():
     assert (meta["n_games_scored"], meta["n_games_scored_free"],
             meta["n_games_scored_price_unknown"]) == ("1", "1", "1"), meta
     assert meta["global_median_revenue"] == "5000.00", "the median is over the paid game only"
+    assert meta["players_trend_7d_market_pct"] == "-4.31"
 
 
 def test_write_meta_leaves_the_new_keys_blank_on_an_older_staging_layer():
@@ -296,5 +299,5 @@ def test_write_meta_leaves_the_new_keys_blank_on_an_older_staging_layer():
     finally:
         c.close()
     for k in ("owners_as_of", "owners_as_of_min", "n_games_scored_free",
-              "n_games_scored_price_unknown"):
+              "n_games_scored_price_unknown", "players_trend_7d_market_pct"):
         assert meta[k] == "", (k, meta[k])

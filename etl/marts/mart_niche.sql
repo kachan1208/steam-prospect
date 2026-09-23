@@ -232,6 +232,15 @@
 --                         in BOTH windows count, so coverage growth can't fake a trend.
 --   players_coverage      share of total_players_now measured fresh (<= 2 days); low
 --                         values mean the total leans on carried tail values.
+--   players_trend_7d_market_pct  (2026-09-22) the SAME statistic over the whole catalog's
+--                         same-panel games (every game with >= @MIN_REVIEWS_DEFAULT@ reviews
+--                         measured in both 7-day windows) — one value, stamped on every row.
+--   players_trend_7d_rel_pct     players_trend_7d_pct - players_trend_7d_market_pct, in
+--                         PERCENTAGE POINTS: the part of the niche's move the market as a
+--                         whole did not make. Why it exists: on 2026-09-21, 174 of 218 niches
+--                         showed a negative 7-day trend (median -4.9%) against a market that
+--                         was itself -4.3% — a seasonal dip read, niche by niche, as 218
+--                         separate declines. NULL whenever either side is NULL.
 --
 -- REVENUE POPULATION vs NICHE POPULATION (2026-09-22). A niche's population is its RELEASED
 -- member games (release_valid) — free and unknown-price games included: they count in
@@ -777,6 +786,10 @@ SELECT
     -- Live-player columns (additive; see header — one value per key across all cuts).
     np.total_players_now,
     round(np.players_trend_7d_pct, 2) AS players_trend_7d_pct,
+    -- ...and the same-panel MARKET trend beside it, plus the niche's move net of it, in
+    -- percentage points (header: players_trend_7d_market_pct / _rel_pct).
+    round(np.players_trend_7d_market_pct, 2) AS players_trend_7d_market_pct,
+    round(np.players_trend_7d_pct - np.players_trend_7d_market_pct, 2) AS players_trend_7d_rel_pct,
     round(np.players_coverage, 4) AS players_coverage,
     round(np.median_players_now, 1) AS median_players_now,
     round(np.players_top5_share, 4) AS players_top5_share,

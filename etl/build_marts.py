@@ -4532,6 +4532,8 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
       n_games_scored_free  the >= min_reviews_default games that global_median_revenue /
       n_games_scored_price_unknown   pct_over_100k / n_games_scored EXCLUDE, by reason (a free
                            game has no box-revenue estimate — price_status in stg_game).
+      players_trend_7d_market_pct   the catalog's same-panel 7-day player trend (the baseline
+                           every *_players_trend_7d_rel_pct column is net of); '' = no panel.
     """
     # est_rev_reviews is NULL for free and unknown-price games since 2026-09-22, so this
     # "scored" population is the PAID games at the floor — the free ones used to sit in it at $0.
@@ -4580,6 +4582,8 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
         f"FROM stg_game WHERE total_reviews >= {int(MIN_REVIEWS_DEFAULT)}",
     )
     n_scored_free, n_scored_unknown = excluded if excluded else (None, None)
+    market = _optional_meta(con, "SELECT players_trend_7d_market_pct FROM _pl_market_trend")
+    market_pct = market[0] if market else None
 
     # Provenance (2026-09-01): best-effort on purpose — a failure here empties a row, it
     # never fails a build that otherwise succeeded.
@@ -4637,6 +4641,7 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
         "owners_as_of_min": owners_as_of_min or "",
         "n_games_scored_free": "" if n_scored_free is None else str(n_scored_free),
         "n_games_scored_price_unknown": "" if n_scored_unknown is None else str(n_scored_unknown),
+        "players_trend_7d_market_pct": "" if market_pct is None else f"{market_pct:.2f}",
         "build_mode": build_mode,
         "fulltext_mode": fulltext_mode,
         "fulltext_built_at": fulltext_built_at,
