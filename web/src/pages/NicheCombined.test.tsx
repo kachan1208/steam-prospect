@@ -277,13 +277,64 @@ describe("NicheCombined page", () => {
     expect(screen.getByTestId("per-niche-funnel").textContent).toContain("8,000 games");
   });
 
-  it("reads the per-input sizes under the originally-specced `per_niche` name too", async () => {
-    const { inputs, ...rest } = combinedBody();
-    stubFetch(() => jsonResponse({ ...rest, per_niche: inputs }));
+  it("falls back to each niche's own detail when the API echoes no input sizes", async () => {
+    // (`per_niche` / `degraded` / `note` were never sent by the API and are no longer read.)
+    const { inputs: _inputs, ...rest } = combinedBody();
+    const fetchMock = stubFetch(() => jsonResponse({ ...rest, inputs: [] }));
     renderPage(TWO);
 
     await screen.findByText("Games in ALL 2 niches");
-    expect(screen.getByTestId("per-niche-funnel").textContent).toContain("8,000 games");
+    await waitFor(() => expect(screen.getByTestId("per-niche-funnel").textContent).toContain("8,000 games"));
+    // Through the shared query factory: every fallback request carries an abort signal.
+    const detailCalls = (fetchMock.mock.calls as unknown as [RequestInfo | URL, RequestInit | undefined][]).filter(([u]) =>
+      String(u).startsWith("/api/niches/tag/"),
+    );
+    expect(detailCalls.length).toBeGreaterThan(0);
+    for (const [, init] of detailCalls) expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("without min_reviews opens the ≥50-review default — Number(null) is 0, the All-games cut", async () => {
+    stubFetch(() => jsonResponse(combinedBody()));
+    renderPage("?niches=tag%3ARoguelike&niches=tag%3ADeckbuilding&mode=intersect");
+    await screen.findByText("Games in ALL 2 niches");
+    expect(combinedCalls[0]).toContain("min_reviews=50");
+    expect(combinedCalls[0]).toContain("win=24m");
+    // …and the count says which games it counts.
+    expect(document.body.textContent).toContain("last 24 months · ≥50 reviews");
+  });
+
+  it("keeps the page in the URL, and a change to what is asked re-pages to the top", async () => {
+    stubFetch(() => jsonResponse(combinedBody({ n_games: 80, total: 80 })));
+    renderPage(`${TWO}&offset=25`);
+    await screen.findByText("Games in ALL 2 niches");
+    expect(combinedCalls.at(-1)).toContain("offset=25");
+    expect(document.body.textContent).toContain("26–50 of 80");
+
+    fireEvent.click(screen.getByText("Next"));
+    await waitFor(() => expect(new URLSearchParams(lastLocation.search).get("offset")).toBe("50"));
+    await waitFor(() => expect(combinedCalls.at(-1)).toContain("offset=50"));
+
+    fireEvent.click(screen.getByText("Union (any)"));
+    await waitFor(() => expect(new URLSearchParams(lastLocation.search).get("offset")).toBeNull());
+  });
+
+  it("matches an old tag spelling to the canonical niche the API served, and says it merged", async () => {
+    stubFetch(() =>
+      jsonResponse(
+        combinedBody({
+          inputs: [
+            { dimension: "tag", key: "Roguelike", n_games: 8000, requested_key: "Rogue-like", alias_of: "Roguelike" },
+            { dimension: "tag", key: "Deckbuilding", n_games: 3000, requested_key: "Deckbuilding", alias_of: null },
+          ],
+        }),
+      ),
+    );
+    renderPage("?niches=tag%3ARogue-like&niches=tag%3ADeckbuilding&mode=intersect&win=24m&min_reviews=50");
+    await screen.findByText("Games in ALL 2 niches");
+    const funnel = screen.getByTestId("per-niche-funnel");
+    expect(funnel.textContent).toContain("Roguelike");
+    expect(funnel.textContent).toContain("was ‘Rogue-like’ — merged on Steam");
+    expect(funnel.textContent).toContain("8,000 games");
   });
 
   it("treats an unmaterialised cut as a cut problem, not a failure", async () => {
