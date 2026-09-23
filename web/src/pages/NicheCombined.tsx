@@ -573,26 +573,33 @@ export default function NicheCombined() {
                 </>
               }
             />
+            {/* Revenue is estimated for PAID games only (the rebuilt mart leaves free and
+                unknown-price games without an estimate), so these percentiles are paid-only by
+                construction — said on the tile. /combined doesn't return the paid count yet,
+                so the niche page's "withheld: only N paid games" rule can't run here. */}
             <KpiCell
               term="median_rev"
               value={fmtUsd(data.median_rev)}
               sentinel={data.median_rev == null ? "no data" : undefined}
+              footnoteWrap
               footnote={
                 data.p25_rev != null || data.p75_rev != null
-                  ? `bottom 25% ${fmtUsd(data.p25_rev)} · top 25% ${fmtUsd(data.p75_rev)}`
-                  : undefined
+                  ? `paid games only · bottom 25% ${fmtUsd(data.p25_rev)} · top 25% ${fmtUsd(data.p75_rev)}`
+                  : "paid games only"
               }
             />
             <KpiCell
               term="p90_rev"
               value={fmtUsd(data.p90_rev)}
               sentinel={data.p90_rev == null ? "no data" : undefined}
-              footnote="only 1 game in 10 earns more"
+              footnote="only 1 paid game in 10 earns more"
             />
             <KpiCell
               term="median_price"
               value={fmtPrice(data.median_price)}
               sentinel={data.median_price == null ? "no data" : undefined}
+              footnoteWrap
+              footnote="every game in the set, a $0 listing (free or unpriced) counted as $0"
             />
           </div>
 

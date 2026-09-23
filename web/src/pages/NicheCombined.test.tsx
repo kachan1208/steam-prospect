@@ -245,6 +245,10 @@ describe("NicheCombined page", () => {
     // ...and the mode is stated in words, not just implied by a toggle.
     expect(document.body.textContent).toContain("carries BOTH niches — Roguelike AND Deckbuilding");
     expect(screen.getByText("Slay the Spire")).toBeTruthy();
+    // Revenue exists for paid games only — the tiles say so; the price tile says $0s count.
+    expect(document.body.textContent).toContain("paid games only · bottom 25%");
+    expect(document.body.textContent).toContain("only 1 paid game in 10 earns more");
+    expect(document.body.textContent).toContain("a $0 listing (free or unpriced) counted as $0");
   });
 
   it("switches mode, and the switch changes the URL, the request and the wording", async () => {
