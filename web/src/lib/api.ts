@@ -1497,33 +1497,10 @@ export function useGameTeardown(appid: number | null) {
   });
 }
 
-// ---- channel mix (Track M — where a genre gets marketing attention) ---------------------
-export interface ChannelMixRow {
-  channel: string; // 'press' (creator channels removed 2026-08-25)
-  n_mentions: number;
-  reach_weighted: number;
-  share_mentions: number | null;
-  share_reach_weighted: number | null;
-}
-
-export interface GameChannelMix {
-  appid: number;
-  genre: string | null;
-  channels: ChannelMixRow[];
-}
-
-/** The game's GENRE-level marketing-channel mix (mart_channel_mix rows for its
- * primary_genre — the mix is a genre property, per-game channel data would be too sparse).
- * `channels` is empty when the game has no primary_genre, the genre has no rows, or the
- * mart predates the channel-mix ETL. */
-export function useGameChannelMix(appid: number | null) {
-  return useQuery({
-    queryKey: ["game-channel-mix", appid],
-    queryFn: ({ signal }) => request<GameChannelMix>(`/games/${appid}/channel-mix`, { signal }),
-    enabled: appid !== null,
-    staleTime: 5 * 60_000,
-  });
-}
+// ---- channel mix: retired from the web (2026-09-23) --------------------------------------
+// GET /games/{appid}/channel-mix still exists, but mart_channel_mix has been press-only since
+// the creator channels retired on 2026-08-25 — every genre answered "Press 100%" — so the game
+// page no longer asks for it and its hook and types are gone.
 
 // ---- game trends (+ compare overlay) ----------------------------------------------------
 // Mirrors api/app/routers/trends.py. This is the CANONICAL response shape: the chart
