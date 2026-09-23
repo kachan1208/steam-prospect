@@ -509,12 +509,15 @@ export function monthName(m: number): string {
   return MONTH_NAMES[(m - 1 + 12) % 12] ?? String(m);
 }
 
-// SQLite/DuckDB dayofweek-style convention verified against the API: weekday 0 =
-// Monday .. 6 = Sunday (median_rev peaks on weekday 1/2, matching the cited
-// "Tuesday" launch-day benchmark).
-const WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+// DuckDB's dayofweek(): 0 = SUNDAY .. 6 = Saturday — what etl/marts/mart_seasonality.sql
+// computes and says in its header. This table used to read 0 = Monday (on the strength of
+// a median-revenue peak that fits either reading), which shifted every /timing heatmap
+// column one day: the release-count data settles it — weekdays 0 and 6 are the two quiet
+// days (6,013 and 6,124 releases on the 2026-09-23 mart, against 19K–28K on the other
+// five), and Steam's quiet days are the weekend, not Sunday-and-Monday.
+const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 export function weekdayName(w: number): string {
-  return WEEKDAY_NAMES[w % 7] ?? String(w);
+  return WEEKDAY_NAMES[((w % 7) + 7) % 7] ?? String(w);
 }
 
 export function titleCase(s: string): string {

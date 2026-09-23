@@ -167,13 +167,19 @@ describe("monthName", () => {
 });
 
 describe("weekdayName", () => {
-  it("maps DuckDB-style 0=Monday .. 6=Sunday", () => {
-    expect(weekdayName(0)).toBe("Mon");
-    expect(weekdayName(6)).toBe("Sun");
+  // DuckDB's dayofweek() — what mart_seasonality computes: 0 = SUNDAY .. 6 = Saturday. The
+  // old table read 0 = Monday and shifted every heatmap column a day; the mart's own release
+  // counts put the two quiet days (the weekend) at 0 and 6.
+  it("maps DuckDB's dayofweek: 0 = Sunday .. 6 = Saturday", () => {
+    expect(weekdayName(0)).toBe("Sun");
+    expect(weekdayName(1)).toBe("Mon");
+    expect(weekdayName(4)).toBe("Thu");
+    expect(weekdayName(6)).toBe("Sat");
   });
 
-  it("wraps modulo 7", () => {
-    expect(weekdayName(7)).toBe("Mon");
+  it("wraps modulo 7, negatives included", () => {
+    expect(weekdayName(7)).toBe("Sun");
+    expect(weekdayName(-1)).toBe("Sat");
   });
 });
 
