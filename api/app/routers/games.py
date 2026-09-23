@@ -6,7 +6,7 @@ from typing import Literal
 import duckdb
 from fastapi import APIRouter, HTTPException, Query
 
-from .. import analytics_db, paging, signals_db
+from .. import aliases, analytics_db, paging, signals_db
 from ..schemas import (
     AspectReviewExcerpt,
     AspectReviewsResponse,
@@ -281,8 +281,16 @@ def search_games(
         where.append("primary_genre = ?")
         params.append(genre)
     if tag:
-        where.append("list_contains(top_tags, ?)")
-        params.append(tag)
+        spellings = aliases.variants("tag", tag)
+        if len(spellings) == 1:
+            where.append("list_contains(top_tags, ?)")
+            params.append(spellings[0])
+        else:
+            # The canonical tag AND its aliases (mart_tag_alias): autocomplete now offers
+            # canonical names only, so a game tagged only "Rogue-like" must still match
+            # tag=Roguelike — and asking for the alias finds the same games.
+            where.append("list_has_any(top_tags, ?)")
+            params.append(spellings)
     data_as_of: str | None = None
     if released_within_days is not None:
         # "New releases": released in the recent PAST. Upper-bounded to the anchor so
@@ -376,12 +384,28 @@ def search_games(
 # drops the memo along with the generation when a new mart is hot-reloaded.
 def _tag_frequencies() -> list[tuple[str, int]]:
     def compute() -> list[tuple[str, int]]:
-        rows = analytics_db.query(
-            "SELECT tag, COUNT(*) AS n_games "
-            "FROM (SELECT UNNEST(top_tags) AS tag FROM mart_game) "
-            "WHERE tag IS NOT NULL "
-            "GROUP BY tag ORDER BY n_games DESC, tag"
-        )
+        if aliases.has_aliases():
+            # CANONICAL names only (mart_tag_alias): "Rogue-like" and "Roguelike" are one
+            # suggestion, counted as the DISTINCT games carrying either spelling — summing
+            # the two raw counts would double-count games tagged both ways. Two hops, so an
+            # alias of an alias still lands on the canonical.
+            rows = analytics_db.query(
+                "SELECT COALESCE(a2.canonical, a1.canonical, t.tag) AS tag, "
+                "COUNT(DISTINCT t.appid) AS n_games "
+                "FROM (SELECT appid, UNNEST(top_tags) AS tag FROM mart_game) t "
+                "LEFT JOIN mart_tag_alias a1 ON a1.dimension = 'tag' AND a1.alias = t.tag "
+                "LEFT JOIN mart_tag_alias a2 ON a2.dimension = 'tag' AND a2.alias = a1.canonical "
+                "AND a2.alias <> a2.canonical "
+                "WHERE t.tag IS NOT NULL "
+                "GROUP BY 1 ORDER BY n_games DESC, tag"
+            )
+        else:
+            rows = analytics_db.query(
+                "SELECT tag, COUNT(*) AS n_games "
+                "FROM (SELECT UNNEST(top_tags) AS tag FROM mart_game) "
+                "WHERE tag IS NOT NULL "
+                "GROUP BY tag ORDER BY n_games DESC, tag"
+            )
         return [(r["tag"], int(r["n_games"])) for r in rows]
 
     return analytics_db.memo("games.tag_frequencies", compute)

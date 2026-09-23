@@ -38,7 +38,7 @@ import io
 import duckdb
 from fastapi import APIRouter, HTTPException, Query, Response
 
-from .. import analytics_db, histograms, paging
+from .. import aliases, analytics_db, histograms, paging
 from ..schemas import (
     HeadlineCut,
     HistBucket,
@@ -345,6 +345,16 @@ def _require_list_cut(window: str, min_reviews: int) -> None:
         raise _cut_422("window", window, min_reviews, "mart_niche", cuts)
 
 
+def _identity(dimension: str, key: str) -> dict:
+    """Which niche a (dimension, key) path actually serves. With mart_tag_alias present an
+    alias key ("Rogue-like") is served as its canonical niche ("Roguelike"): the response
+    says so — canonical_key is the key served (== the response's `key`), requested_key is
+    what the URL said, alias_of is set ONLY when an alias was resolved (the web replaces its
+    URL with the canonical one). Without the table every key is its own canonical."""
+    canonical, alias_of = aliases.resolve(dimension, key)
+    return {"canonical_key": canonical, "requested_key": key, "alias_of": alias_of}
+
+
 def _require_dimension(dimension: str) -> None:
     """422 everywhere a path dimension is validated by hand (drill-down surface AND
     niche_detail): FastAPI's own validation status for bad input, so all these endpoints
@@ -565,9 +575,28 @@ def _build_filters(
 ) -> tuple[str, list]:
     where = "WHERE dimension = ? AND win = ? AND min_reviews = ?"
     params: list = [dimension, window, min_reviews]
+    alias_aware = aliases.has_aliases()
     if q:
-        where += " AND key ILIKE ? ESCAPE '\\'"
-        params.append(f"%{_like_escape(q)}%")
+        pattern = f"%{_like_escape(q)}%"
+        if alias_aware:
+            # Search/autocomplete is alias-aware but answers with CANONICAL niches only:
+            # typing "rogue-like" finds Roguelike (via its alias) — never a separate
+            # "Rogue-like" row competing with it.
+            where += (
+                " AND (key ILIKE ? ESCAPE '\\' OR key IN (SELECT canonical FROM mart_tag_alias"
+                " WHERE dimension = ? AND alias ILIKE ? ESCAPE '\\'))"
+            )
+            params.extend([pattern, dimension, pattern])
+        else:
+            where += " AND key ILIKE ? ESCAPE '\\'"
+            params.append(pattern)
+    if alias_aware:
+        # Should a mart still carry rows under an alias key, they never list: the canonical
+        # row is THE niche (and /{dimension}/{alias} resolves to it).
+        where += (
+            " AND NOT EXISTS (SELECT 1 FROM mart_tag_alias a WHERE a.dimension = mart_niche.dimension"
+            " AND a.alias = mart_niche.key AND a.alias <> a.canonical)"
+        )
     if tiers is not None and dimension == "tag":
         wanted = [t.strip() for t in tiers.split(",") if t.strip()]
         bad = [t for t in wanted if t not in _TIERS]
@@ -669,7 +698,24 @@ def niches_combined(
     — averaging the per-niche marts would be flatly wrong for an intersection.
     """
     win = window or win  # `window` is an accepted alias — see _WINDOW_ALIAS_DESC
-    pairs = _parse_niche_specs(niches)  # 422s before any capability/DB work
+    requested = _parse_niche_specs(niches)  # 422s before any capability/DB work
+    # Tag aliases: every spec is served as its canonical niche. An alias listed next to its
+    # own canonical is the same niche twice — the intersect threshold could never be met.
+    resolved: list[tuple[str, str, str | None, str]] = []  # (dim, canonical, alias_of, requested)
+    seen: dict[tuple[str, str], str] = {}
+    for d, k in requested:
+        canonical, alias_of = aliases.resolve(d, k)
+        if (d, canonical) in seen:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"niches: {d}:{k} and {d}:{seen[(d, canonical)]} are the same niche "
+                    f"({d}:{canonical}) — list it once"
+                ),
+            )
+        seen[(d, canonical)] = k
+        resolved.append((d, canonical, alias_of, k))
+    pairs = [(d, c) for d, c, _, _ in resolved]
     _require_niche_games()
     _require_cut(win, min_reviews)
 
@@ -689,8 +735,11 @@ def niches_combined(
         )
     }
     inputs = [
-        NicheCombinedInput(dimension=d, key=k, n_games=per_niche.get((d, k), 0))
-        for d, k in pairs
+        NicheCombinedInput(
+            dimension=d, key=c, n_games=per_niche.get((d, c), 0),
+            requested_key=req, alias_of=alias_of,
+        )
+        for d, c, alias_of, req in resolved
     ]
 
     # One membership pass: count how many of the requested niches each appid hits, then keep
@@ -812,6 +861,8 @@ def niche_games(
     """
     win = window or win  # `window` is an accepted alias — see _WINDOW_ALIAS_DESC
     _require_dimension(dimension)
+    ident = _identity(dimension, key)
+    key = ident["canonical_key"]
     _require_niche_games()
     _require_cut(win, min_reviews)
 
@@ -833,6 +884,7 @@ def niche_games(
         limit=limit,
         offset=offset,
         owners_as_of=analytics_db.mart_meta().get("owners_as_of"),
+        **ident,
     )
 
 
@@ -855,6 +907,8 @@ def niche_distribution(
     """
     win = window or win  # `window` is an accepted alias — see _WINDOW_ALIAS_DESC
     _require_dimension(dimension)
+    ident = _identity(dimension, key)
+    key = ident["canonical_key"]
 
     if metric == "revenue":
         # Prefer the precomputed mart when the request matches the ONE cut it materialises
@@ -881,6 +935,7 @@ def niche_distribution(
                     buckets=buckets,
                     n_games=sum(b.count for b in buckets),
                     source="mart",
+                    **ident,
                 )
 
     _require_niche_games()
@@ -913,6 +968,7 @@ def niche_distribution(
             buckets=buckets,
             n_games=sum(b.count for b in buckets),
             source="computed",
+            **ident,
         )
 
     # Price: linear $2.50 bins (mart_market_hist's convention — price is bounded and
@@ -941,12 +997,15 @@ def niche_distribution(
         buckets=buckets,
         n_games=sum(b.count for b in buckets),
         source="computed",
+        **ident,
     )
 
 
 @router.get("/{dimension}/{key:path}", response_model=NicheDetail)
 def niche_detail(dimension: str, key: str) -> NicheDetail:
     _require_dimension(dimension)
+    ident = _identity(dimension, key)
+    key = ident["canonical_key"]
 
     variants = _niche_query(
         "WHERE dimension = ? AND key = ?",
@@ -957,7 +1016,12 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
         None,
     )
     if not variants:
-        raise HTTPException(status_code=404, detail=f"niche not found: {dimension}/{key}")
+        requested = ident["requested_key"]
+        raise HTTPException(
+            status_code=404,
+            detail=f"niche not found: {dimension}/{key}"
+            + (f" (the canonical niche for alias {requested!r})" if ident["alias_of"] else ""),
+        )
     variants.sort(key=lambda v: (v["win"], v["min_reviews"]))
 
     trend_cols = "year, n_releases, n_scored, median_rev" + (", p90_rev" if _has_p90_trend() else "")
@@ -1098,6 +1162,7 @@ def niche_detail(dimension: str, key: str) -> NicheDetail:
     return NicheDetail(
         dimension=dimension,
         key=key,
+        **ident,
         tier=headline.get("tier"),
         variants=[_row_to_niche(v) for v in variants],
         saturation_trend=[TrendPoint(**t) for t in trend],

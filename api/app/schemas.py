@@ -861,6 +861,10 @@ class NicheGameList(BaseModel):
     limit: int
     offset: int
     owners_as_of: Optional[str] = None  # when owners_est was taken (mart_meta.owners_as_of)
+    # Tag aliases (mart_tag_alias) — see NicheDetail.
+    canonical_key: str
+    requested_key: str
+    alias_of: Optional[str] = None
 
 
 class NicheDistribution(BaseModel):
@@ -894,6 +898,10 @@ class NicheDistribution(BaseModel):
     buckets: list[HistBucket] = Field(default_factory=list)
     n_games: int = 0  # sum of bucket counts (games with a non-null value for the metric)
     source: Literal["mart", "computed"] = "computed"
+    # Tag aliases (mart_tag_alias) — see NicheDetail.
+    canonical_key: str
+    requested_key: str
+    alias_of: Optional[str] = None
 
 
 class NicheCombinedInput(BaseModel):
@@ -902,8 +910,10 @@ class NicheCombinedInput(BaseModel):
     guaranteed equal to mart_niche.n_games for the same (dimension, key, win, min_reviews)."""
 
     dimension: str
-    key: str
+    key: str  # the CANONICAL key this input was served as
     n_games: int
+    requested_key: Optional[str] = None  # the spec's key as sent
+    alias_of: Optional[str] = None  # set only when requested_key was an alias of `key`
 
 
 class NicheCombined(BaseModel):
@@ -950,7 +960,14 @@ class HeadlineCut(BaseModel):
 
 class NicheDetail(BaseModel):
     dimension: str
-    key: str
+    key: str  # the key SERVED — the canonical one when the URL used an alias
+    # Tag aliases (mart_tag_alias). canonical_key == key; requested_key is the key in the
+    # URL; alias_of is non-null ONLY when requested_key was an alias — it then equals
+    # canonical_key, and the client should replace its URL with the canonical one. Without
+    # the alias table (older marts) alias_of is always null and every key is canonical.
+    canonical_key: str
+    requested_key: str
+    alias_of: Optional[str] = None
     tier: Optional[str] = None
     variants: list[NicheRow]
     saturation_trend: list[TrendPoint]

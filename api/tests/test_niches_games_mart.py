@@ -406,9 +406,13 @@ def test_combined_reports_each_input_niches_own_size(niche_games_client):
     body = niche_games_client.get(
         "/api/niches/combined", params={"niches": ["tag:Roguelike", "tag:Deckbuilding"]}
     ).json()
+    # requested_key/alias_of: tag-alias bookkeeping (no mart_tag_alias here, so every key is
+    # its own canonical and alias_of stays null).
     assert body["inputs"] == [
-        {"dimension": "tag", "key": "Roguelike", "n_games": 8},
-        {"dimension": "tag", "key": "Deckbuilding", "n_games": 5},
+        {"dimension": "tag", "key": "Roguelike", "n_games": 8,
+         "requested_key": "Roguelike", "alias_of": None},
+        {"dimension": "tag", "key": "Deckbuilding", "n_games": 5,
+         "requested_key": "Deckbuilding", "alias_of": None},
     ]
 
 
@@ -476,8 +480,10 @@ def test_combined_honours_the_cut(niche_games_client):
     ).json()
     # Deckbuilding has no 24m rows in this mart -> intersect is empty, and it says so.
     assert body["inputs"] == [
-        {"dimension": "tag", "key": "Roguelike", "n_games": 3},
-        {"dimension": "tag", "key": "Deckbuilding", "n_games": 0},
+        {"dimension": "tag", "key": "Roguelike", "n_games": 3,
+         "requested_key": "Roguelike", "alias_of": None},
+        {"dimension": "tag", "key": "Deckbuilding", "n_games": 0,
+         "requested_key": "Deckbuilding", "alias_of": None},
     ]
     assert body["n_games"] == 0
 
