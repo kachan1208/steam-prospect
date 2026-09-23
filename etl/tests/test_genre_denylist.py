@@ -227,7 +227,8 @@ def main() -> int:
     con.execute(
         "CREATE TEMP TABLE _niche_players_now(dimension VARCHAR, key VARCHAR,"
         " total_players_now BIGINT, players_coverage DOUBLE, players_trend_7d_pct DOUBLE,"
-        " median_players_now DOUBLE, players_top5_share DOUBLE)"
+        " median_players_now DOUBLE, players_top5_share DOUBLE,"
+        " players_trend_7d_market_pct DOUBLE)"
     )
     con.execute(
         "CREATE TEMP TABLE _niche_lifetime(dimension VARCHAR, key VARCHAR,"

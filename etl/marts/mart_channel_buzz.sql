@@ -47,8 +47,13 @@ DROP TABLE IF EXISTS mart_channel_buzz_summary;
 -- ------------------------------------------------------------------------------------
 -- Unified (title, published_at, weight, channel) rows from every source.
 -- ------------------------------------------------------------------------------------
+-- weight is CAST to DOUBLE on purpose: a bare `1.0` literal is DECIMAL(2,1) in DuckDB, and
+-- every SUM over it came out DECIMAL(38,1) — reach_weighted_score / total_weighted shipped
+-- as DECIMAL, which Python reads back as decimal.Decimal and the MCP's `float += Decimal`
+-- crashed on (2026-09-22). Every weighted column downstream is DOUBLE from here.
 CREATE TEMP TABLE _cb_press_rows AS
-SELECT a.title, TRY_CAST(a.published_at AS TIMESTAMP) AS published_at, 1.0 AS weight, 'press' AS channel
+SELECT a.title, TRY_CAST(a.published_at AS TIMESTAMP) AS published_at,
+    CAST(1.0 AS DOUBLE) AS weight, 'press' AS channel
 FROM src.articles a
 WHERE a.source != 'steam_news'
   AND a.title IS NOT NULL AND TRIM(a.title) != ''
@@ -79,10 +84,16 @@ WHERE len(tw.words) >= 2;
 -- mart_press.sql's own concept_unigram/concept_bigram temp tables in the same session.
 -- stg_game_tags, NOT src.game_tags: HTML-entity phantom-twin tags fake niche demand
 -- trends (source fixed 2026-08-26; stale snapshots/regressions must not resurrect them).
+-- Canonical tag names plus their other spellings (stg_niche_alias), exactly as
+-- mart_press.sql's _concept_source — a headline's "rogue-like" is still a concept word.
 CREATE TEMP TABLE _cb_concept_source AS
 SELECT DISTINCT lower(trim(tag)) AS phrase
 FROM stg_game_tags
 WHERE tag NOT IN (SELECT tag FROM denylist_tag)
+UNION
+SELECT DISTINCT lower(trim(alias)) AS phrase
+FROM stg_niche_alias
+WHERE dimension = 'tag' AND canonical NOT IN (SELECT tag FROM denylist_tag)
 UNION
 SELECT DISTINCT lower(trim(genre)) AS phrase
 FROM src.game_genres
@@ -122,8 +133,10 @@ SELECT term, channel, period, month_idx, COUNT(*) AS n_mentions, SUM(weight) AS 
 FROM _cb_terms
 GROUP BY term, channel, period, month_idx;
 
+-- CAST: SUM over BIGINT is HUGEINT in DuckDB — keep every published count a plain BIGINT.
 CREATE TEMP TABLE _cb_term_month AS
-SELECT term, period, month_idx, SUM(n_mentions) AS n_mentions, SUM(reach_weighted_score) AS reach_weighted_score
+SELECT term, period, month_idx, CAST(SUM(n_mentions) AS BIGINT) AS n_mentions,
+    SUM(reach_weighted_score) AS reach_weighted_score
 FROM _cb_term_channel_month
 GROUP BY term, period, month_idx;
 
@@ -132,7 +145,7 @@ GROUP BY term, period, month_idx;
 -- kept identical so "rising/cooling" reads consistently across both marts.
 CREATE TEMP TABLE _cb_term_stats AS
 SELECT term,
-    SUM(n_mentions) AS total_mentions,
+    CAST(SUM(n_mentions) AS BIGINT) AS total_mentions,
     SUM(reach_weighted_score) AS total_weighted,
     COALESCE(AVG(reach_weighted_score) FILTER (WHERE month_idx BETWEEN 1 AND @BUZZ_RECENT_MONTHS@), 0) AS recent_avg_weighted,
     COALESCE(AVG(reach_weighted_score) FILTER (

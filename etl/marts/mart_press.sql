@@ -101,8 +101,12 @@ FROM _outlet_genre_articles;
 
 CREATE TABLE mart_press_outlet_genre AS
 WITH counts AS (
-    SELECT source, genre, COUNT(*) AS n_articles, COUNT(DISTINCT appid) AS n_games_covered,
-        COUNT(*) FILTER (WHERE is_recent) AS n_articles_recent_24m
+    -- DISTINCT articles (2026-09-22): the rows are (article, game) pairs, so COUNT(*) counted
+    -- a roundup of five Action games five times for (outlet, Action) — "articles" that were
+    -- really article-mentions. Same fix as mart_niche_press.
+    SELECT source, genre, COUNT(DISTINCT article_id) AS n_articles,
+        COUNT(DISTINCT appid) AS n_games_covered,
+        COUNT(DISTINCT article_id) FILTER (WHERE is_recent) AS n_articles_recent_24m
     FROM _outlet_genre_articles
     GROUP BY source, genre
 ),
@@ -136,12 +140,15 @@ FROM _press_journalist p
 JOIN stg_genre_membership gm ON gm.appid = p.appid
 WHERE p.has_named_author;
 
+-- DISTINCT articles, floor included: three mentions in ONE roundup are one article, and
+-- must not clear a three-article floor on their own (see mart_press_outlet_genre).
 CREATE TEMP TABLE _author_genre_counts AS
-SELECT author, genre, COUNT(*) AS n_articles, COUNT(DISTINCT appid) AS n_distinct_games,
-    COUNT(*) FILTER (WHERE is_recent) AS n_articles_recent_24m
+SELECT author, genre, COUNT(DISTINCT article_id) AS n_articles,
+    COUNT(DISTINCT appid) AS n_distinct_games,
+    COUNT(DISTINCT article_id) FILTER (WHERE is_recent) AS n_articles_recent_24m
 FROM _author_genre_articles
 GROUP BY author, genre
-HAVING COUNT(*) >= @PRESS_AUTHOR_MIN_ARTICLES@;
+HAVING COUNT(DISTINCT article_id) >= @PRESS_AUTHOR_MIN_ARTICLES@;
 
 -- Some journalists' bylines appear under more than one outlet source (career moves) —
 -- outlets is a list so the pitch list can show all of them for this author x genre.
@@ -225,10 +232,17 @@ WHERE len(tw.words) >= 2;
 -- "action" alone — exactly the kind of noise this fix removes.
 -- stg_game_tags, NOT src.game_tags: HTML-entity phantom-twin tags fake niche demand
 -- trends (source fixed 2026-08-26; stale snapshots/regressions must not resurrect them).
+-- stg_game_tags carries only CANONICAL names since the spelling-twin merge (2026-09-22), so
+-- the twins' other spellings are added back from stg_niche_alias: a headline still says
+-- "rogue-like" and "base-building", and the vocabulary is about words, not niche keys.
 CREATE TEMP TABLE _concept_source AS
 SELECT DISTINCT lower(trim(tag)) AS phrase
 FROM stg_game_tags
 WHERE tag NOT IN (SELECT tag FROM denylist_tag)
+UNION
+SELECT DISTINCT lower(trim(alias)) AS phrase
+FROM stg_niche_alias
+WHERE dimension = 'tag' AND canonical NOT IN (SELECT tag FROM denylist_tag)
 UNION
 SELECT DISTINCT lower(trim(genre)) AS phrase
 FROM src.game_genres
@@ -270,7 +284,7 @@ GROUP BY term, period, month_idx;
 
 CREATE TEMP TABLE _buzz_term_stats AS
 SELECT term,
-    SUM(n_mentions) AS total_mentions,
+    CAST(SUM(n_mentions) AS BIGINT) AS total_mentions,   -- SUM(BIGINT) is HUGEINT otherwise
     COALESCE(AVG(n_mentions) FILTER (WHERE month_idx BETWEEN 1 AND @BUZZ_RECENT_MONTHS@), 0) AS recent_avg,
     COALESCE(AVG(n_mentions) FILTER (
         WHERE month_idx BETWEEN @BUZZ_RECENT_MONTHS@ + 1 AND @BUZZ_RECENT_MONTHS@ * 2

@@ -14,7 +14,14 @@ relationship at all to the axis the board grades on. The rebuild (see mart_niche
 This file exists so it cannot silently invert again. It pins four things:
 
   1. ORDERING          median(enter) > median(hold) > median(crowded) > median(declining),
-                       with the ring computed by a port of web/src/lib/radarVerdict.ts.
+                       with the ring computed by a port of web/src/lib/radarVerdict.ts —
+                       including its 2026-09-22 rule that a winner-take-most niche never
+                       rings enter (see radar_ring). Measured on the 2026-09-21 mart
+                       (tag / 24m / min50), that rule moves 18 niches enter -> watch:
+                         enter  n=34 median 60.5  ->  n=16 median 66.4
+                         watch  n=187 median 50.5 ->  n=205 median 50.9
+                         crowded 96 / 41.0 and declining 4 / 17.7 unchanged
+                       so the ordering it pins got WIDER, not narrower.
   2. FORMULA           opportunity_v2 recomputed INDEPENDENTLY in Python from the mart's own
                        published columns must equal the published score. The SQL and this
                        file are two implementations of one documented formula; if either
@@ -71,7 +78,17 @@ CUR_YEAR = TODAY.year
 # chain). Kept as a straight transcription — the TS side has its own unit tests; this port
 # exists so the ETL can assert the score against the same verdicts the board renders.
 # `hold` here is radarVerdict's `watch` reached through a DEMAND arm (holding / softening /
-# surging-but-flooding); its caution arms would be `watch`, which the fixture never hits.
+# surging-but-flooding / surging-but-winner-take-most); its caution arms would be `watch`,
+# which the fixture never hits.
+#
+# WINNER-TAKE-MOST NEVER RINGS "ENTER" (2026-09-22, owner rule: never a bullish verdict when
+# a deciding check fails). The enter arm used to test demand and supply only, so a niche whose
+# revenue is winner-take-most (winner_concentration > WC_WINNER_TAKE_MOST: the top 5% of titles
+# take > 85% of it) still rang "Enter now" whenever demand surged on a calm pipeline — 18 of the
+# 34 enter rings on the 2026-09-21 default cut, Metroidvania and Souls-like among them. It now
+# rings watch, "demand surging, but winner-take-most revenue" — the mirror of the existing
+# "demand surging, but supply flooding" arm, and like it a DEMAND arm (hence `hold` below), not
+# crowded: surging demand is real evidence, the concentration is the caveat on it.
 # ---------------------------------------------------------------------------------------
 DEMAND_ENTER_PCT = 40.0
 DEMAND_DECLINE_PCT = -30.0
@@ -90,7 +107,8 @@ def radar_ring(trend, sat, wc, emerging) -> str:
     flooding = sat is not None and sat > SAT_FLOOD_YOY
     winner_take_most = wc is not None and wc > WC_WINNER_TAKE_MOST
     if demand_enter and supply_calm:
-        return "enter"
+        # "demand surging, but winner-take-most revenue" -> watch (a demand arm: `hold`)
+        return "hold" if winner_take_most else "enter"
     if demand_decline:
         return "declining"
     if winner_take_most:
@@ -146,10 +164,17 @@ def expected_score(row: dict) -> tuple[float, dict]:
 
     momentum = None if dem_g is None else 50.0 + 50.0 * math.tanh(dem_g / g_enter)
     flood_room = flood_room_of(dem_g, sup_g)
-    entrant_room = (
-        None if (er is None or emerging)
-        else 100.0 * clamp01((er - bm.OPP_ENTRANT_FULL) / (bm.OPP_ENTRANT_NORM - bm.OPP_ENTRANT_FULL))
-    )
+    # Entrant economics that EXIST but cannot be verified (a published cut of this key whose
+    # paid sample is under the revenue floor, so its median is withheld) score 0 — failed,
+    # not absent (mart_niche.sql, 2026-09-22). `_n_paid_by_win` is the key's sibling rows.
+    thin = any(n is not None and n < bm.MIN_NICHE_GAMES
+               for n in row.get("_n_paid_by_win", {}).values())
+    if emerging:
+        entrant_room = None
+    elif er is not None:
+        entrant_room = 100.0 * clamp01((er - bm.OPP_ENTRANT_FULL) / (bm.OPP_ENTRANT_NORM - bm.OPP_ENTRANT_FULL))
+    else:
+        entrant_room = 0.0 if thin else None
     if flood_room is None:
         supply_room = entrant_room
     elif entrant_room is None:
@@ -208,6 +233,9 @@ PROFILES = [
     ("crowded_flood", -5.0, 24, 12, False),  # sat +1.00, demand <= 0 -> crowded
     ("crowded_wtm", 25.0, 15, 15, True),     # calm supply, wc > 0.85 -> crowded
     ("declining", -50.0, 16, 15, False),     # trend <= -30 -> declining
+    ("surging_wtm", 80.0, 15, 15, True),     # enter's demand + calm supply, but wc > 0.85
+                                             # -> watch ("demand surging, but winner-take-
+                                             #    most revenue"), NEVER enter (2026-09-22)
 ]
 NICHES_PER_PROFILE = 8
 RECENT_PER_NICHE = 34
@@ -312,14 +340,17 @@ def main() -> int:
         """
         CREATE TEMP TABLE stg_game(
             appid INTEGER, name VARCHAR, release_year INTEGER, release_date DATE,
-            release_valid BOOLEAN, price_initial DOUBLE, positive_ratio DOUBLE,
+            release_valid BOOLEAN, price_initial DOUBLE, price_status VARCHAR,
+            positive_ratio DOUBLE,
             owners_mid DOUBLE, total_reviews BIGINT, est_rev_reviews DOUBLE,
             self_published BOOLEAN, is_singleplayer BOOLEAN, is_indie BOOLEAN,
             review_count_source VARCHAR)
         """
     )
+    # Every fixture game is priced, so every one is 'paid' (carries a revenue estimate) —
+    # the free/unknown-price population rules are pinned in test_mart_niche_game.py.
     con.executemany(
-        "INSERT INTO stg_game VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO stg_game VALUES (?,?,?,?,?,?,'paid',?,?,?,?,?,?,?,?)",
         [(g["appid"], g["name"], g["release_year"], g["release_date"], g["release_valid"],
           g["price_initial"], g["positive_ratio"], g["owners_mid"], g["total_reviews"],
           g["est_rev_reviews"], g["self_published"], g["is_singleplayer"], g["is_indie"],
@@ -332,7 +363,8 @@ def main() -> int:
     con.execute(
         "CREATE TEMP TABLE _niche_players_now(dimension VARCHAR, key VARCHAR, "
         "total_players_now BIGINT, players_coverage DOUBLE, players_trend_7d_pct DOUBLE, "
-        "median_players_now DOUBLE, players_top5_share DOUBLE)"
+        "median_players_now DOUBLE, players_top5_share DOUBLE, "
+        "players_trend_7d_market_pct DOUBLE)"
     )
     con.execute(
         "CREATE TEMP TABLE _niche_lifetime(dimension VARCHAR, key VARCHAR, "
@@ -368,15 +400,22 @@ def main() -> int:
         "key", "win", "min_reviews", "demand_trend_24m_pct", "saturation_yoy",
         "entrant_ratio", "winner_concentration", "demand", "market_size", "quality_gap",
         "demand_emerging", "momentum", "supply_room", "revenue_spread", "market_pull",
-        "supply_brake", "opportunity_v2", "solo_viability", "solo_tier",
+        "supply_brake", "opportunity_v2", "solo_viability", "solo_tier", "n_paid",
     ]
     rows = [dict(zip(cols, r)) for r in con.execute(
         f"SELECT {', '.join(cols)} FROM mart_niche WHERE dimension = 'tag'"
     ).fetchall()]
     rows = [{k: (float(v) if isinstance(v, (int,)) and k not in
-                 ("min_reviews",) and not isinstance(v, bool) else v)
+                 ("min_reviews", "n_paid") and not isinstance(v, bool) else v)
              for k, v in r.items()} for r in rows]
     assert rows, "fixture produced no tag rows"
+    # Each row's sibling cuts' paid-sample sizes (same key + floor, both windows) — the input
+    # the entrant check's "failed, not absent" rule reads.
+    by_key: dict[tuple, dict] = {}
+    for r in rows:
+        by_key.setdefault((r["key"], r["min_reviews"]), {})[r["win"]] = r["n_paid"]
+    for r in rows:
+        r["_n_paid_by_win"] = by_key[(r["key"], r["min_reviews"])]
 
     # ---- 1. the ORDERING invariant, on the cut every consumer defaults to --------------
     cut = [r for r in rows if r["win"] == "24m" and r["min_reviews"] == 50]
@@ -394,6 +433,21 @@ def main() -> int:
             print(f"          {ring:<10} n={len(by_ring[ring]):>3}  median={med[ring]:6.2f}")
     for ring in ("enter", "hold", "crowded", "declining"):
         assert ring in med, f"fixture never produced a '{ring}' niche — the test has no teeth"
+    # The winner-take-most rule, on the rows themselves: a surging, calm-supply niche whose
+    # revenue is winner-take-most rings watch (`hold`), never enter — and the fixture must
+    # actually contain such niches, or the rule is untested.
+    surging_wtm = [r for r in cut if r["key"].startswith("surging_wtm-")]
+    assert surging_wtm, "fixture lost its surging winner-take-most niches"
+    for r in surging_wtm:
+        assert r["demand_trend_24m_pct"] >= DEMAND_ENTER_PCT and r["winner_concentration"] > WC_WINNER_TAKE_MOST, (
+            f"{r['key']}: fixture drifted — not a surging winner-take-most niche "
+            f"(trend {r['demand_trend_24m_pct']}, wc {r['winner_concentration']})")
+        assert r["_ring"] == "hold", f"{r['key']}: winner-take-most niche rang {r['_ring']!r}, must be watch"
+    assert not [r for r in cut if r["_ring"] == "enter"
+                and r["winner_concentration"] is not None
+                and r["winner_concentration"] > WC_WINNER_TAKE_MOST], (
+        "a winner-take-most niche rang 'enter'")
+    print(f"[ok] {len(surging_wtm)} surging winner-take-most niches ring watch, none enter")
     chain = ["enter", "hold", "crowded", "declining"]
     for a, b in zip(chain, chain[1:]):
         assert med[a] > med[b], (

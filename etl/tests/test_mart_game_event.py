@@ -25,9 +25,17 @@ def build() -> duckdb.DuckDBPyConnection:
         " url VARCHAR, published_at VARCHAR)"
     )
     con.execute(
-        "CREATE TEMP TABLE stg_game(appid INTEGER, release_date DATE, release_valid BOOLEAN)"
+        "CREATE TEMP TABLE stg_game(appid INTEGER, release_date DATE, release_valid BOOLEAN,"
+        " store_release_date DATE, release_date_source VARCHAR, is_ea_graduate BOOLEAN)"
     )
-    con.execute("INSERT INTO stg_game VALUES (1, DATE '2024-05-01', true), (2, DATE '2023-01-01', true)")
+    con.execute(
+        "INSERT INTO stg_game VALUES"
+        " (1, DATE '2024-05-01', true, DATE '2024-05-01', 'store', false),"
+        " (2, DATE '2023-01-01', true, DATE '2023-01-01', 'store', false),"
+        # appid 3: an Early Access graduate — public (first review) 2018-08, 1.0 on 2025-06-17,
+        # the first-public date known only to the month.
+        " (3, DATE '2018-08-01', true, DATE '2025-06-17', 'first_review_month', true)"
+    )
 
     rows = [
         # appid 1: one of each kind that should survive
@@ -78,6 +86,35 @@ def test_selection_and_cap():
     print(f"[ok] kinds={sorted(kinds)}  appid1={len(titles)} events  appid2={n2} (cap {bm.GAME_EVENT_CAP}, release kept)")
 
 
+def test_ea_graduate_is_anchored_at_its_ea_launch_and_marks_the_1_0():
+    """An Early Access graduate's release anchor is its FIRST-PUBLIC date (stg_game.release_date)
+    and must say it was an EA launch; its store date — the 1.0 — becomes a separate dated event.
+    Before 2026-09-22 SCUM's chart anchored 'Released' at the 2025 1.0 with seven years of
+    reviews to its left, and nothing explained the 1.0 spike."""
+    con = build()
+    rows = con.execute(
+        "SELECT CAST(event_date AS VARCHAR), kind, title FROM mart_game_event "
+        "WHERE appid = 3 ORDER BY event_date"
+    ).fetchall()
+    assert rows == [
+        ("2018-08-01", "release", "Early Access launch (month approximate)"),
+        ("2025-06-17", "update", "1.0 release"),
+    ], rows
+    # Exactly one 'release' per game stays the contract, graduate or not.
+    per_game = con.execute(
+        "SELECT appid, count(*) FROM mart_game_event WHERE kind = 'release' GROUP BY 1 ORDER BY 1"
+    ).fetchall()
+    assert per_game == [(1, 1), (2, 1), (3, 1)], per_game
+    # A game that is not a graduate keeps the plain title and gets no 1.0 marker.
+    assert con.execute(
+        "SELECT title FROM mart_game_event WHERE appid = 1 AND kind = 'release'"
+    ).fetchone()[0] == "Released"
+    assert con.execute(
+        "SELECT count(*) FROM mart_game_event WHERE title = '1.0 release' AND appid <> 3"
+    ).fetchone()[0] == 0
+
+
 if __name__ == "__main__":
     test_selection_and_cap()
-    print("[PASS] mart_game_event selection + cap")
+    test_ea_graduate_is_anchored_at_its_ea_launch_and_marks_the_1_0()
+    print("[PASS] mart_game_event selection + cap + EA graduate anchor")

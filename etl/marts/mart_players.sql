@@ -85,10 +85,13 @@ WITH membership AS (
     SELECT 'genre' AS dimension, genre AS key, appid FROM stg_genre_membership
 ),
 scored_floor AS (
+    -- mart_niche's (win='all', min_reviews=@MIN_REVIEWS_DEFAULT@) population: every game at
+    -- the floor, paid or not (a free game's players are as real as a paid one's — the
+    -- est_rev_reviews IS NOT NULL test this used to carry went with mart_niche's, 2026-09-22).
     SELECT m.dimension, m.key
     FROM membership m
     JOIN stg_game g ON g.appid = m.appid
-    WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@ AND g.est_rev_reviews IS NOT NULL
+    WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@
     GROUP BY 1, 2
     HAVING COUNT(*) >= @MIN_NICHE_GAMES@
 ),
@@ -123,12 +126,34 @@ SELECT appid,
 FROM mart_game_players_daily
 GROUP BY appid;
 
+-- MARKET baseline (2026-09-22): the niche/game trend statistic computed over the WHOLE
+-- catalog's same panel — every game with >= @MIN_REVIEWS_DEFAULT@ reviews measured in both
+-- windows, summed exactly like a niche's (so it is directly comparable to one: a sum, i.e.
+-- weighted by audience size). Why: on 2026-09-21, 174 of 218 niches read negative (median
+-- -4.9%) while this baseline was -4.3% — a market-wide seasonal dip that every niche page
+-- presented as its own decline. Published beside each trend as *_market_pct, with the
+-- difference as *_rel_pct (percentage points). Same >= @NICHE_PLAYERS_MIN_MEASURED@-game
+-- floor as a niche trend; NULL without it. Kept alive past this file: write_meta() records
+-- the value in mart_meta.
+CREATE TEMP TABLE _pl_market_trend AS
+SELECT
+    CASE WHEN SUM(w.avg_prior) > 0 AND COUNT(*) >= @NICHE_PLAYERS_MIN_MEASURED@
+         THEN 100.0 * (SUM(w.avg_recent) - SUM(w.avg_prior)) / SUM(w.avg_prior)
+    END AS players_trend_7d_market_pct,
+    COUNT(*) AS n_games_trend
+FROM _pl_game_windows w
+JOIN stg_game g ON g.appid = w.appid
+WHERE w.avg_recent IS NOT NULL AND w.avg_prior IS NOT NULL
+  AND g.total_reviews >= @MIN_REVIEWS_DEFAULT@;
+
 CREATE TEMP TABLE _game_players_summary AS
-SELECT appid,
-    avg_recent AS players_7d_avg,
-    CASE WHEN avg_recent IS NOT NULL AND avg_prior > 0
-         THEN 100.0 * (avg_recent - avg_prior) / avg_prior END AS players_trend_7d_pct
-FROM _pl_game_windows;
+SELECT w.appid,
+    w.avg_recent AS players_7d_avg,
+    CASE WHEN w.avg_recent IS NOT NULL AND w.avg_prior > 0
+         THEN 100.0 * (w.avg_recent - w.avg_prior) / w.avg_prior END AS players_trend_7d_pct,
+    mt.players_trend_7d_market_pct
+FROM _pl_game_windows w
+CROSS JOIN _pl_market_trend mt;
 
 -- ---------------------------------------------------------------------------------------
 -- All-sources player history (additive, 2026-08-14). Three measures, one table, a `source`
@@ -162,10 +187,13 @@ WITH membership AS (
     SELECT 'genre' AS dimension, genre AS key, appid FROM stg_genre_membership
 ),
 scored_floor AS (
+    -- mart_niche's (win='all', min_reviews=@MIN_REVIEWS_DEFAULT@) population: every game at
+    -- the floor, paid or not (a free game's players are as real as a paid one's — the
+    -- est_rev_reviews IS NOT NULL test this used to carry went with mart_niche's, 2026-09-22).
     SELECT m.dimension, m.key
     FROM membership m
     JOIN stg_game g ON g.appid = m.appid
-    WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@ AND g.est_rev_reviews IS NOT NULL
+    WHERE g.total_reviews >= @MIN_REVIEWS_DEFAULT@
     GROUP BY 1, 2
     HAVING COUNT(*) >= @MIN_NICHE_GAMES@
 ),
@@ -295,10 +323,14 @@ SELECT n.dimension, n.key,
          THEN 100.0 * (t.sum_recent - t.sum_prior) / t.sum_prior END AS players_trend_7d_pct,
     t.n_games_trend,
     CAST(n.median_players_now AS DOUBLE) AS median_players_now,
-    t5.top5_players * 1.0 / NULLIF(n.total_players_now, 0) AS players_top5_share
+    t5.top5_players * 1.0 / NULLIF(n.total_players_now, 0) AS players_top5_share,
+    -- One catalog-wide value on every row (see _pl_market_trend); mart_niche derives the
+    -- niche-minus-market column from it.
+    mt.players_trend_7d_market_pct
 FROM now_agg n
 LEFT JOIN tr t ON t.dimension = n.dimension AND t.key = n.key
-LEFT JOIN top5 t5 ON t5.dimension = n.dimension AND t5.key = n.key;
+LEFT JOIN top5 t5 ON t5.dimension = n.dimension AND t5.key = n.key
+CROSS JOIN _pl_market_trend mt;
 
 -- ---------------------------------------------------------------------------------------
 -- Game LIFETIME (steamcharts monthly, top-8k coverage): how long a game keeps an audience.
@@ -393,7 +425,7 @@ HAVING COUNT(*) >= @LIFETIME_MIN_NICHE_GAMES@;
 -- to produce (each is dropped by its last consumer, or read after the mart loop):
 --   _game_players_summary, _game_lifetime  -> read + dropped by mart_game.sql
 --   _niche_players_now, _niche_lifetime    -> read + dropped by mart_niche.sql
---   _pl_panel                              -> read by write_meta() AFTER all mart files
+--   _pl_panel, _pl_market_trend            -> read by write_meta() AFTER all mart files
 -- ------------------------------------------------------------------------------------
 DROP TABLE IF EXISTS _pl_game_windows;
 DROP TABLE IF EXISTS _pl_dates;

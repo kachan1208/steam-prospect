@@ -9,15 +9,18 @@
 --               see mart_game.sql's tag_ranked CTE — so synthetic/app-type tags never
 --               enter a pair) plus est_rev_reviews / total_reviews.
 --   mart_niche  supplies the single-tag baselines: the (dimension='tag', win='all',
---               min_reviews=@MIN_REVIEWS_DEFAULT@) cut, whose per-game population filter
---               (total_reviews >= @MIN_REVIEWS_DEFAULT@, est_rev_reviews IS NOT NULL) is
---               replicated verbatim below for the pair population, so pair and solo
---               medians describe comparable populations by construction.
+--               min_reviews=@MIN_REVIEWS_DEFAULT@) cut. Its median_rev / hit_rate_200k are
+--               over that cut's PAID games (n_paid — free and unknown-price games carry no
+--               revenue estimate, 2026-09-22), and the pair population below is the same
+--               thing at the pair grain (total_reviews >= @MIN_REVIEWS_DEFAULT@,
+--               est_rev_reviews IS NOT NULL), so pair and solo medians describe comparable
+--               populations by construction — which is why the solo n shipped beside them
+--               is n_paid, not the niche's n_games.
 --
 -- LIFT = pair median est_rev_reviews / GREATEST(tag_a solo median, tag_b solo median).
 -- Comparing against the BETTER solo tag means lift > 1 can't be trivially achieved by
 -- pairing a strong tag with a weak one — it asks "does the combination beat the best
--- thing either tag does alone?". NULL when both solo medians are 0 (all-free-game tags).
+-- thing either tag does alone?". NULL when both solo medians are 0 or NULL (no paid games).
 --
 -- Floors:
 --   * per-game: total_reviews >= @MIN_REVIEWS_DEFAULT@ (matches the niche mart's
@@ -67,7 +70,7 @@ agg AS (
 ),
 solo AS (
     -- Single-tag baseline: the all-history, min_reviews=@MIN_REVIEWS_DEFAULT@ cut.
-    SELECT key AS tag, n_games, median_rev, hit_rate_200k
+    SELECT key AS tag, n_paid AS n_games, median_rev, hit_rate_200k
     FROM mart_niche
     WHERE dimension = 'tag' AND win = 'all' AND min_reviews = @MIN_REVIEWS_DEFAULT@
 )

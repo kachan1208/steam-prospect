@@ -49,8 +49,17 @@ for i in range(200):
     total_reviews = REVIEW_LADDER[i % 12]
     price = PRICE_LADDER[i % 5]
 
-    # est_rev_reviews IS NULL for ~6% of games -> exercises mart_niche's NOT NULL filter.
-    est_rev = None if i % 17 == 0 else float(total_reviews) * 30.0 * price
+    # price_status exactly as create_staging() derives it (2026-09-22): Steam's free flag wins;
+    # a $0 or absent price WITHOUT the flag is 'unknown'; only a 'paid' game carries a revenue
+    # estimate. All three are members of the niche population — they used to be $0 revenue
+    # (free) or dropped from n_games entirely (NULL price), see check 1f.
+    if price == 0.0:
+        price_status = "free" if i % 2 == 0 else "unknown"
+    elif i % 17 == 0:
+        price_status, price = "unknown", None       # no price on file at all
+    else:
+        price_status = "paid"
+    est_rev = float(total_reviews) * 30.0 * price if price_status == "paid" else None
 
     # Release dates: a recent bucket (inside 24m), an old bucket, plus two invalid shapes
     # (NULL date, future date) that release_valid must reject.
@@ -78,6 +87,7 @@ for i in range(200):
             release_date=release_date,
             release_valid=release_valid,
             price_initial=price,
+            price_status=price_status,
             positive_ratio=0.5 + (i % 50) / 100.0,
             owners_mid=float(total_reviews * 30),
             total_reviews=total_reviews,
@@ -150,18 +160,20 @@ def main() -> int:
         """
         CREATE TEMP TABLE stg_game(
             appid INTEGER, name VARCHAR, release_year INTEGER, release_date DATE,
-            release_valid BOOLEAN, price_initial DOUBLE, positive_ratio DOUBLE,
+            release_valid BOOLEAN, price_initial DOUBLE, price_status VARCHAR,
+            positive_ratio DOUBLE,
             owners_mid DOUBLE, total_reviews BIGINT, est_rev_reviews DOUBLE,
             self_published BOOLEAN, is_singleplayer BOOLEAN, is_indie BOOLEAN,
             review_count_source VARCHAR)
         """
     )
     con.executemany(
-        "INSERT INTO stg_game VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO stg_game VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [
             (
                 g["appid"], g["name"], g["release_year"], g["release_date"],
-                g["release_valid"], g["price_initial"], g["positive_ratio"],
+                g["release_valid"], g["price_initial"], g["price_status"],
+                g["positive_ratio"],
                 g["owners_mid"], g["total_reviews"], g["est_rev_reviews"],
                 g["self_published"], g["is_singleplayer"], g["is_indie"],
                 g["review_count_source"],
@@ -188,7 +200,8 @@ def main() -> int:
         CREATE TEMP TABLE _niche_players_now(
             dimension VARCHAR, key VARCHAR, total_players_now BIGINT,
             players_coverage DOUBLE, players_trend_7d_pct DOUBLE,
-            median_players_now DOUBLE, players_top5_share DOUBLE)
+            median_players_now DOUBLE, players_top5_share DOUBLE,
+            players_trend_7d_market_pct DOUBLE)
         """
     )
     con.execute(
@@ -391,6 +404,115 @@ def main() -> int:
     )
     print("[ok] solo-evidence trio: membership-replayed exactly, alias in lockstep, hours not minutes")
 
+    # ---- 1f. REVENUE population: free / unknown-price games count, but earn nothing ----
+    # The regression (2026-09-22): free games entered every revenue statistic at exactly $0 —
+    # 5,951 of 42,869 games with >= 50 reviews — dragging medians toward zero, counting as
+    # misses in the hit rates and padding every percent_rank with $0 ties; games with NO price
+    # were dropped from n_games altogether. Now: members of the population (n_games, demand,
+    # owners...), absent from revenue/price statistics, and itemised per row. Replayed over
+    # the published membership, so every number is checked against the games it claims.
+    bad_revenue = con.execute(f"""
+        WITH m AS (
+            SELECT g.dimension, g.key, g.win, g.min_reviews, sg.price_status,
+                   sg.est_rev_reviews AS rev, sg.price_initial AS price
+            FROM mart_niche_game g JOIN stg_game sg ON sg.appid = g.appid
+        ),
+        ranked AS (
+            SELECT *, percent_rank() OVER (PARTITION BY dimension, key, win, min_reviews
+                                           ORDER BY rev) AS pr
+            FROM m WHERE rev IS NOT NULL
+        ),
+        wc AS (
+            SELECT dimension, key, win, min_reviews,
+                   SUM(rev) FILTER (WHERE pr >= {bm.WINNER_TOP_PCT}) / NULLIF(SUM(rev), 0) AS wc
+            FROM ranked GROUP BY 1, 2, 3, 4
+        ),
+        replay_raw AS (
+            SELECT dimension, key, win, min_reviews,
+                   COUNT(*) FILTER (WHERE price_status = 'paid') AS n_paid,
+                   COUNT(*) FILTER (WHERE price_status = 'free') AS n_free,
+                   COUNT(*) FILTER (WHERE price_status = 'unknown') AS n_unknown,
+                   median(rev) AS med_rev,
+                   AVG(CASE WHEN rev > {bm.TIMING_BIG_REV} THEN 1.0 ELSE 0.0 END)
+                       FILTER (WHERE rev IS NOT NULL) AS hit_200k,
+                   median(price) FILTER (WHERE price_status = 'paid') AS med_price
+            FROM m GROUP BY 1, 2, 3, 4
+        ),
+        -- the REVENUE SAMPLE FLOOR: a sample statistic needs MIN_NICHE_GAMES paid games
+        replay AS (
+            SELECT dimension, key, win, min_reviews, n_paid, n_free, n_unknown,
+                   CASE WHEN n_paid >= {bm.MIN_NICHE_GAMES} THEN med_rev END AS med_rev,
+                   CASE WHEN n_paid >= {bm.MIN_NICHE_GAMES} THEN hit_200k END AS hit_200k,
+                   CASE WHEN n_paid >= {bm.MIN_NICHE_GAMES} THEN med_price END AS med_price,
+                   n_paid >= {bm.MIN_NICHE_GAMES} AS sampled
+            FROM replay_raw
+        )
+        SELECT COUNT(*) FROM mart_niche n
+        JOIN replay r USING (dimension, key, win, min_reviews)
+        LEFT JOIN wc USING (dimension, key, win, min_reviews)
+        WHERE n.n_paid != r.n_paid OR n.n_free != r.n_free OR n.n_price_unknown != r.n_unknown
+           OR n.n_paid + n.n_free + n.n_price_unknown != n.n_games
+           OR (n.median_rev IS NULL) != (r.med_rev IS NULL)
+           OR ABS(COALESCE(n.median_rev, 0) - COALESCE(r.med_rev, 0)) > 1e-6
+           OR (n.hit_rate_200k IS NULL) != (r.hit_200k IS NULL)
+           OR ABS(COALESCE(n.hit_rate_200k, 0) - COALESCE(r.hit_200k, 0)) > 1e-9
+           OR (n.median_price IS NULL) != (r.med_price IS NULL)
+           OR ABS(COALESCE(n.median_price, 0) - COALESCE(r.med_price, 0)) > 1e-9
+           OR (n.winner_concentration IS NULL) != (NOT r.sampled OR wc.wc IS NULL)
+           OR (r.sampled AND ABS(COALESCE(n.winner_concentration, 0) - COALESCE(wc.wc, 0)) > 1e-9)
+    """).fetchone()[0]
+    assert bad_revenue == 0, (
+        f"{bad_revenue} cut(s) have revenue statistics that are not paid-games-only, or an "
+        f"n_paid/n_free/n_price_unknown split that does not add up to n_games"
+    )
+    # Teeth: the split must be exercised, and the $0-free median must actually differ from the
+    # published one somewhere — otherwise this check passes without the fix.
+    teeth = con.execute(f"""
+        WITH m AS (
+            SELECT g.dimension, g.key, g.win, g.min_reviews,
+                   CASE WHEN sg.price_status = 'free' THEN 0.0 ELSE sg.est_rev_reviews END AS rev_old
+            FROM mart_niche_game g JOIN stg_game sg ON sg.appid = g.appid
+        ),
+        old AS (SELECT dimension, key, win, min_reviews, median(rev_old) AS med_old
+                FROM m GROUP BY 1, 2, 3, 4)
+        SELECT SUM(n.n_free), SUM(n.n_price_unknown),
+               COUNT(*) FILTER (WHERE old.med_old < n.median_rev)
+        FROM mart_niche n JOIN old USING (dimension, key, win, min_reviews)
+    """).fetchone()
+    assert teeth[0] > 0 and teeth[1] > 0, f"fixture never produced free/unknown members: {teeth}"
+    assert teeth[2] > 0, "no cut's median moved when free games stopped counting as $0 — no teeth"
+    # The floor has teeth both ways: some published cuts sit under it (revenue withheld,
+    # NULL — never a number from a handful of paid games) and some clear it.
+    floor = con.execute(f"""
+        SELECT COUNT(*) FILTER (WHERE n_paid < {bm.MIN_NICHE_GAMES}),
+               COUNT(*) FILTER (WHERE n_paid < {bm.MIN_NICHE_GAMES} AND median_rev IS NOT NULL),
+               COUNT(*) FILTER (WHERE n_paid >= {bm.MIN_NICHE_GAMES} AND median_rev IS NULL),
+               COUNT(*) FILTER (WHERE n_paid >= {bm.MIN_NICHE_GAMES})
+        FROM mart_niche
+    """).fetchone()
+    assert floor[0] > 0 and floor[3] > 0, f"fixture never straddles the revenue sample floor: {floor}"
+    assert floor[1] == 0 and floor[2] == 0, f"revenue sample floor misapplied: {floor}"
+    # ...and a withheld median must not become a SCORE advantage: entrant economics that exist
+    # but cannot be verified (a sibling cut under the floor) brake the score fully instead of
+    # dropping out of it (mart_niche.sql, entrant_room: "failed, not absent").
+    braked = con.execute(f"""
+        WITH sib AS (
+            SELECT dimension, key, min_reviews,
+                   MIN(n_paid) AS min_paid, COUNT(*) AS n_cuts
+            FROM mart_niche GROUP BY 1, 2, 3
+        )
+        SELECT COUNT(*),
+               COUNT(*) FILTER (WHERE n.supply_room != 0 OR n.supply_brake != {bm.SUPPLY_BRAKE_FLOOR})
+        FROM mart_niche n JOIN sib USING (dimension, key, min_reviews)
+        WHERE NOT n.demand_emerging AND n.entrant_ratio IS NULL
+          AND sib.min_paid < {bm.MIN_NICHE_GAMES}
+    """).fetchone()
+    assert braked[0] > 0, "fixture never produced an unverifiable-entrant niche — no teeth"
+    assert braked[1] == 0, f"{braked[1]} row(s) escaped the brake on unverifiable entrant economics"
+    print(f"[ok] revenue stats are paid-only on every cut; n_paid+n_free+n_price_unknown = n_games "
+          f"({teeth[0]} free / {teeth[1]} unknown member rows; {teeth[2]} cut medians the $0 rows "
+          f"used to drag down)")
+
     n_rows = con.execute("SELECT COUNT(*) FROM mart_niche_game").fetchone()[0]
     n_niche = con.execute("SELECT COUNT(*) FROM mart_niche").fetchone()[0]
     print(f"\n[rows] mart_niche      = {n_niche:,} groups")
@@ -481,6 +603,18 @@ def main() -> int:
         flag = "OK " if row[4] == row[5] else "BAD"
         print(f"           {flag} {row[0]:<6} {row[1]:<13} {row[2]:<4} {row[3]:>4} "
               f"{row[4]:>6} {row[5]:>8}")
+
+    # ---- 6b. unreleased games are not members, paid or not ----------------------------
+    # The old `est_rev_reviews IS NOT NULL` gate kept most coming-soon pages (no price yet)
+    # out of min_reviews=0 by accident; with free/unknown-price games now members, the
+    # release test does it on purpose. The fixture's NULL-date / future-date games must be
+    # in no cut at all.
+    unreleased = con.execute(
+        "SELECT COUNT(*) FROM mart_niche_game g JOIN stg_game sg ON sg.appid = g.appid "
+        "WHERE NOT sg.release_valid"
+    ).fetchone()[0]
+    assert unreleased == 0, f"{unreleased} membership row(s) belong to unreleased games"
+    print("[ok] unreleased games (NULL / future release date) are in no cut")
 
     # ---- 7. contrast: the top_tags-style shortcut this mart replaces ------------------
     # (mart_game.top_tags is capped at TOP_TAGS_PER_GAME; here we show the *unfiltered*
