@@ -20,7 +20,8 @@ import { installChartLayout } from "../test/recharts";
  *    The panel used to pair reviews-based revenue ($251,497,872.9) with the owners-based unit
  *    count (7,500,000) at a $14.99 price — $33.53 a copy, under a footnote spelling out the
  *    division.
- * 3. The press tone percentage is printed with the base it is actually computed over.
+ * 3. (2026-09-23) Every figure explains itself and no placeholder passes for a value — see the
+ *    Estimates, rank, comparables, press, launch-shape and error-state blocks below.
  */
 
 const PROFILE = {
@@ -421,9 +422,9 @@ describe("GameProfile — placeholders are never shown as values", () => {
     });
     renderProfile();
     const players = await estRow("est-players");
-    expect(players.textContent).toContain("−5.8% vs the prior 7 days · Steam overall +0.8% → −6.5 pts vs market");
+    expect(players.textContent).toContain("-5.8% vs the prior 7 days · Steam overall +0.8% → -6.5 pts vs market");
     fireEvent.click(screen.getByRole("button", { name: "About Players now" }));
-    expect(screen.getByRole("tooltip").textContent).toContain("−5.8% (this game) − +0.8% (all of Steam) = −6.5 pts");
+    expect(screen.getByRole("tooltip").textContent).toContain("-5.8% (this game) − +0.8% (all of Steam) = -6.5 pts");
   });
 
   it("never quotes a clock-time capture schedule", async () => {
@@ -509,7 +510,53 @@ const COMPARABLES = {
   ],
 };
 
+describe("GameProfile — an Early Access graduate's 1.0 on the velocity chart", () => {
+  it("marks the 1.0 even when the event feed dropped it (CS2: beta review, then the Aug 2012 launch)", async () => {
+    const month = (period: string, n: number) => ({
+      period,
+      n_reviews: n,
+      n_positive: Math.round(n * 0.9),
+      cum_reviews: 0,
+      cum_positive: 0,
+      cum_positive_share: null,
+      trailing_reviews: null,
+      trailing_positive_share: null,
+    });
+    serve(/\/reviews-summary/, {
+      appid: 730,
+      eligible: true,
+      timeline: [month("2012-05", 1), month("2012-08", 1838), month("2012-09", 1091), month("2012-10", 570), month("2012-11", 653)],
+      language_split: [],
+      playtime_at_review: [],
+      launch_curve: [],
+    });
+    serve(/\/events/, { appid: 730, items: [{ event_date: "2012-05-01", kind: "release", title: "Early Access launch (month approximate)", url: null }] });
+    serve(/^\/api\/games\/367520(\?|$)/, {
+      ...PROFILE,
+      release_date: "2012-05-01",
+      first_public_date: "2012-05-01",
+      release_date_1_0: "2012-08-21",
+      is_ea_graduate: true,
+      release_date_source: "first_review_month",
+    });
+    const { container } = renderWithCharts();
+    await screen.findByText("Early Access since ~May 2012 · 1.0 on Aug 21, 2012");
+    await waitForText(container as HTMLElement, "EA LAUNCH");
+    const labels = Array.from(container.querySelectorAll("text.plumb-label")).map((t) => t.textContent?.trim());
+    expect(labels).toContain("EA LAUNCH");
+    expect(labels.some((l) => l?.startsWith("1.0"))).toBe(true);
+    expect(labels.some((l) => /\d{3,}×/.test(l ?? ""))).toBe(false);
+  });
+});
+
 describe("GameProfile — comparables explain their columns", () => {
+  it("names the price band of a game with no list price in words, not as $-0.01–$0.01", async () => {
+    serve(/\/comparables/, { ...COMPARABLES, price_band: { low: -0.01, high: 0.01 } });
+    renderProfile();
+    expect(await screen.findByText(/Same genre \(Strategy\) · free or unknown price, like this game/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain("$-0.01");
+  });
+
   it("works the tag overlap through the top row's own tags", async () => {
     serve(/\/comparables/, COMPARABLES);
     renderProfile();

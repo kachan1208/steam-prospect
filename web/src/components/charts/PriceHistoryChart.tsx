@@ -266,9 +266,7 @@ export function PriceHistoryChart({
           </span>
           <PriceTip />
         </p>
-        {asOfIso && (
-          <p className="text-[11px] text-ink-muted">Checked through {fmtDay(asOfIso)} (latest data).</p>
-        )}
+        {asOfIso && <p className="text-[11px] text-ink-muted">Latest data: {fmtDay(asOfIso)}.</p>}
       </div>
     );
   }

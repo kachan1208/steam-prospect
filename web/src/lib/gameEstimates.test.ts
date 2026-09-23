@@ -78,9 +78,9 @@ describe("priceStatus — the served verdict wins", () => {
 describe("players trend vs the market", () => {
   it("reads the game's week against Steam's when the market trend is served (SCUM)", () => {
     const r = playersTrendRead({ players_trend_7d_pct: -5.75, players_trend_7d_market_pct: 0.75, players_trend_7d_rel_pct: -6.5 });
-    expect(r.trend).toBe("−5.8% vs the prior 7 days");
-    expect(r.market).toBe("Steam overall +0.8% → −6.5 pts vs market");
-    expect(r.worked).toBe("−5.8% (this game) − +0.8% (all of Steam) = −6.5 pts");
+    expect(r.trend).toBe("-5.8% vs the prior 7 days");
+    expect(r.market).toBe("Steam overall +0.8% → -6.5 pts vs market");
+    expect(r.worked).toBe("-5.8% (this game) − +0.8% (all of Steam) = -6.5 pts");
   });
 
   it("shows a served relative figure it can't reproduce as served, without the equation", () => {
@@ -90,7 +90,7 @@ describe("players trend vs the market", () => {
 
   it("falls back to the plain trend on a mart without the market columns", () => {
     const r = playersTrendRead({ players_trend_7d_pct: -3.49 });
-    expect(r.trend).toBe("−3.5% vs the prior 7 days");
+    expect(r.trend).toBe("-3.5% vs the prior 7 days");
     expect(r.market).toBeNull();
   });
 

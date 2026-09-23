@@ -317,6 +317,9 @@ describe("plumbLineLabel — <= ~9 characters of uppercase", () => {
   it("drops the decimal from ten times up", () => {
     expect(plumbLineLabel(spike(12.3))).toBe("▲ 12×");
     expect(plumbLineLabel(spike(9.96))).toBe("▲ 10×"); // never "10.0×"
+    // A multiple of a near-empty baseline (CS2's one beta review, then its launch month).
+    expect(plumbLineLabel(spike(1838))).toBe("▲ >99×");
+    expect(plumbLineLabel(spike(99.4))).toBe("▲ 99×");
   });
 
   it("never prints a collapse as a multiple of nothing", () => {

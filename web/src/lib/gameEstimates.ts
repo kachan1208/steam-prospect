@@ -1,4 +1,4 @@
-import { fmtCompact, fmtInt, fmtPrice, fmtUsd } from "./format";
+import { fmtCompact, fmtInt, fmtPrice, fmtSigned, fmtUsd } from "./format";
 import { priceStatus, type PricedRow } from "./priceStatus";
 
 /**
@@ -133,28 +133,25 @@ export function fmtShareTrim(v: number | null | undefined): string {
   return `${s.endsWith(".0") ? s.slice(0, -2) : s}%`;
 }
 
-/** A trend already in PERCENT (players_trend_7d_pct = -5.35 means −5.35%): "−5.4%" / "+2.0%". */
+/** A trend already in PERCENT (players_trend_7d_pct = -5.35 means -5.35%): "-5.4%" / "+2.0%"
+ * — lib/format's fmtSigned on the fraction, so the page speaks one sign convention. */
 export function fmtTrendPct(v: number | null | undefined): string | null {
   if (typeof v !== "number" || !Number.isFinite(v)) return null;
-  const t = Math.abs(v).toFixed(1);
-  if (Number(t) === 0) return "0.0%";
-  return `${v > 0 ? "+" : "−"}${t}%`;
+  return fmtSigned(v / 100, 1);
 }
 
-/** Percentage points, signed: "−3.4 pts". */
+/** Percentage points, signed the same way: "-3.4 pts", "+2.2 pts", "0.0 pts". */
 export function fmtPts(v: number | null | undefined): string | null {
   if (typeof v !== "number" || !Number.isFinite(v)) return null;
-  const t = Math.abs(v).toFixed(1);
-  if (Number(t) === 0) return "0.0 pts";
-  return `${v > 0 ? "+" : "−"}${t} pts`;
+  return fmtSigned(v / 100, 1).replace(/%$/, " pts");
 }
 
 export interface PlayersTrendRead {
-  /** "−5.4% vs the prior 7 days" */
+  /** "-5.4% vs the prior 7 days" */
   trend: string | null;
-  /** "Steam overall −2.0% → −3.4 pts vs market" (only when the market fields are served) */
+  /** "Steam overall -2.0% → -3.4 pts vs market" (only when the market fields are served) */
   market: string | null;
-  /** The ⓘ arithmetic: "−5.35% (this game) − (−2.00%) (all of Steam) = −3.35 pts" */
+  /** The ⓘ arithmetic: "-5.4% (this game) − -2.0% (all of Steam) = -3.4 pts" */
   worked: string | null;
 }
 

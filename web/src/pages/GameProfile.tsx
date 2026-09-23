@@ -87,6 +87,22 @@ const BAR_MUTED = "color-mix(in srgb, var(--accent-400) 55%, transparent)";
 /** The same hue at full strength — the partial month's hatch lines and dashed outline. */
 const BAR_MUTED_SOLID = "var(--accent-400)";
 
+/**
+ * The catalog events plus an Early Access graduate's 1.0, when the feed dropped it. The
+ * rebuilt mart emits the 1.0 as an 'update' titled "1.0 release", but the events endpoint
+ * keeps only the most recent few dozen, so a patch-heavy veteran (CS2's Aug 2012 1.0) loses
+ * it — and its launch spike then read "▲ >99×" against a beta month instead of "1.0".
+ */
+function withOneZero(
+  events: GameEvent[] | undefined,
+  p: { is_ea_graduate?: boolean | null; release_date_1_0?: string | null },
+): GameEvent[] | undefined {
+  if (!p.is_ea_graduate || !p.release_date_1_0) return events;
+  const list = events ?? [];
+  if (list.some((e) => e.kind === "update" && /^1\.0 release/i.test(e.title))) return list;
+  return [...list, { event_date: p.release_date_1_0.slice(0, 10), kind: "update", title: "1.0 release", url: null }];
+}
+
 /** Comparables header type: the table's own 11px muted weight, in the HeaderLabel's shape. */
 const COMPARABLE_HEADER: CSSProperties = { fontSize: 11, letterSpacing: "0.02em", textTransform: "none", fontWeight: 500 };
 
@@ -1022,7 +1038,7 @@ export default function GameProfile() {
             {reviewsQ.data && (
               <ReviewVelocityBars
                 points={reviewsQ.data.timeline}
-                events={eventsQ.data}
+                events={withOneZero(eventsQ.data, profile)}
                 asOf={dataAge.asOf}
                 launchDate={launch.launchDate}
               />
@@ -1308,9 +1324,11 @@ export default function GameProfile() {
           title="Comparables"
           subtitle={
             comparablesQ.data
-              ? `Same genre (${comparablesQ.data.primary_genre ?? "no genre"}) · list price ${fmtPrice(
-                  comparablesQ.data.price_band.low,
-                )}–${fmtPrice(comparablesQ.data.price_band.high)} · most alike first, by tag overlap`
+              ? `Same genre (${comparablesQ.data.primary_genre ?? "no genre"}) · ${
+                  comparablesQ.data.price_band.high <= 0.01
+                    ? "free or unknown price, like this game"
+                    : `list price ${fmtPrice(Math.max(0, comparablesQ.data.price_band.low))}–${fmtPrice(comparablesQ.data.price_band.high)}`
+                } · most alike first, by tag overlap`
               : undefined
           }
         >

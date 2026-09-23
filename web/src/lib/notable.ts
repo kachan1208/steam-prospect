@@ -225,6 +225,9 @@ function changeGlyph(reason: MarkerReason): "▲" | "▼" | undefined {
  * "<0.1×" — a multiple of nothing is not what happened. */
 function fmtMultiple(ratio: number): string {
   if (ratio < 0.05) return "<0.1×";
+  // Past ~100× the multiple is of a near-empty baseline (a beta month with one review before
+  // the real launch read "▲ 1838×"), so the digits say nothing more than ">99×" does.
+  if (ratio >= 99.5) return ">99×";
   return `${ratio < 9.95 ? ratio.toFixed(1) : Math.round(ratio)}×`;
 }
 

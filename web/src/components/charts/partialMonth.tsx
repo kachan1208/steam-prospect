@@ -41,11 +41,13 @@ export function partialBarLabel(periods: readonly string[], partial: string | nu
     const y = Number(props.y);
     const width = Number(props.width);
     if (partial === null || index == null || periods[index] !== partial || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+    // The partial month is always the LAST bar, at the plot's right edge: anchored at the bar's
+    // right side the word runs leftward over the plot, never out into the right-hand axis.
     return (
       <text
-        x={x + (Number.isFinite(width) ? width / 2 : 0)}
+        x={x + (Number.isFinite(width) ? width : 0)}
         y={y - 4}
-        textAnchor="middle"
+        textAnchor="end"
         className="partial-month-label"
         style={{ fontSize: 9, fill: "var(--text-muted)" }}
       >

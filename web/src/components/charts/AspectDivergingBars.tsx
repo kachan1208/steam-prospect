@@ -242,8 +242,10 @@ export function AspectDivergingBars({ appid, aspects }: { appid: number; aspects
   const sorted = [...aspects].sort((a, b) => b.total_mentions - a.total_mentions);
   const standouts = standoutAspects(sorted);
   const weak = weakAspects(sorted);
-  const weakRows = sorted.filter((a) => weak.has(a.aspect));
-  const strongRows = sorted.filter((a) => standouts.has(a.aspect));
+  // Widest gap first — the order the rule's ⓘ states.
+  const gap = (a: ReviewAspect) => a.text_delta_vs_genre ?? 0;
+  const weakRows = sorted.filter((a) => weak.has(a.aspect)).sort((a, b) => gap(a) - gap(b));
+  const strongRows = sorted.filter((a) => standouts.has(a.aspect)).sort((a, b) => gap(b) - gap(a));
   const pts = (a: ReviewAspect) => {
     const v = Math.round((a.text_delta_vs_genre ?? 0) * 100);
     return `${v >= 0 ? "+" : ""}${v} pts`;
