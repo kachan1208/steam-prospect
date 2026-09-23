@@ -6,6 +6,7 @@ import {
   CartesianGrid,
   Cell,
   ComposedChart,
+  LabelList,
   Line,
   ReferenceArea,
   ReferenceLine,
@@ -23,6 +24,7 @@ import { PressBySourceChart } from "../components/charts/PressBySourceChart";
 import { PressTimelineChart } from "../components/charts/PressTimelineChart";
 import { PriceHistoryChart } from "../components/charts/PriceHistoryChart";
 import { TooltipPanel, type TooltipRow } from "../components/charts/TooltipPanel";
+import { HatchDefs, partialBarLabel, partialNote, useHatchId } from "../components/charts/partialMonth";
 import { changeTooltipRow, PLUMB_LABEL_BAND, PLUMB_LEGEND_ROW_PX, PlumbLegendTick, plumbLabelProps, usePlotWidth } from "../components/charts/plumbLabels";
 import { NotableCoverageCard } from "../components/NotableCoverageCard";
 import { Badge } from "../components/ui/Badge";
@@ -52,13 +54,14 @@ import {
 } from "../lib/api";
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
-import { fmtDay } from "../lib/dates";
+import { addMonths, fmtDay, fmtMonth, partialMonth } from "../lib/dates";
 import { estimatedUnits } from "../lib/estimates";
 import { DEFAULT_NICHE_CUT, findNicheVariant } from "../lib/nicheSelection";
 import { axisScale, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName, isFreeTitle } from "../lib/format";
 import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { layoutPlumbLabels, markerReasons } from "../lib/notable";
 import { CSS_VAR, MONO} from "../lib/palette";
+import { useDataAge } from "../lib/dataAge";
 import { usePageTitle } from "../lib/usePageTitle";
 import { useDetailView } from "../lib/viewMode";
 import { useDragZoom } from "../lib/useDragZoom";
@@ -71,6 +74,8 @@ const CONDENSED: CSSProperties = { fontFamily: '"Barlow Condensed", "Barlow", sy
  * not a paper alpha — the one mark on this page that isn't on the demand/competition mono
  * language in lib/palette.ts, kept local since that file is foundation-owned. */
 const BAR_MUTED = "color-mix(in srgb, var(--accent-400) 55%, transparent)";
+/** The same hue at full strength — the partial month's hatch lines and dashed outline. */
+const BAR_MUTED_SOLID = "var(--accent-400)";
 
 /** The teardown's caveats minus the ones about things this page no longer shows: the press
  * TONE caveat (the API still sends it) describes a coverage-tone read that was removed
@@ -79,11 +84,29 @@ function pageCaveats(caveats: readonly string[]): string[] {
   return caveats.filter((c) => !/^press coverage tone\b/i.test(c.trim()));
 }
 
-/** ReviewTimelinePoint.period is "YYYY-MM" -> "Jul 2026", for chart tooltips/captions. */
-function monthLabel(period: string): string {
-  const m = Number(period.slice(5, 7));
-  const y = period.slice(0, 4);
-  return m >= 1 && m <= 12 ? `${monthName(m)} ${y}` : period;
+/** The review timeline with its empty months put back as zero-review rows (the cumulative
+ * columns carry forward; there is no trailing share for a month nobody reviewed). */
+function fillReviewMonths(points: ReviewTimelinePoint[]): ReviewTimelinePoint[] {
+  const out: ReviewTimelinePoint[] = [];
+  for (const p of points) {
+    const prev = out[out.length - 1];
+    if (prev && /^\d{4}-\d{2}$/.test(prev.period) && /^\d{4}-\d{2}$/.test(p.period)) {
+      for (let m = addMonths(prev.period, 1); m < p.period && out.length < 2400; m = addMonths(m, 1)) {
+        out.push({
+          period: m,
+          n_reviews: 0,
+          n_positive: 0,
+          cum_reviews: prev.cum_reviews,
+          cum_positive: prev.cum_positive,
+          cum_positive_share: prev.cum_positive_share,
+          trailing_reviews: null,
+          trailing_positive_share: null,
+        });
+      }
+    }
+    out.push(p);
+  }
+  return out;
 }
 
 /**
@@ -368,14 +391,21 @@ function ratingAxisFor(points: ReviewTimelinePoint[]): { domain: [number, number
 }
 
 export function ReviewVelocityBars({
-  points,
+  points: rawPoints,
   eventMarker,
   events,
+  asOf,
 }: {
   points: ReviewTimelinePoint[];
   eventMarker?: { period: string; label: string };
   events?: GameEvent[];
+  /** The data's as-of date (lib/dataAge) — decides which month is still being counted.
+   * Without it the viewer's current month stands in. */
+  asOf?: Date | null;
 }) {
+  // Every month gets a slot: the timeline skips months with no reviews (CS2 jumps from
+  // 2012-05 to 2012-08), and a category axis would draw those neighbours side by side.
+  const points = useMemo(() => fillReviewMonths(rawPoints), [rawPoints]);
   // Drag a range to zoom (lib/useDragZoom). Above the early return, never below it: a render
   // that took the "no history" branch ran one hook fewer than the next, which is React #310
   // and the whole page swapped for the error boundary. Event markers below are narrowed to the
@@ -384,6 +414,7 @@ export function ReviewVelocityBars({
   // The plot width the label layout needs — the container minus both 40px y-axes and the
   // 8px right margin. A hook as well, so it stays above the early return with the zoom.
   const plot = usePlotWidth(VELOCITY_AXIS_CHROME);
+  const hatchId = useHatchId("velocity-hatch");
 
   if (points.length === 0) {
     return (
@@ -393,6 +424,9 @@ export function ReviewVelocityBars({
     );
   }
 
+  // The month still being counted (the data's as-of month): hatched, labelled "partial", and
+  // never a "drop" line — lib/notable's detector reads its "now" from the same date.
+  const partial = partialMonth(points[points.length - 1]?.period, asOf);
   const peak = points.reduce((best, p) => (p.n_reviews > best.n_reviews ? p : best), points[0]);
   // One unit for the whole review-velocity axis — it used to read "0 / 30.0K / 60.0K /
   // 90.0K / 120K", losing its decimal at exactly the tick where fmtAxisCompact's clipping
@@ -421,6 +455,7 @@ export function ReviewVelocityBars({
     points.map((p) => ({ period: p.period, value: p.n_reviews })),
     eventsByMonth.keys(),
     releaseMonth,
+    asOf ? { now: new Date(asOf.getUTCFullYear(), asOf.getUTCMonth(), asOf.getUTCDate()) } : {},
   );
   // Each line's label, spread over two rows above the plot and degraded/hidden where the
   // measured width cannot fit them — for the visible months only, so nothing floats off a
@@ -450,9 +485,11 @@ export function ReviewVelocityBars({
         <ResponsiveContainer width="100%" height={VELOCITY_CHART_HEIGHT} onResize={plot.onResize}>
           <ComposedChart data={zoom.data} margin={{ top: PLUMB_LABEL_BAND, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
           <CartesianGrid stroke="var(--gridline)" vertical={false} />
+          <HatchDefs id={hatchId} color={BAR_MUTED_SOLID} />
           <XAxis
             dataKey="period"
             tick={{ fontSize: 10 }}
+            tickFormatter={(v: string) => fmtMonth(v) ?? v}
             interval="preserveStartEnd"
             minTickGap={24}
             tickLine={false}
@@ -526,19 +563,28 @@ export function ReviewVelocityBars({
               ];
               const rating = ratingRow(p);
               if (rating) rows.push(rating);
+              if (p.period === partial) rows.push({ label: "Note", value: partialNote(asOf) });
               const change = changeTooltipRow(reasons.get(String(label)));
               if (change) rows.push(change);
               for (const e of eventsByMonth.get(String(label)) ?? []) {
                 const t = e.title.length > 60 ? `${e.title.slice(0, 57)}…` : e.title;
                 rows.push({ label: e.kind.charAt(0).toUpperCase() + e.kind.slice(1), value: t, color: "var(--text-muted)" });
               }
-              return <TooltipPanel title={monthLabel(String(label))} rows={rows} />;
+              return <TooltipPanel title={fmtMonth(String(label)) ?? String(label)} rows={rows} />;
             }}
           />
-          <Bar yAxisId="reviews" dataKey="n_reviews" radius={[2, 2, 0, 0]} maxBarSize={28}>
-            {points.map((p) => (
-              <Cell key={p.period} fill={p.period === peak.period ? "var(--brand)" : BAR_MUTED} />
+          <Bar yAxisId="reviews" dataKey="n_reviews" radius={[2, 2, 0, 0]} maxBarSize={28} isAnimationActive={false}>
+            {zoom.data.map((p) => (
+              <Cell
+                key={p.period}
+                fill={
+                  p.period === partial ? `url(#${hatchId})` : p.period === peak.period ? "var(--brand)" : BAR_MUTED
+                }
+                stroke={p.period === partial ? BAR_MUTED_SOLID : undefined}
+                strokeDasharray={p.period === partial ? "2 2" : undefined}
+              />
             ))}
+            <LabelList dataKey="n_reviews" content={partialBarLabel(zoom.data.map((d) => d.period), partial)} />
           </Bar>
           {hasRating && (
             <Line
@@ -571,6 +617,14 @@ export function ReviewVelocityBars({
             Positive rating, trailing 3-month share (right axis)
           </span>
         )}
+        {partial && (
+          <span className="inline-flex items-center gap-1.5" data-testid="velocity-partial">
+            <svg aria-hidden width="12" height="8">
+              <rect width="12" height="8" fill={`url(#${hatchId})`} stroke={BAR_MUTED_SOLID} strokeDasharray="2 2" />
+            </svg>
+            {fmtMonth(partial)}: {partialNote(asOf)}
+          </span>
+        )}
       </div>
       {reasons.size > 0 && (
         <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-ink-muted">
@@ -578,7 +632,7 @@ export function ReviewVelocityBars({
         </div>
       )}
       <p className="mt-1 text-[11px] italic text-ink-muted">
-        Highlighted: {monthLabel(peak.period)} — the highest-volume month of reviews since launch.
+        Highlighted: {fmtMonth(peak.period)} — the highest-volume month of reviews since launch.
       </p>
     </div>
   );
@@ -603,6 +657,9 @@ export default function GameProfile() {
   // (the panel labels it "These games") rather than an artifact of a pending query.
   const genreCurveQ = useLaunchCurve(profileQ.data ? (profileQ.data.primary_genre ?? "__all__") : null);
   const benchmarksQ = useMarketBenchmarks();
+  // How old the served data is — the as-of date decides which month is still being counted
+  // and replaces the old hard-coded "21:00 UTC" schedule copy.
+  const dataAge = useDataAge();
   // The game's own name once it lands; the app default holds until then (never
   // "undefined — Prospect"), so a history entry reads as the game you looked at.
   usePageTitle(profileQ.data?.name);
@@ -951,7 +1008,7 @@ export default function GameProfile() {
                 <Loading className="h-full text-xs" />
               </div>
             )}
-            {reviewsQ.data && <ReviewVelocityBars points={reviewsQ.data.timeline} events={eventsQ.data} />}
+            {reviewsQ.data && <ReviewVelocityBars points={reviewsQ.data.timeline} events={eventsQ.data} asOf={dataAge.asOf} />}
           </BlueprintPanel>
 
           {/* FULL-WIDTH stack, not the mockup's sm:grid-cols-2 pair (changed 2026-08-25):
@@ -1454,7 +1511,7 @@ export default function GameProfile() {
                 </div>
                 <div>
                   <div className="mb-1 text-xs text-ink-muted">Coverage over time</div>
-                  <PressTimelineChart points={teardownQ.data.press.timeline} />
+                  <PressTimelineChart points={teardownQ.data.press.timeline} asOf={dataAge.asOf} />
                 </div>
               </div>
             </>

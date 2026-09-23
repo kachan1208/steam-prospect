@@ -131,6 +131,48 @@ describe("ReviewVelocityBars — rating line on the right axis", () => {
     expect(screen.getByText(/Positive rating, trailing 3-month share \(right axis\)/)).toBeTruthy();
   });
 
+  it("hatches and labels the month still being counted, and says so in the legend", () => {
+    const { container } = render(<ReviewVelocityBars points={TIMELINE} events={EVENTS} asOf={new Date(Date.UTC(2026, 8, 15))} />, {
+      wrapper: Page,
+    });
+    const fills = Array.from(container.querySelectorAll(".recharts-bar-rectangle path")).map((b) => b.getAttribute("fill") ?? "");
+    expect(fills[fills.length - 1]).toMatch(/^url\(#velocity-hatch-/);
+    expect(fills.slice(0, -1).some((f) => f.startsWith("url("))).toBe(false);
+    expect(Array.from(container.querySelectorAll("text.partial-month-label")).map((t) => t.textContent)).toEqual(["partial"]);
+    expect(screen.getByTestId("velocity-partial").textContent).toBe(
+      "Sep 2026: partial month — data through Sep 15, 2026 (15 of 30 days)",
+    );
+  });
+
+  it("takes the partial month from the DATA's as-of date, not the reader's clock", () => {
+    // Read on Oct 2 against data built Sep 15: September is still half-counted, so it must
+    // not earn a "drop" line nor lose its partial marking.
+    vi.setSystemTime(new Date(2026, 9, 2));
+    const { container } = render(<ReviewVelocityBars points={TIMELINE} events={EVENTS} asOf={new Date(Date.UTC(2026, 8, 15))} />, {
+      wrapper: Page,
+    });
+    expect(container.querySelector("text.partial-month-label")?.textContent).toBe("partial");
+    expect(Array.from(container.querySelectorAll("text.plumb-label")).map((t) => t.textContent?.trim())).toEqual([
+      "RELEASED",
+      "▼ 0.3×",
+      "▲ 3.0×",
+      "▲ 4.2×",
+    ]);
+  });
+
+  it("gives skipped months their own empty slot", () => {
+    // CS2's timeline jumps 2012-05 -> 2012-08 (no reviews in between).
+    const gappy = [TIMELINE[0], { ...TIMELINE[1], period: "2025-10" }];
+    const { container } = render(<ReviewVelocityBars points={gappy} />, { wrapper: Page });
+    const ticks = Array.from(container.querySelectorAll(".recharts-xAxis .recharts-cartesian-axis-tick-value")).map((t) =>
+      t.textContent?.trim(),
+    );
+    expect(ticks[0]).toBe("Jul 2025");
+    expect(ticks[ticks.length - 1]).toBe("Oct 2025");
+    // Four slots (Jul, Aug, Sep, Oct), two of them empty.
+    expect(container.querySelectorAll(".recharts-bar-rectangle").length).toBe(4);
+  });
+
   it("draws bars only, with no right axis, when no month has a trailing share", () => {
     const { container } = render(<ReviewVelocityBars points={TIMELINE} events={EVENTS} />, { wrapper: Page });
     expect(container.querySelector(".recharts-line")).toBeNull();
