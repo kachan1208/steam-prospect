@@ -636,7 +636,7 @@ export default function LaunchTiming() {
 
       <Card
         title="Launch shape by genre — when first-year reviews land"
-        subtitle="Share of first-year reviews earned in each window after launch — tall left = front-loaded (bet on the splash); flat = slow-burn (sustained marketing pays)"
+        subtitle="Share of first-year reviews earned PER WEEK in each window after launch (windows run from 1 week to 6 months, so each bar is normalised to a week) — tall left = front-loaded (bet on the splash); flat = slow-burn (sustained marketing pays)"
         action={<InfoTip term="launch_shape" />}
       >
         <div className="mb-3 flex min-h-[30px] flex-wrap gap-1.5">
@@ -658,7 +658,7 @@ export default function LaunchTiming() {
           ))}
         </div>
         <p className="mb-3 text-[11px] text-ink-muted">
-          Bars show the median share of a genre&apos;s first-year reviews landing in each window after launch.
+          Bars show the median share of a genre&apos;s first-year reviews landing per week in each window after launch — the windows differ in length (1 week to 6 months), so each is divided by its number of weeks.
         </p>
         {curveGenres.length === 0 && <div className="text-xs text-ink-muted">Pick at least one genre above.</div>}
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
