@@ -175,3 +175,44 @@ def test_crlf_in_non_ascii_text_keeps_its_boundary():
     assert not _diff(con)
     windows = [w for (w,) in con.execute("SELECT window_text FROM w_new").fetchall()]
     assert windows and not any(w.startswith("\r") for w in windows), windows
+
+
+def test_shipped_excerpts_keep_their_boundary_on_crlf_reviews_too():
+    """The excerpt arms rendered into mart_game_aspect_reviews.sql (_ASPECT_EXCERPT_ARM) had the
+    same reverse() defect: on a CRLF review with any non-ASCII character the excerpt started
+    with a stray '\\r', was therefore not a substring of the review, and lost its '…' markers.
+    End to end over the REAL .sql, against the old pipeline the excerpt fuzz recomputes."""
+    import duckdb
+    import test_mart_aspect_reviews_window_rewrite as ex
+
+    con = duckdb.connect()
+    con.execute("CREATE SCHEMA src")
+    con.execute("""CREATE TABLE src.reviews(recommendationid VARCHAR, appid INTEGER,
+        author_steamid VARCHAR, playtime_forever INTEGER, playtime_at_review INTEGER,
+        language VARCHAR, review_text VARCHAR, timestamp_created BIGINT, votes_up INTEGER)""")
+    con.execute("""CREATE TEMP TABLE stg_aspect_mention_sentiment(appid INTEGER,
+        recommendationid VARCHAR, aspect VARCHAR, kw_aspect VARCHAR, compound DOUBLE,
+        text_sentiment VARCHAR)""")
+    cases = [
+        ("Combat & Bosses", "Great remaster — and 50+ hours.\r\n\r\nI've also tried the Brutal "
+                            "Doom mod, but it changes the core mechanics too much.\r\n"),
+        ("Story & Writing", "café\r\nWill there be a conquest mode or story (maybe)?\r\n\r\nok"),
+        ("Price & Value", "~ GRAPHICS ~\r\n✅ Good\r\n\r\n~ PRICE ~\r\n🔲 Free\r\n✅ Perfect Price\r\n"),
+    ]
+    rows = [(f"r{i}", 9000, "765", 1, 1, "english", text, ex.TS, 100 - i)
+            for i, (_a, text) in enumerate(cases)]
+    rows += [(f"f{i}", 9000, "765", 1, 1, "english", "filler mentions nothing", ex.TS, -1 - i)
+             for i in range(bm.TEARDOWN_MIN_REVIEWS)]
+    con.executemany("INSERT INTO src.reviews VALUES (?,?,?,?,?,?,?,?,?)", rows)
+    con.executemany("INSERT INTO stg_aspect_mention_sentiment VALUES (?,?,?,?,?,?)",
+                    [(9000, f"r{i}", a, a, 0.7, "praise") for i, (a, _t) in enumerate(cases)])
+    con.execute(bm.render((ETL / "marts" / "mart_game_aspect_reviews.sql").read_text(),
+                          bm.build_params()))
+    con.execute(ex._expected_sql())
+    got = con.execute("""SELECT a.excerpt, e.excerpt FROM mart_game_aspect_reviews a
+        JOIN expected e ON e.appid = a.appid AND e.votes_up = a.votes_up AND e.aspect = a.aspect
+        ORDER BY a.votes_up DESC""").fetchall()
+    assert len(got) == len(cases)
+    for shipped, expected in got:
+        assert shipped == expected and not shipped.startswith("\r"), (shipped, expected)
+        assert shipped.startswith("…"), "every case starts mid-review, so it must say so"

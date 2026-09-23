@@ -2834,6 +2834,14 @@ def _aspect_window_sql(pool: str) -> str:
 # @ASPECT_SENTENCE_CHARS@ would render to), so the rendered SQL is byte-identical to the
 # hand-maintained original — pinned by rendering before/after in review, and any future
 # change to this template must keep the rendered output diffable against the marts.
+#
+# ONE DELIBERATE CHANGE SINCE (2026-09-22): clause_l is an END-anchored extraction, not
+# reverse() / '^[^.!?;\n]*' / reverse(). DuckDB's reverse() reverses grapheme clusters as soon as
+# a string has any non-ASCII character, and CR LF is one cluster, so on a Windows-line-ending
+# review with (say) an em dash in it the old spelling kept a stray '\r' in front of the clause —
+# a window that is not a substring of the review, so strpos() missed it and the excerpt lost its
+# '…' markers too. The end-anchored form is what the old regex always produced (see
+# _aspect_window_sql, where the same fix is pinned by tests/test_aspect_window_sql_rewrite.py).
 _ASPECT_EXCERPT_ARM = """    SELECT appid, recommendationid, aspect, sentiment, votes_up, playtime_minutes,
         timestamp_created, language,
         CASE WHEN kw_pos - {slice_before} > 1
@@ -2841,7 +2849,7 @@ _ASPECT_EXCERPT_ARM = """    SELECT appid, recommendationid, aspect, sentiment, 
              ELSE substr(review_text, 1, {slice_chars})
         END AS slice,
         length(regexp_extract(slice, '^([\\s\\S]*?)(?:{rx})', 1, 'i')) + 1 AS kw_off,
-        reverse(regexp_extract(reverse(substr(slice, 1, kw_off - 1)), '^[^.!?;\\n]*', 0)) AS clause_l,
+        regexp_extract(substr(slice, 1, kw_off - 1), '[^.!?;\\n]*$', 0) AS clause_l,
         regexp_extract(substr(slice, kw_off), '^[^.!?;\\n]*', 0) AS clause_r,
         CASE WHEN regexp_matches(slice, '{rx}', 'i')
              THEN substr(regexp_extract(

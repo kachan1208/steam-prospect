@@ -94,8 +94,8 @@ def old_window_sql(slice_expr: str, rx: str) -> str:
 def new_window_sql(slice_col: str, rx: str) -> str:
     """The shipped expression, spelled exactly as the ten arms of the .sql spell it."""
     kw_off = f"length(regexp_extract({slice_col}, '^([\\s\\S]*?)(?:{rx})', 1, 'i')) + 1"
-    lft = (f"reverse(regexp_extract(reverse(substr({slice_col}, 1, ({kw_off}) - 1)), "
-           f"'^[^.!?;\\n]*', 0))")
+    # End-anchored, not reverse()d: see _ASPECT_EXCERPT_ARM (reverse() keeps CR LF together).
+    lft = f"regexp_extract(substr({slice_col}, 1, ({kw_off}) - 1), '[^.!?;\\n]*$', 0)"
     rgt = f"regexp_extract(substr({slice_col}, {kw_off}), '^[^.!?;\\n]*', 0)"
     anchored = (f"'^[\\s\\S][\\s\\S]{{0,{SC}}}(?:{rx})[\\s\\S]{{0,{SC}}}'")
     return (f"""CASE WHEN regexp_matches({slice_col}, '{rx}', 'i')
