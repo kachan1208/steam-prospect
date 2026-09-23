@@ -118,7 +118,8 @@ SORTABLE = {
     "lifetime_survival_12m", "lifetime_median_dead_months",
     "p90_rev",
     "reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct",
-    "n_free", "n_price_unknown", "players_trend_7d_market_pct", "players_trend_7d_rel_pct",
+    "n_paid", "n_free", "n_price_unknown", "players_trend_7d_market_pct",
+    "players_trend_7d_rel_pct",
 }
 _PLAYERS_COLS = ["total_players_now", "players_trend_7d_pct", "players_coverage"]
 _LIFETIME_COLS = ["lifetime_n_games", "lifetime_survival_12m", "lifetime_median_dead_months"]
@@ -150,7 +151,10 @@ _V2_PARTS_COLS = [
 ]
 # The ETL's in-flight additions (2026-09), each gated on ITS OWN column so a partially
 # landed build serves what it has and a pre-rebuild mart simply leaves them null:
-#   n_free / n_price_unknown  how many of the cut's games are free-to-play vs have no known
+#   n_paid / n_free / n_price_unknown  the cut's games split by price status (they sum to
+#       n_games). Revenue/price statistics are PAID-ONLY and NULL when n_paid < 30, so
+#       n_paid is what a 'withheld' sentinel must quote. n_free / n_price_unknown: how many
+#       are free-to-play vs have no known
 #       price — the denominators behind median_price/median_rev once free and unknown-price
 #       revenue became NULL instead of 0 (a median over "the priced games" must say how
 #       many it left out).
@@ -159,7 +163,8 @@ _V2_PARTS_COLS = [
 #       week in a +6% market is an underperformance, and players_trend_7d_pct alone can't
 #       say so.
 _NEW_OPTIONAL_COLS = [
-    "n_free", "n_price_unknown", "players_trend_7d_market_pct", "players_trend_7d_rel_pct",
+    "n_paid", "n_free", "n_price_unknown", "players_trend_7d_market_pct",
+    "players_trend_7d_rel_pct",
 ]
 
 # Ordered base column list (single source of truth for SELECT + CSV header); the players

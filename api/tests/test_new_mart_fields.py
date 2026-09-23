@@ -44,7 +44,7 @@ def test_absent_columns_are_null_not_errors(modern_mart):
     niches = modern_mart.get("/api/niches", params={"window": "all", "min_reviews": 50}).json()
     assert niches["owners_as_of"] is None
     for item in niches["items"]:
-        for field in ("n_free", "n_price_unknown", "players_trend_7d_market_pct",
+        for field in ("n_paid", "n_free", "n_price_unknown", "players_trend_7d_market_pct",
                       "players_trend_7d_rel_pct"):
             assert item[field] is None, field
     players = modern_mart.get("/api/niches/tag/Roguelike").json()["players"]
@@ -52,7 +52,8 @@ def test_absent_columns_are_null_not_errors(modern_mart):
 
 
 @pytest.mark.parametrize(
-    "sort", ["n_free", "n_price_unknown", "players_trend_7d_market_pct", "players_trend_7d_rel_pct"]
+    "sort", ["n_paid", "n_free", "n_price_unknown", "players_trend_7d_market_pct",
+             "players_trend_7d_rel_pct"]
 )
 def test_sorting_by_an_absent_column_is_the_rebuild_503(modern_mart, sort):
     r = modern_mart.get("/api/niches", params={"sort": sort, "window": "all", "min_reviews": 50})
@@ -86,7 +87,7 @@ def test_niche_rows_and_detail_carry_the_new_columns(new_cols_client):
     body = new_cols_client.get("/api/niches", params={"window": "all", "min_reviews": 50}).json()
     assert body["owners_as_of"] == "2024-06-01"
     row = next(i for i in body["items"] if i["key"] == "Roguelike")
-    assert (row["n_free"], row["n_price_unknown"]) == (1, 0)
+    assert (row["n_paid"], row["n_free"], row["n_price_unknown"]) == (row["n_games"] - 1, 1, 0)
     assert row["players_trend_7d_market_pct"] == -1.0
     assert row["players_trend_7d_rel_pct"] == -2.02
 
@@ -106,7 +107,8 @@ def test_new_niche_columns_are_sortable_once_present(new_cols_client):
 def test_export_header_carries_the_new_columns(new_cols_client):
     r = new_cols_client.get("/api/niches/export.csv", params={"window": "all", "min_reviews": 50, "tiers": ""})
     header = r.text.splitlines()[0].split(",")
-    for col in ("n_free", "n_price_unknown", "players_trend_7d_market_pct", "players_trend_7d_rel_pct"):
+    for col in ("n_paid", "n_free", "n_price_unknown", "players_trend_7d_market_pct",
+                "players_trend_7d_rel_pct"):
         assert col in header
 
 

@@ -736,7 +736,7 @@ def build_modern_mart(
         ]
         if new_niche_cols:
             extra += [
-                ("n_free", "INTEGER"), ("n_price_unknown", "INTEGER"),
+                ("n_paid", "INTEGER"), ("n_free", "INTEGER"), ("n_price_unknown", "INTEGER"),
                 ("players_trend_7d_market_pct", "DOUBLE"), ("players_trend_7d_rel_pct", "DOUBLE"),
             ]
         decls = []
@@ -763,7 +763,7 @@ def build_modern_mart(
                 "supply_brake": 0.9, "momentum": 60.0,
             }
             if new_niche_cols:
-                base.update(n_free=1, n_price_unknown=0,
+                base.update(n_paid=n_games - 1, n_free=1, n_price_unknown=0,
                             players_trend_7d_market_pct=-1.0, players_trend_7d_rel_pct=-2.02)
             base.update(over)
             return tuple(base.get(c) for c in cols)
