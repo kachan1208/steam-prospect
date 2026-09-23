@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -244,47 +244,235 @@ function renderDetailed() {
   return renderWithCharts();
 }
 
+/** The "In niches" row for a tag: the link's row. */
+async function nicheRow(tag: string): Promise<HTMLElement> {
+  const link = await screen.findByRole("link", { name: tag });
+  return link.parentElement as HTMLElement;
+}
+
 describe("GameProfile — In niches quotes the app-default cut", () => {
   it("shows the >=50-reviews score, the one the linked niche page opens on", async () => {
-    renderProfile();
     // Souls-like: 24m/>=50 -> 77.3. The >=0 cut (57.7) and the >=100 cut (80.5) are both wrong.
-    expect(await screen.findByText("opp 77.3")).toBeTruthy();
-    expect(screen.queryByText("opp 57.7")).toBeNull();
-    expect(screen.queryByText("opp 80.5")).toBeNull();
+    renderProfile();
+    const row = await nicheRow("Souls-like");
+    await waitForText(row, "77.3");
+    expect(row.textContent).not.toContain("57.7");
+    expect(row.textContent).not.toContain("80.5");
+    // Named "Opportunity", never the retired "opp".
+    expect(row.textContent).toContain("Opportunity");
+    expect(document.body.textContent).not.toMatch(/\bopp \d/);
   });
 
   it("does not just read high or low — Metroidvania drops from 58.7 to its real 30.1", async () => {
     renderProfile();
-    expect(await screen.findByText("opp 30.1")).toBeTruthy();
-    expect(screen.queryByText("opp 58.7")).toBeNull();
+    const row = await nicheRow("Metroidvania");
+    await waitForText(row, "30.1");
+    expect(row.textContent).not.toContain("58.7");
   });
 
   it("names the cut, and discloses when a niche has no >=50 variant to fall back from", async () => {
     renderProfile();
-    expect(await screen.findByText(/Opportunity v2 on the default cut: last 24 months, ≥50 reviews/)).toBeTruthy();
+    expect(await screen.findByText(/On the default cut: games released in the last 24 months, ≥50 reviews/)).toBeTruthy();
     // Platformer only has the >=0 row: it still renders, but says which population it is.
     expect(await screen.findByText(/≥0 reviews — the ≥50 default cut isn't built for this niche/)).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/Opportunity v2/);
   });
 });
 
+async function waitForText(el: HTMLElement, text: string) {
+  for (let i = 0; i < 50 && !(el.textContent ?? "").includes(text); i++) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  expect(el.textContent).toContain(text);
+}
+
+/** The Estimates row with this test id. */
+async function estRow(id: string): Promise<HTMLElement> {
+  return screen.findByTestId(id);
+}
+
 describe("GameProfile — the Estimates panel prints one estimator", () => {
-  it("pairs gross revenue with the units that revenue implies at the launch price", async () => {
+  it("pairs Est. revenue with the units that revenue implies at the launch price", async () => {
     renderProfile();
     // 559,257 x 30 x $14.99 = $251,497,872.9 -> "$251.5M"; / $14.99 = 16,777,710 -> "16.8M".
-    expect(await screen.findByText("$251.5M")).toBeTruthy();
-    expect(await screen.findByText("16.8M")).toBeTruthy();
-    // The owners-based count must not be the headline any more...
-    expect(screen.queryByText("7.5M")).toBeNull();
-    // ...but it is still disclosed, named as the other method.
-    expect(await screen.findByText(/owners-based estimate: 7.5M \(different method\)/)).toBeTruthy();
+    const revenue = await estRow("est-revenue");
+    expect(revenue.textContent).toContain("Est. revenue");
+    expect(revenue.textContent).toContain("$251.5M");
+    const units = await estRow("est-units");
+    expect(units.textContent).toContain("Est. units sold");
+    expect(units.textContent).toContain("16.8M");
+    // The owners figure is still disclosed, named as the other method, with its vintage.
+    expect(units.textContent).toContain("Owners (SteamSpy snapshot, date not reported): 7.5M — a different method");
+    // The retired names are gone.
+    expect(document.body.textContent).not.toMatch(/Gross revenue|Units sold/);
   });
 
-  it("shows the division a reader would do, and says the footnote's formula now holds", async () => {
+  it("dates the owners figure when the mart stamps its SteamSpy snapshot", async () => {
+    serve(/^\/api\/games\/367520(\?|$)/, { ...PROFILE, owners_as_of: "2026-07-07" });
     renderProfile();
-    expect(await screen.findByText(/\$251\.5M ÷ \$14\.99 launch price/)).toBeTruthy();
-    expect(
-      await screen.findByText(/gross revenue ÷ launch price = units exactly/),
-    ).toBeTruthy();
+    const units = await estRow("est-units");
+    expect(units.textContent).toContain("Owners (SteamSpy, as of Jul 7, 2026): 7.5M");
+  });
+
+  it("shows the division a reader would do, and the range with its multipliers", async () => {
+    renderProfile();
+    expect((await estRow("est-units")).textContent).toContain("$251.5M ÷ $14.99 launch price");
+    expect((await estRow("est-revenue")).textContent).toContain("range $167.7M – $461.1M (reviews × 20 to × 55 × price)");
+  });
+
+  it("works the formula through the game's own numbers in the ⓘ", async () => {
+    renderProfile();
+    await estRow("est-revenue");
+    fireEvent.click(screen.getByRole("button", { name: "About Est. revenue" }));
+    const tip = screen.getByRole("tooltip");
+    expect(tip.textContent).toContain("reviews × 30 owners-per-review × launch price");
+    expect(tip.textContent).toContain("559,257 reviews × 30 × $14.99 = $251.5M");
+    expect(tip.textContent).toContain("× 20 = $167.7M … × 55 = $461.1M");
+  });
+});
+
+/** GET /api/games/{appid} shapes on the 2026-09-23 mart. */
+const ZERO_REVIEWS = {
+  ...PROFILE,
+  total_reviews: 0,
+  positive_ratio: null,
+  est_rev_reviews: 0,
+  owners_mid: null,
+  rev_pct_in_genre: null,
+  reviews_pct_in_genre: null,
+  owners_pct_in_genre: null,
+  n_reviews_trailing_30d: 0,
+  live_players: null,
+  players_trend_7d_pct: null,
+  price_initial: 7.99,
+  price_status: "paid",
+};
+
+describe("GameProfile — placeholders are never shown as values", () => {
+  it("a 0-review game says it can't be estimated instead of printing $0.00 and 0 units", async () => {
+    serve(/^\/api\/games\/367520(\?|$)/, ZERO_REVIEWS);
+    renderProfile();
+    const revenue = await estRow("est-revenue");
+    expect(revenue.textContent).toContain("Not enough reviews to estimate (0 reviews)");
+    expect(revenue.textContent).toContain("not estimated");
+    expect(revenue.textContent).not.toMatch(/\$0/);
+    const units = await estRow("est-units");
+    expect(units.textContent).toContain("not estimated");
+    expect(units.textContent).not.toMatch(/^0|\b0\b(?! reviews)/);
+    const reviews = await estRow("est-reviews");
+    expect(reviews.textContent).toContain("0 reviews");
+    expect(reviews.textContent).toContain("no rating yet");
+    expect(reviews.textContent).not.toContain("—");
+    expect((await estRow("est-players")).textContent).toContain("not measured");
+  });
+
+  it("a free-to-play game has no unit sales and no box revenue — not 296.1M units", async () => {
+    serve(/^\/api\/games\/367520(\?|$)/, {
+      ...PROFILE,
+      price_initial: 0,
+      is_free: 1,
+      price_status: "free",
+      est_rev_reviews: null,
+      owners_mid: 150_000_000,
+      rev_pct_in_genre: null,
+    });
+    renderProfile();
+    const units = await estRow("est-units");
+    expect(units.textContent).toContain("Free to play — no unit sales");
+    expect(units.textContent).toContain("not applicable");
+    expect(units.textContent).not.toContain("16.8M");
+    expect(units.textContent).toContain("150.0M"); // the owners figure still reads, as owners
+    expect((await estRow("est-revenue")).textContent).toContain("Free to play — no box sales to estimate");
+  });
+
+  it("an unknown price is 'Price unknown', not 'Free'", async () => {
+    serve(/^\/api\/games\/367520(\?|$)/, { ...PROFILE, price_initial: 0, is_free: 0, price_status: "unknown", est_rev_reviews: null });
+    renderProfile();
+    const revenue = await estRow("est-revenue");
+    expect(revenue.textContent).toContain("Price unknown — the estimate needs a list price");
+    expect(revenue.textContent).not.toMatch(/Free/);
+  });
+
+  it("a handful of reviews reads '8 reviews · 100% positive' and is flagged a small sample", async () => {
+    serve(/^\/api\/games\/367520(\?|$)/, {
+      ...PROFILE,
+      total_reviews: 8,
+      positive_ratio: 1,
+      est_rev_reviews: 8 * 30 * 14.99,
+      rev_pct_in_genre: null,
+      reviews_pct_in_genre: null,
+      owners_pct_in_genre: null,
+    });
+    renderProfile();
+    const reviews = await estRow("est-reviews");
+    expect(reviews.textContent).toContain("8 reviews · 100% positive");
+    expect(reviews.textContent).toContain("small sample");
+    expect(reviews.textContent).not.toContain("100.0%");
+    expect((await estRow("est-revenue")).textContent).toContain("small sample");
+  });
+
+  it("reads the 7-day players trend against the whole of Steam when the mart serves it", async () => {
+    serve(/^\/api\/games\/367520(\?|$)/, {
+      ...PROFILE,
+      live_players: 6041,
+      players_trend_7d_pct: -5.75,
+      players_trend_7d_market_pct: 0.75,
+      players_trend_7d_rel_pct: -6.5,
+    });
+    renderProfile();
+    const players = await estRow("est-players");
+    expect(players.textContent).toContain("−5.8% vs the prior 7 days · Steam overall +0.8% → −6.5 pts vs market");
+    fireEvent.click(screen.getByRole("button", { name: "About Players now" }));
+    expect(screen.getByRole("tooltip").textContent).toContain("−5.8% (this game) − +0.8% (all of Steam) = −6.5 pts");
+  });
+
+  it("never quotes a clock-time capture schedule", async () => {
+    renderProfile();
+    await estRow("est-players");
+    fireEvent.click(screen.getByRole("button", { name: "About Players now" }));
+    expect(document.body.textContent).not.toMatch(/21:00|21-22:00|UTC/);
+  });
+});
+
+describe("GameProfile — rank vs genre", () => {
+  it("floors the rank, names the 50-review population, and never prints P100", async () => {
+    renderProfile();
+    expect(await screen.findByText(/Where this game sits among Action games with 50\+ reviews/)).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/≥10 reviews|P100/);
+    expect(screen.getAllByText("top 1%").length).toBe(2); // 99.6 revenue, 99.8 reviews
+    expect(screen.getByText("P98")).toBeTruthy(); // 98.9 owners, floored
+  });
+
+  it("marks a missing rank with its reason and draws no median tick on its empty rail", async () => {
+    serve(/^\/api\/games\/367520(\?|$)/, ZERO_REVIEWS);
+    renderProfile();
+    await screen.findByText(/Where this game sits among/);
+    const rails = screen.getAllByRole("img").filter((el) => /rank vs|no data/.test(el.getAttribute("aria-label") ?? ""));
+    expect(rails.length).toBe(3);
+    for (const rail of rails) {
+      expect(rail.hasAttribute("data-empty")).toBe(true);
+      // The tick at 50 on an empty rail read as "P50".
+      expect(rail.querySelector("div")).toBeNull();
+    }
+    expect(screen.getAllByText("not ranked").length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+/**
+ * Est. revenue and Est. units used to open their own "growth over time" charts — the reviews
+ * curve × 30, then × the price: the same shape three times. Only Reviews and Players now open
+ * a drilldown now; the others say why they have none.
+ */
+describe("GameProfile — one growth chart, not three", () => {
+  it("opens the reviews drilldown from Reviews, and revenue / units are not clickable", async () => {
+    renderProfile();
+    await estRow("est-revenue");
+    expect(screen.queryByRole("button", { name: "Est. revenue" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Est. units sold" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Reviews" }));
+    expect(await screen.findByText("Reviews — growth over time")).toBeTruthy();
+    expect(screen.getByText(/Est\. revenue and Est\. units are this same curve × 30/)).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/Owners \(est\.\) — growth over time|Est\. revenue — growth over time/);
   });
 });
 
@@ -340,18 +528,22 @@ describe("GameProfile — Press & attention shows the footprint, not the retired
 describe("GameProfile — the Estimates footnote describes the estimator that actually ran", () => {
   it("states the flat 30 rather than claiming a genre fit that is not applied", async () => {
     renderProfile();
-    const note = await screen.findByText(/Gross revenue = reviews/);
+    const note = await screen.findByText(/Est\. revenue = reviews/);
     expect(note.textContent).toContain("reviews × 30 owners-per-review × launch price");
     expect(note.textContent).toMatch(/not fitted per genre/);
+    expect(note.textContent).toContain("Est. revenue ÷ launch price = units exactly");
     // The exact false claim, in the wording it shipped in.
     expect(note.textContent).not.toMatch(/owners-per-review \(genre-fitted\)/);
+    // The method sits behind a disclosure, not as a screen-long paragraph.
+    expect(note.closest("details")).not.toBeNull();
+    expect(screen.getByText("How this is estimated")).toBeTruthy();
   });
 
   it("keeps the revenue arithmetic untouched while the copy changes", async () => {
     renderProfile();
     // Same figures as before the copy fix: 559,257 x 30 x $14.99, and its 20/55 band ends.
-    expect(await screen.findByText("$251.5M")).toBeTruthy();
-    expect(await screen.findByText(/\$167\.7M – \$461\.1M/)).toBeTruthy();
+    expect((await estRow("est-revenue")).textContent).toContain("$251.5M");
+    expect((await estRow("est-revenue")).textContent).toMatch(/\$167\.7M – \$461\.1M/);
   });
 });
 

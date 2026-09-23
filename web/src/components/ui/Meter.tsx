@@ -84,7 +84,9 @@ export function BulletMeter({
         data-empty={known ? undefined : ""}
       >
         {known && <div className="h-full" style={{ width: `${pct}%`, backgroundColor: color }} />}
-        {benchPct !== undefined && (
+        {/* No tick on an empty rail: a lone median tick over nothing reads as the VALUE —
+            the game page's unranked games looked like they sat at P50. */}
+        {known && benchPct !== undefined && (
           <div
             className="absolute -top-[3px] h-[12px] w-[2px] bg-ink-primary"
             style={{ left: `calc(${benchPct}% - 1px)` }}

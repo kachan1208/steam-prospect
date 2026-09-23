@@ -1,5 +1,6 @@
 import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
 import {
   Bar,
@@ -17,7 +18,8 @@ import {
 } from "recharts";
 
 import { AspectDivergingBars } from "../components/charts/AspectDivergingBars";
-import { GameMetricDrilldown, DRILLDOWN_META, type DrilldownMetric, type OwnersPerReview } from "../components/charts/GameMetricDrilldown";
+import { GameMetricDrilldown, DRILLDOWN_META, type DrilldownMetric } from "../components/charts/GameMetricDrilldown";
+import { GameEstimatesPanel } from "../components/GameEstimates";
 import { LanguageSplitChart } from "../components/charts/LanguageSplitChart";
 import { LaunchShapeBars, launchShapeSummary } from "../components/charts/LaunchShapeBars";
 import { PressBySourceChart } from "../components/charts/PressBySourceChart";
@@ -27,6 +29,7 @@ import { TooltipPanel, type TooltipRow } from "../components/charts/TooltipPanel
 import { HatchDefs, partialBarLabel, partialNote, useHatchId } from "../components/charts/partialMonth";
 import { changeTooltipRow, PLUMB_LABEL_BAND, PLUMB_LEGEND_ROW_PX, PlumbLegendTick, plumbLabelProps, usePlotWidth } from "../components/charts/plumbLabels";
 import { NotableCoverageCard } from "../components/NotableCoverageCard";
+import { OpportunityBreakdown } from "../components/OpportunityBreakdown";
 import { Badge } from "../components/ui/Badge";
 import { InfoTip } from "../components/ui/InfoTip";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -35,11 +38,12 @@ import { InlineError } from "../components/ui/InlineError";
 import { Loading } from "../components/ui/Loading";
 import { SocialLinks } from "../components/ui/SocialLinks";
 import { TableScroll } from "../components/ui/TableScroll";
-import { Meter, BulletMeter } from "../components/ui/Meter";
+import { Meter, PercentileMeter } from "../components/ui/Meter";
 import { ViewToggle } from "../components/ui/ViewToggle";
 import { trackEvent } from "../lib/analytics";
 import { gameWatchlistId, toggleGameWatchlist, useWatchlist, WATCHLIST_CAP } from "../lib/watchlist";
 import {
+  gamePlayersQueryOptions,
   isNotFound,
   notFoundReason,
   useGameComparables,
@@ -51,15 +55,16 @@ import {
   useMarketBenchmarks,
   useNicheDetail,
   type GameEvent,
+  type NicheRow,
   type ReviewTimelinePoint,
 } from "../lib/api";
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
 import { addMonths, fmtDay, fmtMonth, launchFacts, partialMonth } from "../lib/dates";
 import { fmtListPrice, priceStatus } from "../lib/priceStatus";
-import { estimatedUnits } from "../lib/estimates";
+import { glossary } from "../lib/glossary";
 import { DEFAULT_NICHE_CUT, findNicheVariant } from "../lib/nicheSelection";
-import { axisScale, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName, isFreeTitle } from "../lib/format";
+import { axisScale, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, monthName, isFreeTitle } from "../lib/format";
 import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { layoutPlumbLabels, markerReasons } from "../lib/notable";
 import { CSS_VAR, MONO} from "../lib/palette";
@@ -255,57 +260,6 @@ function CreditLinks({ role, joined }: { role: "developer" | "publisher"; joined
         </span>
       ))}
     </>
-  );
-}
-
-/** One row of the sidebar Estimates panel — label left / condensed value right, doubling as
- * the click target for the metric drilldown when `onClick` is given (same tiles → chart
- * convention the old StatTile grid used, just laid out as list rows per the 4c mock). */
-function EstimateRow({
-  label,
-  value,
-  valueClassName,
-  sub,
-  onClick,
-  active,
-  help,
-}: {
-  label: string;
-  value: ReactNode;
-  valueClassName?: string;
-  sub?: ReactNode;
-  onClick?: () => void;
-  active?: boolean;
-  help?: string;
-}) {
-  const interactive = onClick !== undefined;
-  return (
-    <div
-      role={interactive ? "button" : undefined}
-      tabIndex={interactive ? 0 : undefined}
-      aria-pressed={interactive ? (active ?? false) : undefined}
-      onClick={onClick}
-      onKeyDown={(e) => {
-        if (!interactive) return;
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onClick?.();
-        }
-      }}
-      title={help}
-      className={clsx(interactive && "-mx-1 cursor-pointer px-1 py-0.5 transition-colors hover:bg-page", active && "bg-brand-tint")}
-    >
-      <div className="flex items-baseline gap-3">
-        <span className="text-[13.5px] text-ink-secondary">
-          {label}
-          {help && <span aria-hidden className="ml-1 text-[10px] text-ink-muted/70">ⓘ</span>}
-        </span>
-        <span className={clsx("ml-auto shrink-0 text-[17px] font-semibold", valueClassName ?? "text-ink-primary")} style={CONDENSED}>
-          {value}
-        </span>
-      </div>
-      {sub && <div className="mt-0.5 text-[11px] text-ink-muted">{sub}</div>}
-    </div>
   );
 }
 
@@ -674,6 +628,9 @@ export default function GameProfile() {
   // "undefined — Prospect"), so a history entry reads as the game you looked at.
   usePageTitle(profileQ.data?.name);
   const teardownQ = useGameTeardown(validAppid ? appid : null);
+  // The daily player series' summary — the capture dates behind "Players now" (and the same
+  // cache entry the Players drilldown opens on).
+  const playersQ = useQuery({ ...gamePlayersQueryOptions(appid), enabled: validAppid });
 
   // "In niches" (sidebar, §4c) — up to 3 of the game's own top tags, resolved to their real
   // niche opportunity score via the SAME endpoint the Niche Finder/deep-dive use. Fixed-count
@@ -702,57 +659,52 @@ export default function GameProfile() {
       const variant = exact ?? variants?.[0];
       return {
         tag: e.tag,
-        opp: variant?.opportunity_v2 ?? null,
+        variant,
         // null on the default cut (nothing to disclose); the actual cut otherwise.
         offCut: exact || !variant ? null : `${variant.window === "24m" ? "24m" : "all-time"} · ≥${variant.min_reviews}`,
       };
     })
-    .filter((e) => e.opp !== null);
+    .filter((e): e is { tag: string; variant: NicheRow; offCut: string | null } => e.variant?.opportunity_v2 != null);
 
   const profile = profileQ.data;
   const launch = launchFacts(profile ?? {});
+  const ownersAsOfIso = profile?.owners_as_of ?? (dataAge.ownersAsOf ? dataAge.ownersAsOf.toISOString().slice(0, 10) : null);
   // The genre as prose ("a typical Action game"); null for the catalog-wide fallback.
   const genreName = profile?.primary_genre && profile.primary_genre !== "__all__" ? profile.primary_genre : null;
 
-  const revenueRange = useMemo(() => {
-    const bx = benchmarksQ.data?.cited.boxleiter_owners_per_review;
-    if (!profile || !bx || profile.total_reviews === null || profile.price_initial === null) return null;
-    const r = profile.total_reviews;
-    const p = profile.price_initial;
-    return { low: r * bx.min * p, mid: profile.est_rev_reviews ?? r * bx.mid * p, high: r * bx.max * p };
-  }, [profile, benchmarksQ.data]);
-
-  // The revenue figure actually PRINTED in the Estimates panel, and the unit count that goes
-  // with it. Both are the reviews-based (Boxleiter) estimator, so revenue ÷ list price === units
-  // exactly — see lib/estimates.ts for why that estimator and not the owners one. Before this,
-  // the panel printed reviews-based revenue against the owners-based `owners_mid`: Hollow Knight
-  // showed $251.5M over 7.5M units at a $14.99 price, $33.53 a copy, against a footnote that
-  // spells out the division. owners_mid is still shown, one line down, named as the other method.
-  const estRevenue = revenueRange ? revenueRange.mid : profile?.est_rev_reviews ?? null;
-  const estUnits = useMemo(
-    () =>
-      estimatedUnits(
-        estRevenue,
-        profile?.price_initial,
-        profile?.total_reviews,
-        // Only the cited benchmark ratio — never the owners-derived fallback below, which would
-        // put the owners estimator back into the pair through the free-to-play branch.
-        benchmarksQ.data?.cited.boxleiter_owners_per_review.mid ?? null,
-      ),
-    [estRevenue, profile?.price_initial, profile?.total_reviews, benchmarksQ.data],
-  );
-
-  // Owners-per-review ratio for the Owners/Revenue drilldowns — same source + fallback the
-  // Owners/Revenue rows themselves imply: the cited Boxleiter mid when benchmarks are
-  // loaded, else this game's own owners_mid/total_reviews ratio if both are known.
-  const ownersPerReview = useMemo<OwnersPerReview | null>(() => {
-    const bx = benchmarksQ.data?.cited.boxleiter_owners_per_review;
-    if (bx) return { value: bx.mid, source: "benchmark" };
-    if (profile?.owners_mid != null && profile.total_reviews) {
-      return { value: profile.owners_mid / profile.total_reviews, source: "game" };
+  // Rank-vs-genre rows with the reason a rank is missing, never an empty bar.
+  const rankPeers = `${genreName ?? "catalog"} games with 50+ reviews`;
+  const unranked = (what: string): { tag: string; detail: string } | null => {
+    if (!profile) return null;
+    const n = profile.total_reviews;
+    if (n != null && n < 50) {
+      return { tag: "not ranked", detail: `fewer than 50 reviews (${fmtInt(n)}) — ranks only cover ${rankPeers}` };
     }
-    return null;
-  }, [profile, benchmarksQ.data]);
+    return { tag: "not ranked", detail: `no ${what} rank in this data build` };
+  };
+  const status = profile ? priceStatus(profile) : "paid";
+  const rankRows = profile
+    ? [
+        {
+          label: glossary("est_revenue").label,
+          percentile: profile.rev_pct_in_genre,
+          sentinel:
+            profile.rev_pct_in_genre != null
+              ? null
+              : status === "free"
+                ? { tag: "not applicable", detail: "free to play — no revenue estimate to rank; read reviews and owners instead" }
+                : status === "unknown"
+                  ? { tag: "not ranked", detail: "price unknown — no revenue estimate to rank" }
+                  : unranked("revenue"),
+        },
+        { label: "Reviews", percentile: profile.reviews_pct_in_genre, sentinel: profile.reviews_pct_in_genre != null ? null : unranked("review") },
+        {
+          label: `Owners (SteamSpy${fmtDay(ownersAsOfIso) ? `, as of ${fmtDay(ownersAsOfIso)}` : " snapshot"})`,
+          percentile: profile.owners_pct_in_genre,
+          sentinel: profile.owners_pct_in_genre != null ? null : unranked("owners"),
+        },
+      ]
+    : [];
 
   function toggleMetric(metric: DrilldownMetric) {
     setSelectedMetric((cur) => (cur === metric ? null : metric));
@@ -1025,10 +977,18 @@ export default function GameProfile() {
           column; Estimates (the accent-300 frame) then In niches in the sidebar. Everything
           the page had before that ISN'T drawn in the mockup — percentile, comparables, the
           Detailed extras, press footprint, etc. — moves to its own full-width stack below,
-          under "More on {name}"; nothing is deleted, and every hook/trackEvent stays wired. */}
-      <div className="grid grid-cols-1 gap-[22px] lg:grid-cols-[1.7fr_1fr] lg:items-start">
-        <div className="flex min-w-0 flex-col gap-[22px]">
+          under "More on {name}"; nothing is deleted, and every hook/trackEvent stays wired.
+
+          PHONE ORDER (2026-09-23): below lg the two columns dissolve (display: contents) and
+          the cards take an explicit order — header, Estimates, the opened drilldown, review
+          velocity, then the rest. In DOM order the Estimates card sat ~3,200px down on a
+          390px phone, under the velocity chart, the price card and the aspect list; the
+          numbers a reader came for were the last thing they reached. From lg up the columns
+          are real again and the sidebar stays sticky. */}
+      <div className="flex flex-col gap-[22px] lg:grid lg:grid-cols-[1.7fr_1fr] lg:items-start">
+        <div className="contents lg:flex lg:min-w-0 lg:flex-col lg:gap-[22px]">
           <BlueprintPanel
+            className="order-3 min-w-0 lg:order-none"
             title="Review velocity since launch"
             action={<span className="kicker text-[11px] text-ink-muted">Monthly</span>}
           >
@@ -1056,13 +1016,13 @@ export default function GameProfile() {
               panel into ~a third of the page, and its drill-down excerpts — two prose
               columns inside that third — wrapped at ~25 characters. Unreadable prose loses
               to mockup fidelity; both panels now get the main column's full measure. */}
-          <div className="grid grid-cols-1 gap-[22px]">
+          <div className="contents lg:grid lg:grid-cols-1 lg:gap-[22px]">
             {/* Price history (GET /api/games/{appid}/price-history ← signals.db, from
                 2026-08-24) is a record per Steam price CHANGE, not a daily series: most games
                 have one row. PriceHistoryChart owns the states — a sentence for "no change
                 since tracking began", a step line on a time axis once the price has moved,
                 and the missing / unavailable / not-reached-yet / failed empties. */}
-            <BlueprintPanel title="Price history">
+            <BlueprintPanel className="order-4 min-w-0 lg:order-none" title="Price history">
               <PriceHistoryChart appid={appid} priceInitial={profile.price_initial} isFree={profile.is_free} />
             </BlueprintPanel>
 
@@ -1072,6 +1032,7 @@ export default function GameProfile() {
                 under a "Why it works" tab per §4c, which draws it as "What reviews praise /
                 pan" on the main view rather than behind a second tab. */}
             <BlueprintPanel
+              className="order-5 min-w-0 lg:order-none"
               title="What reviews praise / pan"
               subtitle={
                 teardownQ.data
@@ -1101,125 +1062,40 @@ export default function GameProfile() {
 
         {/* Sidebar — Estimates (the one accent-300-bordered frame) then In niches. Sticky
             on desktop so it stays visible while the mockup's own main column scrolls. */}
-        <div className="flex flex-col gap-[22px] lg:sticky lg:top-4">
-          <BlueprintFrame accent className="flex flex-col gap-2.5 px-[22px] py-[18px]">
-            <div className="kicker text-[11px] text-brand">Estimates</div>
-            <div className="flex flex-col gap-2.5">
-              <EstimateRow
-                label="Gross revenue"
-                // The ratio is a FLAT 30 here, not genre-fitted, and the copy has to say the
-                // arithmetic it actually does: mart_game's est_rev_reviews is
-                // total_reviews × 30 × price_initial (etl/build_marts.py:1331) and the low/high
-                // are the same reviews × price at the 20 and 55 ends of the cited band
-                // (/api/market/benchmarks cited.boxleiter_owners_per_review {20, 30, 55}).
-                // Checked on the live API: Hollow Knight 559,257 × 30 × $14.99 = $251,497,872.9,
-                // exactly est_rev_reviews. Genre-fitted multipliers DO exist in the mart
-                // (benchmarks.boxleiter_by_genre — Action slope 26.1, median 107.0) and the MCP
-                // /api/estimate path uses them, but nothing on this panel does. Fix the words,
-                // never the estimator: est_rev_reviews is the spine of /compare, comparables,
-                // mart_niche.median_rev and mart_market.
-                help="Estimated lifetime GROSS revenue: reviews × 30 owners-per-review × launch price. 30 is the Boxleiter MID applied flat to every game, not fitted per genre; the low–high range swaps in the 20 and 55 ends of the same cited band. An estimate with real error bars. Not net of Steam's cut, refunds or discounts."
-                value={fmtRevenue(estRevenue, isFreeTitle(profile))}
-                sub={
-                  isFreeTitle(profile)
-                    ? "Free — no box revenue to estimate (this model prices copies sold)"
-                    : revenueRange
-                      ? `${fmtUsd(revenueRange.low)} – ${fmtUsd(revenueRange.high)}`
-                      : undefined
-                }
-                onClick={() => toggleMetric("revenue")}
-                active={selectedMetric === "revenue"}
-              />
-              <EstimateRow
-                label="Units sold"
-                help="Estimated copies sold on the SAME reviews-based (Boxleiter) estimator as Gross revenue above — reviews × owners-per-review — so gross revenue ÷ launch price lands exactly here. The owners-based (SteamSpy bucket) estimate is a different method and is shown separately below the figure. Owned ≠ played ≠ paid full price."
-                value={fmtCompact(estUnits)}
-                sub={
-                  <>
-                    {profile.price_initial != null && profile.price_initial > 0 && estRevenue != null
-                      ? `${fmtUsd(estRevenue)} ÷ ${fmtPrice(profile.price_initial)} launch price`
-                      : "reviews × owners-per-review — no box revenue to divide at $0"}
-                    {profile.owners_mid != null && (
-                      <> · owners-based estimate: {fmtCompact(profile.owners_mid)} (different method)</>
-                    )}
-                  </>
-                }
-                onClick={() => toggleMetric("owners")}
-                active={selectedMetric === "owners"}
-              />
-              <EstimateRow
-                label="Reviews"
-                help="The game's true Steam review count and positive share. Below ~80% positive starts costing visibility (Steam's 'Mostly Positive' threshold)."
-                value={
-                  <span className={positiveRatioClass(profile.positive_ratio)}>
-                    {fmtInt(profile.total_reviews)} · {fmtPct(profile.positive_ratio)}
-                  </span>
-                }
-                sub={[
-                  `${fmtInt(profile.n_reviews_trailing_30d)} sampled in trailing 30d`,
-                  profile.metacritic_score
-                    ? profile.metacritic_url
-                      ? undefined // link rendered separately below to stay clickable
-                      : `Metacritic ${profile.metacritic_score}`
-                    : null,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")}
-                onClick={() => toggleMetric("reviews")}
-                active={selectedMetric === "reviews"}
-              />
-              {profile.metacritic_score && profile.metacritic_url && (
-                <a
-                  href={profile.metacritic_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="-mt-2 text-[11px] text-ink-muted hover:text-brand hover:underline"
-                >
-                  Metacritic {profile.metacritic_score}
-                </a>
-              )}
-              <EstimateRow
-                label="Players now"
-                help="Concurrent players at our last nightly capture (~21-22:00 UTC) — a point sample, NOT the daily peak. Click for the daily history."
-                value={profile.live_players != null ? fmtCompact(profile.live_players) : "—"}
-                valueClassName="text-brand"
-                sub={
-                  [
-                    profile.players_trend_7d_pct != null
-                      ? `${profile.players_trend_7d_pct >= 0 ? "+" : ""}${profile.players_trend_7d_pct.toFixed(1)}% vs prior 7d`
-                      : null,
-                  ]
-                    .filter(Boolean)
-                    .join(" · ") || undefined
-                }
-                onClick={() => toggleMetric("live_players")}
-                active={selectedMetric === "live_players"}
-              />
-            </div>
-            <div className="mt-1 border-t border-chartborder pt-2.5 text-[11px] text-ink-muted">
-              Gross revenue = reviews × 30 owners-per-review × launch price, lifetime — one flat catalog-wide ratio
-              (the Boxleiter mid), not fitted per genre; the low–high range swaps in 20 and 55. Units sold is
-              that same estimate before the price multiply, so gross revenue ÷ launch price = units exactly. The
-              owners-based (SteamSpy bucket) figure noted beside it is a separate method, not the partner of this
-              revenue. Reviews are a point-in-time read from the catalog, not verified sales data.
-            </div>
-          </BlueprintFrame>
+        <div className="contents lg:sticky lg:top-4 lg:flex lg:flex-col lg:gap-[22px]">
+          <GameEstimatesPanel
+            className="order-1 lg:order-none"
+            profile={profile}
+            band={benchmarksQ.data?.cited.boxleiter_owners_per_review}
+            players={playersQ.data}
+            ownersAsOf={ownersAsOfIso}
+            selected={selectedMetric}
+            onSelect={toggleMetric}
+          />
 
           {inNiches.length > 0 && (
-            <BlueprintPanel title="In niches">
+            <BlueprintPanel
+              className="order-6 lg:order-none"
+              title={
+                <span className="inline-flex items-center gap-1.5">
+                  In niches
+                  <InfoTip term="opportunity_v2" />
+                </span>
+              }
+              subtitle="Opportunity score of the game's top tags, with its four parts (bars) and the supply brake (×) — hover the ⓘ for how each adds up."
+            >
               <div className="flex flex-col gap-2.5 text-[13px]">
-                {inNiches.map(({ tag, opp, offCut }) => (
+                {inNiches.map(({ tag, variant, offCut }) => (
                   <div key={tag} className="flex flex-col">
-                    <div className="flex items-baseline gap-2">
+                    <div className="flex items-center gap-2">
                       <Link
                         to={`/niches/tag/${encodeURIComponent(tag)}`}
                         className="min-w-0 truncate text-ink-primary hover:text-brand hover:underline"
                       >
                         {tag}
                       </Link>
-                      <span className={clsx("ml-auto shrink-0 tabular", (opp as number) >= 70 ? "text-brand" : "text-ink-secondary")}>
-                        opp {(opp as number).toFixed(1)}
-                      </span>
+                      <span className="ml-auto shrink-0 text-[11px] text-ink-muted">Opportunity</span>
+                      <OpportunityBreakdown row={variant} variant="compact" title={`Opportunity score — ${tag}`} className="shrink-0" />
                     </div>
                     {offCut && (
                       <span className="text-[10px] text-ink-muted">
@@ -1232,46 +1108,39 @@ export default function GameProfile() {
               {/* The scores above are the app-default cut, so clicking through to the niche page
                   (which opens on the same cut) shows the SAME number, not a second opinion. */}
               <p className="mt-3 border-t border-chartborder pt-2 text-[10px] text-ink-muted">
-                Opportunity v2 on the default cut: last 24 months, ≥50 reviews.
+                On the default cut: games released in the last 24 months, ≥50 reviews — the cut the niche page opens on.
               </p>
             </BlueprintPanel>
           )}
         </div>
-      </div>
 
-      {selectedMetric && (
-        <BlueprintPanel
-          title={DRILLDOWN_META[selectedMetric].title}
-          subtitle={DRILLDOWN_META[selectedMetric].subtitle}
-          action={
-            <button
-              type="button"
-              onClick={() => setSelectedMetric(null)}
-              aria-label="Close drilldown"
-              className="flex h-7 w-7 shrink-0 items-center justify-center text-ink-secondary hover:bg-page hover:text-ink-primary"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M6 6l12 12M18 6L6 18" />
-              </svg>
-            </button>
-          }
-        >
-          <GameMetricDrilldown
-            appid={profile.appid}
-            metric={selectedMetric}
-            profile={{
-              price_initial: profile.price_initial,
-              total_reviews: profile.total_reviews,
-              // The HEADLINE units the Estimates panel prints, not owners_mid: the owners curve
-              // is cumulative reviews × owners-per-review, and its caption claims it "trends
-              // toward the headline estimate" — true only if the headline is the same estimator.
-              units_headline: estUnits,
-              live_players: profile.live_players,
-            }}
-            ownersPerReview={ownersPerReview}
-          />
-        </BlueprintPanel>
-      )}
+        {selectedMetric && (
+          <BlueprintPanel
+            className="order-2 min-w-0 lg:order-none lg:col-span-2"
+            title={DRILLDOWN_META[selectedMetric].title}
+            subtitle={DRILLDOWN_META[selectedMetric].subtitle}
+            action={
+              <button
+                type="button"
+                onClick={() => setSelectedMetric(null)}
+                aria-label="Close drilldown"
+                className="flex h-7 w-7 shrink-0 items-center justify-center text-ink-secondary hover:bg-page hover:text-ink-primary"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            }
+          >
+            <GameMetricDrilldown
+              appid={profile.appid}
+              metric={selectedMetric}
+              profile={{ total_reviews: profile.total_reviews, live_players: profile.live_players }}
+              asOf={dataAge.asOf}
+            />
+          </BlueprintPanel>
+        )}
+      </div>
 
       {/* Below the mockup composition: every section this page already had that §4c doesn't
           draw — percentile, comparables, the Detailed-only deep charts, and (folded in from
@@ -1291,44 +1160,27 @@ export default function GameProfile() {
       </div>
 
       <div className="flex flex-col gap-[22px]">
+        {/* RANK VS GENRE (2026-09-23): PercentileMeter floors the rank (a 99.6 is "top 1%",
+            never "P100"), explains it with the game's own rank, and a missing rank is a
+            dashed rail with no median tick and a reason — the old empty bar with a tick in the
+            middle read as P50. The ranks cover games with 50+ reviews (mart_game ranks among
+            MIN_REVIEWS_DEFAULT = 50), which the old subtitle called "≥10". */}
         <BlueprintPanel
-          title="Percentile vs. genre"
-          subtitle={`Rank within ${profile.primary_genre ?? "its genre"} among titles with ≥10 reviews`}
+          title={glossary("percentile_vs_genre").label}
+          subtitle={`Where this game sits among ${genreName ?? "catalog"} games with 50+ reviews: P73 = it beats 73% of them`}
         >
           <div className="flex flex-col gap-3">
-            <BulletMeter
-              label="Revenue"
-              value={profile.rev_pct_in_genre !== null ? profile.rev_pct_in_genre / 100 : null}
-              benchmark={0.5}
-              benchmarkLabel="Genre median (P50)"
-              color={CSS_VAR.demand}
-              valueLabel={profile.rev_pct_in_genre !== null ? `P${Math.round(profile.rev_pct_in_genre)}` : "—"}
-            />
-            <BulletMeter
-              label="Review count"
-              value={profile.reviews_pct_in_genre !== null ? profile.reviews_pct_in_genre / 100 : null}
-              benchmark={0.5}
-              benchmarkLabel="Genre median (P50)"
-              color={CSS_VAR.demand}
-              valueLabel={profile.reviews_pct_in_genre !== null ? `P${Math.round(profile.reviews_pct_in_genre)}` : "—"}
-            />
-            <BulletMeter
-              label="Owners"
-              value={profile.owners_pct_in_genre !== null ? profile.owners_pct_in_genre / 100 : null}
-              benchmark={0.5}
-              benchmarkLabel="Genre median (P50)"
-              color={CSS_VAR.demand}
-              valueLabel={profile.owners_pct_in_genre !== null ? `P${Math.round(profile.owners_pct_in_genre)}` : "—"}
-            />
+            {rankRows.map((r) => (
+              <PercentileMeter
+                key={r.label}
+                label={r.label}
+                percentile={r.percentile}
+                peers={rankPeers}
+                color={CSS_VAR.demand}
+                sentinel={r.sentinel ?? undefined}
+              />
+            ))}
           </div>
-          {/* Keyed on price, not is_free — fmtRevenue's R6-Siege case: is_free can be set on
-              titles with a real price and real revenue. */}
-          {isFreeTitle(profile) && (
-            <p className="mt-3 text-[11px] italic text-ink-muted">
-              Revenue percentile isn't meaningful for free-to-play titles (box revenue is $0 at price $0) — read
-              review-count and owners percentile instead.
-            </p>
-          )}
         </BlueprintPanel>
 
         {/* The chart-heavy expert cards live under the Detailed toggle; Simple keeps the

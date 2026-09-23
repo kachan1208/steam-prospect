@@ -119,6 +119,15 @@ describe("BulletMeter / PercentileMeter", () => {
     expect(document.querySelector("[data-sentinel]")!.textContent).toBe("not ranked");
     expect(screen.getByRole("img").hasAttribute("data-empty")).toBe(true);
   });
+
+  it("draws no median tick on an empty rail — a lone tick over nothing reads as P50", () => {
+    render(<PercentileMeter label="Revenue" percentile={null} color="red" />);
+    expect(screen.getByRole("img").querySelector("div")).toBeNull();
+    cleanup();
+    render(<PercentileMeter label="Revenue" percentile={73.9} color="red" />);
+    // With a value the fill and the tick are both there.
+    expect(screen.getByRole("img").querySelectorAll("div").length).toBe(2);
+  });
 });
 
 describe("HeaderLabel", () => {

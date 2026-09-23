@@ -9,7 +9,6 @@ vi.mock("../../lib/api", () => ({ useAspectReviews: vi.fn(() => ({ data: undefin
 import {
   AspectDivergingBars,
   BADGE_MIN_RATED,
-  STANDOUT_MIN_RATED,
   aspectTextSummary,
   ratedMentions,
   standoutAspects,
