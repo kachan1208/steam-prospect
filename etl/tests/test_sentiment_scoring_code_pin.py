@@ -6,9 +6,10 @@ and the nightly only ever scores reviews it has not seen. What invalidates it is
 _sentiment_config_hash, which covers the model FILE, the lexicon, the VADER overrides, the window
 sizing and the thresholds — and NOT the code that turns a window into a score: the classifier's
 tokenizer / feature function / argmax in etl/aspect_classifier.py, the glue in build_marts'
-_score_windows / _get_analyzer, or the vaderSentiment package itself. Change any of those and the
-nightly carries on happily, scoring new reviews with the new code while serving millions scored
-by the old one: two scorers in one cache, invisible in every mart.
+_score_windows / _get_analyzer and the window cut in _aspect_window_sql, or the vaderSentiment
+package itself. Change any of those and the nightly carries on happily, scoring new reviews with
+the new code while serving millions scored by the old one: two scorers in one cache, invisible
+in every mart.
 
 That is not hypothetical. 821fc82 (2026-09-09) changed how the classifier sums its weights
 (sorted feature order instead of set-iteration order) and said so in its own comment — two
@@ -45,7 +46,7 @@ import build_marts as bm  # noqa: E402
 
 # ---- THE PINS. Change only after deciding (a) or (b) above. ----------------------------------
 PINNED_CLASSIFIER_CODE = "2946c2167c538db893b7757ec6000429468ba8f7995da2d1f95966dd25695a25"
-PINNED_SCORING_GLUE = "c94fc4bc84860b4e38fb7b2cbfb75991291b835b4ac8bf97e01681d30d4c8ac0"
+PINNED_SCORING_GLUE = "307c1c3be31fa251524448cad676e33572001700927f8bc83c040d502f475516"
 PINNED_VADER_VERSION = "3.3.2"
 PINNED_VADER_FINGERPRINT = "15316b08defb295fed407add049a09d070f5500fa64b2b5a5388bd69897c6b21"
 
@@ -92,9 +93,15 @@ def classifier_code() -> str:
 
 
 def scoring_glue() -> str:
-    """The build_marts side of a score: how a window becomes (compound, clf_aspect,
-    clf_sentiment, clf_margin), and the one analyzer (with its overrides applied) it uses."""
-    return _code_hash(inspect.getsource(bm._score_windows), inspect.getsource(bm._get_analyzer))
+    """The build_marts side of a score: which text window each mention is scored on
+    (_aspect_window_sql and the keyword-position regex it slices by — the window constants
+    themselves ARE in the config hash, the SQL that applies them is not), how a window becomes
+    (compound, clf_aspect, clf_sentiment, clf_margin), and the one analyzer (with its overrides
+    applied) it uses. A window-cut change must be proven byte-identical — see
+    tests/test_aspect_window_sql_rewrite.py — or bump the version."""
+    return _code_hash(inspect.getsource(bm._score_windows), inspect.getsource(bm._get_analyzer),
+                      inspect.getsource(bm._aspect_window_sql),
+                      inspect.getsource(bm._aspect_keyword_position_regex))
 
 
 def vader_version() -> str:
