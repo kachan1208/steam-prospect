@@ -13,12 +13,32 @@ import {
 
 import type { PressTimelinePoint } from "../../lib/api";
 import { fillMonthlyGaps, fmtMonth, partialMonth } from "../../lib/dates";
-import { axisScale, fmtInt } from "../../lib/format";
+import { fmtInt } from "../../lib/format";
 import { CSS_VAR } from "../../lib/palette";
 import { useDragZoom } from "../../lib/useDragZoom";
 import { HatchDefs, partialBarLabel, partialNote, useHatchId } from "./partialMonth";
 import { SELECTION_AREA_PROPS, ZoomFrame } from "./ZoomFrame";
 import { TooltipPanel, type TooltipRow } from "./TooltipPanel";
+
+/**
+ * An integer count axis: the smallest 1 / 2 / 5 × 10^n step that covers `top` in at most five
+ * intervals, so every tick is a whole number of articles. Exported for tests.
+ */
+export function wholeCountAxis(top: number): { ticks: number[]; domain: [number, number]; format: (v: number | null | undefined) => string } {
+  const max = Math.max(1, Math.ceil(top));
+  let step = 1;
+  for (let mag = 1; ; mag *= 10) {
+    const hit = [1, 2, 5].map((m) => m * mag).find((s) => Math.ceil(max / s) <= 5);
+    if (hit !== undefined) {
+      step = hit;
+      break;
+    }
+  }
+  const last = Math.ceil(max / step) * step;
+  const ticks: number[] = [];
+  for (let t = 0; t <= last; t += step) ticks.push(t);
+  return { ticks, domain: [0, last], format: (v) => fmtInt(v) };
+}
 
 /**
  * Monthly press-mention volume — a single-tone count-per-period bar chart, the same
@@ -49,13 +69,9 @@ export function PressTimelineChart({ points, asOf }: { points: PressTimelinePoin
   }
   const partial = partialMonth(filled[filled.length - 1]?.period, asOf);
   const periods = zoom.data.map((p) => p.period);
-  // Whole mentions only: a 2-mention peak through the shared scale would tick 0 / 0.5 / 1 /
-  // 1.5 / 2, and half an article is not a thing.
-  const top = Math.max(1, ...zoom.data.map((p) => p.n_mentions));
-  const y =
-    top <= 4
-      ? { ticks: Array.from({ length: top + 1 }, (_, i) => i), domain: [0, top] as [number, number], format: (v: number | null | undefined) => fmtInt(v) }
-      : axisScale(top, "count", 4);
+  // Whole mentions only: the shared scale's 2.5-steps ticked CS2's 9-mention peak as
+  // 0 / 2.5 / 5.0 / 7.5 / 10.0, and half an article is not a thing.
+  const y = wholeCountAxis(Math.max(1, ...zoom.data.map((p) => p.n_mentions)));
   return (
     <ZoomFrame zoomed={zoom.zoomed} dragging={zoom.dragging} outOfRange={zoom.outOfRange} onReset={zoom.reset}>
       <ResponsiveContainer width="100%" height={180}>

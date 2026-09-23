@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cleanup, render } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-import { PressTimelineChart } from "./PressTimelineChart";
+import { PressTimelineChart, wholeCountAxis } from "./PressTimelineChart";
 import { axisTicks, installChartLayout } from "../../test/recharts";
 import { ZoomRangeProvider } from "../../lib/zoomRange";
 import type { PressTimelinePoint } from "../../lib/api";
@@ -53,6 +53,22 @@ describe("PressTimelineChart — every month gets a slot", () => {
   it("uses whole-number ticks for counts", () => {
     const { container } = render(<PressTimelineChart points={BALATRO} />, { wrapper: Page });
     for (const t of axisTicks(container, "y")) expect(t).toMatch(/^\d+$/);
+  });
+});
+
+describe("wholeCountAxis — no half articles", () => {
+  it("steps in whole mentions at every scale", () => {
+    // CS2's 9-mention peak ticked 0 / 2.5 / 5.0 / 7.5 / 10.0 on the shared scale.
+    expect(wholeCountAxis(9).ticks).toEqual([0, 2, 4, 6, 8, 10]);
+    expect(wholeCountAxis(2).ticks).toEqual([0, 1, 2]);
+    expect(wholeCountAxis(23).ticks).toEqual([0, 5, 10, 15, 20, 25]);
+    expect(wholeCountAxis(140).ticks).toEqual([0, 50, 100, 150]);
+    for (const top of [1, 3, 7, 9, 13, 48, 99, 101, 999]) {
+      const { ticks, domain } = wholeCountAxis(top);
+      for (const t of ticks) expect(Number.isInteger(t)).toBe(true);
+      expect(domain[1]).toBeGreaterThanOrEqual(top);
+      expect(ticks.length - 1).toBeLessThanOrEqual(5);
+    }
   });
 });
 
