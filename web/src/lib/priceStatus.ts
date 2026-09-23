@@ -21,7 +21,15 @@ import { fmtPrice } from "./format";
  */
 export type PriceStatus = "paid" | "free" | "unknown";
 
-export function priceStatus(row: { price_initial?: number | null; is_free?: number | boolean | null }): PriceStatus {
+export interface PricedRow {
+  price_initial?: number | null;
+  is_free?: number | boolean | null;
+  /** The rebuilt mart's own verdict — wins over the heuristic below whenever it is present. */
+  price_status?: PriceStatus | null;
+}
+
+export function priceStatus(row: PricedRow): PriceStatus {
+  if (row.price_status === "paid" || row.price_status === "free" || row.price_status === "unknown") return row.price_status;
   const price = row.price_initial;
   if (typeof price === "number" && Number.isFinite(price) && price > 0) return "paid";
   if (row.is_free === true || row.is_free === 1) return "free";
@@ -29,9 +37,9 @@ export function priceStatus(row: { price_initial?: number | null; is_free?: numb
 }
 
 /** The price as a reader should see it: "$14.99", "Free", or "Price unknown". */
-export function fmtListPrice(row: { price_initial?: number | null; is_free?: number | boolean | null }): string {
+export function fmtListPrice(row: PricedRow): string {
   const status = priceStatus(row);
-  if (status === "paid") return fmtPrice(row.price_initial);
+  if (status === "paid") return typeof row.price_initial === "number" && row.price_initial > 0 ? fmtPrice(row.price_initial) : "Paid (price not recorded)";
   return status === "free" ? "Free" : "Price unknown";
 }
 

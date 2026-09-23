@@ -1187,6 +1187,26 @@ export interface GameProfile {
   dev_youtube_url?: string | null;
   dev_bluesky_handle?: string | null;
   dev_bluesky_url?: string | null;
+  // ---- the rebuilt mart's columns (2026-09-23): absent/null until the ETL rebuild lands ----
+  /** First day the game was buyable, 'YYYY-MM-DD' — the Early Access start for a graduate.
+   * In the rebuilt mart `release_date` means this same date. */
+  first_public_date?: string | null;
+  /** Steam's store date — the 1.0 date for an Early Access graduate. */
+  release_date_1_0?: string | null;
+  /** True when the game went Early Access -> 1.0. */
+  is_ea_graduate?: boolean | null;
+  /** Where `release_date` came from: the store page, the first review's day, or only the first
+   * review's MONTH ("first_review_month" is month-precision — print "~Mon YYYY"). */
+  release_date_source?: "store" | "first_review" | "first_review_month" | null;
+  /** 'paid' | 'free' | 'unknown' — why a revenue estimate exists or doesn't (only paid games
+   * get one). Preferred over the is_free/price heuristic whenever present. */
+  price_status?: "paid" | "free" | "unknown" | null;
+  /** The whole Steam panel's 7-day player change over the same days as players_trend_7d_pct,
+   * and this game's trend net of it, in percentage points. */
+  players_trend_7d_market_pct?: number | null;
+  players_trend_7d_rel_pct?: number | null;
+  /** When the SteamSpy owners snapshot behind owners_mid was taken ('YYYY-MM-DD'). */
+  owners_as_of?: string | null;
 }
 
 /** Shared query options so the compare page can fan out over N games via useQueries while
@@ -1575,6 +1595,10 @@ export interface GamePlayersSummary {
   live_players: number | null;
   players_7d_avg: number | null;
   players_trend_7d_pct: number | null;
+  /** The whole panel's 7-day change and this game's trend net of it (percentage points);
+   * null until the rebuilt mart carries them. */
+  players_trend_7d_market_pct?: number | null;
+  players_trend_7d_rel_pct?: number | null;
   n_days_measured: number;
   first_date: string | null;
   last_date: string | null;
@@ -1594,6 +1618,8 @@ export interface GamePlayersResponse {
   points: GamePlayersPoint[];
   // Deep monthly history via steamcharts (top-8k games; empty when uncovered/absent).
   monthly?: GamePlayersMonthlyPoint[];
+  /** The last capture day the window ends on — the daily series' own as-of date. */
+  data_as_of?: string | null;
 }
 
 /** Shared query options for the daily-CCU endpoint (GameMetricDrilldown's live_players
