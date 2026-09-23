@@ -47,8 +47,13 @@ DROP TABLE IF EXISTS mart_channel_buzz_summary;
 -- ------------------------------------------------------------------------------------
 -- Unified (title, published_at, weight, channel) rows from every source.
 -- ------------------------------------------------------------------------------------
+-- weight is CAST to DOUBLE on purpose: a bare `1.0` literal is DECIMAL(2,1) in DuckDB, and
+-- every SUM over it came out DECIMAL(38,1) — reach_weighted_score / total_weighted shipped
+-- as DECIMAL, which Python reads back as decimal.Decimal and the MCP's `float += Decimal`
+-- crashed on (2026-09-22). Every weighted column downstream is DOUBLE from here.
 CREATE TEMP TABLE _cb_press_rows AS
-SELECT a.title, TRY_CAST(a.published_at AS TIMESTAMP) AS published_at, 1.0 AS weight, 'press' AS channel
+SELECT a.title, TRY_CAST(a.published_at AS TIMESTAMP) AS published_at,
+    CAST(1.0 AS DOUBLE) AS weight, 'press' AS channel
 FROM src.articles a
 WHERE a.source != 'steam_news'
   AND a.title IS NOT NULL AND TRIM(a.title) != ''
@@ -122,8 +127,10 @@ SELECT term, channel, period, month_idx, COUNT(*) AS n_mentions, SUM(weight) AS 
 FROM _cb_terms
 GROUP BY term, channel, period, month_idx;
 
+-- CAST: SUM over BIGINT is HUGEINT in DuckDB — keep every published count a plain BIGINT.
 CREATE TEMP TABLE _cb_term_month AS
-SELECT term, period, month_idx, SUM(n_mentions) AS n_mentions, SUM(reach_weighted_score) AS reach_weighted_score
+SELECT term, period, month_idx, CAST(SUM(n_mentions) AS BIGINT) AS n_mentions,
+    SUM(reach_weighted_score) AS reach_weighted_score
 FROM _cb_term_channel_month
 GROUP BY term, period, month_idx;
 
@@ -132,7 +139,7 @@ GROUP BY term, period, month_idx;
 -- kept identical so "rising/cooling" reads consistently across both marts.
 CREATE TEMP TABLE _cb_term_stats AS
 SELECT term,
-    SUM(n_mentions) AS total_mentions,
+    CAST(SUM(n_mentions) AS BIGINT) AS total_mentions,
     SUM(reach_weighted_score) AS total_weighted,
     COALESCE(AVG(reach_weighted_score) FILTER (WHERE month_idx BETWEEN 1 AND @BUZZ_RECENT_MONTHS@), 0) AS recent_avg_weighted,
     COALESCE(AVG(reach_weighted_score) FILTER (

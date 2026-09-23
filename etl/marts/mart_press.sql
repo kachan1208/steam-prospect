@@ -270,7 +270,7 @@ GROUP BY term, period, month_idx;
 
 CREATE TEMP TABLE _buzz_term_stats AS
 SELECT term,
-    SUM(n_mentions) AS total_mentions,
+    CAST(SUM(n_mentions) AS BIGINT) AS total_mentions,   -- SUM(BIGINT) is HUGEINT otherwise
     COALESCE(AVG(n_mentions) FILTER (WHERE month_idx BETWEEN 1 AND @BUZZ_RECENT_MONTHS@), 0) AS recent_avg,
     COALESCE(AVG(n_mentions) FILTER (
         WHERE month_idx BETWEEN @BUZZ_RECENT_MONTHS@ + 1 AND @BUZZ_RECENT_MONTHS@ * 2

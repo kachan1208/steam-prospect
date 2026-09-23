@@ -87,7 +87,7 @@ pop AS (
 SELECT c.genre, c.month,
     CASE WHEN t.genre_reviews > 0
          THEN c.month_reviews * 1.0 / t.genre_reviews END AS demand_share,
-    c.month_reviews,
+    CAST(c.month_reviews AS BIGINT) AS month_reviews,   -- SUM(BIGINT) is HUGEINT otherwise
     c.n_games,
     p.n_games_genre
 FROM cell c

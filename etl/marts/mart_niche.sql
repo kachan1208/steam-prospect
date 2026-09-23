@@ -631,7 +631,8 @@ SELECT
     g.median_price, g.p25_price, g.p75_price,
     g.median_positive_ratio,
     g.median_owners,
-    g.total_owners, g.total_rev, g.total_reviews,
+    -- CAST: SUM over BIGINT is HUGEINT in DuckDB, a type half the clients handle badly.
+    g.total_owners, g.total_rev, CAST(g.total_reviews AS BIGINT) AS total_reviews,
     round(g.market_size, 2) AS market_size,
     COALESCE(g.recent_velocity, 0) AS recent_velocity,
     g.self_pub_share,
@@ -694,8 +695,8 @@ SELECT
     -- the published trend and the trend the score used to disagree. Still cut-independent
     -- (see _niche_demand24m's header): every (win, min_reviews) cut of a (dimension, key)
     -- carries the SAME demand numbers.
-    g.reviews_24m,
-    g.reviews_prev_24m,
+    CAST(g.reviews_24m AS BIGINT) AS reviews_24m,
+    CAST(g.reviews_prev_24m AS BIGINT) AS reviews_prev_24m,
     g.demand_trend_24m_pct,
     -- Emerging pair (see _niche_demand24m's EMERGING header). The trend above stays
     -- computed for emerging niches — clients decide not to headline it, and the score
