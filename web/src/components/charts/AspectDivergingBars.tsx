@@ -5,6 +5,7 @@ import type { ReviewAspect } from "../../lib/api";
 import { fmtInt, fmtPct } from "../../lib/format";
 import { CSS_VAR, MONO} from "../../lib/palette";
 import { Badge } from "../ui/Badge";
+import { InfoTip } from "../ui/InfoTip";
 import { AspectReviewExamples } from "./AspectReviewExamples";
 
 /**
@@ -58,30 +59,89 @@ export function ratedMentions(a: ReviewAspect): number {
  * printed next to a keyword count of up to 412.
  */
 export const STANDOUT_MIN_RATED = 10;
-const STANDOUT_TOP_N = 3;
+
+/**
+ * THE STANDOUT BAR (2026-09-23). A badge claims "players single this out", so it needs a real
+ * lead on a real base — the old rule took the top 3 aspects by ANY positive gap vs the genre,
+ * which badged CS2's "Controls & Performance" at 23% positive of 56 rated mentions, +3 pts: a
+ * mostly-NEGATIVE aspect called a "Standout strength" for being slightly less hated than the
+ * genre's. Now all three must hold:
+ *
+ *   - the split itself leans the badge's way: >= 50% positive for a strength, <= 50% for a
+ *     weakness (a strength nobody likes is not a strength);
+ *   - the gap vs the genre's own share is at least 10 points — the size of a gap a reader
+ *     would act on, well clear of the +3 that won the old badge;
+ *   - at least 30 rated mentions, three times the floor for printing a share at all
+ *     (STANDOUT_MIN_RATED): below 30 the ±10-pt gap is inside the noise of the split.
+ *
+ * Weaknesses get the mirror rule and their own badge — the bearish reading is the one a
+ * solo developer can act on first. Still at most three of each, largest gap first.
+ */
+export const BADGE_MIN_RATED = 30;
+export const BADGE_MIN_GAP = 0.1;
+const BADGE_TOP_N = 3;
 
 function baselineLabel(genre: string | null): string {
   if (!genre || genre === "__all__") return "catalog";
   return genre;
 }
 
-/** Top-N aspects by positive TEXT-sentiment genre-differential — "what players praise about
- * THIS game more than genre peers, by what they actually write" — gated by a non-null text
- * share and by STANDOUT_MIN_RATED on the base the differential is actually computed over, so
- * a thin/all-neutral aspect can't win on noise alone. */
+function badgeable(a: ReviewAspect): a is ReviewAspect & { text_pos_share: number; text_delta_vs_genre: number } {
+  return a.text_pos_share !== null && a.text_delta_vs_genre !== null && ratedMentions(a) >= BADGE_MIN_RATED;
+}
+
+/** Aspects players praise clearly MORE than the genre's players praise the same aspect, by
+ * what they write: >= 50% positive, >= +10 pts vs genre, >= 30 rated mentions; top 3. */
 export function standoutAspects(aspects: ReviewAspect[]): Set<string> {
   return new Set(
     aspects
-      .filter(
-        (a) =>
-          a.text_pos_share !== null &&
-          a.text_delta_vs_genre !== null &&
-          a.text_delta_vs_genre > 0 &&
-          ratedMentions(a) >= STANDOUT_MIN_RATED,
-      )
-      .sort((a, b) => (b.text_delta_vs_genre as number) - (a.text_delta_vs_genre as number))
-      .slice(0, STANDOUT_TOP_N)
+      .filter(badgeable)
+      .filter((a) => a.text_pos_share >= 0.5 && a.text_delta_vs_genre >= BADGE_MIN_GAP)
+      .sort((a, b) => b.text_delta_vs_genre - a.text_delta_vs_genre)
+      .slice(0, BADGE_TOP_N)
       .map((a) => a.aspect),
+  );
+}
+
+/** The mirror: aspects panned clearly MORE than the genre pans them — <= 50% positive,
+ * <= -10 pts vs genre, >= 30 rated mentions; top 3 by the widest gap. */
+export function weakAspects(aspects: ReviewAspect[]): Set<string> {
+  return new Set(
+    aspects
+      .filter(badgeable)
+      .filter((a) => a.text_pos_share <= 0.5 && a.text_delta_vs_genre <= -BADGE_MIN_GAP)
+      .sort((a, b) => a.text_delta_vs_genre - b.text_delta_vs_genre)
+      .slice(0, BADGE_TOP_N)
+      .map((a) => a.aspect),
+  );
+}
+
+/** "62% positive of 183 rated, +12 pts vs Strategy" — one aspect's badge evidence. */
+function evidence(a: ReviewAspect): string {
+  const pts = Math.round((a.text_delta_vs_genre ?? 0) * 100);
+  return `${a.aspect}: ${fmtPct(a.text_pos_share, 0)} positive of ${fmtInt(ratedMentions(a))} rated, ${pts >= 0 ? "+" : ""}${pts} pts vs ${baselineLabel(
+    a.baseline_genre,
+  )}`;
+}
+
+/** The ⓘ for the badges: the rule, and this game's own aspects that cleared it (or didn't). */
+export function StandoutRuleTip({ aspects }: { aspects: ReviewAspect[] }) {
+  const strong = aspects.filter((a) => standoutAspects(aspects).has(a.aspect));
+  const weak = aspects.filter((a) => weakAspects(aspects).has(a.aspect));
+  const worked =
+    strong.length + weak.length === 0
+      ? "No aspect of this game clears the bar either way."
+      : [...weak.map((a) => `Weakness — ${evidence(a)}`), ...strong.map((a) => `Strength — ${evidence(a)}`)].join("; ");
+  return (
+    <InfoTip
+      label="Standout strength / weakness"
+      meaning="An aspect this game's reviewers praise — or pan — clearly more than players of its genre do about the same aspect, judged from what they write, not their thumbs-up."
+      formula={`Strength: ≥ 50% of rated mentions positive AND ≥ +${Math.round(BADGE_MIN_GAP * 100)} pts vs the genre's positive share AND ≥ ${BADGE_MIN_RATED} rated mentions. Weakness: ≤ 50% positive AND ≤ −${Math.round(
+        BADGE_MIN_GAP * 100,
+      )} pts AND ≥ ${BADGE_MIN_RATED} rated mentions. At most ${BADGE_TOP_N} of each, widest gap first.`}
+      worked={worked}
+      notes={`${BADGE_MIN_RATED} rated mentions is three times the ${STANDOUT_MIN_RATED} needed to print a share at all — below it a 10-point gap is within the noise.`}
+    />
   );
 }
 
@@ -101,7 +161,7 @@ export function standoutAspects(aspects: ReviewAspect[]): Set<string> {
  */
 export function aspectTextSummary(a: ReviewAspect): {
   kind: "scored" | "thin" | "none";
-  /** Rendered segments, joined by " · ". `strong` is the tabular-emphasised lead-in (the pp
+  /** Rendered segments, joined by " · ". `strong` is the tabular-emphasised lead-in (the pts
    * differential); the JSX below styles it and prints `text` after it. */
   parts: { strong?: string; text: string }[];
   /** The same line as flat text — what the tests assert on and what the bar's title carries,
@@ -138,7 +198,7 @@ export function aspectTextSummary(a: ReviewAspect): {
   ];
   if (deltaPp !== null) {
     parts.push({
-      strong: `${deltaPp >= 0 ? "+" : ""}${deltaPp}pp`,
+      strong: `${deltaPp >= 0 ? "+" : ""}${deltaPp} pts`,
       text: `vs ${baselineLabel(a.baseline_genre)} genre`,
     });
   }
@@ -181,9 +241,40 @@ export function AspectDivergingBars({ appid, aspects }: { appid: number; aspects
   }
   const sorted = [...aspects].sort((a, b) => b.total_mentions - a.total_mentions);
   const standouts = standoutAspects(sorted);
+  const weak = weakAspects(sorted);
+  // Widest gap first — the order the rule's ⓘ states.
+  const gap = (a: ReviewAspect) => a.text_delta_vs_genre ?? 0;
+  const weakRows = sorted.filter((a) => weak.has(a.aspect)).sort((a, b) => gap(a) - gap(b));
+  const strongRows = sorted.filter((a) => standouts.has(a.aspect)).sort((a, b) => gap(b) - gap(a));
+  const pts = (a: ReviewAspect) => {
+    const v = Math.round((a.text_delta_vs_genre ?? 0) * 100);
+    return `${v >= 0 ? "+" : ""}${v} pts`;
+  };
 
   return (
     <div>
+      {/* Bearish reading first: what players single out AGAINST the game, then for it. */}
+      <p className="mb-3 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-ink-secondary" data-testid="aspect-standouts">
+        {weakRows.length + strongRows.length === 0 ? (
+          <span>No aspect stands out from the genre either way.</span>
+        ) : (
+          <span>
+            {weakRows.length > 0 && (
+              <>
+                <span className="font-medium text-ink-primary">Panned more than the genre:</span>{" "}
+                {weakRows.map((a) => `${a.aspect} (${fmtPct(a.text_pos_share, 0)} positive, ${pts(a)})`).join(", ")}.{" "}
+              </>
+            )}
+            {strongRows.length > 0 && (
+              <>
+                <span className="font-medium text-ink-primary">Praised more than the genre:</span>{" "}
+                {strongRows.map((a) => `${a.aspect} (${fmtPct(a.text_pos_share, 0)} positive, ${pts(a)})`).join(", ")}.
+              </>
+            )}
+          </span>
+        )}
+        <StandoutRuleTip aspects={sorted} />
+      </p>
       <div className="mb-2 flex flex-wrap items-center gap-4 text-[11px] text-ink-muted">
         <span className="flex items-center gap-1.5">
           <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: CSS_VAR.praise }} />
@@ -198,26 +289,33 @@ export function AspectDivergingBars({ appid, aspects }: { appid: number; aspects
           Genre baseline (text)
         </span>
       </div>
-      <p className="mb-3 text-[11px] leading-relaxed text-ink-muted">
-        Sentiment is read from the review <span className="font-medium text-ink-secondary">text</span> around each
-        aspect keyword by a model trained on game reviews, so a thumbs-up review that criticizes an aspect counts as
-        negative here — unlike the overall-vote split shown beneath each bar. On a blind sample it agreed with a human
-        read 82% of the time, against 66% for the lexicon scoring this replaced, which could not tell “cheap deaths”
-        from a cheap price. Still directional, not exact: English-only, and it leans slightly toward reading a
-        borderline passage as negative. Neutral/unclear mentions are excluded from the split and reported separately.
-        The <span className="font-medium text-ink-secondary">keyword mentions</span> count on each row is how many
-        sampled reviews matched that aspect's keywords — a different, usually larger population than the rated
-        mentions the split is computed over, because the model discards matches that turn out not to be about the
-        aspect and moves others between aspects. Rows with fewer than {STANDOUT_MIN_RATED} rated mentions show no
-        split at all: below that the share is almost always a degenerate 0% or 100%.
-      </p>
+      {/* The method, one tap away instead of a screen-long paragraph above the bars (on a
+          phone it pushed the first bar most of a screen down). */}
+      <details className="group mb-3 text-[11px] leading-relaxed text-ink-muted">
+        <summary className="cursor-pointer select-none text-ink-secondary hover:text-ink-primary">
+          How these bars are read
+        </summary>
+        <p className="mt-1.5">
+          Sentiment is read from the review <span className="font-medium text-ink-secondary">text</span> around each
+          aspect keyword by a model trained on game reviews, so a thumbs-up review that criticizes an aspect counts as
+          negative here — unlike the overall-vote split shown beneath each bar. On a blind sample it agreed with a human
+          read 82% of the time, against 66% for the lexicon scoring this replaced, which could not tell “cheap deaths”
+          from a cheap price. Still directional, not exact: English-only, and it leans slightly toward reading a
+          borderline passage as negative. Neutral/unclear mentions are excluded from the split and reported separately.
+          The <span className="font-medium text-ink-secondary">keyword mentions</span> count on each row is how many
+          sampled reviews matched that aspect's keywords — a different, usually larger population than the rated
+          mentions the split is computed over, because the model discards matches that turn out not to be about the
+          aspect and moves others between aspects. Rows with fewer than {STANDOUT_MIN_RATED} rated mentions show no
+          split at all: below that the share is almost always a degenerate 0% or 100%.
+        </p>
+      </details>
       <div className="flex flex-col divide-y divide-chartborder/60">
         {sorted.map((a) => (
           <AspectRow
             key={a.aspect}
             appid={appid}
             a={a}
-            isStandout={standouts.has(a.aspect)}
+            badge={standouts.has(a.aspect) ? "strength" : weak.has(a.aspect) ? "weakness" : null}
             isExpanded={expanded === a.aspect}
             onToggle={() => setExpanded((cur) => (cur === a.aspect ? null : a.aspect))}
           />
@@ -227,16 +325,44 @@ export function AspectDivergingBars({ appid, aspects }: { appid: number; aspects
   );
 }
 
+/** One aspect's ⓘ: what the bar and its gap mean, with this row's own counts worked through. */
+function AspectTip({ a }: { a: ReviewAspect }) {
+  const rated = ratedMentions(a);
+  const label = baselineLabel(a.baseline_genre);
+  const share = a.text_pos_share;
+  const gap = a.text_delta_vs_genre;
+  const worked =
+    share === null || rated < STANDOUT_MIN_RATED
+      ? `${fmtInt(a.n_text_pos)} positive, ${fmtInt(a.n_text_neg)} negative — ${fmtInt(rated)} rated, under the ${STANDOUT_MIN_RATED} needed to print a share`
+      : `${fmtInt(a.n_text_pos)} positive ÷ ${fmtInt(rated)} rated = ${fmtPct(share, 0)}` +
+        (gap !== null && a.genre_text_pos_share !== null
+          ? `; ${label} genre ${fmtPct(a.genre_text_pos_share, 0)} → ${gap >= 0 ? "+" : ""}${Math.round(gap * 100)} pts`
+          : "");
+  return (
+    <InfoTip
+      label={a.aspect}
+      meaning="How positively this game's reviewers write about this aspect, next to how the genre's reviewers write about the same aspect."
+      formula="positive ÷ (positive + negative) rated mentions; gap = this game's share − the genre's share, in points"
+      worked={worked}
+      notes={`${fmtInt(a.total_mentions)} keyword mentions = sampled reviews whose text matched this aspect's keywords — a different population from the ${fmtInt(
+        rated,
+      )} rated mentions the share uses (the model drops off-topic matches and re-routes others between aspects). ${fmtInt(
+        a.n_text_neutral,
+      )} neutral/unclear mentions are left out of the share.`}
+    />
+  );
+}
+
 function AspectRow({
   appid,
   a,
-  isStandout,
+  badge,
   isExpanded,
   onToggle,
 }: {
   appid: number;
   a: ReviewAspect;
-  isStandout: boolean;
+  badge: "strength" | "weakness" | null;
   isExpanded: boolean;
   onToggle: () => void;
 }) {
@@ -256,19 +382,19 @@ function AspectRow({
   const posPct = scored ? (a.text_pos_share as number) * 100 : 0;
   const negPct = 100 - posPct;
   const genrePct = a.genre_text_pos_share !== null ? a.genre_text_pos_share * 100 : null;
-  const rated = ratedMentions(a);
 
   return (
     <div className="py-2.5">
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={isExpanded}
-        title={isExpanded ? "Hide example reviews" : "Click to see example reviews"}
-        className="-mx-1.5 block w-[calc(100%+12px)] rounded-md px-1.5 py-0.5 text-left transition-colors hover:bg-page"
-      >
-        <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
-          <span className="flex items-center gap-1.5 text-xs font-medium text-ink-primary">
+      {/* The name is the real, keyboard-reachable toggle; the ⓘ sits BESIDE it (a button can't
+          hold a button), and the bar block below toggles too, as a mouse convenience. */}
+      <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
+        <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs font-medium text-ink-primary">
+          <button
+            type="button"
+            onClick={onToggle}
+            aria-expanded={isExpanded}
+            className="inline-flex items-center gap-1.5 text-left hover:text-brand"
+          >
             <svg
               width="9"
               height="9"
@@ -285,28 +411,28 @@ function AspectRow({
               <path d="M9 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
             {a.aspect}
-            {isStandout && <Badge color={MONO.primary}>Standout strength</Badge>}
-          </span>
-          {/* Named for the population it IS — sampled reviews whose text matched this aspect's
-              keywords — because it is NOT the base of the share below it and usually differs
-              from it by a lot (see ratedMentions). It used to read a bare "155 mentions" one
-              line above "100% positive", which invites exactly the division that cannot work. */}
-          <span
-            className="tabular shrink-0 text-[11px] text-ink-muted"
-            title={`${fmtInt(a.total_mentions)} sampled reviews matched this aspect's keywords. That is a different population from the ${fmtInt(rated)} rated mention${
-              rated === 1 ? "" : "s"
-            } the split below is computed over: the model drops keyword hits that turn out not to be about this aspect and re-routes others in from another aspect's keywords, so the two counts move independently.`}
-          >
-            {fmtInt(a.total_mentions)} keyword mentions
-          </span>
-        </div>
+          </button>
+          <AspectTip a={a} />
+          {badge === "strength" && <Badge color={MONO.primary}>Standout strength</Badge>}
+          {badge === "weakness" && <Badge color={MONO.paper75}>Standout weakness</Badge>}
+        </span>
+        {/* Named for the population it IS — sampled reviews whose text matched this aspect's
+            keywords — because it is NOT the base of the share below it and usually differs
+            from it by a lot (see ratedMentions and the row's ⓘ). */}
+        <span className="tabular shrink-0 text-[11px] text-ink-muted">{fmtInt(a.total_mentions)} keyword mentions</span>
+      </div>
 
+      <div
+        onClick={onToggle}
+        className="-mx-1.5 cursor-pointer rounded-md px-1.5 py-0.5 transition-colors hover:bg-page"
+      >
         {scored ? (
           <>
             <div
               className="relative h-3 rounded-full bg-page"
-              title={`${fmtPct(a.text_pos_share, 0)} of ${fmtInt(rated)} rated mentions read positive (${a.n_text_pos} positive / ${a.n_text_neg} negative; ${a.n_text_neutral} neutral excluded)${
-                genrePct !== null ? ` · ${label} genre text baseline: ${Math.round(genrePct)}% positive` : ""
+              role="img"
+              aria-label={`${a.aspect}: ${fmtPct(a.text_pos_share, 0)} positive${
+                genrePct !== null ? `, ${label} genre ${Math.round(genrePct)}%` : ""
               }`}
             >
               <div
@@ -341,7 +467,7 @@ function AspectRow({
             mentioning this were thumbs-up
           </div>
         )}
-      </button>
+      </div>
       {isExpanded && (
         <div className="mt-3 border-t border-chartborder/60 pt-3">
           <AspectReviewExamples appid={appid} aspect={a.aspect} />
@@ -352,7 +478,7 @@ function AspectRow({
 }
 
 /** aspectTextSummary's segments as the row's sub-line, with the drill-down affordance the
- * whole row is a button for. Rendered from `parts` (never from `detail`) so the emphasised pp
+ * row toggles. Rendered from `parts` (never from `detail`) so the emphasised pts
  * differential keeps its tabular styling. */
 function SummaryLine({
   summary,

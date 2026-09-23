@@ -131,11 +131,107 @@ describe("ReviewVelocityBars — rating line on the right axis", () => {
     expect(screen.getByText(/Positive rating, trailing 3-month share \(right axis\)/)).toBeTruthy();
   });
 
+  it("hatches and labels the month still being counted, and says so in the legend", () => {
+    const { container } = render(<ReviewVelocityBars points={TIMELINE} events={EVENTS} asOf={new Date(Date.UTC(2026, 8, 15))} />, {
+      wrapper: Page,
+    });
+    const fills = Array.from(container.querySelectorAll(".recharts-bar-rectangle path")).map((b) => b.getAttribute("fill") ?? "");
+    expect(fills[fills.length - 1]).toMatch(/^url\(#velocity-hatch-/);
+    expect(fills.slice(0, -1).some((f) => f.startsWith("url("))).toBe(false);
+    expect(Array.from(container.querySelectorAll("text.partial-month-label")).map((t) => t.textContent)).toEqual(["partial"]);
+    expect(screen.getByTestId("velocity-partial").textContent).toBe(
+      "Sep 2026: partial month — data through Sep 15, 2026 (15 of 30 days)",
+    );
+  });
+
+  it("takes the partial month from the DATA's as-of date, not the reader's clock", () => {
+    // Read on Oct 2 against data built Sep 15: September is still half-counted, so it must
+    // not earn a "drop" line nor lose its partial marking.
+    vi.setSystemTime(new Date(2026, 9, 2));
+    const { container } = render(<ReviewVelocityBars points={TIMELINE} events={EVENTS} asOf={new Date(Date.UTC(2026, 8, 15))} />, {
+      wrapper: Page,
+    });
+    expect(container.querySelector("text.partial-month-label")?.textContent).toBe("partial");
+    expect(Array.from(container.querySelectorAll("text.plumb-label")).map((t) => t.textContent?.trim())).toEqual([
+      "RELEASED",
+      "▼ 0.3×",
+      "▲ 3.0×",
+      "▲ 4.2×",
+    ]);
+  });
+
+  it("gives skipped months their own empty slot", () => {
+    // CS2's timeline jumps 2012-05 -> 2012-08 (no reviews in between).
+    const gappy = [TIMELINE[0], { ...TIMELINE[1], period: "2025-10" }];
+    const { container } = render(<ReviewVelocityBars points={gappy} />, { wrapper: Page });
+    const ticks = Array.from(container.querySelectorAll(".recharts-xAxis .recharts-cartesian-axis-tick-value")).map((t) =>
+      t.textContent?.trim(),
+    );
+    expect(ticks[0]).toBe("Jul 2025");
+    expect(ticks[ticks.length - 1]).toBe("Oct 2025");
+    // Four slots (Jul, Aug, Sep, Oct), two of them empty.
+    expect(container.querySelectorAll(".recharts-bar-rectangle").length).toBe(4);
+  });
+
   it("draws bars only, with no right axis, when no month has a trailing share", () => {
     const { container } = render(<ReviewVelocityBars points={TIMELINE} events={EVENTS} />, { wrapper: Page });
     expect(container.querySelector(".recharts-line")).toBeNull();
     expect(container.querySelectorAll(".recharts-yAxis").length).toBe(1);
     expect(container.querySelectorAll("text.plumb-label").length).toBe(4);
     expect(screen.queryByText(/right axis/)).toBeNull();
+  });
+});
+
+/** 36 months from Feb 2024, a steady 100 reviews a month: narrow bands, so a label centred
+ * on the FIRST month would overhang the plot's left edge. */
+const LONG: ReviewTimelinePoint[] = Array.from({ length: 36 }, (_, i) => {
+  const y = 2024 + Math.floor((i + 1) / 12);
+  const m = ((i + 1) % 12) + 1;
+  return {
+    period: `${y}-${String(m).padStart(2, "0")}`,
+    n_reviews: 100,
+    n_positive: 90,
+    cum_reviews: 0,
+    cum_positive: 0,
+    cum_positive_share: null,
+    trailing_reviews: null,
+    trailing_positive_share: null,
+  };
+});
+
+describe("ReviewVelocityBars — labels stay inside the plot", () => {
+  it("pins the first month's label to the plot's left edge instead of over the y-axis ticks", () => {
+    const { container } = render(
+      <ReviewVelocityBars points={LONG} events={[{ event_date: "2024-02-20", kind: "release", title: "Released", url: null }]} />,
+      { wrapper: Page },
+    );
+    const label = container.querySelector("text.plumb-label-release")!;
+    expect(label.textContent).toBe("RELEASED");
+    // Centred it would start ~26px left of its line, over the axis's top tick ("RELEASED"
+    // over "25K"); pinned, it starts exactly at the plot's left edge (the 40px axis column).
+    expect(label.getAttribute("text-anchor")).toBe("start");
+    expect(Number(label.getAttribute("x"))).toBe(40);
+  });
+
+  it("labels an Early Access launch and its 1.0 as what they are", () => {
+    const { container } = render(
+      <ReviewVelocityBars
+        points={LONG}
+        events={[
+          { event_date: "2024-02-10", kind: "release", title: "Early Access launch", url: null },
+          { event_date: "2025-06-17", kind: "update", title: "1.0 release", url: null },
+        ]}
+      />,
+      { wrapper: Page },
+    );
+    const labels = Array.from(container.querySelectorAll("text.plumb-label")).map((t) => t.textContent?.trim());
+    expect(labels).toContain("EA LAUNCH");
+    expect(labels).toContain("1.0");
+    expect(labels).not.toContain("RELEASED");
+  });
+
+  it("falls back to the game's launch date for the launch line when no release event came", () => {
+    const { container } = render(<ReviewVelocityBars points={LONG} events={[]} launchDate="2024-05-10" />, { wrapper: Page });
+    expect(container.querySelector("text.plumb-label-release")?.textContent).toBe("RELEASED");
   });
 });

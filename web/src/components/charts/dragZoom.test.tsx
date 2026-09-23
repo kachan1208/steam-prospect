@@ -56,17 +56,25 @@ function dragAcross(container: HTMLElement, fromX: number, toX: number) {
   fireEvent.mouseUp(wrapper, { clientX: toX, clientY: 100 });
 }
 
+/** A month tick ("Jan 2024", the game page's month format — or a bare "2024-01") as a
+ * sortable "YYYY-MM" key, so window bounds compare as dates, not as strings. */
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function monthKey(tick: string): string {
+  const m = /^([A-Z][a-z]{2}) (\d{4})$/.exec(tick);
+  return m ? `${m[2]}-${String(MONTHS.indexOf(m[1]) + 1).padStart(2, "0")}` : tick;
+}
+
 describe("drag-to-zoom on a time axis", () => {
   it("shrinks the axis to the dragged window and offers a way back", () => {
     const { container } = render(<PressTimelineChart points={months} />, { wrapper: Page });
 
-    const before = axisTicks(container, "x");
+    const before = axisTicks(container, "x").map(monthKey);
     expect(before.length).toBeGreaterThan(2);
     expect(screen.queryByRole("button", { name: /reset zoom/i })).toBeNull();
 
     dragAcross(container, WIDTH * 0.35, WIDTH * 0.6);
 
-    const after = axisTicks(container, "x");
+    const after = axisTicks(container, "x").map(monthKey);
     expect(after.length).toBeGreaterThan(0);
     // The window is a strict subset: its first tick is no earlier and its last no later,
     // and at least one end actually moved.
@@ -78,7 +86,7 @@ describe("drag-to-zoom on a time axis", () => {
 
     const reset = screen.getByRole("button", { name: /reset zoom/i });
     fireEvent.click(reset);
-    expect(axisTicks(container, "x")).toEqual(before);
+    expect(axisTicks(container, "x").map(monthKey)).toEqual(before);
     expect(screen.queryByRole("button", { name: /reset zoom/i })).toBeNull();
   });
 

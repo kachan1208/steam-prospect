@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 // The row's drill-down panel is the only thing in this tree that touches the API; stubbing the
 // hook lets the real component render without a QueryClient. Same idiom as
@@ -8,10 +8,11 @@ vi.mock("../../lib/api", () => ({ useAspectReviews: vi.fn(() => ({ data: undefin
 
 import {
   AspectDivergingBars,
-  STANDOUT_MIN_RATED,
+  BADGE_MIN_RATED,
   aspectTextSummary,
   ratedMentions,
   standoutAspects,
+  weakAspects,
 } from "./AspectDivergingBars";
 import type { ReviewAspect } from "../../lib/api";
 
@@ -87,7 +88,7 @@ describe("aspectTextSummary", () => {
     expect(s.kind).toBe("thin");
     // The three things that were printed off a single mention are all gone.
     expect(s.detail).not.toMatch(/100%/);
-    expect(s.detail).not.toMatch(/95pp/);
+    expect(s.detail).not.toMatch(/95/);
     expect(s.detail).not.toMatch(/positive/);
     expect(s.detail).toBe("Only 1 rated mention — too thin to score (needs 10).");
   });
@@ -95,7 +96,7 @@ describe("aspectTextSummary", () => {
   it("prints the base the percentage actually uses once the base is deep enough", () => {
     const s = aspectTextSummary(controls);
     expect(s.kind).toBe("scored");
-    expect(s.detail).toBe("6% positive of 348 rated · -13pp vs Action genre · 17 neutral excluded");
+    expect(s.detail).toBe("6% positive of 348 rated · -13 pts vs Action genre · 17 neutral excluded");
     // The keyword count must never be offered as the share's base: 21/380 = 6% rounds the
     // same, so assert the printed base is the one that PRODUCES the share exactly.
     expect(s.detail).toContain(`${controls.n_text_pos + controls.n_text_neg} rated`);
@@ -152,27 +153,42 @@ describe("aspectTextSummary", () => {
   });
 });
 
-describe("standoutAspects", () => {
+describe("standoutAspects — a badge needs a real lead on a real base", () => {
   it("refuses to badge a row whose evidence is one mention", () => {
     // +95pp is the largest differential on the page, and the row still must not win: the
     // differential is 1.0 - 0.053 computed from 1/1.
     expect(standoutAspects([aspect()]).has("Map & Navigation / Backtracking")).toBe(false);
   });
 
-  it("still badges a positively-differentiated aspect with a real base", () => {
-    // Rust "Music & Audio": 18 keyword mentions, 11 rated (10 + 1), +10pp. Above the floor on
-    // the base that matters even though the keyword count is small.
-    const music = aspect({
-      aspect: "Music & Audio",
-      total_mentions: 18,
-      n_text_pos: 10,
-      n_text_neg: 1,
-      n_text_neutral: 6,
-      text_pos_share: 0.9090909090909091,
-      text_delta_vs_genre: 0.09940635627467376,
+  it("no longer badges a mostly-NEGATIVE aspect for being slightly less hated than the genre", () => {
+    // GET /api/games/730/teardown (CS2), verbatim: 13 positive / 43 negative = 23% of 56 rated,
+    // +3 pts over the Action baseline. The old "top 3 by any positive gap" rule called this a
+    // "Standout strength".
+    const cs2Controls = aspect({
+      aspect: "Controls & Performance",
+      total_mentions: 94,
+      n_text_pos: 13,
+      n_text_neg: 43,
+      n_text_neutral: 0,
+      text_pos_share: 0.23214285714285715,
+      genre_text_pos_share: 0.20211114341715578,
+      text_delta_vs_genre: 0.030031713725701376,
     });
-    expect(ratedMentions(music)).toBeGreaterThanOrEqual(STANDOUT_MIN_RATED);
-    expect(standoutAspects([aspect(), music]).has("Music & Audio")).toBe(true);
+    expect(standoutAspects([cs2Controls]).size).toBe(0);
+    // ...and it is not a weakness either: it leads the genre, just not by enough to mean much.
+    expect(weakAspects([cs2Controls]).size).toBe(0);
+  });
+
+  it("wants all three: >= 50% positive, >= +10 pts, >= 30 rated mentions", () => {
+    const deep = (name: string, pos: number, neg: number, delta: number) =>
+      aspect({ aspect: name, n_text_pos: pos, n_text_neg: neg, text_pos_share: pos / (pos + neg), text_delta_vs_genre: delta });
+    const badged = standoutAspects([
+      deep("clears all three", 80, 26, 0.27), // Balatro Content & Length: 75% of 106, +27
+      deep("thin base", 7, 4, 0.18), // Balatro Combat & Bosses: 64% of 11, +18
+      deep("mostly negative", 9, 12, 0.26), // Balatro Controls & Performance: 43% of 21, +26
+      deep("small gap", 60, 20, 0.08), // 75% of 80, +8
+    ]);
+    expect([...badged]).toEqual(["clears all three"]);
   });
 
   it("gates on the rated base, not the keyword count, in both directions", () => {
@@ -192,6 +208,7 @@ describe("standoutAspects", () => {
       text_pos_share: 0.75,
       text_delta_vs_genre: 0.2,
     });
+    expect(ratedMentions(quietButReal)).toBeGreaterThanOrEqual(BADGE_MIN_RATED);
     const badged = standoutAspects([loudButEmpty, quietButReal]);
     expect(badged.has("Loud")).toBe(false);
     expect(badged.has("Quiet")).toBe(true);
@@ -217,6 +234,33 @@ describe("standoutAspects", () => {
   });
 });
 
+describe("weakAspects — the mirror rule", () => {
+  it("flags an aspect panned clearly more than the genre pans it", () => {
+    const priced = aspect({
+      aspect: "Price & Value",
+      n_text_pos: 15,
+      n_text_neg: 45,
+      text_pos_share: 0.25,
+      genre_text_pos_share: 0.6,
+      text_delta_vs_genre: -0.35,
+    });
+    expect([...weakAspects([priced])]).toEqual(["Price & Value"]);
+    expect(standoutAspects([priced]).size).toBe(0);
+  });
+
+  it("wants <= 50% positive, <= -10 pts and >= 30 rated mentions", () => {
+    const row = (name: string, pos: number, neg: number, delta: number) =>
+      aspect({ aspect: name, n_text_pos: pos, n_text_neg: neg, text_pos_share: pos / (pos + neg), text_delta_vs_genre: delta });
+    const flagged = weakAspects([
+      row("thin", 5, 13, -0.33), // CS2 Price & Value: 28% of 18 rated — too thin to call
+      row("still liked", 60, 30, -0.12), // 67% positive: behind the genre, but not panned
+      row("small gap", 30, 50, -0.05),
+      row("clear", 20, 60, -0.3),
+    ]);
+    expect([...flagged]).toEqual(["clear"]);
+  });
+});
+
 describe("AspectDivergingBars (rendered)", () => {
   it("no longer puts a keyword count next to a share computed over one mention", () => {
     render(<AspectDivergingBars appid={252490} aspects={[aspect(), controls]} />);
@@ -229,7 +273,7 @@ describe("AspectDivergingBars (rendered)", () => {
     // And the three claims that were made from n_text_pos=1 / n_text_neg=0 are gone.
     expect(screen.getByText(/Only 1 rated mention — too thin to score \(needs 10\)/)).toBeTruthy();
     expect(document.body.textContent).not.toContain("100% positive");
-    expect(document.body.textContent).not.toContain("+95pp");
+    expect(document.body.textContent).not.toContain("+95 pts");
     expect(screen.queryByText("Standout strength")).toBeNull();
   });
 
@@ -240,7 +284,27 @@ describe("AspectDivergingBars (rendered)", () => {
     expect(screen.getByText(/of the 380 reviews mentioning this were thumbs-up/)).toBeTruthy();
   });
 
-  it("still renders the badge and the differential for an aspect with a real base", () => {
+  it("renders the badge and the differential for an aspect that clears the bar", () => {
+    const content = aspect({
+      aspect: "Content & Length",
+      total_mentions: 106,
+      n_pos_mentions: 101,
+      n_neg_mentions: 5,
+      pos_share: 101 / 106,
+      n_text_pos: 80,
+      n_text_neg: 26,
+      n_text_neutral: 10,
+      text_pos_share: 80 / 106,
+      genre_text_pos_share: 0.48,
+      text_delta_vs_genre: 80 / 106 - 0.48,
+    });
+    render(<AspectDivergingBars appid={2379780} aspects={[content]} />);
+    expect(screen.getByText("Standout strength")).toBeTruthy();
+    expect(screen.getByText(/75% positive of 106 rated/)).toBeTruthy();
+    expect(screen.getByText("+27 pts")).toBeTruthy();
+  });
+
+  it("does not badge an 11-mention aspect any more, however large its lead", () => {
     const music = aspect({
       aspect: "Music & Audio",
       total_mentions: 18,
@@ -254,8 +318,65 @@ describe("AspectDivergingBars (rendered)", () => {
       text_delta_vs_genre: 0.09940635627467376,
     });
     render(<AspectDivergingBars appid={252490} aspects={[music]} />);
-    expect(screen.getByText("Standout strength")).toBeTruthy();
+    // The share and gap still print (11 >= the 10 needed for a share)...
     expect(screen.getByText(/91% positive of 11 rated/)).toBeTruthy();
-    expect(screen.getByText("+10pp")).toBeTruthy();
+    // ...but a badge needs 30 rated mentions and a 10-point lead.
+    expect(screen.queryByText("Standout strength")).toBeNull();
+    expect(screen.getByTestId("aspect-standouts").textContent).toContain("No aspect stands out from the genre either way.");
+  });
+
+  it("leads with the weaknesses, then the strengths", () => {
+    const weak = aspect({
+      aspect: "Price & Value",
+      n_text_pos: 15,
+      n_text_neg: 45,
+      text_pos_share: 0.25,
+      genre_text_pos_share: 0.6,
+      text_delta_vs_genre: -0.35,
+    });
+    const strong = aspect({
+      aspect: "Story & Writing",
+      n_text_pos: 474,
+      n_text_neg: 102,
+      text_pos_share: 474 / 576,
+      genre_text_pos_share: 0.59,
+      text_delta_vs_genre: 474 / 576 - 0.59,
+    });
+    render(<AspectDivergingBars appid={1} aspects={[strong, weak]} />);
+    const line = screen.getByTestId("aspect-standouts").textContent ?? "";
+    expect(line.indexOf("Panned more than the genre")).toBeGreaterThanOrEqual(0);
+    expect(line.indexOf("Panned more than the genre")).toBeLessThan(line.indexOf("Praised more than the genre"));
+    expect(line).toContain("Price & Value (25% positive, -35 pts)");
+    expect(line).toContain("Story & Writing (82% positive, +23 pts)");
+    expect(screen.getByText("Standout weakness")).toBeTruthy();
+    expect(screen.getByText("Standout strength")).toBeTruthy();
+  });
+
+  it("explains the badge rule in place, with this game's own numbers", () => {
+    const content = aspect({
+      aspect: "Content & Length",
+      n_text_pos: 80,
+      n_text_neg: 26,
+      text_pos_share: 80 / 106,
+      text_delta_vs_genre: 0.27,
+      baseline_genre: "Strategy",
+    });
+    render(<AspectDivergingBars appid={1} aspects={[content]} />);
+    fireEvent.click(screen.getByRole("button", { name: "About Standout strength / weakness" }));
+    const tip = screen.getByRole("tooltip");
+    expect(tip.textContent).toContain("≥ 50% of rated mentions positive AND ≥ +10 pts");
+    expect(tip.textContent).toContain("≥ 30 rated mentions");
+    expect(tip.textContent).toContain("Strength — Content & Length: 75% positive of 106 rated, +27 pts vs Strategy");
+  });
+
+  it("keeps the aspect name a real toggle button, with its ⓘ beside it, not inside it", () => {
+    render(<AspectDivergingBars appid={252490} aspects={[controls]} />);
+    const toggle = screen.getByRole("button", { name: "Controls & Performance" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    const tipBtn = screen.getByRole("button", { name: "About Controls & Performance" });
+    expect(toggle.contains(tipBtn)).toBe(false);
+    fireEvent.click(tipBtn);
+    expect(screen.getByRole("tooltip").textContent).toContain("21 positive ÷ 348 rated = 6%; Action genre 19% → -13 pts");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
   });
 });

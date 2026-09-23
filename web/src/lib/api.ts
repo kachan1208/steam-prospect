@@ -1187,6 +1187,26 @@ export interface GameProfile {
   dev_youtube_url?: string | null;
   dev_bluesky_handle?: string | null;
   dev_bluesky_url?: string | null;
+  // ---- the rebuilt mart's columns (2026-09-23): absent/null until the ETL rebuild lands ----
+  /** First day the game was buyable, 'YYYY-MM-DD' — the Early Access start for a graduate.
+   * In the rebuilt mart `release_date` means this same date. */
+  first_public_date?: string | null;
+  /** Steam's store date — the 1.0 date for an Early Access graduate. */
+  release_date_1_0?: string | null;
+  /** True when the game went Early Access -> 1.0. */
+  is_ea_graduate?: boolean | null;
+  /** Where `release_date` came from: the store page, the first review's day, or only the first
+   * review's MONTH ("first_review_month" is month-precision — print "~Mon YYYY"). */
+  release_date_source?: "store" | "first_review" | "first_review_month" | null;
+  /** 'paid' | 'free' | 'unknown' — why a revenue estimate exists or doesn't (only paid games
+   * get one). Preferred over the is_free/price heuristic whenever present. */
+  price_status?: "paid" | "free" | "unknown" | null;
+  /** The whole Steam panel's 7-day player change over the same days as players_trend_7d_pct,
+   * and this game's trend net of it, in percentage points. */
+  players_trend_7d_market_pct?: number | null;
+  players_trend_7d_rel_pct?: number | null;
+  /** When the SteamSpy owners snapshot behind owners_mid was taken ('YYYY-MM-DD'). */
+  owners_as_of?: string | null;
 }
 
 /** Shared query options so the compare page can fan out over N games via useQueries while
@@ -1336,20 +1356,38 @@ export interface PricePoint {
   country: string; // 'US' — the only market collected today
 }
 
-/** Daily price snapshots (signals.db, collection live since 2026-08-24 — a days-deep
- * series that grows by one point per day). Same ADDITIVE contract as the catalog events:
- * a stable miss (404/503) resolves to [] so the panel renders its honest "tracking just
- * started" state; transient failures get one retry first, and a cancelled fetch never
- * resolves to data. */
+/** Which EMPTY an empty price history is (GET /price-history `status`, 2026-09-23):
+ *   ok          the store was read — an empty list just means the collector hasn't reached
+ *               this game yet;
+ *   missing     no price store / table at all (the collector never ran on this server);
+ *   unavailable the store exists but couldn't be read (corrupt or locked) — "price history
+ *               unavailable", NOT "no price history yet".
+ * An API that predates the field sends none; that reads as "ok". */
+export type PriceHistoryStatus = "ok" | "missing" | "unavailable";
+
+export interface PriceHistory {
+  items: PricePoint[];
+  status: PriceHistoryStatus;
+}
+
+/** Price records (signals.db, collection live since 2026-08-24). The collector writes a row
+ * only when Steam's price-change counter moves, so most games have ONE row — their price when
+ * tracking began — and a row per change after it; it is not a daily series. Same ADDITIVE
+ * contract as the catalog events: a stable miss (404/503) resolves to an empty "missing"
+ * history so the panel renders its honest state; transient failures get one retry first and
+ * then surface as an error, and a cancelled fetch never resolves to data. */
 export function gamePriceHistoryQueryOptions(appid: number) {
   return {
     queryKey: ["game-price-history", appid] as const,
-    queryFn: async ({ signal }: { signal: AbortSignal }) => {
+    queryFn: async ({ signal }: { signal: AbortSignal }): Promise<PriceHistory> => {
       try {
-        const r = await request<{ appid: number; items: PricePoint[] }>(`/games/${appid}/price-history`, { signal });
-        return r.items;
+        const r = await request<{ appid: number; items?: PricePoint[]; status?: PriceHistoryStatus }>(
+          `/games/${appid}/price-history`,
+          { signal },
+        );
+        return { items: r.items ?? [], status: r.status ?? "ok" };
       } catch (error) {
-        if (isMissingOverlay(error)) return [] as PricePoint[];
+        if (isMissingOverlay(error)) return { items: [], status: "missing" };
         throw error; // transient → retryed once (retryTransientOnce); AbortError → never data
       }
     },
@@ -1459,33 +1497,10 @@ export function useGameTeardown(appid: number | null) {
   });
 }
 
-// ---- channel mix (Track M — where a genre gets marketing attention) ---------------------
-export interface ChannelMixRow {
-  channel: string; // 'press' (creator channels removed 2026-08-25)
-  n_mentions: number;
-  reach_weighted: number;
-  share_mentions: number | null;
-  share_reach_weighted: number | null;
-}
-
-export interface GameChannelMix {
-  appid: number;
-  genre: string | null;
-  channels: ChannelMixRow[];
-}
-
-/** The game's GENRE-level marketing-channel mix (mart_channel_mix rows for its
- * primary_genre — the mix is a genre property, per-game channel data would be too sparse).
- * `channels` is empty when the game has no primary_genre, the genre has no rows, or the
- * mart predates the channel-mix ETL. */
-export function useGameChannelMix(appid: number | null) {
-  return useQuery({
-    queryKey: ["game-channel-mix", appid],
-    queryFn: ({ signal }) => request<GameChannelMix>(`/games/${appid}/channel-mix`, { signal }),
-    enabled: appid !== null,
-    staleTime: 5 * 60_000,
-  });
-}
+// ---- channel mix: retired from the web (2026-09-23) --------------------------------------
+// GET /games/{appid}/channel-mix still exists, but mart_channel_mix has been press-only since
+// the creator channels retired on 2026-08-25 — every genre answered "Press 100%" — so the game
+// page no longer asks for it and its hook and types are gone.
 
 // ---- game trends (+ compare overlay) ----------------------------------------------------
 // Mirrors api/app/routers/trends.py. This is the CANONICAL response shape: the chart
@@ -1557,6 +1572,10 @@ export interface GamePlayersSummary {
   live_players: number | null;
   players_7d_avg: number | null;
   players_trend_7d_pct: number | null;
+  /** The whole panel's 7-day change and this game's trend net of it (percentage points);
+   * null until the rebuilt mart carries them. */
+  players_trend_7d_market_pct?: number | null;
+  players_trend_7d_rel_pct?: number | null;
   n_days_measured: number;
   first_date: string | null;
   last_date: string | null;
@@ -1576,6 +1595,8 @@ export interface GamePlayersResponse {
   points: GamePlayersPoint[];
   // Deep monthly history via steamcharts (top-8k games; empty when uncovered/absent).
   monthly?: GamePlayersMonthlyPoint[];
+  /** The last capture day the window ends on — the daily series' own as-of date. */
+  data_as_of?: string | null;
 }
 
 /** Shared query options for the daily-CCU endpoint (GameMetricDrilldown's live_players

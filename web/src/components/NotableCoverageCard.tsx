@@ -1,45 +1,25 @@
 import { Card } from "./ui/Card";
 import { sourceLabel } from "./charts/PressBySourceChart";
 import type { GamePress, PressNotableArticle } from "../lib/api";
-import { fmtInt, fmtPct } from "../lib/format";
-import { CSS_VAR } from "../lib/palette";
-
-/** DuckDB TIMESTAMP strings ("2017-03-06 23:59:53" / "...53.255353") -> "2017-03-06". Kept as a
- * private copy (not imported from GameProfile.tsx) so this file has zero coupling to the page
- * module it's rendered from. */
-function dateOnly(s: string | null): string {
-  return s ? s.slice(0, 10) : "—";
-}
+import { fmtDay } from "../lib/dates";
 
 /**
- * Card-header tone chip — the same press_pos_share/n_scored_articles the "Press & attention"
- * card's tone bar uses, just condensed to one line. Returns null when nothing was scored (no
- * chip rendered) rather than a misleading "0% positive".
+ * NO TONE HERE, ON PURPOSE (2026-09-23). Each row used to carry a "Positive tone" /
+ * "Negative tone" badge and the card header a "Mostly positive · 83% positive of 70 rated"
+ * chip — VADER, a word-list sentiment scorer, run over each article's headline and summary.
+ * Checked against the served mart before removing it:
  *
- * press_pos_share is positive / (positive + negative) — NEUTRALS ARE EXCLUDED (see GamePress in
- * lib/api.ts and mart_game_teardown.sql). The chip used to print that share beside
- * n_scored_articles, a base that includes them: Hollow Knight read "83% positive · 101 scored"
- * over 58 positive / 12 negative / 31 neutral, and 58/101 is 57%, not 83%. A reader who divides
- * the two numbers we put next to each other must land on the number we printed, so the chip now
- * carries the RATED base (positive + negative) and says outright that neutrals sit outside it.
+ *   - per article it misreads plain news and glowing reviews alike: PC Gamer's "Balatro
+ *     review", "Noita review", "Hotline Miami review" and "The Binding of Isaac: Rebirth
+ *     review" all score NEGATIVE, as does "Devil May Cry 5 domain name registered";
+ *   - in aggregate it measures the game's NAME: games whose title holds a grim word (dead,
+ *     death, doom, kill, war, blood, evil…) average 45% "positive" press against 69% for
+ *     the rest, while their players rate them the same (77% vs 75% positive reviews);
+ *   - across 1,051 games with 10+ rated articles it correlates 0.14 with player sentiment.
+ *
+ * A number that wrong is worse than none, so the card shows what the scrape actually knows —
+ * who covered the game and when — and the page's own caveat about tone is dropped with it.
  */
-export function pressToneSummary(
-  press: GamePress,
-): { dotColor: string | null; label: string; detail: string } | null {
-  if (press.n_scored_articles === 0) return null;
-  const s = press.press_pos_share;
-  if (s == null) {
-    return { dotColor: null, label: "Neutral coverage", detail: `${fmtInt(press.n_scored_articles)} scored, no clear lean` };
-  }
-  const label = s >= 0.66 ? "Mostly positive" : s <= 0.34 ? "Mostly negative" : "Mixed tone";
-  const dotColor = s >= 0.66 ? CSS_VAR.praise : s <= 0.34 ? CSS_VAR.complaint : CSS_VAR.textMuted;
-  const rated = press.n_pos_articles + press.n_neg_articles;
-  const detail =
-    press.n_neutral_articles > 0
-      ? `${fmtPct(s, 0)} positive of ${fmtInt(rated)} rated · ${fmtInt(press.n_neutral_articles)} neutral excluded`
-      : `${fmtPct(s, 0)} positive of ${fmtInt(rated)} scored`;
-  return { dotColor, label, detail };
-}
 
 /** Article title: a real link (with a small external-link glyph) when the article has a URL,
  * plain text otherwise — the field is only populated once the ETL mart carries `articles.url`
@@ -87,14 +67,6 @@ function NotableRow({ item }: { item: PressNotableArticle }) {
   // GamesIndustry.biz (and, less often, Game Developer) byline their own short news posts with
   // the outlet's own name — showing it again in the meta line would just repeat the chip.
   const authorIsOutlet = !!item.author && item.author.trim().toLowerCase() === outlet.toLowerCase();
-  const tone = item.sentiment;
-  const toneColor = tone === "positive" ? CSS_VAR.praise : tone === "negative" ? CSS_VAR.complaint : null;
-  const toneTitle =
-    tone && typeof item.sentiment_compound === "number"
-      ? `${tone === "positive" ? "Positive" : tone === "negative" ? "Negative" : "Neutral"} tone — VADER compound ${
-          item.sentiment_compound >= 0 ? "+" : ""
-        }${item.sentiment_compound.toFixed(2)} (headline/summary)`
-      : undefined;
 
   return (
     /* Two columns from sm up; STACKED below it (A11, measured 2026-09-01). The fixed
@@ -111,18 +83,12 @@ function NotableRow({ item }: { item: PressNotableArticle }) {
         >
           {outlet}
         </span>
-        <span className="tabular pl-0.5 text-[10px] text-ink-muted">{dateOnly(item.published_at)}</span>
+        <span className="tabular pl-0.5 text-[10px] text-ink-muted">{fmtDay(item.published_at) ?? "date unknown"}</span>
       </div>
       <div className="min-w-0 flex-1 sm:pt-0.5">
         <ArticleTitle item={item} />
         <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-ink-muted">
           {!authorIsOutlet && item.author && <span>{item.author}</span>}
-          {toneColor && (
-            <span className="inline-flex items-center gap-1" title={toneTitle}>
-              <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: toneColor }} />
-              {tone === "positive" ? "Positive tone" : "Negative tone"}
-            </span>
-          )}
           {item.is_earliest && (
             <span className="inline-flex items-center rounded-full bg-brand-tint px-1.5 py-[1px] text-[10px] font-medium text-brand">
               Earliest coverage found
@@ -140,8 +106,8 @@ function NotableRow({ item }: { item: PressNotableArticle }) {
  * match-confidence top-N, see PRESS_NOTABLE_N) ordered by that same match_confidence, which is
  * what the card's subtitle promises (today's `notable` payload arrives date-sorted; this is the
  * client-side re-sort that actually delivers "most on-topic matches by title-match confidence").
- * Self-contained (owns its own row/tone rendering) so it can be dropped into GameProfile.tsx as
- * a single call and edited here without touching the page file.
+ * Self-contained (owns its own row rendering) so it can be dropped into GameProfile.tsx as a
+ * single call and edited here without touching the page file.
  */
 export function NotableCoverageCard({ press }: { press: GamePress }) {
   if (press.notable.length === 0) return null;
@@ -152,37 +118,10 @@ export function NotableCoverageCard({ press }: { press: GamePress }) {
     return (a.published_at ?? "").localeCompare(b.published_at ?? "");
   });
 
-  const tone = pressToneSummary(press);
-
   return (
     <Card
       title="Notable coverage"
       subtitle="The angle — earliest coverage found, plus the most on-topic matches by title-match confidence"
-      action={
-        tone ? (
-          <span
-            // Square corners — blueprint grammar has radius 0 on tags/chips (the 2px dot
-            // inside stays a circle; dots aren't chips).
-            //
-            // WRAPS, and must not be shrink-0 (A3, 2026-09-01). Card's header already drops
-            // this chip to its own line at phone widths, but the chip is 372px wide once the
-            // detail carries its base ("Mostly positive · 77% positive of 43 rated · 33
-            // neutral excluded") and the line is only 318px at 390 — as shrink-0 it simply
-            // ran off the end, giving /games/1962700 the app's only body-level horizontal
-            // scroll (scrollWidth 417 vs clientWidth 390) and clipping its own text
-            // mid-word ("exclud…"). The disclosure is the point of that wording, so wrap it
-            // rather than shorten it: label on one line, base on the next.
-            className="inline-flex max-w-full flex-wrap items-center gap-x-1.5 gap-y-0.5 border border-chartborder bg-page px-2.5 py-1 text-[11px]"
-            title={`${fmtInt(press.n_pos_articles)} positive · ${fmtInt(press.n_neg_articles)} negative${
-              press.n_neutral_articles ? ` · ${fmtInt(press.n_neutral_articles)} neutral (excluded from the share)` : ""
-            } of ${fmtInt(press.n_scored_articles)} scored — VADER on headlines/summaries`}
-          >
-            {tone.dotColor && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: tone.dotColor }} />}
-            <span className="font-medium text-ink-primary">{tone.label}</span>
-            <span className="text-ink-muted">· {tone.detail}</span>
-          </span>
-        ) : undefined
-      }
     >
       <div className="flex flex-col">
         {rows.map((n, i) => (

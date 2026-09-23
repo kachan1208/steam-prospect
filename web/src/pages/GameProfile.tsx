@@ -1,11 +1,13 @@
-import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useMemo, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
 import {
   Bar,
   CartesianGrid,
   Cell,
   ComposedChart,
+  LabelList,
   Line,
   ReferenceArea,
   ReferenceLine,
@@ -16,30 +18,36 @@ import {
 } from "recharts";
 
 import { AspectDivergingBars } from "../components/charts/AspectDivergingBars";
-import { ChannelShareBars } from "../components/charts/ChannelShareBars";
-import { GameMetricDrilldown, DRILLDOWN_META, type DrilldownMetric, type OwnersPerReview } from "../components/charts/GameMetricDrilldown";
+import { GameMetricDrilldown, DRILLDOWN_META, type DrilldownMetric } from "../components/charts/GameMetricDrilldown";
+import { GameEstimatesPanel } from "../components/GameEstimates";
 import { LanguageSplitChart } from "../components/charts/LanguageSplitChart";
-import { LaunchShapeBars } from "../components/charts/LaunchShapeBars";
+import { LaunchShapeBars, launchShapeSummary } from "../components/charts/LaunchShapeBars";
 import { PressBySourceChart } from "../components/charts/PressBySourceChart";
 import { PressTimelineChart } from "../components/charts/PressTimelineChart";
 import { PriceHistoryChart } from "../components/charts/PriceHistoryChart";
 import { TooltipPanel, type TooltipRow } from "../components/charts/TooltipPanel";
+import { HatchDefs, partialBarLabel, partialNote, useHatchId } from "../components/charts/partialMonth";
 import { changeTooltipRow, PLUMB_LABEL_BAND, PLUMB_LEGEND_ROW_PX, PlumbLegendTick, plumbLabelProps, usePlotWidth } from "../components/charts/plumbLabels";
 import { NotableCoverageCard } from "../components/NotableCoverageCard";
+import { OpportunityBreakdown } from "../components/OpportunityBreakdown";
 import { Badge } from "../components/ui/Badge";
+import { InfoTip } from "../components/ui/InfoTip";
 import { EmptyState } from "../components/ui/EmptyState";
+import { HeaderLabel } from "../components/ui/HeaderLabel";
+import { SentinelTag } from "../components/ui/SentinelTag";
 import { ErrorState } from "../components/ui/ErrorState";
+import { InlineError } from "../components/ui/InlineError";
 import { Loading } from "../components/ui/Loading";
 import { SocialLinks } from "../components/ui/SocialLinks";
 import { TableScroll } from "../components/ui/TableScroll";
-import { Meter, BulletMeter } from "../components/ui/Meter";
+import { Meter, PercentileMeter } from "../components/ui/Meter";
 import { ViewToggle } from "../components/ui/ViewToggle";
 import { trackEvent } from "../lib/analytics";
 import { gameWatchlistId, toggleGameWatchlist, useWatchlist, WATCHLIST_CAP } from "../lib/watchlist";
 import {
+  gamePlayersQueryOptions,
   isNotFound,
   notFoundReason,
-  useGameChannelMix,
   useGameComparables,
   useGameEvents,
   useGameProfile,
@@ -48,17 +56,33 @@ import {
   useLaunchCurve,
   useMarketBenchmarks,
   useNicheDetail,
+  type GameComparable,
   type GameEvent,
+  type NicheRow,
   type ReviewTimelinePoint,
 } from "../lib/api";
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
-import { estimatedUnits } from "../lib/estimates";
+import { addMonths, fmtDay, fmtMonth, launchFacts, partialMonth } from "../lib/dates";
+import { glossary } from "../lib/glossary";
 import { DEFAULT_NICHE_CUT, findNicheVariant } from "../lib/nicheSelection";
-import { axisScale, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName, isFreeTitle } from "../lib/format";
+import {
+  axisScale,
+  fmtCompact,
+  fmtInt,
+  fmtMinutes,
+  fmtMonths,
+  fmtPct,
+  fmtPrice,
+  fmtPriceFor,
+  fmtRevenueFor,
+  fmtUsd,
+  priceKind,
+} from "../lib/format";
 import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { layoutPlumbLabels, markerReasons } from "../lib/notable";
 import { CSS_VAR, MONO} from "../lib/palette";
+import { useDataAge } from "../lib/dataAge";
 import { usePageTitle } from "../lib/usePageTitle";
 import { useDetailView } from "../lib/viewMode";
 import { useDragZoom } from "../lib/useDragZoom";
@@ -71,17 +95,143 @@ const CONDENSED: CSSProperties = { fontFamily: '"Barlow Condensed", "Barlow", sy
  * not a paper alpha — the one mark on this page that isn't on the demand/competition mono
  * language in lib/palette.ts, kept local since that file is foundation-owned. */
 const BAR_MUTED = "color-mix(in srgb, var(--accent-400) 55%, transparent)";
+/** The same hue at full strength — the partial month's hatch lines and dashed outline. */
+const BAR_MUTED_SOLID = "var(--accent-400)";
 
-/** DuckDB TIMESTAMP strings ("2017-03-06 23:59:53" / "...53.255353") -> "2017-03-06". */
-function dateOnly(s: string | null): string {
-  return s ? s.slice(0, 10) : "—";
+/**
+ * The catalog events plus an Early Access graduate's 1.0, when the feed dropped it. The
+ * rebuilt mart emits the 1.0 as an 'update' titled "1.0 release", but the events endpoint
+ * keeps only the most recent few dozen, so a patch-heavy veteran (CS2's Aug 2012 1.0) loses
+ * it — and its launch spike then read "▲ >99×" against a beta month instead of "1.0".
+ */
+function withOneZero(
+  events: GameEvent[] | undefined,
+  p: { is_ea_graduate?: boolean | null; release_date_1_0?: string | null },
+): GameEvent[] | undefined {
+  if (!p.is_ea_graduate || !p.release_date_1_0) return events;
+  const list = events ?? [];
+  if (list.some((e) => e.kind === "update" && /^1\.0 release/i.test(e.title))) return list;
+  return [...list, { event_date: p.release_date_1_0.slice(0, 10), kind: "update", title: "1.0 release", url: null }];
 }
 
-/** ReviewTimelinePoint.period is "YYYY-MM" -> "Jul 2026", for chart tooltips/captions. */
-function monthLabel(period: string): string {
-  const m = Number(period.slice(5, 7));
-  const y = period.slice(0, 4);
-  return m >= 1 && m <= 12 ? `${monthName(m)} ${y}` : period;
+/** Tailwind's lg breakpoint — where the page is two columns. Must match the lg: utilities on
+ * the body grid. Defaults to desktop when matchMedia is unavailable. */
+const LG_QUERY = "(min-width: 1024px)";
+
+function subscribeLg(cb: () => void): () => void {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return () => {};
+  const mql = window.matchMedia(LG_QUERY);
+  mql.addEventListener("change", cb);
+  return () => mql.removeEventListener("change", cb);
+}
+
+function isLgNow(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return true;
+  return window.matchMedia(LG_QUERY).matches;
+}
+
+function useIsLg(): boolean {
+  return useSyncExternalStore(subscribeLg, isLgNow, () => true);
+}
+
+/** A playtime percentile off the reviews-summary list ("p25" -> minutes), or null. */
+function pctile(points: { pctile: string; value: number }[], key: string): number | null {
+  const hit = points.find((q) => q.pctile.toLowerCase() === key);
+  return hit ? hit.value : null;
+}
+
+/** "25th percentile 29.0h; 50th 85.4h; 75th 291h" for a playtime ⓘ. */
+function playtimeWorked(rows: [string, number | null | undefined][]): string | undefined {
+  const known = rows.filter((r): r is [string, number] => typeof r[1] === "number");
+  if (known.length === 0) return undefined;
+  return known.map(([k, v], i) => `${k}${i === 0 ? " percentile" : ""} ${fmtMinutes(v)}`).join("; ");
+}
+
+/** One playtime distribution in words: "Median 85.4h · middle half 29.0h–291h", plus the tails
+ * when known ("· 10% under 5.8h · 10% over 837h"). */
+function PlaytimeLine({
+  p10,
+  p25,
+  p50,
+  p75,
+  p90,
+}: {
+  p10?: number | null;
+  p25?: number | null;
+  p50?: number | null;
+  p75?: number | null;
+  p90?: number | null;
+}) {
+  const v = (x: number | null | undefined) => (typeof x === "number" ? fmtMinutes(x) : null);
+  const parts: ReactNode[] = [];
+  if (v(p50)) parts.push(<span key="m">Median <span className="tabular font-medium text-ink-primary">{v(p50)}</span></span>);
+  if (v(p25) && v(p75)) {
+    parts.push(
+      <span key="h">
+        middle half <span className="tabular font-medium text-ink-primary">{v(p25)}–{v(p75)}</span>
+      </span>,
+    );
+  }
+  if (v(p10)) parts.push(<span key="lo">10% under <span className="tabular font-medium text-ink-primary">{v(p10)}</span></span>);
+  if (v(p90)) parts.push(<span key="hi">10% over <span className="tabular font-medium text-ink-primary">{v(p90)}</span></span>);
+  if (parts.length === 0) return <SentinelTag>no playtime in our sample</SentinelTag>;
+  return (
+    <div className="flex flex-wrap gap-x-1.5 gap-y-1 text-xs text-ink-secondary">
+      {parts.map((part, i) => (
+        <span key={i}>
+          {i > 0 && <span aria-hidden="true">· </span>}
+          {part}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** Comparables header type: the table's own 11px muted weight, in the HeaderLabel's shape. */
+const COMPARABLE_HEADER: CSSProperties = { fontSize: 11, letterSpacing: "0.02em", textTransform: "none", fontWeight: 500 };
+
+/**
+ * The Tag overlap ⓘ's worked line from one comparable: shared tags ÷ all distinct tags across
+ * the two games' top 10 (Jaccard), e.g. "Slay the Spire: 9 shared ÷ 11 distinct = 82%". The
+ * API sends the shared list and the ratio; the distinct count is shared ÷ ratio.
+ */
+function tagOverlapWorked(c: GameComparable | undefined): string | undefined {
+  if (!c || !(c.jaccard > 0)) return undefined;
+  const shared = c.shared_tags.length;
+  const distinct = Math.round(shared / c.jaccard);
+  return `${c.name ?? `App ${c.appid}`}: ${shared} shared ÷ ${distinct} distinct = ${Math.round(c.jaccard * 100)}% (${c.shared_tags.join(", ")})`;
+}
+
+/** The teardown's caveats minus the ones about things this page no longer shows: the press
+ * TONE caveat (the API still sends it) describes a coverage-tone read that was removed
+ * because it was wrong more often than right — see components/NotableCoverageCard.tsx. */
+function pageCaveats(caveats: readonly string[]): string[] {
+  return caveats.filter((c) => !/^press coverage tone\b/i.test(c.trim()));
+}
+
+/** The review timeline with its empty months put back as zero-review rows (the cumulative
+ * columns carry forward; there is no trailing share for a month nobody reviewed). */
+function fillReviewMonths(points: ReviewTimelinePoint[]): ReviewTimelinePoint[] {
+  const out: ReviewTimelinePoint[] = [];
+  for (const p of points) {
+    const prev = out[out.length - 1];
+    if (prev && /^\d{4}-\d{2}$/.test(prev.period) && /^\d{4}-\d{2}$/.test(p.period)) {
+      for (let m = addMonths(prev.period, 1); m < p.period && out.length < 2400; m = addMonths(m, 1)) {
+        out.push({
+          period: m,
+          n_reviews: 0,
+          n_positive: 0,
+          cum_reviews: prev.cum_reviews,
+          cum_positive: prev.cum_positive,
+          cum_positive_share: prev.cum_positive_share,
+          trailing_reviews: null,
+          trailing_positive_share: null,
+        });
+      }
+    }
+    out.push(p);
+  }
+  return out;
 }
 
 /**
@@ -231,57 +381,6 @@ function CreditLinks({ role, joined }: { role: "developer" | "publisher"; joined
   );
 }
 
-/** One row of the sidebar Estimates panel — label left / condensed value right, doubling as
- * the click target for the metric drilldown when `onClick` is given (same tiles → chart
- * convention the old StatTile grid used, just laid out as list rows per the 4c mock). */
-function EstimateRow({
-  label,
-  value,
-  valueClassName,
-  sub,
-  onClick,
-  active,
-  help,
-}: {
-  label: string;
-  value: ReactNode;
-  valueClassName?: string;
-  sub?: ReactNode;
-  onClick?: () => void;
-  active?: boolean;
-  help?: string;
-}) {
-  const interactive = onClick !== undefined;
-  return (
-    <div
-      role={interactive ? "button" : undefined}
-      tabIndex={interactive ? 0 : undefined}
-      aria-pressed={interactive ? (active ?? false) : undefined}
-      onClick={onClick}
-      onKeyDown={(e) => {
-        if (!interactive) return;
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onClick?.();
-        }
-      }}
-      title={help}
-      className={clsx(interactive && "-mx-1 cursor-pointer px-1 py-0.5 transition-colors hover:bg-page", active && "bg-brand-tint")}
-    >
-      <div className="flex items-baseline gap-3">
-        <span className="text-[13.5px] text-ink-secondary">
-          {label}
-          {help && <span aria-hidden className="ml-1 text-[10px] text-ink-muted/70">ⓘ</span>}
-        </span>
-        <span className={clsx("ml-auto shrink-0 text-[17px] font-semibold", valueClassName ?? "text-ink-primary")} style={CONDENSED}>
-          {value}
-        </span>
-      </div>
-      {sub && <div className="mt-0.5 text-[11px] text-ink-muted">{sub}</div>}
-    </div>
-  );
-}
-
 /**
  * "Review velocity since launch" (§4c main chart) — the mockup draws this as bars, not the
  * line the since-removed ReviewsTimelineChart used to render further down this page.
@@ -338,8 +437,11 @@ const VELOCITY_SERIES_ROW_PX = 21;
  * "Highlighted:" caption (`mt-1` + one 11px italic line) — so its loading placeholder
  * reserves the same and the card does not jump when the data lands. */
 const VELOCITY_BLOCK_HEIGHT = VELOCITY_CHART_HEIGHT + VELOCITY_SERIES_ROW_PX + PLUMB_LEGEND_ROW_PX + 21;
-/** Both y-axes are 40px; the right margin stays 8px. What usePlotWidth subtracts. */
-const VELOCITY_AXIS_CHROME = 40 + 40 + 8;
+/** Each y-axis column is 40px wide; the right margin stays 8px. */
+const VELOCITY_Y_AXIS_PX = 40;
+/** Both y-axes plus the right margin — what usePlotWidth subtracts. The plot then runs from
+ * x = 40 to x = 40 + plot width, the bounds the plumb labels are pinned inside. */
+const VELOCITY_AXIS_CHROME = VELOCITY_Y_AXIS_PX + VELOCITY_Y_AXIS_PX + 8;
 /** The rating line — paper ink, not the bars' accent, so it stays legible where it crosses
  * a bar of the same hue (the peak bar is full accent). */
 const RATING_STROKE = MONO.paper75;
@@ -366,14 +468,25 @@ function ratingAxisFor(points: ReviewTimelinePoint[]): { domain: [number, number
 }
 
 export function ReviewVelocityBars({
-  points,
+  points: rawPoints,
   eventMarker,
   events,
+  asOf,
+  launchDate,
 }: {
   points: ReviewTimelinePoint[];
   eventMarker?: { period: string; label: string };
   events?: GameEvent[];
+  /** The data's as-of date (lib/dataAge) — decides which month is still being counted.
+   * Without it the viewer's current month stands in. */
+  asOf?: Date | null;
+  /** The game's launch day ('YYYY-MM-DD' — the first public date, Early Access included), for
+   * the launch line when the catalog events carry no release event. */
+  launchDate?: string | null;
 }) {
+  // Every month gets a slot: the timeline skips months with no reviews (CS2 jumps from
+  // 2012-05 to 2012-08), and a category axis would draw those neighbours side by side.
+  const points = useMemo(() => fillReviewMonths(rawPoints), [rawPoints]);
   // Drag a range to zoom (lib/useDragZoom). Above the early return, never below it: a render
   // that took the "no history" branch ran one hook fewer than the next, which is React #310
   // and the whole page swapped for the error boundary. Event markers below are narrowed to the
@@ -382,6 +495,7 @@ export function ReviewVelocityBars({
   // The plot width the label layout needs — the container minus both 40px y-axes and the
   // 8px right margin. A hook as well, so it stays above the early return with the zoom.
   const plot = usePlotWidth(VELOCITY_AXIS_CHROME);
+  const hatchId = useHatchId("velocity-hatch");
 
   if (points.length === 0) {
     return (
@@ -391,6 +505,9 @@ export function ReviewVelocityBars({
     );
   }
 
+  // The month still being counted (the data's as-of month): hatched, labelled "partial", and
+  // never a "drop" line — lib/notable's detector reads its "now" from the same date.
+  const partial = partialMonth(points[points.length - 1]?.period, asOf);
   const peak = points.reduce((best, p) => (p.n_reviews > best.n_reviews ? p : best), points[0]);
   // One unit for the whole review-velocity axis — it used to read "0 / 30.0K / 60.0K /
   // 90.0K / 120K", losing its decimal at exactly the tick where fmtAxisCompact's clipping
@@ -414,11 +531,13 @@ export function ReviewVelocityBars({
   // CS2's real inflections (2019 operations, the 2023-03 CS2 announcement, the 2023-09
   // release) predate our article scrape, so gating lines on having an event erased them
   // all. Every month's events stay readable in the tooltip regardless.
-  const releaseMonth = (events ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
+  const releaseMonth =
+    (events ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7) ?? (launchDate ? launchDate.slice(0, 7) : undefined);
   const reasons = markerReasons(
     points.map((p) => ({ period: p.period, value: p.n_reviews })),
     eventsByMonth.keys(),
     releaseMonth,
+    asOf ? { now: new Date(asOf.getUTCFullYear(), asOf.getUTCMonth(), asOf.getUTCDate()) } : {},
   );
   // Each line's label, spread over two rows above the plot and degraded/hidden where the
   // measured width cannot fit them — for the visible months only, so nothing floats off a
@@ -448,9 +567,11 @@ export function ReviewVelocityBars({
         <ResponsiveContainer width="100%" height={VELOCITY_CHART_HEIGHT} onResize={plot.onResize}>
           <ComposedChart data={zoom.data} margin={{ top: PLUMB_LABEL_BAND, right: 8, left: 0, bottom: 0 }} {...zoom.handlers}>
           <CartesianGrid stroke="var(--gridline)" vertical={false} />
+          <HatchDefs id={hatchId} color={BAR_MUTED_SOLID} />
           <XAxis
             dataKey="period"
             tick={{ fontSize: 10 }}
+            tickFormatter={(v: string) => fmtMonth(v) ?? v}
             interval="preserveStartEnd"
             minTickGap={24}
             tickLine={false}
@@ -506,7 +627,7 @@ export function ReviewVelocityBars({
               stroke="var(--text-muted)"
               strokeDasharray="2 5"
               strokeOpacity={month === releaseMonth ? 0.9 : 0.5}
-              label={plumbLabelProps(label, month === releaseMonth)}
+              label={plumbLabelProps(label, month === releaseMonth, { left: VELOCITY_Y_AXIS_PX, right: VELOCITY_Y_AXIS_PX + plot.width })}
             />
           ))}
           <Tooltip
@@ -524,19 +645,28 @@ export function ReviewVelocityBars({
               ];
               const rating = ratingRow(p);
               if (rating) rows.push(rating);
+              if (p.period === partial) rows.push({ label: "Note", value: partialNote(asOf) });
               const change = changeTooltipRow(reasons.get(String(label)));
               if (change) rows.push(change);
               for (const e of eventsByMonth.get(String(label)) ?? []) {
                 const t = e.title.length > 60 ? `${e.title.slice(0, 57)}…` : e.title;
                 rows.push({ label: e.kind.charAt(0).toUpperCase() + e.kind.slice(1), value: t, color: "var(--text-muted)" });
               }
-              return <TooltipPanel title={monthLabel(String(label))} rows={rows} />;
+              return <TooltipPanel title={fmtMonth(String(label)) ?? String(label)} rows={rows} />;
             }}
           />
-          <Bar yAxisId="reviews" dataKey="n_reviews" radius={[2, 2, 0, 0]} maxBarSize={28}>
-            {points.map((p) => (
-              <Cell key={p.period} fill={p.period === peak.period ? "var(--brand)" : BAR_MUTED} />
+          <Bar yAxisId="reviews" dataKey="n_reviews" radius={[2, 2, 0, 0]} maxBarSize={28} isAnimationActive={false}>
+            {zoom.data.map((p) => (
+              <Cell
+                key={p.period}
+                fill={
+                  p.period === partial ? `url(#${hatchId})` : p.period === peak.period ? "var(--brand)" : BAR_MUTED
+                }
+                stroke={p.period === partial ? BAR_MUTED_SOLID : undefined}
+                strokeDasharray={p.period === partial ? "2 2" : undefined}
+              />
             ))}
+            <LabelList dataKey="n_reviews" content={partialBarLabel(zoom.data.map((d) => d.period), partial)} />
           </Bar>
           {hasRating && (
             <Line
@@ -569,6 +699,14 @@ export function ReviewVelocityBars({
             Positive rating, trailing 3-month share (right axis)
           </span>
         )}
+        {partial && (
+          <span className="inline-flex items-center gap-1.5" data-testid="velocity-partial">
+            <svg aria-hidden width="12" height="8">
+              <rect width="12" height="8" fill={`url(#${hatchId})`} stroke={BAR_MUTED_SOLID} strokeDasharray="2 2" />
+            </svg>
+            {fmtMonth(partial)}: {partialNote(asOf)}
+          </span>
+        )}
       </div>
       {reasons.size > 0 && (
         <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-ink-muted">
@@ -576,7 +714,7 @@ export function ReviewVelocityBars({
         </div>
       )}
       <p className="mt-1 text-[11px] italic text-ink-muted">
-        Highlighted: {monthLabel(peak.period)} — the highest-volume month of reviews since launch.
+        Highlighted: {fmtMonth(peak.period)} — the highest-volume month of reviews since launch.
       </p>
     </div>
   );
@@ -589,6 +727,7 @@ export default function GameProfile() {
   const validAppid = Number.isFinite(appid);
   const [selectedMetric, setSelectedMetric] = useState<DrilldownMetric | null>(null);
   const [view, setView] = useDetailView();
+  const isLg = useIsLg();
 
   const profileQ = useGameProfile(validAppid ? appid : null);
   const comparablesQ = useGameComparables(validAppid ? appid : null);
@@ -601,11 +740,16 @@ export default function GameProfile() {
   // (the panel labels it "These games") rather than an artifact of a pending query.
   const genreCurveQ = useLaunchCurve(profileQ.data ? (profileQ.data.primary_genre ?? "__all__") : null);
   const benchmarksQ = useMarketBenchmarks();
+  // How old the served data is — the as-of date decides which month is still being counted
+  // and replaces the old hard-coded "21:00 UTC" schedule copy.
+  const dataAge = useDataAge();
   // The game's own name once it lands; the app default holds until then (never
   // "undefined — Prospect"), so a history entry reads as the game you looked at.
   usePageTitle(profileQ.data?.name);
   const teardownQ = useGameTeardown(validAppid ? appid : null);
-  const channelMixQ = useGameChannelMix(validAppid ? appid : null);
+  // The daily player series' summary — the capture dates behind "Players now" (and the same
+  // cache entry the Players drilldown opens on).
+  const playersQ = useQuery({ ...gamePlayersQueryOptions(appid), enabled: validAppid });
 
   // "In niches" (sidebar, §4c) — up to 3 of the game's own top tags, resolved to their real
   // niche opportunity score via the SAME endpoint the Niche Finder/deep-dive use. Fixed-count
@@ -634,54 +778,52 @@ export default function GameProfile() {
       const variant = exact ?? variants?.[0];
       return {
         tag: e.tag,
-        opp: variant?.opportunity_v2 ?? null,
+        variant,
         // null on the default cut (nothing to disclose); the actual cut otherwise.
         offCut: exact || !variant ? null : `${variant.window === "24m" ? "24m" : "all-time"} · ≥${variant.min_reviews}`,
       };
     })
-    .filter((e) => e.opp !== null);
+    .filter((e): e is { tag: string; variant: NicheRow; offCut: string | null } => e.variant?.opportunity_v2 != null);
 
   const profile = profileQ.data;
+  const launch = launchFacts(profile ?? {});
+  const ownersAsOfIso = profile?.owners_as_of ?? (dataAge.ownersAsOf ? dataAge.ownersAsOf.toISOString().slice(0, 10) : null);
+  // The genre as prose ("a typical Action game"); null for the catalog-wide fallback.
+  const genreName = profile?.primary_genre && profile.primary_genre !== "__all__" ? profile.primary_genre : null;
 
-  const revenueRange = useMemo(() => {
-    const bx = benchmarksQ.data?.cited.boxleiter_owners_per_review;
-    if (!profile || !bx || profile.total_reviews === null || profile.price_initial === null) return null;
-    const r = profile.total_reviews;
-    const p = profile.price_initial;
-    return { low: r * bx.min * p, mid: profile.est_rev_reviews ?? r * bx.mid * p, high: r * bx.max * p };
-  }, [profile, benchmarksQ.data]);
-
-  // The revenue figure actually PRINTED in the Estimates panel, and the unit count that goes
-  // with it. Both are the reviews-based (Boxleiter) estimator, so revenue ÷ list price === units
-  // exactly — see lib/estimates.ts for why that estimator and not the owners one. Before this,
-  // the panel printed reviews-based revenue against the owners-based `owners_mid`: Hollow Knight
-  // showed $251.5M over 7.5M units at a $14.99 price, $33.53 a copy, against a footnote that
-  // spells out the division. owners_mid is still shown, one line down, named as the other method.
-  const estRevenue = revenueRange ? revenueRange.mid : profile?.est_rev_reviews ?? null;
-  const estUnits = useMemo(
-    () =>
-      estimatedUnits(
-        estRevenue,
-        profile?.price_initial,
-        profile?.total_reviews,
-        // Only the cited benchmark ratio — never the owners-derived fallback below, which would
-        // put the owners estimator back into the pair through the free-to-play branch.
-        benchmarksQ.data?.cited.boxleiter_owners_per_review.mid ?? null,
-      ),
-    [estRevenue, profile?.price_initial, profile?.total_reviews, benchmarksQ.data],
-  );
-
-  // Owners-per-review ratio for the Owners/Revenue drilldowns — same source + fallback the
-  // Owners/Revenue rows themselves imply: the cited Boxleiter mid when benchmarks are
-  // loaded, else this game's own owners_mid/total_reviews ratio if both are known.
-  const ownersPerReview = useMemo<OwnersPerReview | null>(() => {
-    const bx = benchmarksQ.data?.cited.boxleiter_owners_per_review;
-    if (bx) return { value: bx.mid, source: "benchmark" };
-    if (profile?.owners_mid != null && profile.total_reviews) {
-      return { value: profile.owners_mid / profile.total_reviews, source: "game" };
+  // Rank-vs-genre rows with the reason a rank is missing, never an empty bar.
+  const rankPeers = `${genreName ?? "catalog"} games with 50+ reviews`;
+  const unranked = (what: string): { tag: string; detail: string } | null => {
+    if (!profile) return null;
+    const n = profile.total_reviews;
+    if (n != null && n < 50) {
+      return { tag: "not ranked", detail: `fewer than 50 reviews (${fmtInt(n)}) — ranks only cover ${rankPeers}` };
     }
-    return null;
-  }, [profile, benchmarksQ.data]);
+    return { tag: "not ranked", detail: `no ${what} rank in this data build` };
+  };
+  const status = profile ? priceKind(profile) : "paid";
+  const rankRows = profile
+    ? [
+        {
+          label: glossary("est_revenue").label,
+          percentile: profile.rev_pct_in_genre,
+          sentinel:
+            profile.rev_pct_in_genre != null
+              ? null
+              : status === "free"
+                ? { tag: "not applicable", detail: "free to play — no revenue estimate to rank; read reviews and owners instead" }
+                : status === "unknown"
+                  ? { tag: "not ranked", detail: "price unknown — no revenue estimate to rank" }
+                  : unranked("revenue"),
+        },
+        { label: "Reviews", percentile: profile.reviews_pct_in_genre, sentinel: profile.reviews_pct_in_genre != null ? null : unranked("review") },
+        {
+          label: `Owners (SteamSpy${fmtDay(ownersAsOfIso) ? `, as of ${fmtDay(ownersAsOfIso)}` : " snapshot"})`,
+          percentile: profile.owners_pct_in_genre,
+          sentinel: profile.owners_pct_in_genre != null ? null : unranked("owners"),
+        },
+      ]
+    : [];
 
   function toggleMetric(metric: DrilldownMetric) {
     setSelectedMetric((cur) => (cur === metric ? null : metric));
@@ -751,6 +893,33 @@ export default function GameProfile() {
     );
   }
 
+  const drilldown = selectedMetric ? (
+    <BlueprintPanel
+      className="order-2 min-w-0 lg:order-none"
+      title={DRILLDOWN_META[selectedMetric].title}
+      subtitle={DRILLDOWN_META[selectedMetric].subtitle}
+      action={
+        <button
+          type="button"
+          onClick={() => setSelectedMetric(null)}
+          aria-label="Close drilldown"
+          className="flex h-7 w-7 shrink-0 items-center justify-center text-ink-secondary hover:bg-page hover:text-ink-primary"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+      }
+    >
+      <GameMetricDrilldown
+        appid={profile.appid}
+        metric={selectedMetric}
+        profile={{ total_reviews: profile.total_reviews, live_players: profile.live_players }}
+        asOf={dataAge.asOf}
+      />
+    </BlueprintPanel>
+  ) : null;
+
   return (
     <div className="flex flex-col gap-5">
       <Link to="/games" className="text-xs text-ink-muted hover:text-ink-primary">
@@ -798,11 +967,36 @@ export default function GameProfile() {
                   competing as equals, so nothing was findable. Split by what each answers, and
                   badges are now spent only on the two that are a SIGNAL rather than a label. */}
 
-              {/* What is this game: when, how much, what kind. */}
+              {/* What is this game: when, how much, what kind. An Early Access graduate reads
+                  as both of its dates (the rebuilt mart dates a game from its first PUBLIC day),
+                  and a $0 price is "Free" only when Steam says so — otherwise "Price unknown". */}
               <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-ink-secondary">
-                <span>{profile.release_date ?? "Release date unknown"}</span>
+                <span className="inline-flex items-center gap-1" data-testid="launch-dates">
+                  {launch.line}
+                  {launch.kind !== "unknown" && (
+                    <InfoTip
+                      label="Launch date"
+                      meaning="When the game was first buyable on Steam. For an Early Access game that is the day Early Access opened — its launch — and the 1.0 date is Steam's full release."
+                      worked={
+                        launch.kind === "ea-graduate"
+                          ? `Early Access from ${launch.firstPublic}; 1.0 on ${launch.fullRelease}`
+                          : `Released ${launch.firstPublic}`
+                      }
+                      source={launch.source ?? undefined}
+                    />
+                  )}
+                </span>
                 <span aria-hidden="true">·</span>
-                <span>{fmtPrice(profile.price_initial)}</span>
+                <span className="inline-flex items-center gap-1">
+                  {fmtPriceFor(profile)}
+                  {priceKind(profile) === "unknown" && (
+                    <InfoTip
+                      label="Price unknown"
+                      meaning="Steam gives no price for this game and doesn't mark it free — delisted, region-locked or not yet priced. Every revenue figure needs a list price, so none is estimated."
+                      sentinel="no list price"
+                    />
+                  )}
+                </span>
                 {profile.primary_genre && (
                   <>
                     <span aria-hidden="true">·</span>
@@ -816,19 +1010,13 @@ export default function GameProfile() {
                   </>
                 )}
                 {/* When WE first saw the game — provenance about our own coverage, not a fact
-                    about the game, so it is the quietest thing here and it is dropped below
-                    `sm`. On a phone it otherwise wrapped to a line of its own led by an
-                    orphaned separator, spending a whole row on the least useful item. */}
-                {profile.first_seen && !Number.isNaN(Date.parse(profile.first_seen)) && (
-                  <span
-                    className="hidden items-center gap-x-2 text-ink-muted sm:inline-flex"
-                    title={`First seen in our catalog: ${profile.first_seen}`}
-                  >
+                    about the game (it read "in catalog since Jul 2026" beside a 2015 release,
+                    which looked like a date about the game). The quietest thing here, dropped
+                    below `sm`, where it wrapped to a line of its own. */}
+                {fmtDay(profile.first_seen) && (
+                  <span className="hidden items-center gap-x-2 text-ink-muted sm:inline-flex">
                     <span aria-hidden="true">·</span>
-                    <span>
-                      in catalog since{" "}
-                      {new Date(profile.first_seen).toLocaleDateString(undefined, { year: "numeric", month: "short" })}
-                    </span>
+                    <span>First seen by Prospect: {fmtDay(profile.first_seen)}</span>
                   </span>
                 )}
               </div>
@@ -887,19 +1075,32 @@ export default function GameProfile() {
                 (profile.lifetime_alive === true && profile.lifetime_first_100_month) ||
                 (profile.lifetime_alive === false && profile.lifetime_months != null)) && (
                 <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  {/* The audience-lifetime badges explain themselves with a real ⓘ — the old
+                      hover-only title= was unreachable by keyboard and on a phone. */}
                   {profile.lifetime_alive === true && profile.lifetime_first_100_month && (
-                    <span title="Reached a monthly average of 100+ concurrent players then and still averages 10+ (steamcharts monthly history, top-8k coverage).">
-                      <Badge color={CSS_VAR.demand}>
-                        Audience alive since {monthName(Number(profile.lifetime_first_100_month.slice(5, 7)))}{" "}
-                        {profile.lifetime_first_100_month.slice(0, 4)}
-                      </Badge>
+                    <span className="inline-flex items-center gap-1">
+                      <Badge color={CSS_VAR.demand}>Audience alive since {fmtMonth(profile.lifetime_first_100_month)}</Badge>
+                      <InfoTip
+                        label="Audience alive"
+                        meaning="The game reached a monthly average of 100+ concurrent players, and still averages 10+ — its audience hasn't died off."
+                        formula="first month averaging 100+ players; alive while no full month since has averaged under 10"
+                        worked={`first 100+ month: ${fmtMonth(profile.lifetime_first_100_month)}; no month under 10 since`}
+                        source="steamcharts monthly averages (top ~8,000 games only)"
+                      />
                     </span>
                   )}
                   {profile.lifetime_alive === false && profile.lifetime_months != null && (
-                    <span title="Audience lifetime: months from the game's first month averaging 100+ concurrent players to its first full month averaging under 10 (steamcharts monthly history, top-8k coverage).">
-                      <Badge color={MONO.paper50}>
-                        Audience: {fmtMonths(profile.lifetime_months)} (100+ → &lt;10)
-                      </Badge>
+                    <span className="inline-flex items-center gap-1">
+                      <Badge color={MONO.paper50}>Audience lasted {fmtMonths(profile.lifetime_months)}</Badge>
+                      <InfoTip
+                        label="Audience lifetime"
+                        meaning="How long the game held an audience: from its first month averaging 100+ concurrent players to its first full month averaging under 10."
+                        formula="months from the first 100+ month to the first full month under 10"
+                        worked={`${fmtMonth(profile.lifetime_first_100_month) ?? "first 100+ month"} → ${
+                          fmtMonth(profile.lifetime_died_month) ?? "first month under 10"
+                        } = ${fmtMonths(profile.lifetime_months)}`}
+                        source="steamcharts monthly averages (top ~8,000 games only)"
+                      />
                     </span>
                   )}
                   {profile.has_demo === true && (
@@ -935,11 +1136,25 @@ export default function GameProfile() {
           column; Estimates (the accent-300 frame) then In niches in the sidebar. Everything
           the page had before that ISN'T drawn in the mockup — percentile, comparables, the
           Detailed extras, press footprint, etc. — moves to its own full-width stack below,
-          under "More on {name}"; nothing is deleted, and every hook/trackEvent stays wired. */}
-      <div className="grid grid-cols-1 gap-[22px] lg:grid-cols-[1.7fr_1fr] lg:items-start">
-        <div className="flex min-w-0 flex-col gap-[22px]">
+          under "More on {name}"; nothing is deleted, and every hook/trackEvent stays wired.
+
+          PHONE ORDER (2026-09-23): below lg the two columns dissolve (display: contents) and
+          the cards take an explicit order — header, Estimates, the opened drilldown, review
+          velocity, then the rest. In DOM order the Estimates card sat ~3,200px down on a
+          390px phone, under the velocity chart, the price card and the aspect list; the
+          numbers a reader came for were the last thing they reached. From lg up the columns
+          are real again and the sidebar stays sticky. */}
+      <div className="flex flex-col gap-[22px] lg:grid lg:grid-cols-[1.7fr_1fr] lg:items-start">
+        <div className="contents lg:flex lg:min-w-0 lg:flex-col lg:gap-[22px]">
           <BlueprintPanel
-            title="Review velocity since launch"
+            className="order-3 min-w-0 lg:order-none"
+            title={
+              // The glossary's one name for this series ("Review velocity" is retired), with its ⓘ.
+              <span className="inline-flex items-center gap-1.5">
+                {glossary("review_velocity").label} since launch
+                <InfoTip term="review_velocity" />
+              </span>
+            }
             action={<span className="kicker text-[11px] text-ink-muted">Monthly</span>}
           >
             {reviewsQ.isLoading && (
@@ -948,7 +1163,17 @@ export default function GameProfile() {
                 <Loading className="h-full text-xs" />
               </div>
             )}
-            {reviewsQ.data && <ReviewVelocityBars points={reviewsQ.data.timeline} events={eventsQ.data} />}
+            {reviewsQ.isError && (
+              <InlineError what="the review history" error={reviewsQ.error} onRetry={() => void reviewsQ.refetch()} />
+            )}
+            {reviewsQ.data && (
+              <ReviewVelocityBars
+                points={reviewsQ.data.timeline}
+                events={withOneZero(eventsQ.data, profile)}
+                asOf={dataAge.asOf}
+                launchDate={launch.launchDate}
+              />
+            )}
           </BlueprintPanel>
 
           {/* FULL-WIDTH stack, not the mockup's sm:grid-cols-2 pair (changed 2026-08-25):
@@ -956,13 +1181,14 @@ export default function GameProfile() {
               panel into ~a third of the page, and its drill-down excerpts — two prose
               columns inside that third — wrapped at ~25 characters. Unreadable prose loses
               to mockup fidelity; both panels now get the main column's full measure. */}
-          <div className="grid grid-cols-1 gap-[22px]">
-            {/* Price history went live 2026-08-24 (GET /api/games/{appid}/price-history ←
-                signals.db daily US snapshots), so this is a real series now — days deep and
-                growing daily. PriceHistoryChart owns the honest thin-data states (dots for
-                1-2 points, step line at 3+, F2P / no-snapshots messaging). */}
-            <BlueprintPanel title="Price history">
-              <PriceHistoryChart appid={appid} priceInitial={profile.price_initial} />
+          <div className="contents lg:grid lg:grid-cols-1 lg:gap-[22px]">
+            {/* Price history (GET /api/games/{appid}/price-history ← signals.db, from
+                2026-08-24) is a record per Steam price CHANGE, not a daily series: most games
+                have one row. PriceHistoryChart owns the states — a sentence for "no change
+                since tracking began", a step line on a time axis once the price has moved,
+                and the missing / unavailable / not-reached-yet / failed empties. */}
+            <BlueprintPanel className="order-4 min-w-0 lg:order-none" title="Price history">
+              <PriceHistoryChart appid={appid} priceInitial={profile.price_initial} isFree={profile.is_free} />
             </BlueprintPanel>
 
             {/* AspectDivergingBars is "What players say about each aspect" — the full
@@ -971,6 +1197,7 @@ export default function GameProfile() {
                 under a "Why it works" tab per §4c, which draws it as "What reviews praise /
                 pan" on the main view rather than behind a second tab. */}
             <BlueprintPanel
+              className="order-5 min-w-0 lg:order-none"
               title="What reviews praise / pan"
               subtitle={
                 teardownQ.data
@@ -984,9 +1211,7 @@ export default function GameProfile() {
                 <Loading className="h-24 text-xs" />
               )}
               {teardownQ.isError && (
-                <div className="text-xs text-verdict-serious">
-                  Failed to load review aspects{teardownQ.error instanceof Error ? `: ${teardownQ.error.message}` : "."}
-                </div>
+                <InlineError what="the review aspects" error={teardownQ.error} onRetry={() => void teardownQ.refetch()} />
               )}
               {teardownQ.data && teardownQ.data.eligible_reviews && (
                 <AspectDivergingBars appid={appid} aspects={teardownQ.data.review_aspects} />
@@ -1002,125 +1227,40 @@ export default function GameProfile() {
 
         {/* Sidebar — Estimates (the one accent-300-bordered frame) then In niches. Sticky
             on desktop so it stays visible while the mockup's own main column scrolls. */}
-        <div className="flex flex-col gap-[22px] lg:sticky lg:top-4">
-          <BlueprintFrame accent className="flex flex-col gap-2.5 px-[22px] py-[18px]">
-            <div className="kicker text-[11px] text-brand">Estimates</div>
-            <div className="flex flex-col gap-2.5">
-              <EstimateRow
-                label="Gross revenue"
-                // The ratio is a FLAT 30 here, not genre-fitted, and the copy has to say the
-                // arithmetic it actually does: mart_game's est_rev_reviews is
-                // total_reviews × 30 × price_initial (etl/build_marts.py:1331) and the low/high
-                // are the same reviews × price at the 20 and 55 ends of the cited band
-                // (/api/market/benchmarks cited.boxleiter_owners_per_review {20, 30, 55}).
-                // Checked on the live API: Hollow Knight 559,257 × 30 × $14.99 = $251,497,872.9,
-                // exactly est_rev_reviews. Genre-fitted multipliers DO exist in the mart
-                // (benchmarks.boxleiter_by_genre — Action slope 26.1, median 107.0) and the MCP
-                // /api/estimate path uses them, but nothing on this panel does. Fix the words,
-                // never the estimator: est_rev_reviews is the spine of /compare, comparables,
-                // mart_niche.median_rev and mart_market.
-                help="Estimated lifetime GROSS revenue: reviews × 30 owners-per-review × launch price. 30 is the Boxleiter MID applied flat to every game, not fitted per genre; the low–high range swaps in the 20 and 55 ends of the same cited band. An estimate with real error bars. Not net of Steam's cut, refunds or discounts."
-                value={fmtRevenue(estRevenue, isFreeTitle(profile))}
-                sub={
-                  isFreeTitle(profile)
-                    ? "Free — no box revenue to estimate (this model prices copies sold)"
-                    : revenueRange
-                      ? `${fmtUsd(revenueRange.low)} – ${fmtUsd(revenueRange.high)}`
-                      : undefined
-                }
-                onClick={() => toggleMetric("revenue")}
-                active={selectedMetric === "revenue"}
-              />
-              <EstimateRow
-                label="Units sold"
-                help="Estimated copies sold on the SAME reviews-based (Boxleiter) estimator as Gross revenue above — reviews × owners-per-review — so gross revenue ÷ launch price lands exactly here. The owners-based (SteamSpy bucket) estimate is a different method and is shown separately below the figure. Owned ≠ played ≠ paid full price."
-                value={fmtCompact(estUnits)}
-                sub={
-                  <>
-                    {profile.price_initial != null && profile.price_initial > 0 && estRevenue != null
-                      ? `${fmtUsd(estRevenue)} ÷ ${fmtPrice(profile.price_initial)} launch price`
-                      : "reviews × owners-per-review — no box revenue to divide at $0"}
-                    {profile.owners_mid != null && (
-                      <> · owners-based estimate: {fmtCompact(profile.owners_mid)} (different method)</>
-                    )}
-                  </>
-                }
-                onClick={() => toggleMetric("owners")}
-                active={selectedMetric === "owners"}
-              />
-              <EstimateRow
-                label="Reviews"
-                help="The game's true Steam review count and positive share. Below ~80% positive starts costing visibility (Steam's 'Mostly Positive' threshold)."
-                value={
-                  <span className={positiveRatioClass(profile.positive_ratio)}>
-                    {fmtInt(profile.total_reviews)} · {fmtPct(profile.positive_ratio)}
-                  </span>
-                }
-                sub={[
-                  `${fmtInt(profile.n_reviews_trailing_30d)} sampled in trailing 30d`,
-                  profile.metacritic_score
-                    ? profile.metacritic_url
-                      ? undefined // link rendered separately below to stay clickable
-                      : `Metacritic ${profile.metacritic_score}`
-                    : null,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")}
-                onClick={() => toggleMetric("reviews")}
-                active={selectedMetric === "reviews"}
-              />
-              {profile.metacritic_score && profile.metacritic_url && (
-                <a
-                  href={profile.metacritic_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="-mt-2 text-[11px] text-ink-muted hover:text-brand hover:underline"
-                >
-                  Metacritic {profile.metacritic_score}
-                </a>
-              )}
-              <EstimateRow
-                label="Players now"
-                help="Concurrent players at our last nightly capture (~21-22:00 UTC) — a point sample, NOT the daily peak. Click for the daily history."
-                value={profile.live_players != null ? fmtCompact(profile.live_players) : "—"}
-                valueClassName="text-brand"
-                sub={
-                  [
-                    profile.players_trend_7d_pct != null
-                      ? `${profile.players_trend_7d_pct >= 0 ? "+" : ""}${profile.players_trend_7d_pct.toFixed(1)}% vs prior 7d`
-                      : null,
-                  ]
-                    .filter(Boolean)
-                    .join(" · ") || undefined
-                }
-                onClick={() => toggleMetric("live_players")}
-                active={selectedMetric === "live_players"}
-              />
-            </div>
-            <div className="mt-1 border-t border-chartborder pt-2.5 text-[11px] text-ink-muted">
-              Gross revenue = reviews × 30 owners-per-review × launch price, lifetime — one flat catalog-wide ratio
-              (the Boxleiter mid), not fitted per genre; the low–high range swaps in 20 and 55. Units sold is
-              that same estimate before the price multiply, so gross revenue ÷ launch price = units exactly. The
-              owners-based (SteamSpy bucket) figure noted beside it is a separate method, not the partner of this
-              revenue. Reviews are a point-in-time read from the catalog, not verified sales data.
-            </div>
-          </BlueprintFrame>
+        <div className="contents lg:sticky lg:top-4 lg:flex lg:flex-col lg:gap-[22px]">
+          <GameEstimatesPanel
+            className="order-1 lg:order-none"
+            profile={profile}
+            band={benchmarksQ.data?.cited.boxleiter_owners_per_review}
+            players={playersQ.data}
+            ownersAsOf={ownersAsOfIso}
+            selected={selectedMetric}
+            onSelect={toggleMetric}
+          />
 
           {inNiches.length > 0 && (
-            <BlueprintPanel title="In niches">
+            <BlueprintPanel
+              className="order-6 lg:order-none"
+              title={
+                <span className="inline-flex items-center gap-1.5">
+                  In niches
+                  <InfoTip term="opportunity_v2" />
+                </span>
+              }
+              subtitle="Opportunity score of the game's top tags, with its four parts (bars) and the supply brake (×) — hover the ⓘ for how each adds up."
+            >
               <div className="flex flex-col gap-2.5 text-[13px]">
-                {inNiches.map(({ tag, opp, offCut }) => (
+                {inNiches.map(({ tag, variant, offCut }) => (
                   <div key={tag} className="flex flex-col">
-                    <div className="flex items-baseline gap-2">
+                    <div className="flex items-center gap-2">
                       <Link
                         to={`/niches/tag/${encodeURIComponent(tag)}`}
                         className="min-w-0 truncate text-ink-primary hover:text-brand hover:underline"
                       >
                         {tag}
                       </Link>
-                      <span className={clsx("ml-auto shrink-0 tabular", (opp as number) >= 70 ? "text-brand" : "text-ink-secondary")}>
-                        opp {(opp as number).toFixed(1)}
-                      </span>
+                      <span className="ml-auto shrink-0 text-[11px] text-ink-muted">Opportunity</span>
+                      <OpportunityBreakdown row={variant} variant="compact" title={`Opportunity score — ${tag}`} className="shrink-0" />
                     </div>
                     {offCut && (
                       <span className="text-[10px] text-ink-muted">
@@ -1133,46 +1273,20 @@ export default function GameProfile() {
               {/* The scores above are the app-default cut, so clicking through to the niche page
                   (which opens on the same cut) shows the SAME number, not a second opinion. */}
               <p className="mt-3 border-t border-chartborder pt-2 text-[10px] text-ink-muted">
-                Opportunity v2 on the default cut: last 24 months, ≥50 reviews.
+                On the default cut: games released in the last 24 months, ≥50 reviews — the cut the niche page opens on.
               </p>
             </BlueprintPanel>
           )}
         </div>
+
+        {/* Phone: the opened drilldown sits right under the Estimates card that opened it. */}
+        {!isLg && drilldown}
       </div>
 
-      {selectedMetric && (
-        <BlueprintPanel
-          title={DRILLDOWN_META[selectedMetric].title}
-          subtitle={DRILLDOWN_META[selectedMetric].subtitle}
-          action={
-            <button
-              type="button"
-              onClick={() => setSelectedMetric(null)}
-              aria-label="Close drilldown"
-              className="flex h-7 w-7 shrink-0 items-center justify-center text-ink-secondary hover:bg-page hover:text-ink-primary"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M6 6l12 12M18 6L6 18" />
-              </svg>
-            </button>
-          }
-        >
-          <GameMetricDrilldown
-            appid={profile.appid}
-            metric={selectedMetric}
-            profile={{
-              price_initial: profile.price_initial,
-              total_reviews: profile.total_reviews,
-              // The HEADLINE units the Estimates panel prints, not owners_mid: the owners curve
-              // is cumulative reviews × owners-per-review, and its caption claims it "trends
-              // toward the headline estimate" — true only if the headline is the same estimator.
-              units_headline: estUnits,
-              live_players: profile.live_players,
-            }}
-            ownersPerReview={ownersPerReview}
-          />
-        </BlueprintPanel>
-      )}
+      {/* Desktop: full width under both columns — OUTSIDE the grid, because the sticky sidebar
+          is constrained by the whole grid container, and a drilldown in a second grid row slid
+          under it. */}
+      {isLg && drilldown}
 
       {/* Below the mockup composition: every section this page already had that §4c doesn't
           draw — percentile, comparables, the Detailed-only deep charts, and (folded in from
@@ -1192,44 +1306,27 @@ export default function GameProfile() {
       </div>
 
       <div className="flex flex-col gap-[22px]">
+        {/* RANK VS GENRE (2026-09-23): PercentileMeter floors the rank (a 99.6 is "top 1%",
+            never "P100"), explains it with the game's own rank, and a missing rank is a
+            dashed rail with no median tick and a reason — the old empty bar with a tick in the
+            middle read as P50. The ranks cover games with 50+ reviews (mart_game ranks among
+            MIN_REVIEWS_DEFAULT = 50), which the old subtitle called "≥10". */}
         <BlueprintPanel
-          title="Percentile vs. genre"
-          subtitle={`Rank within ${profile.primary_genre ?? "its genre"} among titles with ≥10 reviews`}
+          title={glossary("percentile_vs_genre").label}
+          subtitle={`Where this game sits among ${genreName ?? "catalog"} games with 50+ reviews: P73 = it beats 73% of them`}
         >
           <div className="flex flex-col gap-3">
-            <BulletMeter
-              label="Revenue"
-              value={profile.rev_pct_in_genre !== null ? profile.rev_pct_in_genre / 100 : null}
-              benchmark={0.5}
-              benchmarkLabel="Genre median (P50)"
-              color={CSS_VAR.demand}
-              valueLabel={profile.rev_pct_in_genre !== null ? `P${Math.round(profile.rev_pct_in_genre)}` : "—"}
-            />
-            <BulletMeter
-              label="Review count"
-              value={profile.reviews_pct_in_genre !== null ? profile.reviews_pct_in_genre / 100 : null}
-              benchmark={0.5}
-              benchmarkLabel="Genre median (P50)"
-              color={CSS_VAR.demand}
-              valueLabel={profile.reviews_pct_in_genre !== null ? `P${Math.round(profile.reviews_pct_in_genre)}` : "—"}
-            />
-            <BulletMeter
-              label="Owners"
-              value={profile.owners_pct_in_genre !== null ? profile.owners_pct_in_genre / 100 : null}
-              benchmark={0.5}
-              benchmarkLabel="Genre median (P50)"
-              color={CSS_VAR.demand}
-              valueLabel={profile.owners_pct_in_genre !== null ? `P${Math.round(profile.owners_pct_in_genre)}` : "—"}
-            />
+            {rankRows.map((r) => (
+              <PercentileMeter
+                key={r.label}
+                label={r.label}
+                percentile={r.percentile}
+                peers={rankPeers}
+                color={CSS_VAR.demand}
+                sentinel={r.sentinel ?? undefined}
+              />
+            ))}
           </div>
-          {/* Keyed on price, not is_free — fmtRevenue's R6-Siege case: is_free can be set on
-              titles with a real price and real revenue. */}
-          {isFreeTitle(profile) && (
-            <p className="mt-3 text-[11px] italic text-ink-muted">
-              Revenue percentile isn't meaningful for free-to-play titles (box revenue is $0 at price $0) — read
-              review-count and owners percentile instead.
-            </p>
-          )}
         </BlueprintPanel>
 
         {/* The chart-heavy expert cards live under the Detailed toggle; Simple keeps the
@@ -1247,94 +1344,101 @@ export default function GameProfile() {
                 profile should lead with the game's own story, then the genre yardstick. */}
             <BlueprintPanel
               title="Launch shape — front-loaded vs. slow-burn"
-              subtitle="How fast games in this genre earn their first-year reviews (a sales-momentum proxy) — tells you whether to bet on a big launch splash or a sustained slow-burn."
+              subtitle="How fast games in this genre earn their first-year reviews (a sales-momentum proxy) — whether to bet on the launch splash or a sustained slow burn."
             >
               {genreCurveQ.data &&
                 (() => {
-                  const pts = genreCurveQ.data.points;
-                  const at = (d: number) => pts.find((p) => p.day === d)?.median_cum_fraction ?? null;
-                  const d30 = at(30);
-                  if (d30 == null) return null;
-                  const d7 = at(7);
-                  const d30pct = Math.round(d30 * 100);
-                  const d7pct = d7 != null ? Math.round(d7 * 100) : null;
-                  const shape = d30pct >= 60 ? "Front-loaded" : d30pct <= 45 ? "Slow-burn" : "Balanced";
-                  const note =
-                    shape === "Front-loaded"
-                      ? "sales cluster at launch — the launch splash matters most here."
-                      : shape === "Slow-burn"
-                        ? "sales keep accruing all year — sustained marketing and updates pay off."
-                        : "there's a launch spike, but the long tail keeps building — both matter.";
-                  const genreLabel =
-                    profile.primary_genre && profile.primary_genre !== "__all__" ? profile.primary_genre : "These";
+                  // One takeaway, off the same per-week bars drawn below (2026-09-23). The old
+                  // callout graded the genre on its day-30 share (">= 60% front-loaded, <= 45%
+                  // slow-burn") and called every real genre "Balanced" (they all sit at 46-50%)
+                  // beside a chart that looked like a U — neither said what the data says.
+                  const summary = launchShapeSummary(genreCurveQ.data.points, genreName);
+                  if (!summary) return null;
                   return (
-                    <div className="mb-3 border border-chartborder bg-page px-3 py-2 text-xs text-ink-secondary">
-                      <span className="font-semibold text-ink-primary">{shape}.</span> {genreLabel} games land{" "}
-                      <span className="font-semibold text-ink-primary">~{d30pct}%</span> of first-year reviews in the first
-                      30 days{d7pct != null ? ` (${d7pct}% in week one)` : ""} — {note}
+                    <div className="mb-3 flex items-start gap-1.5 border border-chartborder bg-page px-3 py-2 text-xs text-ink-secondary">
+                      <p className="min-w-0" data-testid="launch-shape-headline">
+                        {summary.headline}
+                      </p>
+                      <InfoTip term="launch_shape" worked={summary.worked} />
                     </div>
                   );
                 })()}
-              {genreCurveQ.isLoading && (
-                <Loading className="h-40 text-xs" />
+              {genreCurveQ.isLoading && <Loading className="h-40 text-xs" />}
+              {genreCurveQ.isError && (
+                <InlineError what="the genre's launch curve" error={genreCurveQ.error} onRetry={() => void genreCurveQ.refetch()} />
               )}
               {genreCurveQ.data && <LaunchShapeBars points={genreCurveQ.data.points} height={220} />}
               {genreCurveQ.data && (
                 <p className="mt-2 text-[11px] italic text-ink-muted">
-                  Share of first-year reviews earned in each window after launch — genre median across{" "}
-                  {(genreCurveQ.data.points[0]?.n_games ?? 0).toLocaleString()} {profile.primary_genre &&
-                    profile.primary_genre !== "__all__"
-                    ? profile.primary_genre
-                    : ""}{" "}
-                  titles — a benchmark for this title's own month-by-month trajectory, shown on the Momentum card above.
+                  Genre median across {fmtInt(genreCurveQ.data.points[0]?.n_games ?? 0)} {genreName ?? ""} titles at least a
+                  year old — the yardstick for this game&apos;s own month-by-month reviews in Monthly reviews above.
                 </p>
               )}
             </BlueprintPanel>
-
-            {/* "Where this genre gets attention" (the genre channel mix) used to sit here with
-                the genre yardsticks; since 2026-09-19 it is the second half of the "Press &
-                attention" card below, next to this game's own press footprint — the two
-                marketing reads belong on one screen. */}
 
             <BlueprintPanel title="Language split" subtitle="Share of sampled reviews by language — a localization reference">
               {reviewsQ.isLoading && (
                 <Loading className="h-24 text-xs" />
               )}
+              {reviewsQ.isError && (
+                <InlineError what="the language split" error={reviewsQ.error} onRetry={() => void reviewsQ.refetch()} />
+              )}
               {reviewsQ.data && <LanguageSplitChart data={reviewsQ.data.language_split} />}
             </BlueprintPanel>
 
+            {/* PLAIN WORDS, NOT P25 / P75 (2026-09-23): "P25 29.0h" is the jargon the glossary
+                retires. Each line is the median, the middle half, and — at review time — the
+                tails, with the percentiles behind them in the ⓘ. */}
             <BlueprintPanel title="Playtime">
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
-                  <div className="mb-1 text-xs text-ink-muted">Total playtime, sampled reviewers (all-time)</div>
-                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
-                    <span>
-                      <span className="text-ink-muted">P25</span>{" "}
-                      <span className="tabular font-medium text-ink-primary">{fmtMinutes(profile.playtime_p25)}</span>
-                    </span>
-                    <span>
-                      <span className="text-ink-muted">P50</span>{" "}
-                      <span className="tabular font-medium text-ink-primary">{fmtMinutes(profile.playtime_p50)}</span>
-                    </span>
-                    <span>
-                      <span className="text-ink-muted">P75</span>{" "}
-                      <span className="tabular font-medium text-ink-primary">{fmtMinutes(profile.playtime_p75)}</span>
-                    </span>
+                  <div className="mb-1 flex items-center gap-1 text-xs text-ink-muted">
+                    Total playtime of the reviewers we sampled (all-time)
+                    <InfoTip
+                      label="Total playtime"
+                      meaning="How long the reviewers in our sample have played in total — a read on how much game players find here. Our sample leans to recent and to popular reviews."
+                      formula="median and the 25th–75th percentile of each sampled reviewer's total playtime"
+                      worked={playtimeWorked([
+                        ["25th", profile.playtime_p25],
+                        ["50th", profile.playtime_p50],
+                        ["75th", profile.playtime_p75],
+                      ])}
+                    />
                   </div>
+                  <PlaytimeLine p25={profile.playtime_p25} p50={profile.playtime_p50} p75={profile.playtime_p75} />
                 </div>
                 <div>
-                  <div className="mb-1 text-xs text-ink-muted">Playtime at the time of review</div>
-                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
-                    {reviewsQ.data?.playtime_at_review.map((p) => (
-                      <span key={p.pctile}>
-                        <span className="text-ink-muted">{p.pctile.toUpperCase()}</span>{" "}
-                        <span className="tabular font-medium text-ink-primary">{fmtMinutes(p.value)}</span>
-                      </span>
-                    ))}
-                    {reviewsQ.data && reviewsQ.data.playtime_at_review.length === 0 && (
-                      <span className="text-ink-muted">Not enough sampled reviews.</span>
+                  <div className="mb-1 flex items-center gap-1 text-xs text-ink-muted">
+                    Playtime when they wrote the review
+                    {reviewsQ.data && reviewsQ.data.playtime_at_review.length > 0 && (
+                      <InfoTip
+                        label="Playtime at review"
+                        meaning="How long reviewers had played when they posted — early reviews on little playtime judge the first hours, long ones the whole game."
+                        formula="percentiles of playtime-at-review across sampled reviews"
+                        worked={playtimeWorked(reviewsQ.data.playtime_at_review.map((q) => [q.pctile.replace(/^p/i, "") + "th", q.value]))}
+                      />
                     )}
                   </div>
+                  {reviewsQ.data && reviewsQ.data.playtime_at_review.length > 0 && (
+                    <PlaytimeLine
+                      p10={pctile(reviewsQ.data.playtime_at_review, "p10")}
+                      p25={pctile(reviewsQ.data.playtime_at_review, "p25")}
+                      p50={pctile(reviewsQ.data.playtime_at_review, "p50")}
+                      p75={pctile(reviewsQ.data.playtime_at_review, "p75")}
+                      p90={pctile(reviewsQ.data.playtime_at_review, "p90")}
+                    />
+                  )}
+                  {reviewsQ.data && reviewsQ.data.playtime_at_review.length === 0 && (
+                    <span className="text-xs text-ink-muted">Not enough sampled reviews to say.</span>
+                  )}
+                  {reviewsQ.isError && (
+                    <InlineError
+                      what="playtime at review"
+                      error={reviewsQ.error}
+                      onRetry={() => void reviewsQ.refetch()}
+                      className="w-full"
+                    />
+                  )}
                 </div>
               </div>
             </BlueprintPanel>
@@ -1345,13 +1449,18 @@ export default function GameProfile() {
           title="Comparables"
           subtitle={
             comparablesQ.data
-              ? `Same genre (${comparablesQ.data.primary_genre ?? "—"}) · price band ${fmtPrice(
-                  comparablesQ.data.price_band.low,
-                )}–${fmtPrice(comparablesQ.data.price_band.high)} · ranked by tag overlap (on-demand, not precomputed)`
+              ? `Same genre (${comparablesQ.data.primary_genre ?? "no genre"}) · ${
+                  comparablesQ.data.price_band.high <= 0.01
+                    ? "free or unknown price, like this game"
+                    : `list price ${fmtPrice(Math.max(0, comparablesQ.data.price_band.low))}–${fmtPrice(comparablesQ.data.price_band.high)}`
+                } · most alike first, by tag overlap`
               : undefined
           }
         >
           {comparablesQ.isLoading && <Loading label="Loading comparables…" className="py-1 text-xs" />}
+          {comparablesQ.isError && (
+            <InlineError what="comparable games" error={comparablesQ.error} onRetry={() => void comparablesQ.refetch()} />
+          )}
           {comparablesQ.data && comparablesQ.data.items.length === 0 && (
             <EmptyState
               className="py-6"
@@ -1362,15 +1471,40 @@ export default function GameProfile() {
           {comparablesQ.data && comparablesQ.data.items.length > 0 && (
             <TableScroll className="border border-chartborder">
               <table className="w-full min-w-[640px] text-xs">
+                      {/* Every metric header explains itself (HeaderLabel + the glossary), and Tag
+                          overlap works the TOP row's own tags through the Jaccard formula. */}
                       <thead>
                         <tr className="border-b border-chartborder text-left text-ink-muted">
-                          <th className="px-2 py-1.5 font-medium">Game</th>
-                          <th className="px-2 py-1.5 font-medium">Year</th>
-                          <th className="px-2 py-1.5 font-medium">Price</th>
-                          <th className="px-2 py-1.5 font-medium">Reviews</th>
-                          <th className="px-2 py-1.5 font-medium">Positive</th>
-                          <th className="px-2 py-1.5 font-medium">Est. revenue</th>
-                          <th className="px-2 py-1.5 font-medium">Tag overlap</th>
+                          <th className="px-2 py-1.5 font-medium">
+                            <HeaderLabel label="Game" style={COMPARABLE_HEADER} />
+                          </th>
+                          <th className="px-2 py-1.5 font-medium">
+                            <HeaderLabel label="Year" style={COMPARABLE_HEADER} />
+                          </th>
+                          <th className="px-2 py-1.5 font-medium">
+                            <HeaderLabel term="launch_price" label="Price" style={COMPARABLE_HEADER} />
+                          </th>
+                          <th className="px-2 py-1.5 font-medium">
+                            <HeaderLabel term="reviews" style={COMPARABLE_HEADER} />
+                          </th>
+                          <th className="px-2 py-1.5 font-medium">
+                            <HeaderLabel term="positive_ratio" style={COMPARABLE_HEADER} />
+                          </th>
+                          <th className="px-2 py-1.5 font-medium">
+                            <HeaderLabel
+                              term="est_revenue"
+                              style={COMPARABLE_HEADER}
+                              worked={(() => {
+                                const top = comparablesQ.data.items.find((c) => priceKind(c) === "paid" && c.total_reviews != null);
+                                return top && top.est_rev_reviews != null
+                                  ? `${top.name ?? `App ${top.appid}`}: ${fmtInt(top.total_reviews)} reviews × 30 × ${fmtPrice(top.price_initial)} = ${fmtUsd(top.est_rev_reviews)}`
+                                  : undefined;
+                              })()}
+                            />
+                          </th>
+                          <th className="px-2 py-1.5 font-medium">
+                            <HeaderLabel term="tag_overlap" style={COMPARABLE_HEADER} worked={tagOverlapWorked(comparablesQ.data.items[0])} />
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1392,21 +1526,27 @@ export default function GameProfile() {
                               </Link>
                             </td>
                             <td className="tabular px-2 py-1.5">{c.release_year ?? "—"}</td>
-                            <td className="tabular px-2 py-1.5">{fmtPrice(c.price_initial)}</td>
+                            <td className="tabular px-2 py-1.5">{fmtPriceFor(c)}</td>
                             <td className="tabular px-2 py-1.5">{fmtInt(c.total_reviews)}</td>
                             <td className={clsx("tabular px-2 py-1.5", positiveRatioClass(c.positive_ratio))}>
                               {fmtPct(c.positive_ratio)}
                             </td>
                             <td className="tabular px-2 py-1.5">
-                              <span
-                                className="px-1.5 py-0.5"
-                                style={heatStyle(c.est_rev_reviews, ...heatDomain(all, (x) => x.est_rev_reviews))}
-                              >
-                                {fmtRevenue(c.est_rev_reviews, isFreeTitle(c))}
-                              </span>
+                              {priceKind(c) === "paid" && c.est_rev_reviews != null ? (
+                                <span
+                                  className="px-1.5 py-0.5"
+                                  style={heatStyle(c.est_rev_reviews, ...heatDomain(all, (x) => x.est_rev_reviews))}
+                                >
+                                  {fmtUsd(c.est_rev_reviews)}
+                                </span>
+                              ) : (
+                                // Free and unknown-price games have no estimate (NULL in the
+                                // rebuilt mart) — flagged, never a bare dash or a "$0".
+                                <SentinelTag>{fmtRevenueFor(c, null)}</SentinelTag>
+                              )}
                             </td>
                             <td className="px-2 py-1.5">
-                              <div className="flex items-center gap-1.5" title={c.shared_tags.join(", ")}>
+                              <div className="flex items-center gap-1.5" title={`Shared tags: ${c.shared_tags.join(", ")}`}>
                                 <Meter value={c.jaccard * 100} color={CSS_VAR.competition} />
                                 <span className="tabular w-9 shrink-0 text-ink-secondary">{Math.round(c.jaccard * 100)}%</span>
                               </div>
@@ -1419,121 +1559,75 @@ export default function GameProfile() {
                 )}
               </BlueprintPanel>
 
-        {/* One card for both marketing reads (2026-09-19, user request), in the order the user
-            asked for: where the GENRE gets attention first (the channel mix — genre-level
-            because per-game channel data is too sparse), then this game's own press stats,
-            and the article links follow in NotableCoverageCard below. Attention → stats →
-            links. The genre half is hidden (no empty section) when the genre has no channel
-            rows or the mart predates the channel-mix ETL — same pattern as NotableCoverageCard. */}
+        {/* THIS GAME'S PRESS FOOTPRINT (2026-09-23). The card used to open with "Where this
+            genre gets attention" — the genre's marketing-channel mix — but mart_channel_mix has
+            been press-only since the creator channels retired on 2026-08-25, so that half was
+            always one "Press 100%" bar under copy still promising YouTube/Reddit/Twitch/X
+            creator mentions and an audience-weighted hover that no longer exist. It is gone,
+            and so is the "Coverage tone" bar: headline VADER that reads PC Gamer's "Balatro
+            review" as negative and tracks a game's NAME more than its coverage (see
+            components/NotableCoverageCard.tsx). What is left is what the scrape knows: who
+            covered the game, and when. */}
         <BlueprintPanel
           title="Press & attention"
-          subtitle="Where this genre's attention comes from, then this game's own journalist coverage"
+          subtitle="This game's own coverage in the tracked games-press outlets — journalist articles only (Steam News excluded)"
         >
-            {channelMixQ.data && channelMixQ.data.channels.length > 0 && (
-              <div className="mb-5 border-b border-chartborder pb-4">
-                <div className="kicker text-[11px] text-ink-secondary">Where this genre gets attention</div>
-                <div className="mb-3 mt-0.5 text-[11px] text-ink-muted">
-                  Marketing-channel mix for {channelMixQ.data.genre} — each channel's share of tracked coverage (press
-                  articles + YouTube/Reddit/Twitch/X creator mentions), a genre-level read, not this game's own footprint
-                </div>
-                <ChannelShareBars channels={channelMixQ.data.channels} />
-                <p className="mt-3 text-[11px] italic text-ink-muted">
-                  One press article = one creator mention = one unit of volume. Hover a channel for its audience-weighted
-                  share — that read skews almost entirely toward big-subscriber channels, since a creator mention counts
-                  their whole audience while a press article counts 1.
-                </p>
-              </div>
-            )}
-            <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-              <div className="kicker text-[11px] text-ink-secondary">This game's press footprint</div>
-              {teardownQ.data && teardownQ.data.press.total_mentions > 0 && (
-                <div className="text-[11px] text-ink-muted">
-                  {fmtInt(teardownQ.data.press.total_mentions)} filtered mentions across {teardownQ.data.press.n_sources} outlet
-                  {teardownQ.data.press.n_sources === 1 ? "" : "s"}
-                  {teardownQ.data.press.first_seen
-                    ? ` · ${dateOnly(teardownQ.data.press.first_seen)} – ${dateOnly(teardownQ.data.press.last_seen)}`
-                    : ""}
-                  {" "}· journalist coverage only (Steam News excluded)
-                </div>
-              )}
+          {teardownQ.isLoading && <Loading className="h-32 text-xs" />}
+          {teardownQ.isError && (
+            <InlineError what="the press coverage" error={teardownQ.error} onRetry={() => void teardownQ.refetch()} />
+          )}
+          {teardownQ.data && teardownQ.data.press.total_mentions === 0 && (
+            <div className="flex h-24 items-center justify-center text-center text-xs text-ink-muted">
+              No press coverage found for this game above the match-confidence floor.
             </div>
-            {teardownQ.isLoading && (
-              <Loading className="h-32 text-xs" />
-            )}
-            {teardownQ.data && teardownQ.data.press.total_mentions === 0 && (
-              <div className="flex h-24 items-center justify-center text-xs text-ink-muted">
-                No press coverage found for this game above the match-confidence floor.
+          )}
+          {teardownQ.data && teardownQ.data.press.total_mentions > 0 && (
+            <>
+              <div className="mb-3 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12px] text-ink-secondary">
+                <span>
+                  <span className="tabular font-medium text-ink-primary">{fmtInt(teardownQ.data.press.total_mentions)}</span>{" "}
+                  press mention{teardownQ.data.press.total_mentions === 1 ? "" : "s"} across{" "}
+                  <span className="tabular font-medium text-ink-primary">{fmtInt(teardownQ.data.press.n_sources)}</span> outlet
+                  {teardownQ.data.press.n_sources === 1 ? "" : "s"}
+                  {teardownQ.data.press.first_seen && (
+                    <>
+                      {" "}· {fmtDay(teardownQ.data.press.first_seen)} – {fmtDay(teardownQ.data.press.last_seen) ?? "?"}
+                    </>
+                  )}
+                </span>
+                <InfoTip
+                  term="press_mentions"
+                  worked={`${fmtInt(teardownQ.data.press.total_mentions)} matched mentions from ${fmtInt(
+                    teardownQ.data.press.n_sources,
+                  )} outlet${teardownQ.data.press.n_sources === 1 ? "" : "s"}${
+                    teardownQ.data.press.first_seen
+                      ? `, first ${fmtDay(teardownQ.data.press.first_seen)}, latest ${fmtDay(teardownQ.data.press.last_seen) ?? "unknown"}`
+                      : ""
+                  }`}
+                />
               </div>
-            )}
-            {teardownQ.data && teardownQ.data.press.total_mentions > 0 && (
-              <>
-                {teardownQ.data.press.press_pos_share != null &&
-                  (() => {
-                    const p = teardownQ.data.press;
-                    const posPct = (p.press_pos_share as number) * 100;
-                    const mc = p.mean_compound;
-                    return (
-                      <div className="mb-4">
-                        <div className="mb-1 flex items-center justify-between gap-2 text-xs">
-                          <span className="text-ink-muted">Coverage tone (headlines &amp; summaries)</span>
-                          {/* The share is positive / (positive + negative) — the base printed
-                              beside it has to be that same base, not n_scored_articles, or the
-                              division a reader does on the line below fails (Hollow Knight:
-                              58/12/31, so 83% is 58/70 and NOT 58/101). */}
-                          <span className="tabular shrink-0 text-ink-secondary">
-                            {fmtPct(p.press_pos_share, 0)} positive of {fmtInt(p.n_pos_articles + p.n_neg_articles)} rated
-                          </span>
-                        </div>
-                        <div
-                          className="relative h-3 bg-page"
-                          title={`${p.n_pos_articles} positive / ${p.n_neg_articles} negative${
-                            p.n_neutral_articles ? ` (${p.n_neutral_articles} neutral excluded)` : ""
-                          } of ${p.n_scored_articles} scored articles`}
-                        >
-                          <div className="absolute inset-y-0 left-0" style={{ width: `${posPct}%`, backgroundColor: CSS_VAR.praise }} />
-                          <div
-                            className="absolute inset-y-0 right-0"
-                            style={{ width: `${100 - posPct}%`, backgroundColor: CSS_VAR.complaint }}
-                          />
-                          <div className="absolute inset-y-0 w-[2px] bg-page" style={{ left: `calc(${posPct}% - 1px)` }} />
-                        </div>
-                        <div className="mt-1 text-[11px] text-ink-muted">
-                          {fmtInt(p.n_pos_articles)} positive · {fmtInt(p.n_neg_articles)} negative
-                          {p.n_neutral_articles > 0 && (
-                            <> · {fmtInt(p.n_neutral_articles)} neutral (excluded from the share)</>
-                          )}
-                          {typeof mc === "number" && (
-                            <>
-                              {" · "}mean <span className="tabular">{mc >= 0 ? "+" : ""}{mc.toFixed(2)}</span>
-                            </>
-                          )}{" "}
-                          · VADER on headlines/summaries (coarse — an outlet's framing, not a verdict)
-                        </div>
-                      </div>
-                    );
-                  })()}
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div>
-                    <div className="mb-1 text-xs text-ink-muted">Mentions by outlet</div>
-                    <PressBySourceChart data={teardownQ.data.press.by_source} />
-                  </div>
-                  <div>
-                    <div className="mb-1 text-xs text-ink-muted">Coverage over time</div>
-                    <PressTimelineChart points={teardownQ.data.press.timeline} />
-                  </div>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <div className="mb-1 text-xs text-ink-muted">Mentions by outlet</div>
+                  <PressBySourceChart data={teardownQ.data.press.by_source} />
                 </div>
-              </>
-            )}
-          </BlueprintPanel>
+                <div>
+                  <div className="mb-1 text-xs text-ink-muted">Coverage over time</div>
+                  <PressTimelineChart points={teardownQ.data.press.timeline} asOf={dataAge.asOf} />
+                </div>
+              </div>
+            </>
+          )}
+        </BlueprintPanel>
 
           {teardownQ.data && teardownQ.data.press.notable.length > 0 && (
             <NotableCoverageCard press={teardownQ.data.press} />
           )}
 
-          {teardownQ.data && teardownQ.data.caveats.length > 0 && (
+          {teardownQ.data && pageCaveats(teardownQ.data.caveats).length > 0 && (
             <BlueprintPanel title="Read this with caveats">
               <ul className="flex flex-col gap-1.5 text-xs text-ink-secondary">
-                {teardownQ.data.caveats.map((c, i) => (
+                {pageCaveats(teardownQ.data.caveats).map((c, i) => (
                   <li key={i} className="flex gap-2">
                     <span className="shrink-0 text-ink-muted">·</span>
                     <span>{c}</span>

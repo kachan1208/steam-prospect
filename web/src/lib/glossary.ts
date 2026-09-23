@@ -626,10 +626,12 @@ export const GLOSSARY = {
     label: "Launch shape",
     short: "Launch shape",
     meaning:
-      "When a genre's first-year reviews arrive: a tall first week = front-loaded (launch week is everything); a flatter spread = slow burn (updates and marketing keep paying).",
+      "When a genre's first-year reviews arrive, as a weekly pace: a tall first week that falls away fast = front-loaded (the launch week decides most of the year); bars that stay level = slow burn (updates and marketing keep paying).",
     formula:
-      "for each window after launch (1w, 2w, 3–4w, 2m, 3m, 4–6m, 7–12m): median share of first-year reviews landed by the window's end − by its start",
+      "for each window after launch (1w, 2w, 3–4w, 2m, 3m, 4–6m, 7–12m): (median share of first-year reviews landed by the window's end − by its start) ÷ the window's length in weeks",
     unit: "percent",
+    notes:
+      "Per week so windows of different lengths compare: months 7–12 hold about a fifth of first-year reviews, but spread over 26 weeks. Front-loaded when week 1's weekly pace is 5× or more the months-7–12 pace.",
     source: "our review sample, games at least a year old — shape, not absolute counts",
     computed: true,
   },
@@ -649,8 +651,9 @@ export const GLOSSARY = {
     short: "Price history",
     meaning: "The game's Steam store price over time, with discounts — when it went on sale, and how deep.",
     unit: "series",
-    notes: "Daily store snapshots since 24 Aug 2026; earlier history isn't recorded.",
-    source: "Steam store price, captured daily",
+    notes:
+      "Recorded only when Steam's own price-change counter moves, from 24 Aug 2026 — so one record means the price hasn't changed since tracking began, not a missing series. Earlier history isn't recorded.",
+    source: "Steam store price (US), recorded on change",
     computed: false,
     fields: ["final_cents", "original_cents", "discount_pct"],
   },
