@@ -1,6 +1,6 @@
-"""First-public release dates and price status — through the real staging.
+"""First-public release dates, price status and the owners vintage — through the real staging.
 
-Two 2026-09-22 regressions, each pinned on the rows that exposed it:
+Three 2026-09-22 regressions, each pinned on the rows that exposed it:
 
   1. EARLY ACCESS GRADUATES COUNTED AS NEW RELEASES. Steam's store date is the 1.0 date for a
      graduate, so SCUM (reviewed since 2018-08, 1.0 in 2025-06), My Summer Car (2016 -> 2025)
@@ -12,6 +12,8 @@ Two 2026-09-22 regressions, each pinned on the rows that exposed it:
      is_ea_graduate. Games with no usable store date but real reviews are dated from them.
   2. FREE GAMES COUNTED AS $0 REVENUE. price_status 'free' | 'paid' | 'unknown'; only 'paid'
      carries est_rev_reviews / est_rev_owners.
+  3. OWNERS WITHOUT A VINTAGE. owners/playtime come from a frozen July SteamSpy snapshot;
+     stg_owners_vintage dates it from the data and write_meta publishes it (owners_as_of).
 
 Runs the REAL build_marts.create_staging() over a synthetic src schema. No network needed.
 """
@@ -235,6 +237,20 @@ def test_only_paid_games_carry_revenue(con):
     assert got[PAID][2] == pytest.approx(50000 * 9.99), "SteamSpy owners x price for a paid game"
 
 
+def test_owners_source_says_where_the_owners_figure_came_from(con):
+    src = dict(con.execute(
+        "SELECT appid, owners_source FROM stg_game WHERE appid IN (?, ?)", [PAID, FLOORED]
+    ).fetchall())
+    assert src == {PAID: "steamspy", FLOORED: "reviews_estimate"}, src
+
+
+def test_owners_vintage_is_dated_from_the_snapshots_it_matches(con):
+    row = con.execute("SELECT CAST(owners_as_of_min AS VARCHAR), CAST(owners_as_of AS VARCHAR), "
+                      "n_games_matched FROM stg_owners_vintage").fetchone()
+    # the 2026-09-20 snapshot has a different CCU: it is NOT what analysis_games holds
+    assert row == ("2026-07-05", "2026-07-07", len(PRICES)), row
+
+
 def _meta_fixture(with_new_staging: bool) -> duckdb.DuckDBPyConnection:
     c = duckdb.connect(":memory:")
     cols = "appid INTEGER, total_reviews INTEGER, est_rev_reviews DOUBLE, price_initial DOUBLE"
@@ -245,6 +261,8 @@ def _meta_fixture(with_new_staging: bool) -> duckdb.DuckDBPyConnection:
         c.execute("INSERT INTO stg_game VALUES (1, 100, 5000.0, 9.99, 'paid'), "
                   "(2, 100, NULL, 0.0, 'free'), (3, 80, NULL, NULL, 'unknown'), "
                   "(4, 10, NULL, 0.0, 'free')")
+        c.execute("CREATE TABLE stg_owners_vintage AS SELECT DATE '2026-07-05' AS owners_as_of_min,"
+                  " DATE '2026-07-07' AS owners_as_of, 2 AS n_games_matched")
     else:
         c.execute("INSERT INTO stg_game VALUES (1, 100, 5000.0, 9.99)")
     c.execute("CREATE TABLE stg_genre_boxleiter(genre VARCHAR, slope DOUBLE)")
@@ -254,13 +272,14 @@ def _meta_fixture(with_new_staging: bool) -> duckdb.DuckDBPyConnection:
     return c
 
 
-def test_write_meta_publishes_the_revenue_exclusions():
+def test_write_meta_publishes_the_vintage_and_the_revenue_exclusions():
     c = _meta_fixture(with_new_staging=True)
     try:
         bm.write_meta(c, "src.db", "20260922")
         meta = dict(c.execute("SELECT key, value FROM mart_meta").fetchall())
     finally:
         c.close()
+    assert (meta["owners_as_of"], meta["owners_as_of_min"]) == ("2026-07-07", "2026-07-05")
     # the free/unknown games at the floor are what global_median_revenue now EXCLUDES
     assert (meta["n_games_scored"], meta["n_games_scored_free"],
             meta["n_games_scored_price_unknown"]) == ("1", "1", "1"), meta
@@ -276,5 +295,6 @@ def test_write_meta_leaves_the_new_keys_blank_on_an_older_staging_layer():
         meta = dict(c.execute("SELECT key, value FROM mart_meta").fetchall())
     finally:
         c.close()
-    for k in ("n_games_scored_free", "n_games_scored_price_unknown"):
+    for k in ("owners_as_of", "owners_as_of_min", "n_games_scored_free",
+              "n_games_scored_price_unknown"):
         assert meta[k] == "", (k, meta[k])

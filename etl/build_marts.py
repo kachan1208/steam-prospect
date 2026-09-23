@@ -1368,6 +1368,36 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
     else:
         con.execute("CREATE TEMP TABLE _stg_first_review_month(appid INTEGER, first_review_month DATE)")
 
+    # Owners/playtime VINTAGE (mart_meta.owners_as_of). owners_mid / avg_playtime_forever come
+    # from analysis_games, a one-off SteamSpy snapshot table that has not moved since SteamSpy
+    # discovery stalled (2026-07-05, the scraper's page-87 dead end) — so the UI must be able to
+    # say "as of July", and that date has to come from the data, not a comment. analysis_games
+    # records no date of its own; it is matched back to the game_snapshots rows it was built
+    # from on a fingerprint (owners bucket + average playtime + CCU) that a later snapshot of
+    # the same game would not repeat. MAX = the newest SteamSpy data any owners value reflects.
+    if _sqlite_table_exists(con, "game_snapshots") and _sqlite_table_exists(con, "analysis_games"):
+        con.execute(
+            """
+            CREATE TEMP TABLE stg_owners_vintage AS
+            WITH matched AS (
+                SELECT ag.appid, MAX(TRY_CAST(substr(gs.run_at, 1, 10) AS DATE)) AS snap_date
+                FROM src.analysis_games ag
+                JOIN src.game_snapshots gs
+                  ON gs.appid = ag.appid
+                 AND (gs.owners_min + gs.owners_max) / 2.0 = ag.owners_mid
+                 AND gs.average_playtime_forever IS NOT DISTINCT FROM ag.avg_playtime_forever
+                 AND gs.ccu IS NOT DISTINCT FROM ag.ccu
+                GROUP BY ag.appid
+            )
+            SELECT MIN(snap_date) AS owners_as_of_min, MAX(snap_date) AS owners_as_of,
+                COUNT(*) AS n_games_matched
+            FROM matched
+            """
+        )
+    else:
+        con.execute("CREATE TEMP TABLE stg_owners_vintage(owners_as_of_min DATE, "
+                    "owners_as_of DATE, n_games_matched BIGINT)")
+
     staging_sql = render(
         """
         -- Single normalized read of src.game_tags. Every tag consumer reads the CANONICAL
@@ -1836,12 +1866,12 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
         -- back to '__all__' then the literal MID constant); revenue = owners * price.
         -- Only the true zeros are touched -- any row with existing SteamSpy owners_mid
         -- passes through unchanged (owners_is_floor_estimate = FALSE), so this never
-        -- overwrites good SteamSpy owner data. owners_is_floor_estimate is internal
-        -- plumbing (not exposed on any mart) that keeps mart_market_boxleiter's regression
-        -- fit -- see above -- from training on its own output; the appid-grain marts
-        -- (mart_game, mart_niche_top) instead expose review_count_source, which -- given
-        -- owners=0/NULL only ever coincides with SteamSpy also reporting 0 reviews in this
-        -- catalog -- is 'reviews_sample' for every row this floor touches.
+        -- overwrites good SteamSpy owner data. owners_is_floor_estimate keeps
+        -- mart_market_boxleiter's regression fit -- see above -- from training on its own
+        -- output, and (2026-09-22) is published on mart_game as owners_source: since the floor
+        -- also replaces SteamSpy's 0-20k catch-all bucket, review_count_source no longer tells
+        -- a floored owners figure from a measured one, and the two differ in VINTAGE too —
+        -- SteamSpy's is the July snapshot (mart_meta.owners_as_of), the floor is tonight's.
         CREATE TEMP TABLE stg_game AS
         WITH genre_pick AS (
             SELECT g.appid,
@@ -1881,6 +1911,8 @@ def create_staging(con: duckdb.DuckDBPyConnection, params: dict) -> None:
             -- estimate; SteamSpy-resolved rows (>20k) keep their measured owners. Lower bound.
             CASE WHEN gp.owners_is_floor_estimate THEN gp.reviews_owner_est
                  ELSE g.owners_mid_steamspy END AS owners_mid,
+            CASE WHEN gp.owners_is_floor_estimate THEN 'reviews_estimate'
+                 WHEN g.owners_mid_steamspy IS NOT NULL THEN 'steamspy' END AS owners_source,
             -- Same price gate as est_rev_reviews: no owners-based revenue for a free or
             -- unknown-price game either (SteamSpy's own figure is owners x $0 for those).
             CASE WHEN g.price_status <> 'paid' THEN NULL
@@ -4492,6 +4524,11 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
       etl_git_sha          the ETL code's git SHA (best-effort `git rev-parse HEAD` from the
                            repo root; '' when not in a git checkout or git is unavailable).
       duckdb_version       the duckdb library version that built the file.
+      owners_as_of         (2026-09-22) the newest SteamSpy snapshot date (YYYY-MM-DD) any
+      owners_as_of_min     published owners_mid / avg_playtime_forever value reflects, and the
+                           oldest — see stg_owners_vintage in create_staging(). SteamSpy has
+                           been frozen since 2026-07-05, so every "owners" figure the UI shows
+                           with owners_source='steamspy' is THIS old; '' = could not be matched.
       n_games_scored_free  the >= min_reviews_default games that global_median_revenue /
       n_games_scored_price_unknown   pct_over_100k / n_games_scored EXCLUDE, by reason (a free
                            game has no box-revenue estimate — price_status in stg_game).
@@ -4533,6 +4570,9 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
     # Data-vintage / population keys (2026-09-22). Read through _optional_meta: they come from
     # staging that a minimal caller (the write_meta unit tests' hand-built stg_game) does not
     # have, and a provenance row must never be the thing that fails a finished build.
+    vintage = _optional_meta(con, "SELECT CAST(owners_as_of AS VARCHAR), "
+                                  "CAST(owners_as_of_min AS VARCHAR) FROM stg_owners_vintage")
+    owners_as_of, owners_as_of_min = vintage if vintage else (None, None)
     excluded = _optional_meta(
         con,
         "SELECT COUNT(*) FILTER (WHERE price_status = 'free'), "
@@ -4593,6 +4633,8 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
         ),
         "ccu_panel_games": str(ccu_panel_games),
         "ccu_history_days": str(ccu_history_days),
+        "owners_as_of": owners_as_of or "",
+        "owners_as_of_min": owners_as_of_min or "",
         "n_games_scored_free": "" if n_scored_free is None else str(n_scored_free),
         "n_games_scored_price_unknown": "" if n_scored_unknown is None else str(n_scored_unknown),
         "build_mode": build_mode,

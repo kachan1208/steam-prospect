@@ -117,7 +117,11 @@ SELECT
     g.price_initial, g.is_free, g.price_status,
     pg.primary_genre,
     g.developers, g.publishers, g.self_published, g.is_indie,
-    g.owners_mid, g.total_reviews, g.positive_ratio, g.review_count_source,
+    -- owners_source: 'steamspy' (SteamSpy's owners bucket midpoint — as of
+    -- mart_meta.owners_as_of, July 2026) | 'reviews_estimate' (total_reviews x the genre's
+    -- owners-per-review multiplier: SteamSpy had no resolved bucket, a floor estimate) |
+    -- NULL (no owners figure).
+    g.owners_mid, g.owners_source, g.total_reviews, g.positive_ratio, g.review_count_source,
     g.est_rev_reviews, g.est_rev_owners,
     g.metacritic_score, g.achievements_count, g.avg_playtime_forever,
     gh.header_image, gh.short_description,
