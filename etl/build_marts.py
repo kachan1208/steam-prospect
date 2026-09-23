@@ -3543,6 +3543,32 @@ def _build_aspect_keyword_votes(con: duckdb.DuckDBPyConnection, mention_table: s
     con.execute("DROP TABLE IF EXISTS _kw_votes_part")
 
 
+@dataclass(frozen=True)
+class PoolCoverage:
+    """How much of the in-scope review pool the sentiment cache has scored, as of the end of this
+    run's scoring loop — the full-text cadence's guard against publishing marts built from a
+    partly scored pool (see _decide_fulltext).
+
+      total    reviews in the pool (TEARDOWN_MIN_REVIEWS floor + the per-game cap)
+      scored   how many of them have a scored_review record"""
+    scored: int
+    total: int
+
+    @property
+    def complete(self) -> bool:
+        return self.scored >= self.total
+
+    @property
+    def pct(self) -> float:
+        return (100.0 * self.scored / self.total) if self.total else 100.0
+
+
+# Set by every compute_aspect_sentiment() call (None before one, and on --light, which never
+# scores); main() hands it to _decide_fulltext. Module state rather than a return value so the
+# function's contract — it returns a row count the tests pin — does not move.
+_SENTIMENT_POOL_COVERAGE: PoolCoverage | None = None
+
+
 def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
                              scoring_only: bool = False) -> int:
     """Precompute per-(appid, aspect) VADER text sentiment for the Game Teardown (see the
@@ -3596,6 +3622,8 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
     VADER+classifier stream, ~16 min per bucket) runs with it DETACHED, writing into a local
     staging table. Measured hold to commit one 125k-review bucket into a production-sized cache:
     ~0.8s on a dev laptop, ~3s scaled to the droplet, i.e. a duty cycle around 0.3%."""
+    global _SENTIMENT_POOL_COVERAGE
+    _SENTIMENT_POOL_COVERAGE = None
     # Idempotent per connection: the nightly calls this once per process, but tests (and any
     # future re-entry) may not, and CREATE TEMP TABLE has no IF NOT EXISTS to fall back on.
     con.execute("DROP TABLE IF EXISTS stg_aspect_mention_sentiment")
@@ -3727,6 +3755,9 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
         _build_aspect_keyword_votes(con, "_sent_raw")
         con.execute("DROP TABLE IF EXISTS _sent_raw")
         con.execute("DROP TABLE IF EXISTS _sent_windows")
+        # Uncached, the whole pool was scanned just now — complete by construction.
+        _n_pool = con.execute("SELECT COUNT(*) FROM _sent_pool_meta").fetchone()[0]
+        _SENTIMENT_POOL_COVERAGE = PoolCoverage(scored=_n_pool, total=_n_pool)
     else:
         # PHASE 1 of three, and the cache is attached for ONLY these few seconds: work out what
         # this run has to score. See the docstring — the lock is exclusive and cross-process, so
@@ -4047,6 +4078,16 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
             # which is exactly the pool's unscored part as of phase 1, so the pool's scored
             # count follows from those two numbers without another join over the cache.
             _pool_scored = _pool_reviews - n_new_reviews + (_scored_reviews - _scored_before)
+            # What the full-text cadence reads (_decide_fulltext): is the pool COMPLETELY scored?
+            # Decided from this run's own bookkeeping, not from _pool_scored: every review
+            # unscored at phase 1 sits in a bucket of _todo, so the pool is complete exactly
+            # when every bucket of _todo committed — no deadline stop. _pool_scored itself can
+            # overshoot when a concurrent --rescore-only commits into scored_review between
+            # phase 1 and here, so it is only trusted below the total, never to claim it.
+            _SENTIMENT_POOL_COVERAGE = PoolCoverage(
+                scored=(_pool_reviews if n_done == len(_todo)
+                        else max(0, min(_pool_scored, _pool_reviews - 1))),
+                total=_pool_reviews)
             con.execute("DELETE FROM cache.rescore_status")
             con.execute(
                 "INSERT INTO cache.rescore_status VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -5308,7 +5349,8 @@ def _parse_fulltext_provenance(meta: dict[str, str]) -> tuple[datetime, int] | N
 def _decide_fulltext(requested: str, prev_name: str | None, prev_meta: dict[str, str],
                      scored_now: int | None, now: datetime | None = None,
                      max_age_hours: float | None = None,
-                     rebuild_delta: int | None = None) -> FulltextPlan:
+                     rebuild_delta: int | None = None,
+                     pool: PoolCoverage | None = None) -> FulltextPlan:
     """The cadence verdict for one build, evaluated after the night's delta has been scored.
 
       requested    the --fulltext flag. 'build' and 'copy' are obeyed as-is (main() passes
@@ -5316,21 +5358,42 @@ def _decide_fulltext(requested: str, prev_name: str | None, prev_meta: dict[str,
                    copy from, when its provenance is missing (the first night after this
                    landed, or a cache-off build), when its full-text tables are older than
                    max_age_hours, or when more than rebuild_delta reviews were scored since
-                   they were built — and copies otherwise.
+                   they were built — and copies otherwise. EXCEPT while the pool is only partly
+                   scored (below): then 'auto' copies whenever there is anything to copy.
       prev_name    the published mart's name, for the log (None = nothing is published).
       prev_meta    its mart_meta rows (_read_mart_meta).
       scored_now   COUNT(*) of cache.scored_review after this run's scoring; None when the
                    cache is disabled, which 'auto' reads as "the delta cannot be bounded" and
                    rebuilds (with the cache off every run rescans the whole corpus anyway).
+      pool         this run's PoolCoverage (compute_aspect_sentiment); None = unknown, read
+                   as complete (--light, and callers that predate it).
       now / max_age_hours / rebuild_delta
                    injectable for tests; None = the clock and the env knobs.
+
+    A PARTLY SCORED POOL NEVER FEEDS A REBUILD (2026-09-22). After a cache wipe with
+    PROSPECT_SENTIMENT_DEADLINE_SECONDS set, the cache refills over several nights, and the rules
+    above used to rebuild anyway: the scored delta goes negative (never a trigger) but the age
+    rule fires after FULLTEXT_MAX_AGE_HOURS, and the teardown / aspect marts were then rebuilt
+    from a hash-sampled, part-refilled cache — mention counts silently low while
+    n_reviews_sampled (the pool, not the scored part of it) stayed full, and
+    mart_game_review_aspects still has games x 10 rows, so the validation gate cannot see it.
+    Now, while the pool is incomplete, 'auto' copies the published tables regardless of age and
+    rebuilds once scoring catches up; with nothing published it has no choice but to build, and
+    says so. An explicit --fulltext build is obeyed, with the same warning.
 
     Pure by design — no I/O — so every branch is unit-testable (tests/test_fulltext_cadence)."""
     now = datetime.now(timezone.utc) if now is None else now
     max_age_hours = _fulltext_max_age_hours() if max_age_hours is None else max_age_hours
     rebuild_delta = _fulltext_rebuild_delta() if rebuild_delta is None else rebuild_delta
+    partial = None
+    if pool is not None and not pool.complete:
+        partial = (f"the sentiment pool is only {pool.pct:.1f}% scored "
+                   f"({pool.total - pool.scored:,} of {pool.total:,} reviews unscored)")
 
     def build(reason: str) -> FulltextPlan:
+        if partial is not None:
+            reason += (f" — WARNING: {partial}, so this build's teardown/aspect mention counts "
+                       "are LOW for the unscored reviews' games")
         return FulltextPlan("build", reason, now.isoformat(timespec="seconds"),
                             "" if scored_now is None else str(scored_now))
 
@@ -5347,6 +5410,10 @@ def _decide_fulltext(requested: str, prev_name: str | None, prev_meta: dict[str,
 
     if prev_name is None:
         return build("rebuilding (no published mart to copy from)")
+    if partial is not None:
+        return copy(f"copied from {prev_name}: {partial} — the full-text marts are never rebuilt "
+                    "from a partly scored pool, whatever their age; they rebuild once scoring "
+                    "catches up")
     provenance = _parse_fulltext_provenance(prev_meta)
     if provenance is None:
         return build(f"rebuilding ({prev_name} carries no full-text provenance: the first build "
@@ -6152,6 +6219,7 @@ def _build(args: argparse.Namespace, source_db: str, data_dir: Path, mart_versio
                 None if prev_mart is None else prev_mart.stem,
                 {} if prev_mart is None else _read_mart_meta(prev_mart),
                 _count_scored_reviews(con, data_dir),
+                pool=_SENTIMENT_POOL_COVERAGE,
             )
             print(f"[etl] full-text marts: {fulltext.reason}")
         copy_fulltext = fulltext.mode == "copy"
