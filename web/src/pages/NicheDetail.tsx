@@ -83,6 +83,7 @@ import { DEFAULT_NICHE_CUT, findNicheVariant, formatNicheRef, nicheCombinedPath 
 import {
   DOSSIER_LABEL,
   ENTRANT_RATIO_CATALOG_NORM,
+  ENTRANT_RATIO_PAR,
   WC_WINNER_TAKE_MOST,
   cutPopulationLabel,
   demandTrendWorked,
@@ -289,7 +290,8 @@ function declineFlags(v: NicheRow, players: NichePlayers | null): { serious: boo
       text: `Release pipeline shrinking ${fmtPct(Math.abs(v.saturation_yoy))}/yr — "low competition" here is everyone leaving, not an open market.`,
     });
   }
-  if (v.entrant_ratio != null && v.entrant_ratio < 1) {
+  // The same par the verdict trace's newcomer row uses — it moves with the constant's re-fit.
+  if (v.entrant_ratio != null && v.entrant_ratio < ENTRANT_RATIO_PAR) {
     flags.push({
       serious: v.entrant_ratio < 0.7,
       text: `Recent entrants earn ${v.entrant_ratio.toFixed(2)}× the back catalog's median (catalog norm ~${ENTRANT_RATIO_CATALOG_NORM}×) — newcomers underearn here.`,
