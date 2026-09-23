@@ -25,6 +25,12 @@ import {
   weekdayName,
   isFreeTitle,
   fmtRevenue,
+  priceKind,
+  fmtPriceFor,
+  fmtRevenueFor,
+  PRICE_UNKNOWN,
+  fmtIsoDate,
+  fmtIsoMonth,
 } from "./format";
 
 describe("fmtUsd", () => {
@@ -620,5 +626,63 @@ describe("the sentinel-friendly API", () => {
     expect(isFiniteNumber(Infinity)).toBe(false);
     expect(isFiniteNumber("12")).toBe(false);
     expect(isFiniteNumber(null)).toBe(false);
+  });
+});
+
+describe("priceKind / fmtPriceFor / fmtRevenueFor — $0 is only free when Steam says so", () => {
+  // GET /api/games/search?q=grand%20theft%20auto (2026-09-21 mart), verbatim fields.
+  const GTA_V_LEGACY = { price_initial: 0, is_free: 0 };
+  const CS_GO = { price_initial: 0, is_free: 1 };
+  const DOGWALK = { price_initial: null, is_free: 1 };
+  const SIEGE = { price_initial: 19.99, is_free: 1 };
+
+  it("reads a $0 row with is_free = 0 as an UNKNOWN price, not a free game", () => {
+    expect(priceKind(GTA_V_LEGACY)).toBe("unknown");
+    expect(fmtPriceFor(GTA_V_LEGACY)).toBe(PRICE_UNKNOWN);
+    // The mart priced its revenue at $0.00; the cell must say why there is no number.
+    expect(fmtRevenueFor(GTA_V_LEGACY, 0)).toBe("Price unknown");
+  });
+
+  it("keeps the flagged free games free, with or without a $0 price", () => {
+    expect(priceKind(CS_GO)).toBe("free");
+    expect(priceKind(DOGWALK)).toBe("free");
+    expect(fmtRevenueFor(CS_GO, 0)).toBe("Free");
+    expect(fmtPriceFor(DOGWALK)).toBe("Free");
+  });
+
+  it("lets a known price win over the free flag", () => {
+    expect(priceKind(SIEGE)).toBe("paid");
+    expect(fmtPriceFor(SIEGE)).toBe("$19.99");
+    expect(fmtRevenueFor(SIEGE, 920_000_000)).toBe("$920.0M");
+  });
+
+  it("falls back to the old reading when the row carries no flag at all", () => {
+    expect(priceKind({ price_initial: 0 })).toBe("free");
+    expect(priceKind({ price_initial: 0, is_free: null })).toBe("free");
+    expect(priceKind({ price_initial: null })).toBe("unknown");
+    expect(fmtPriceFor({ price_initial: null })).toBe("Price unknown");
+  });
+});
+
+describe("fmtIsoDate / fmtIsoMonth — one date format, no timezone drift", () => {
+  it("prints the footer's style from the ISO digits", () => {
+    expect(fmtIsoDate("2024-02-20")).toBe("Feb 20, 2024");
+    expect(fmtIsoDate("2026-09-21T22:28:20+00:00")).toBe("Sep 21, 2026");
+    expect(fmtIsoDate("2024-02")).toBe("Feb 2024");
+    expect(fmtIsoMonth("2024-02-20")).toBe("Feb 2024");
+  });
+
+  it("never shifts a 1st-of-the-month date into the previous month", () => {
+    // new Date("2024-03-01T00:00:00") west of UTC is still Mar 1 locally, but a UTC parse
+    // read back in local time is Feb 29 — the digits never move.
+    expect(fmtIsoMonth("2024-03-01")).toBe("Mar 2024");
+    expect(fmtIsoDate("2024-01-01")).toBe("Jan 1, 2024");
+  });
+
+  it("prints MISSING for anything that isn't an ISO date", () => {
+    expect(fmtIsoDate(null)).toBe(MISSING);
+    expect(fmtIsoDate("")).toBe(MISSING);
+    expect(fmtIsoDate("Coming soon")).toBe(MISSING);
+    expect(fmtIsoMonth("2024-13-01")).toBe(MISSING);
   });
 });
