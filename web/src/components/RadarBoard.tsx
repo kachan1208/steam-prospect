@@ -26,7 +26,7 @@ import {
   type VerdictCheck,
 } from "../lib/radarVerdict";
 import { useCoarsePointer } from "../lib/useMediaQuery";
-import { PAID_MIN } from "../lib/nichePaid";
+import { PAID_MIN, paidCount } from "../lib/nichePaid";
 import { TooltipPanel } from "./charts/TooltipPanel";
 import { InfoTipBase } from "./ui/InfoTipBase";
 import { nicheDetailPath } from "../lib/nichePath";
@@ -269,7 +269,7 @@ export function radarBlipFromRow(row: NicheRow): RadarBoardBlip | null {
     n_recent_year: row.n_recent_year ?? null,
     n_prior_year: row.n_prior_year ?? null,
     n_games: row.n_games,
-    n_paid: row.n_paid ?? null,
+    n_paid: paidCount(row),
   });
   return {
     dimension: row.dimension,
@@ -289,7 +289,7 @@ export function radarBlipFromRow(row: NicheRow): RadarBoardBlip | null {
     trace: checks,
     opp: row,
     population: row.window != null ? cutPopulationLabel(row.window, row.min_reviews) : undefined,
-    n_paid: row.n_paid ?? null,
+    n_paid: paidCount(row),
   };
 }
 

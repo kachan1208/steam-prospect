@@ -24,9 +24,23 @@ export interface PaidCounts {
   n_price_unknown?: number | null;
 }
 
+/**
+ * The cut's paid games: `n_paid` when served, else derived from the mart's own invariant
+ * n_paid + n_free + n_price_unknown = n_games (the API serves n_free and n_price_unknown but,
+ * as of 2026-09-23, not n_paid itself). Null on a mart that predates the split.
+ */
+export function paidCount(row: PaidCounts | null | undefined): number | null {
+  if (isFiniteNumber(row?.n_paid)) return row!.n_paid!;
+  if (isFiniteNumber(row?.n_games) && isFiniteNumber(row?.n_free) && isFiniteNumber(row?.n_price_unknown)) {
+    return Math.max(0, row!.n_games! - row!.n_free! - row!.n_price_unknown!);
+  }
+  return null;
+}
+
 /** True when the row's paid-only stats were withheld for too few paid games. */
 export function paidWithheld(row: PaidCounts | null | undefined): boolean {
-  return isFiniteNumber(row?.n_paid) && row!.n_paid! < PAID_MIN;
+  const n = paidCount(row);
+  return n !== null && n < PAID_MIN;
 }
 
 /**
@@ -39,7 +53,7 @@ export function paidStatSentinel(
 ): { tag: string; detail: string } | string | undefined {
   if (isFiniteNumber(value)) return undefined;
   if (paidWithheld(row)) {
-    const n = row!.n_paid!;
+    const n = paidCount(row)!;
     return {
       tag: `withheld: only ${fmtInt(n)} paid game${n === 1 ? "" : "s"}`,
       detail: `Revenue, price and hit-rate figures count paid games only, and are withheld below ${PAID_MIN} of them — ${fmtInt(
@@ -63,5 +77,5 @@ export function paidOnlyNote(row: PaidCounts | null | undefined): string | null 
     .filter((p): p is string => p !== null)
     .join(" and ");
   const noun = free + unknown === 1 ? "game" : "games";
-  return isFiniteNumber(row?.n_paid) ? `paid games only — ${parts} ${noun} left out` : `excludes ${parts} ${noun}`;
+  return paidCount(row) !== null ? `paid games only — ${parts} ${noun} left out` : `excludes ${parts} ${noun}`;
 }

@@ -219,6 +219,7 @@
 
 import { fmtCompact, fmtInt, fmtPct, fmtSigned, fmtUsd } from "./format";
 import type { GlossaryKey } from "./glossary";
+import { PAID_MIN, paidCount } from "./nichePaid";
 import { MONO } from "./palette";
 
 // ---- thresholds -------------------------------------------------------------------------
@@ -370,8 +371,11 @@ export interface RadarVerdictInput {
   /** The cut's scored games — the singleplayer row's worked count. */
   n_games?: number | null;
   /** The cut's PAID games (rebuilt mart): winner_concentration is withheld (NULL) below 30 of
-   * them, and the concentration row then says so instead of a bare "unknown". */
+   * them, and the concentration row then says so instead of a bare "unknown". Derived from
+   * n_games − n_free − n_price_unknown when not served (lib/nichePaid.ts paidCount). */
   n_paid?: number | null;
+  n_free?: number | null;
+  n_price_unknown?: number | null;
 }
 
 export interface RadarVerdict {
@@ -496,9 +500,9 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
   const nGames = num(input.n_games);
   const nRecentYear = num(input.n_recent_year);
   const nPriorYear = num(input.n_prior_year);
-  const nPaid = num(input.n_paid);
-  // The rebuilt mart withholds paid-only stats below 30 paid games (lib/nichePaid.ts).
-  const paidTooFew = nPaid !== null && nPaid < 30;
+  const nPaid = paidCount(input);
+  // The rebuilt mart withholds paid-only stats below PAID_MIN paid games (lib/nichePaid.ts).
+  const paidTooFew = nPaid !== null && nPaid < PAID_MIN;
 
   // The solo LENS row — shared by both trace shapes. decides:false: see module doc.
   // The pass bar stays on the SINGLEPLAYER SHARE alone; the evidence trio is inlined into
