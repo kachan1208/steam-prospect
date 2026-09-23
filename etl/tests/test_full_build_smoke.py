@@ -8,7 +8,8 @@ would catch them breaking:
 
   - the shared stg_press_base (build_marts.create_staging) must satisfy all four of its
     consumers: mart_game_teardown._press_base, mart_press._press_journalist,
-    mart_niche_press._niche_press_last and mart_channel_mix._mix_press;
+    mart_niche_press (its distinct-article counts + last_article_at) and
+    mart_channel_mix._mix_press;
   - the end-of-file `DROP TABLE` hygiene must not drop a temp another file still needs —
     the cross-file handoffs are _game_players_summary/_game_lifetime (mart_players ->
     mart_game), _niche_players_now/_niche_lifetime (mart_players -> mart_niche), _niche_pop
@@ -215,7 +216,7 @@ def test_shared_press_base_feeds_all_four_consumers(published):
     try:
         for tbl in ("mart_game_press_summary",     # mart_game_teardown._press_base
                     "mart_press_author",           # mart_press._press_journalist
-                    "mart_niche_press_outlets",    # mart_niche_press._niche_press_last
+                    "mart_niche_press_outlets",    # mart_niche_press (distinct articles)
                     "mart_channel_mix"):           # mart_channel_mix._mix_press
             n = con.execute(f'SELECT COUNT(*) FROM "{tbl}"').fetchone()[0]
             assert n > 0, f"{tbl} is empty — its stg_press_base consumer is broken"

@@ -101,8 +101,12 @@ FROM _outlet_genre_articles;
 
 CREATE TABLE mart_press_outlet_genre AS
 WITH counts AS (
-    SELECT source, genre, COUNT(*) AS n_articles, COUNT(DISTINCT appid) AS n_games_covered,
-        COUNT(*) FILTER (WHERE is_recent) AS n_articles_recent_24m
+    -- DISTINCT articles (2026-09-22): the rows are (article, game) pairs, so COUNT(*) counted
+    -- a roundup of five Action games five times for (outlet, Action) — "articles" that were
+    -- really article-mentions. Same fix as mart_niche_press.
+    SELECT source, genre, COUNT(DISTINCT article_id) AS n_articles,
+        COUNT(DISTINCT appid) AS n_games_covered,
+        COUNT(DISTINCT article_id) FILTER (WHERE is_recent) AS n_articles_recent_24m
     FROM _outlet_genre_articles
     GROUP BY source, genre
 ),
@@ -136,12 +140,15 @@ FROM _press_journalist p
 JOIN stg_genre_membership gm ON gm.appid = p.appid
 WHERE p.has_named_author;
 
+-- DISTINCT articles, floor included: three mentions in ONE roundup are one article, and
+-- must not clear a three-article floor on their own (see mart_press_outlet_genre).
 CREATE TEMP TABLE _author_genre_counts AS
-SELECT author, genre, COUNT(*) AS n_articles, COUNT(DISTINCT appid) AS n_distinct_games,
-    COUNT(*) FILTER (WHERE is_recent) AS n_articles_recent_24m
+SELECT author, genre, COUNT(DISTINCT article_id) AS n_articles,
+    COUNT(DISTINCT appid) AS n_distinct_games,
+    COUNT(DISTINCT article_id) FILTER (WHERE is_recent) AS n_articles_recent_24m
 FROM _author_genre_articles
 GROUP BY author, genre
-HAVING COUNT(*) >= @PRESS_AUTHOR_MIN_ARTICLES@;
+HAVING COUNT(DISTINCT article_id) >= @PRESS_AUTHOR_MIN_ARTICLES@;
 
 -- Some journalists' bylines appear under more than one outlet source (career moves) —
 -- outlets is a list so the pitch list can show all of them for this author x genre.
