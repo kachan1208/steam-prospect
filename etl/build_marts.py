@@ -287,7 +287,10 @@ OPP_ENTER_PCT = 40.0             # == DEMAND_ENTER_PCT: +40%/24m demand growth -
 OPP_FLOOD_YOY = 0.15             # == SAT_FLOOD_YOY as a NUMBER, but read differently: the ring
                                  # tests saturation_yoy against it directly; flood_room hits 50
                                  # when supply outgrows DEMAND by this much
-OPP_WINNER_TAKE_MOST = 0.85      # == WC_WINNER_TAKE_MOST -> revenue_spread 50
+OPP_WINNER_TAKE_MOST = 0.85      # == WC_WINNER_TAKE_MOST -> revenue_spread 50. Since
+                                 # 2026-09-22 the ring also refuses "enter" above it ("demand
+                                 # surging, but winner-take-most revenue" -> watch); pinned by
+                                 # test_opportunity_ordering.radar_ring
 OPP_ENTRANT_NORM = 1.08          # == ENTRANT_RATIO_CATALOG_NORM -> entrant_room 100 (capped)
 OPP_ENTRANT_FULL = 0.5           # entrant_ratio <= 0.5 -> entrant_room 0 (same bar the
                                  # retired gate used, kept so the two agree on "as bad as
