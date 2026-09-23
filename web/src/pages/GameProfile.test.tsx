@@ -790,6 +790,21 @@ describe("GameProfile — header dates and price read as what they are", () => {
     expect(await screen.findByText("Price unknown")).toBeTruthy();
   });
 
+  it("explains the audience-lifetime badges with a real ⓘ, not a hover-only title", async () => {
+    serve(/^\/api\/games\/367520(\?|$)/, {
+      ...PROFILE,
+      lifetime_alive: false,
+      lifetime_months: 14,
+      lifetime_first_100_month: "2019-01-01",
+      lifetime_died_month: "2020-03-01",
+    });
+    renderProfile();
+    expect(await screen.findByText("Audience lasted 14 mo")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "About Audience lifetime" }));
+    expect(screen.getByRole("tooltip").textContent).toContain("Jan 2019 → Mar 2020 = 14 mo");
+    expect(document.querySelector("[title*='steamcharts']")).toBeNull();
+  });
+
   it("names our own first sighting as ours, not as a fact about the game", async () => {
     renderProfile();
     expect(await screen.findByText("First seen by Prospect: Jul 5, 2026")).toBeTruthy();

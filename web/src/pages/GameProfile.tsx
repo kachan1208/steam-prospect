@@ -67,7 +67,7 @@ import { addMonths, fmtDay, fmtMonth, launchFacts, partialMonth } from "../lib/d
 import { fmtListPrice, priceStatus } from "../lib/priceStatus";
 import { glossary } from "../lib/glossary";
 import { DEFAULT_NICHE_CUT, findNicheVariant } from "../lib/nicheSelection";
-import { axisScale, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtUsd, monthName } from "../lib/format";
+import { axisScale, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtUsd } from "../lib/format";
 import { heatDomain, heatStyle, positiveRatioClass } from "../lib/heat";
 import { layoutPlumbLabels, markerReasons } from "../lib/notable";
 import { CSS_VAR, MONO} from "../lib/palette";
@@ -1064,19 +1064,32 @@ export default function GameProfile() {
                 (profile.lifetime_alive === true && profile.lifetime_first_100_month) ||
                 (profile.lifetime_alive === false && profile.lifetime_months != null)) && (
                 <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  {/* The audience-lifetime badges explain themselves with a real ⓘ — the old
+                      hover-only title= was unreachable by keyboard and on a phone. */}
                   {profile.lifetime_alive === true && profile.lifetime_first_100_month && (
-                    <span title="Reached a monthly average of 100+ concurrent players then and still averages 10+ (steamcharts monthly history, top-8k coverage).">
-                      <Badge color={CSS_VAR.demand}>
-                        Audience alive since {monthName(Number(profile.lifetime_first_100_month.slice(5, 7)))}{" "}
-                        {profile.lifetime_first_100_month.slice(0, 4)}
-                      </Badge>
+                    <span className="inline-flex items-center gap-1">
+                      <Badge color={CSS_VAR.demand}>Audience alive since {fmtMonth(profile.lifetime_first_100_month)}</Badge>
+                      <InfoTip
+                        label="Audience alive"
+                        meaning="The game reached a monthly average of 100+ concurrent players, and still averages 10+ — its audience hasn't died off."
+                        formula="first month averaging 100+ players; alive while no full month since has averaged under 10"
+                        worked={`first 100+ month: ${fmtMonth(profile.lifetime_first_100_month)}; no month under 10 since`}
+                        source="steamcharts monthly averages (top ~8,000 games only)"
+                      />
                     </span>
                   )}
                   {profile.lifetime_alive === false && profile.lifetime_months != null && (
-                    <span title="Audience lifetime: months from the game's first month averaging 100+ concurrent players to its first full month averaging under 10 (steamcharts monthly history, top-8k coverage).">
-                      <Badge color={MONO.paper50}>
-                        Audience: {fmtMonths(profile.lifetime_months)} (100+ → &lt;10)
-                      </Badge>
+                    <span className="inline-flex items-center gap-1">
+                      <Badge color={MONO.paper50}>Audience lasted {fmtMonths(profile.lifetime_months)}</Badge>
+                      <InfoTip
+                        label="Audience lifetime"
+                        meaning="How long the game held an audience: from its first month averaging 100+ concurrent players to its first full month averaging under 10."
+                        formula="months from the first 100+ month to the first full month under 10"
+                        worked={`${fmtMonth(profile.lifetime_first_100_month) ?? "first 100+ month"} → ${
+                          fmtMonth(profile.lifetime_died_month) ?? "first month under 10"
+                        } = ${fmtMonths(profile.lifetime_months)}`}
+                        source="steamcharts monthly averages (top ~8,000 games only)"
+                      />
                     </span>
                   )}
                   {profile.has_demo === true && (
