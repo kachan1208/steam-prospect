@@ -1,19 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { render, within } from "@testing-library/react";
 
-import { NotableCoverageCard, pressToneSummary } from "./NotableCoverageCard";
+import { NotableCoverageCard } from "./NotableCoverageCard";
 import type { GamePress, PressNotableArticle } from "../lib/api";
 
-/**
- * A percentage and the base printed next to it must be able to produce each other.
- *
- * press_pos_share is positive / (positive + negative) — neutrals excluded. The chip printed it
- * beside n_scored_articles, which INCLUDES neutrals, so /games/367520 read
- * "Mostly positive · 83% positive · 101 scored" over 58 positive / 12 negative / 31 neutral:
- * 58/101 = 57.4%, and the only way to 83% is 58/70, a base the card never showed.
- *
- * Numbers below are GET /api/games/367520/teardown verbatim.
- */
+/** GET /api/games/367520/teardown's press block (Hollow Knight), verbatim. */
 function press(overrides: Partial<GamePress>): GamePress {
   return {
     total_mentions: 101,
@@ -33,35 +24,6 @@ function press(overrides: Partial<GamePress>): GamePress {
   };
 }
 
-describe("pressToneSummary", () => {
-  it("prints the base the percentage actually uses", () => {
-    const tone = pressToneSummary(press({}));
-    expect(tone?.label).toBe("Mostly positive");
-    expect(tone?.detail).toBe("83% positive of 70 rated · 31 neutral excluded");
-  });
-
-  it("never pairs the share with a base that cannot produce it", () => {
-    const p = press({});
-    const tone = pressToneSummary(p);
-    const rated = p.n_pos_articles + p.n_neg_articles;
-    // The number in the chip has to be the denominator of the printed percentage.
-    expect(Math.round((p.n_pos_articles / rated) * 100)).toBe(83);
-    expect(tone?.detail).toContain(`${rated} rated`);
-    // 58/101 = 57%, so the all-scored base must not be offered as the share's base.
-    expect(tone?.detail).not.toMatch(/83% positive · 101 scored/);
-  });
-
-  it("drops the exclusion clause when there is nothing excluded", () => {
-    const tone = pressToneSummary(press({ n_neutral_articles: 0, n_scored_articles: 70 }));
-    expect(tone?.detail).toBe("83% positive of 70 scored");
-  });
-
-  it("still refuses to invent a lean when nothing was scored or nothing took a side", () => {
-    expect(pressToneSummary(press({ n_scored_articles: 0 }))).toBeNull();
-    expect(pressToneSummary(press({ press_pos_share: null }))?.detail).toBe("101 scored, no clear lean");
-  });
-});
-
 function article(overrides: Partial<PressNotableArticle> = {}): PressNotableArticle {
   return {
     source: "pcgamer",
@@ -78,25 +40,50 @@ function article(overrides: Partial<PressNotableArticle> = {}): PressNotableArti
 }
 
 /**
- * Two phone-width layout failures measured on production 2026-09-01, on /games/1962700 at
- * 390px. jsdom has no layout engine, so what is asserted here is the STRUCTURE that
- * produces the measured result — the pixels themselves were verified with Playwright:
- * body scrollWidth 417 -> 390, and the press headline box 146px -> 286px.
+ * The per-article "Positive tone / Negative tone" badges and the header's "Mostly positive"
+ * chip are gone (2026-09-23): headline VADER tagged PC Gamer's glowing "Balatro review"
+ * NEGATIVE, and across the catalog it tracks the game's NAME (grim-titled games read 45%
+ * positive vs 69%) far more than its coverage. See the note at the top of the component.
  */
-describe("NotableCoverageCard at phone widths", () => {
-  it("lets the tone chip give way instead of running off the page (A3)", () => {
-    const { container } = render(<NotableCoverageCard press={press({ notable: [article()] })} />);
-    const chip = within(container).getByText("Mostly positive").parentElement!;
-    // 372px of chip on a 318px line: as `shrink-0` it overflowed the viewport by 27px and
-    // clipped its own last word ("exclud…"), giving the route the app's only body-level
-    // horizontal scroll. It has to be able to shrink AND to wrap internally.
-    expect(chip.className).not.toMatch(/\bshrink-0\b/);
-    expect(chip.className).toMatch(/\bflex-wrap\b/);
-    expect(chip.className).toMatch(/\bmax-w-full\b/);
-    // …and the disclosure that wrapping exists to preserve is still whole.
-    expect(chip.textContent).toContain("83% positive of 70 rated · 31 neutral excluded");
+describe("NotableCoverageCard — no automated tone guesses", () => {
+  it("prints no tone badge on any row, whatever the article's stored sentiment", () => {
+    const { container } = render(
+      <NotableCoverageCard
+        press={press({
+          notable: [
+            article({ title: "Balatro review", sentiment: "negative", sentiment_compound: -0.49, is_earliest: true }),
+            article({ title: "Balatro Review - IGN", source: "ign", sentiment: "positive" }),
+          ],
+        })}
+      />,
+    );
+    expect(container.textContent).not.toMatch(/tone/i);
+    expect(container.textContent).not.toMatch(/Mostly (positive|negative)|Mixed tone|Neutral coverage/);
+    expect(container.textContent).not.toMatch(/% positive of/);
+    // What the scrape does know is still there.
+    expect(within(container).getByText("Earliest coverage found")).toBeTruthy();
+    expect(within(container).getByText("Balatro review", { selector: "span" })).toBeTruthy();
   });
 
+  it("dates each article in the page's one date format", () => {
+    const { container } = render(<NotableCoverageCard press={press({ notable: [article()] })} />);
+    expect(within(container).getByText("May 14, 2026")).toBeTruthy();
+    expect(container.textContent).not.toContain("2026-05-14");
+  });
+
+  it("renders nothing without notable articles", () => {
+    const { container } = render(<NotableCoverageCard press={press({ notable: [] })} />);
+    expect(container.textContent).toBe("");
+  });
+});
+
+/**
+ * A phone-width layout failure measured on production 2026-09-01, on /games/1962700 at
+ * 390px. jsdom has no layout engine, so what is asserted here is the STRUCTURE that
+ * produces the measured result — the pixels themselves were verified with Playwright:
+ * the press headline box 146px -> 286px.
+ */
+describe("NotableCoverageCard at phone widths", () => {
   it("gives the headline the full row below sm instead of a 146px sliver (A11)", () => {
     const { container } = render(<NotableCoverageCard press={press({ notable: [article()] })} />);
     const headline = within(container).getByText("How to get gold in Subnautica 2", { selector: "span" });

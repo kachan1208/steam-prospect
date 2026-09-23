@@ -88,7 +88,10 @@ const TEARDOWN = {
   eligible_reviews: false,
   n_reviews_sampled: 22_880,
   review_aspects: [],
-  caveats: [],
+  caveats: [
+    "Press coverage is fuzzy-matched (article_game_mentions, confidence-filtered) and skews recent.",
+    "Press coverage tone is VADER sentiment of each matched article's headline + short summary.",
+  ],
   press: {
     total_mentions: 101,
     n_sources: 6,
@@ -245,13 +248,37 @@ describe("GameProfile — the Estimates panel prints one estimator", () => {
   });
 });
 
-describe("GameProfile — press tone percentage and its base agree", () => {
-  it("prints the rated base (positive + negative), not the all-scored base", async () => {
+/**
+ * The Press & attention card after the 2026-09-23 cleanup: no genre channel mix (press-only
+ * since 2026-08-25, so it was always one "Press 100%" bar under copy promising creator
+ * channels), no headline-VADER "coverage tone", and every outlet bar labelled.
+ */
+describe("GameProfile — Press & attention shows the footprint, not the retired reads", () => {
+  it("drops the channel mix, the creator copy and every tone read", async () => {
     renderProfile();
-    // 58 / (58 + 12) = 83%. The old chip said "83% positive · 101 scored", and 58/101 = 57%.
-    await waitFor(() => expect(screen.getAllByText(/83% positive of 70 rated/).length).toBeGreaterThan(0));
-    expect(screen.queryByText(/83% positive · 101 scored/)).toBeNull();
-    expect(await screen.findByText(/31 neutral excluded/)).toBeTruthy();
+    expect(await screen.findByText(/101/, { selector: "span.tabular" })).toBeTruthy();
+    const body = document.body.textContent ?? "";
+    expect(body).not.toMatch(/Where this genre gets attention/);
+    expect(body).not.toMatch(/YouTube|Reddit|Twitch|creator mention/);
+    expect(body).not.toMatch(/audience-weighted/);
+    expect(body).not.toMatch(/Coverage tone|% positive of 70 rated|Mostly positive|Positive tone|Negative tone/);
+    // No request for the retired genre mix either.
+    const calls = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0]));
+    expect(calls.some((u) => u.includes("/channel-mix"))).toBe(false);
+  });
+
+  it("states the footprint with its dates in the page's one date format", async () => {
+    renderProfile();
+    expect(await screen.findByText(/press mentions across/)).toBeTruthy();
+    expect(screen.getByText(/Mar 6, 2017 – Feb 5, 2026/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain("2017-03-06");
+  });
+
+  it("drops the API's press-tone caveat along with the tone read it described", async () => {
+    renderProfile();
+    expect(await screen.findByText("Read this with caveats")).toBeTruthy();
+    expect(screen.getByText(/Press coverage is fuzzy-matched/)).toBeTruthy();
+    expect(screen.queryByText(/Press coverage tone is VADER/)).toBeNull();
   });
 });
 

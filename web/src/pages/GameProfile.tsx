@@ -16,7 +16,6 @@ import {
 } from "recharts";
 
 import { AspectDivergingBars } from "../components/charts/AspectDivergingBars";
-import { ChannelShareBars } from "../components/charts/ChannelShareBars";
 import { GameMetricDrilldown, DRILLDOWN_META, type DrilldownMetric, type OwnersPerReview } from "../components/charts/GameMetricDrilldown";
 import { LanguageSplitChart } from "../components/charts/LanguageSplitChart";
 import { LaunchShapeBars } from "../components/charts/LaunchShapeBars";
@@ -27,6 +26,7 @@ import { TooltipPanel, type TooltipRow } from "../components/charts/TooltipPanel
 import { changeTooltipRow, PLUMB_LABEL_BAND, PLUMB_LEGEND_ROW_PX, PlumbLegendTick, plumbLabelProps, usePlotWidth } from "../components/charts/plumbLabels";
 import { NotableCoverageCard } from "../components/NotableCoverageCard";
 import { Badge } from "../components/ui/Badge";
+import { InfoTip } from "../components/ui/InfoTip";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ErrorState } from "../components/ui/ErrorState";
 import { Loading } from "../components/ui/Loading";
@@ -39,7 +39,6 @@ import { gameWatchlistId, toggleGameWatchlist, useWatchlist, WATCHLIST_CAP } fro
 import {
   isNotFound,
   notFoundReason,
-  useGameChannelMix,
   useGameComparables,
   useGameEvents,
   useGameProfile,
@@ -53,6 +52,7 @@ import {
 } from "../lib/api";
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
+import { fmtDay } from "../lib/dates";
 import { estimatedUnits } from "../lib/estimates";
 import { DEFAULT_NICHE_CUT, findNicheVariant } from "../lib/nicheSelection";
 import { axisScale, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName, isFreeTitle } from "../lib/format";
@@ -72,9 +72,11 @@ const CONDENSED: CSSProperties = { fontFamily: '"Barlow Condensed", "Barlow", sy
  * language in lib/palette.ts, kept local since that file is foundation-owned. */
 const BAR_MUTED = "color-mix(in srgb, var(--accent-400) 55%, transparent)";
 
-/** DuckDB TIMESTAMP strings ("2017-03-06 23:59:53" / "...53.255353") -> "2017-03-06". */
-function dateOnly(s: string | null): string {
-  return s ? s.slice(0, 10) : "—";
+/** The teardown's caveats minus the ones about things this page no longer shows: the press
+ * TONE caveat (the API still sends it) describes a coverage-tone read that was removed
+ * because it was wrong more often than right — see components/NotableCoverageCard.tsx. */
+function pageCaveats(caveats: readonly string[]): string[] {
+  return caveats.filter((c) => !/^press coverage tone\b/i.test(c.trim()));
 }
 
 /** ReviewTimelinePoint.period is "YYYY-MM" -> "Jul 2026", for chart tooltips/captions. */
@@ -605,7 +607,6 @@ export default function GameProfile() {
   // "undefined — Prospect"), so a history entry reads as the game you looked at.
   usePageTitle(profileQ.data?.name);
   const teardownQ = useGameTeardown(validAppid ? appid : null);
-  const channelMixQ = useGameChannelMix(validAppid ? appid : null);
 
   // "In niches" (sidebar, §4c) — up to 3 of the game's own top tags, resolved to their real
   // niche opportunity score via the SAME endpoint the Niche Finder/deep-dive use. Fixed-count
@@ -1419,121 +1420,72 @@ export default function GameProfile() {
                 )}
               </BlueprintPanel>
 
-        {/* One card for both marketing reads (2026-09-19, user request), in the order the user
-            asked for: where the GENRE gets attention first (the channel mix — genre-level
-            because per-game channel data is too sparse), then this game's own press stats,
-            and the article links follow in NotableCoverageCard below. Attention → stats →
-            links. The genre half is hidden (no empty section) when the genre has no channel
-            rows or the mart predates the channel-mix ETL — same pattern as NotableCoverageCard. */}
+        {/* THIS GAME'S PRESS FOOTPRINT (2026-09-23). The card used to open with "Where this
+            genre gets attention" — the genre's marketing-channel mix — but mart_channel_mix has
+            been press-only since the creator channels retired on 2026-08-25, so that half was
+            always one "Press 100%" bar under copy still promising YouTube/Reddit/Twitch/X
+            creator mentions and an audience-weighted hover that no longer exist. It is gone,
+            and so is the "Coverage tone" bar: headline VADER that reads PC Gamer's "Balatro
+            review" as negative and tracks a game's NAME more than its coverage (see
+            components/NotableCoverageCard.tsx). What is left is what the scrape knows: who
+            covered the game, and when. */}
         <BlueprintPanel
           title="Press & attention"
-          subtitle="Where this genre's attention comes from, then this game's own journalist coverage"
+          subtitle="This game's own coverage in the tracked games-press outlets — journalist articles only (Steam News excluded)"
         >
-            {channelMixQ.data && channelMixQ.data.channels.length > 0 && (
-              <div className="mb-5 border-b border-chartborder pb-4">
-                <div className="kicker text-[11px] text-ink-secondary">Where this genre gets attention</div>
-                <div className="mb-3 mt-0.5 text-[11px] text-ink-muted">
-                  Marketing-channel mix for {channelMixQ.data.genre} — each channel's share of tracked coverage (press
-                  articles + YouTube/Reddit/Twitch/X creator mentions), a genre-level read, not this game's own footprint
-                </div>
-                <ChannelShareBars channels={channelMixQ.data.channels} />
-                <p className="mt-3 text-[11px] italic text-ink-muted">
-                  One press article = one creator mention = one unit of volume. Hover a channel for its audience-weighted
-                  share — that read skews almost entirely toward big-subscriber channels, since a creator mention counts
-                  their whole audience while a press article counts 1.
-                </p>
-              </div>
-            )}
-            <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-              <div className="kicker text-[11px] text-ink-secondary">This game's press footprint</div>
-              {teardownQ.data && teardownQ.data.press.total_mentions > 0 && (
-                <div className="text-[11px] text-ink-muted">
-                  {fmtInt(teardownQ.data.press.total_mentions)} filtered mentions across {teardownQ.data.press.n_sources} outlet
-                  {teardownQ.data.press.n_sources === 1 ? "" : "s"}
-                  {teardownQ.data.press.first_seen
-                    ? ` · ${dateOnly(teardownQ.data.press.first_seen)} – ${dateOnly(teardownQ.data.press.last_seen)}`
-                    : ""}
-                  {" "}· journalist coverage only (Steam News excluded)
-                </div>
-              )}
+          {teardownQ.isLoading && <Loading className="h-32 text-xs" />}
+          {teardownQ.data && teardownQ.data.press.total_mentions === 0 && (
+            <div className="flex h-24 items-center justify-center text-center text-xs text-ink-muted">
+              No press coverage found for this game above the match-confidence floor.
             </div>
-            {teardownQ.isLoading && (
-              <Loading className="h-32 text-xs" />
-            )}
-            {teardownQ.data && teardownQ.data.press.total_mentions === 0 && (
-              <div className="flex h-24 items-center justify-center text-xs text-ink-muted">
-                No press coverage found for this game above the match-confidence floor.
+          )}
+          {teardownQ.data && teardownQ.data.press.total_mentions > 0 && (
+            <>
+              <div className="mb-3 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12px] text-ink-secondary">
+                <span>
+                  <span className="tabular font-medium text-ink-primary">{fmtInt(teardownQ.data.press.total_mentions)}</span>{" "}
+                  press mention{teardownQ.data.press.total_mentions === 1 ? "" : "s"} across{" "}
+                  <span className="tabular font-medium text-ink-primary">{fmtInt(teardownQ.data.press.n_sources)}</span> outlet
+                  {teardownQ.data.press.n_sources === 1 ? "" : "s"}
+                  {teardownQ.data.press.first_seen && (
+                    <>
+                      {" "}· {fmtDay(teardownQ.data.press.first_seen)} – {fmtDay(teardownQ.data.press.last_seen) ?? "?"}
+                    </>
+                  )}
+                </span>
+                <InfoTip
+                  term="press_mentions"
+                  worked={`${fmtInt(teardownQ.data.press.total_mentions)} matched mentions from ${fmtInt(
+                    teardownQ.data.press.n_sources,
+                  )} outlet${teardownQ.data.press.n_sources === 1 ? "" : "s"}${
+                    teardownQ.data.press.first_seen
+                      ? `, first ${fmtDay(teardownQ.data.press.first_seen)}, latest ${fmtDay(teardownQ.data.press.last_seen) ?? "unknown"}`
+                      : ""
+                  }`}
+                />
               </div>
-            )}
-            {teardownQ.data && teardownQ.data.press.total_mentions > 0 && (
-              <>
-                {teardownQ.data.press.press_pos_share != null &&
-                  (() => {
-                    const p = teardownQ.data.press;
-                    const posPct = (p.press_pos_share as number) * 100;
-                    const mc = p.mean_compound;
-                    return (
-                      <div className="mb-4">
-                        <div className="mb-1 flex items-center justify-between gap-2 text-xs">
-                          <span className="text-ink-muted">Coverage tone (headlines &amp; summaries)</span>
-                          {/* The share is positive / (positive + negative) — the base printed
-                              beside it has to be that same base, not n_scored_articles, or the
-                              division a reader does on the line below fails (Hollow Knight:
-                              58/12/31, so 83% is 58/70 and NOT 58/101). */}
-                          <span className="tabular shrink-0 text-ink-secondary">
-                            {fmtPct(p.press_pos_share, 0)} positive of {fmtInt(p.n_pos_articles + p.n_neg_articles)} rated
-                          </span>
-                        </div>
-                        <div
-                          className="relative h-3 bg-page"
-                          title={`${p.n_pos_articles} positive / ${p.n_neg_articles} negative${
-                            p.n_neutral_articles ? ` (${p.n_neutral_articles} neutral excluded)` : ""
-                          } of ${p.n_scored_articles} scored articles`}
-                        >
-                          <div className="absolute inset-y-0 left-0" style={{ width: `${posPct}%`, backgroundColor: CSS_VAR.praise }} />
-                          <div
-                            className="absolute inset-y-0 right-0"
-                            style={{ width: `${100 - posPct}%`, backgroundColor: CSS_VAR.complaint }}
-                          />
-                          <div className="absolute inset-y-0 w-[2px] bg-page" style={{ left: `calc(${posPct}% - 1px)` }} />
-                        </div>
-                        <div className="mt-1 text-[11px] text-ink-muted">
-                          {fmtInt(p.n_pos_articles)} positive · {fmtInt(p.n_neg_articles)} negative
-                          {p.n_neutral_articles > 0 && (
-                            <> · {fmtInt(p.n_neutral_articles)} neutral (excluded from the share)</>
-                          )}
-                          {typeof mc === "number" && (
-                            <>
-                              {" · "}mean <span className="tabular">{mc >= 0 ? "+" : ""}{mc.toFixed(2)}</span>
-                            </>
-                          )}{" "}
-                          · VADER on headlines/summaries (coarse — an outlet's framing, not a verdict)
-                        </div>
-                      </div>
-                    );
-                  })()}
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div>
-                    <div className="mb-1 text-xs text-ink-muted">Mentions by outlet</div>
-                    <PressBySourceChart data={teardownQ.data.press.by_source} />
-                  </div>
-                  <div>
-                    <div className="mb-1 text-xs text-ink-muted">Coverage over time</div>
-                    <PressTimelineChart points={teardownQ.data.press.timeline} />
-                  </div>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <div className="mb-1 text-xs text-ink-muted">Mentions by outlet</div>
+                  <PressBySourceChart data={teardownQ.data.press.by_source} />
                 </div>
-              </>
-            )}
-          </BlueprintPanel>
+                <div>
+                  <div className="mb-1 text-xs text-ink-muted">Coverage over time</div>
+                  <PressTimelineChart points={teardownQ.data.press.timeline} />
+                </div>
+              </div>
+            </>
+          )}
+        </BlueprintPanel>
 
           {teardownQ.data && teardownQ.data.press.notable.length > 0 && (
             <NotableCoverageCard press={teardownQ.data.press} />
           )}
 
-          {teardownQ.data && teardownQ.data.caveats.length > 0 && (
+          {teardownQ.data && pageCaveats(teardownQ.data.caveats).length > 0 && (
             <BlueprintPanel title="Read this with caveats">
               <ul className="flex flex-col gap-1.5 text-xs text-ink-secondary">
-                {teardownQ.data.caveats.map((c, i) => (
+                {pageCaveats(teardownQ.data.caveats).map((c, i) => (
                   <li key={i} className="flex gap-2">
                     <span className="shrink-0 text-ink-muted">·</span>
                     <span>{c}</span>

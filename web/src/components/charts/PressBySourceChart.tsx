@@ -42,6 +42,10 @@ export function PressBySourceChart({ data, height }: { data: PressBySource[]; he
           axisLine={{ stroke: "var(--baseline)" }}
           allowDecimals={false}
         />
+        {/* interval={0}: every outlet keeps its name. Left to recharts' default
+            ("preserveEnd" collision thinning) a 4-bar chart labelled only 2 of them — Balatro
+            read "PC Gamer" and "IGN" beside four bars, two outlets anonymous. The rows are
+            28px apart, so the 11px names never actually collide. */}
         <YAxis
           type="category"
           dataKey="source"
@@ -50,6 +54,7 @@ export function PressBySourceChart({ data, height }: { data: PressBySource[]; he
           tickLine={false}
           axisLine={false}
           width={112}
+          interval={0}
         />
         <Tooltip
           cursor={{ fill: "var(--gridline)", opacity: 0.5 }}
