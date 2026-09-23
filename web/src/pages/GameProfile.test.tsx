@@ -600,6 +600,21 @@ describe("GameProfile — an Early Access graduate's 1.0 on the velocity chart",
   });
 });
 
+describe("GameProfile — one name per concept", () => {
+  it("titles the review chart with the glossary's name and never a retired one", async () => {
+    serve(/\/comparables/, COMPARABLES);
+    renderDetailed();
+    expect(await screen.findByText(/Monthly reviews since launch/)).toBeTruthy();
+    await screen.findByRole("link", { name: "Slay the Spire" });
+    const body = document.body.textContent ?? "";
+    for (const retired of ["Review velocity", "Gross revenue", "Units sold", "Percentile vs. genre", "Opportunity v2", "opp "]) {
+      expect(body, retired).not.toContain(retired);
+    }
+    expect(screen.getByRole("button", { name: "About Monthly reviews" })).toBeTruthy();
+    expect(screen.getByText("Positive %")).toBeTruthy();
+  });
+});
+
 describe("GameProfile — comparables explain their columns", () => {
   it("names the price band of a game with no list price in words, not as $-0.01–$0.01", async () => {
     serve(/\/comparables/, { ...COMPARABLES, price_band: { low: -0.01, high: 0.01 } });

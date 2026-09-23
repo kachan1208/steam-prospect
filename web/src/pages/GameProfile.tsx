@@ -1137,7 +1137,13 @@ export default function GameProfile() {
         <div className="contents lg:flex lg:min-w-0 lg:flex-col lg:gap-[22px]">
           <BlueprintPanel
             className="order-3 min-w-0 lg:order-none"
-            title="Review velocity since launch"
+            title={
+              // The glossary's one name for this series ("Review velocity" is retired), with its ⓘ.
+              <span className="inline-flex items-center gap-1.5">
+                {glossary("review_velocity").label} since launch
+                <InfoTip term="review_velocity" />
+              </span>
+            }
             action={<span className="kicker text-[11px] text-ink-muted">Monthly</span>}
           >
             {reviewsQ.isLoading && (
@@ -1354,7 +1360,7 @@ export default function GameProfile() {
               {genreCurveQ.data && (
                 <p className="mt-2 text-[11px] italic text-ink-muted">
                   Genre median across {fmtInt(genreCurveQ.data.points[0]?.n_games ?? 0)} {genreName ?? ""} titles at least a
-                  year old — the yardstick for this game&apos;s own month-by-month reviews in Review velocity above.
+                  year old — the yardstick for this game&apos;s own month-by-month reviews in Monthly reviews above.
                 </p>
               )}
             </BlueprintPanel>
@@ -1471,7 +1477,7 @@ export default function GameProfile() {
                             <HeaderLabel term="reviews" style={COMPARABLE_HEADER} />
                           </th>
                           <th className="px-2 py-1.5 font-medium">
-                            <HeaderLabel term="positive_ratio" label="Positive" style={COMPARABLE_HEADER} />
+                            <HeaderLabel term="positive_ratio" style={COMPARABLE_HEADER} />
                           </th>
                           <th className="px-2 py-1.5 font-medium">
                             <HeaderLabel

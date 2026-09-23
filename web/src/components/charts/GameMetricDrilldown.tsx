@@ -287,6 +287,27 @@ function monthlyDot(partial: string | null, color: string) {
   };
 }
 
+/** The monthly-average fallback's dots: solid, and hollow for the month still being counted. */
+function ccuDot(partial: string | null) {
+  return function CcuDot(props: { cx?: number; cy?: number; index?: number; payload?: GameTrendPoint }) {
+    const { cx, cy, index, payload } = props;
+    if (cx == null || cy == null || !payload || payload.ccu_avg == null) return <g key={`cd-${index}`} />;
+    const isPartial = payload.period === partial;
+    return (
+      <circle
+        key={`cd-${index}`}
+        cx={cx}
+        cy={cy}
+        r={3}
+        fill={isPartial ? "var(--surface-1)" : CSS_VAR.demand}
+        stroke={CSS_VAR.demand}
+        strokeWidth={isPartial ? 1.5 : 0}
+        strokeDasharray={isPartial ? "2 1.5" : undefined}
+      />
+    );
+  };
+}
+
 function LivePlayersDrilldown({
   points,
   daily,
@@ -321,6 +342,7 @@ function LivePlayersDrilldown({
   const monthly = daily?.monthly ?? [];
   const monthlyZoom = useDragZoom(monthly, "month");
   const monthlyPartial = partialMonth(monthly[monthly.length - 1]?.month.slice(0, 7), asOf);
+  const ccuPartial = partialMonth(points[points.length - 1]?.period, asOf);
   const seriesAsOf = daily?.data_as_of ?? null;
 
   return (
@@ -414,7 +436,7 @@ function LivePlayersDrilldown({
                   dataKey="ccu_avg"
                   stroke={CSS_VAR.demand}
                   strokeWidth={1.5}
-                  dot={{ r: 3, fill: CSS_VAR.demand, strokeWidth: 0 }}
+                  dot={ccuDot(ccuPartial)}
                   isAnimationActive={false}
                 />
                 {ccuMonthZoom.selection && (
