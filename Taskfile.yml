@@ -2,10 +2,27 @@ version: "3"
 
 tasks:
   etl:
-    desc: Build the DuckDB analytics marts from the read-only Steam source DB (writes data/prospect_<date>.duckdb, repoints data/current.duckdb).
+    desc: >-
+      Build the DuckDB analytics marts from the Steam source DB ($PROSPECT_SOURCE_DB) into
+      $PROSPECT_DATA_DIR (writes prospect_<date>.duckdb, repoints current.duckdb). Both env vars
+      are required; extra build_marts flags go after `--`, e.g. `task etl -- --light`.
     dir: etl
+    # No path defaults, on purpose: this task used to run build_marts with no flags at all, and
+    # build_marts then defaulted to a stale August copy of the source and to the repo's data/ —
+    # a weeks-old mart, built in the wrong place, exit 0. See README.md, "Building the marts".
+    preconditions:
+      - sh: '[ -n "$PROSPECT_SOURCE_DB" ] && [ -n "$PROSPECT_DATA_DIR" ]'
+        msg: |-
+          task etl needs two env vars — there are no path defaults:
+            export PROSPECT_SOURCE_DB=/path/to/steam-scraper/steam_games.db   # the LIVE scraper DB
+            export PROSPECT_DATA_DIR=/path/to/prospect-data                   # must already exist
+          then rerun `task etl` (extra flags after `--`). See README.md, "Building the marts".
+      - sh: '[ -f "$PROSPECT_SOURCE_DB" ]'
+        msg: 'PROSPECT_SOURCE_DB={{.PROSPECT_SOURCE_DB}} is not a file.'
+      - sh: '[ -d "$PROSPECT_DATA_DIR" ]'
+        msg: 'PROSPECT_DATA_DIR={{.PROSPECT_DATA_DIR}} is not a directory — create it first (mkdir -p) if this is a first build.'
     cmds:
-      - .venv/bin/python build_marts.py
+      - .venv/bin/python build_marts.py --source "$PROSPECT_SOURCE_DB" --data-dir "$PROSPECT_DATA_DIR" {{.CLI_ARGS}}
 
   api:
     desc: Run the FastAPI backend on :8000 (auto-reload).

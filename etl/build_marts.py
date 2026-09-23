@@ -8,16 +8,29 @@ counts, then atomically repoints the `data/current.duckdb` symlink at the new fi
 Why DuckDB: the marts lean on median()/quantile_cont()/percent_rank()/regr_slope() which
 SQLite lacks. The SQLite source is opened READ_ONLY and never mutated.
 
-Run:  python build_marts.py            (paths default relative to this file)
-      python build_marts.py --source /path/to/steam_games.db --data-dir /path/to/data
+Run:  python build_marts.py --source /path/to/steam_games.db --data-dir /path/to/data
+      (or set PROSPECT_SOURCE_DB / PROSPECT_DATA_DIR; there are NO path defaults — see
+      build_arg_parser for why a default here once built a stale mart in the wrong place)
 
-Exit codes (deploy/prospect-refresh.sh treats any non-zero as "keep the previous mart"):
+Safe to run unattended, on Linux or macOS, with no wrapper script around it: it takes an
+exclusive lock on the data dir (a second run exits 3 without touching anything), refuses to
+start below a free-disk floor (exit 4), caps DuckDB's spill below free disk, pins every date to
+UTC, and warns when the source DB has stopped being written. The PROSPECT_* knobs are listed in
+the ETL section of README.md.
+
+Exit codes (a scheduler should treat any non-zero as "keep the previous mart"):
   0  built, validated and swapped
   1  the build FINISHED but the pre-swap validation gate refused the swap. current.duckdb is
      untouched and the finished artifact is KEPT at data/prospect_<version>.duckdb.building
      (its spill dir is not) — see the remedy the run prints; none of the options need a rebuild.
-  2  refused before doing any work (missing source DB, missing aspect model, --light guard,
-     contradictory flags such as --light with --fulltext build).
+     (An unhandled exception also exits 1 — Python's own code — so read the log to tell them apart.)
+  2  refused before doing any work (missing/unset source DB or data dir, missing aspect model,
+     --light guard, contradictory flags such as --light with --fulltext build, a garbled knob).
+  3  BUSY: another build_marts run holds this data dir's lock (a mart build, or a
+     --rescore-only/--repair-arms run for those modes) — nothing was touched. Retry later; a
+     scheduler can treat it as "skipped", not "failed".
+  4  refused before doing any work: free disk on the data dir is below PROSPECT_DISK_MIN_FREE_GB
+     even after the dead-scratch sweep.
 
 DEPLOY NOTE — the first build after the model-fingerprint change (2026-08). The sentiment
 cache is keyed on a hash of the scoring config, which includes a fingerprint of
@@ -38,19 +51,22 @@ build, so:
 from __future__ import annotations
 
 import argparse
+import errno
+import fcntl
 import gc
 import hashlib
 import json
 import multiprocessing
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import warnings
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -768,9 +784,12 @@ SCORE_CHUNK_WINDOWS = 2000       # windows per task handed to one worker (see _S
 # overshoot its deadline (it only stops BETWEEN buckets) is one bucket. Contrast the old fixed
 # 8: on a wipe that is 6.5h PER BUCKET, larger than the entire nightly budget, so not one
 # bucket would ever complete and a resumable rescore would never advance a single step.
-# Bigger is not free either — every bucket re-streams the 24.8M-row sqlite reviews table
-# (~50s on the droplet), so the overhead is N x 50s: 2.7h across a 196-bucket rescore (+5% on
-# 52h of scoring), where N=1000 would be 13.9h (+27%).
+# Bigger is not free either — every bucket re-streamed the 24.8M-row sqlite reviews table
+# (~50s on the droplet), so the overhead was N x 50s: 2.7h across a 196-bucket rescore (+5% on
+# 52h of scoring), where N=1000 would be 13.9h (+27%). SINCE 2026-09-22 a bucket fetches its
+# text by primary key instead (_fetch_review_text: ~2s for 33K reviews where the stream took
+# 33-213s), so the per-bucket overhead is now proportional to the bucket, and this sizing is
+# about the deadline arithmetic above only.
 RESCORE_BUCKET_REVIEWS = 125_000
 
 # THE UNIT OF WORK for repair_sentiment_arms (--repair-arms), in reviews per hash bucket.
@@ -1183,8 +1202,51 @@ MART_FILES = [
 HERE = Path(__file__).resolve().parent
 
 
+# --------------------------------------------------------------------------------------
+# ONE CLOCK: UTC (2026-09-22). DuckDB's TimeZone setting defaults to the HOST's zone, and
+# nothing here used to pin it. On the owner's Mac (Europe/Kiev, UTC+3) a review written at
+# 22:30 UTC was dated the NEXT day by `CAST(to_timestamp(...) AS DATE)` in staging, CURRENT_DATE
+# (the 24m windows, trailing-30d counts) was the local date, and date.today() named the mart
+# and set CUR_YEAR — while mart_game_trends.sql's make_timestamp() and every *_at column are
+# UTC. One build therefore mixed two calendars, and the same source produced different marts on
+# a UTC droplet and a UTC+3 laptop. Every DuckDB connection the ETL opens goes through
+# _connect(), which pins the session to UTC before any query runs (ATTACHed databases — the
+# sqlite source, the sentiment cache, the previous mart — share their connection's session),
+# and every Python-side date comes from _utc_today(). Pinned by tests/test_build_timezone_utc.py,
+# which runs the build under a non-UTC TZ.
+# --------------------------------------------------------------------------------------
+def _connect(database: str = ":memory:", read_only: bool = False) -> duckdb.DuckDBPyConnection:
+    """duckdb.connect() with the session TimeZone pinned to UTC — the only way the ETL opens
+    DuckDB. See the ONE CLOCK note above."""
+    con = duckdb.connect(database, read_only=read_only)
+    try:
+        con.execute("SET TimeZone = 'UTC'")
+    except BaseException:
+        con.close()
+        raise
+    return con
+
+
+def _cursor(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
+    """con.cursor(), UTC-pinned. A DuckDB cursor is a NEW connection to the same database and
+    does NOT inherit its parent's session settings (measured: a cursor of a UTC-pinned
+    connection reports the host zone), so it needs the same SET as _connect()."""
+    cur = con.cursor()
+    try:
+        cur.execute("SET TimeZone = 'UTC'")
+    except BaseException:
+        cur.close()
+        raise
+    return cur
+
+
+def _utc_today() -> date:
+    """Today's date in UTC — the mart version and CUR_YEAR, whatever the host's zone."""
+    return datetime.now(timezone.utc).date()
+
+
 def build_params() -> dict[str, str]:
-    today = date.today()
+    today = _utc_today()
     cur_year = today.year
     # Aspect keyword regexes (single source of truth) rendered into both teardown SQL files,
     # plus the shared sentiment/excerpt window size — see ASPECT_LEXICON above.
@@ -2572,7 +2634,7 @@ def _stream_scored(con: duckdb.DuckDBPyConnection, select_sql: str, insert_sql: 
     same order, as the inline path inserts. Returns the number of rows scored."""
     target = _StagedInsert(con, insert_sql)
     pool = _SCORE_POOL
-    read = con.cursor()
+    read = _cursor(con)
     read.execute(select_sql)
     n = 0
     try:
@@ -2668,11 +2730,11 @@ def _aspect_window_sql(pool: str) -> str:
     mart_game_aspect_reviews.sql can join each excerpt to its sentiment) rather than a boolean
     column.
 
-    PERFORMANCE (see the ASPECT_WINDOW_SLICE_BEFORE/CHARS comment above): the sentence regex runs
-    on a small substr slice around the first keyword match's position (an inner subquery computes
+    PERFORMANCE (see the ASPECT_WINDOW_SLICE_BEFORE/CHARS comment above): the window is cut from
+    a small substr slice around the first keyword match's position (an inner subquery computes
     that position once via _aspect_keyword_position_regex), not the whole review_text -- output is
-    byte-identical, but the expensive pattern scans ~ASPECT_WINDOW_SLICE_CHARS characters instead
-    of the full review body. One extra wrinkle beyond a plain substr: when the slice doesn't start
+    byte-identical, but the windowing scans ~ASPECT_WINDOW_SLICE_CHARS characters instead of the
+    full review body. One extra wrinkle beyond a plain substr: when the slice doesn't start
     at the review's true beginning, its first few characters can be the TAIL of a word that was
     truncated mid-word by the cut (e.g. slicing into "...for the most p|art you're..." at the `|`
     leaves "art you're..." at the slice's start) -- and because a \\b boundary is satisfied at the
@@ -2681,30 +2743,80 @@ def _aspect_window_sql(pool: str) -> str:
     with a `^\\S+` regexp_replace (only when the slice doesn't start at position 1, where there's
     nothing to truncate) before the sentence regex ever sees it -- found and fixed via the
     byte-identical-output check against real review text (see the ETL run report), not by
-    inspection."""
+    inspection.
+
+    THE WINDOW IS CUT WITHOUT THE SENTENCE REGEX (2026-09-22). _aspect_sentence_regex is still
+    the DEFINITION of the window, but running it — `regexp_extract(slice, sent, 0, 'i')` — is the
+    one expensive thing left in scoring: RE2 unrolls the two {0,ASPECT_SENTENCE_CHARS} negated
+    classes into ~320 multi-range states, its lazy DFA thrashes, and an extract that needs match
+    boundaries falls back to the NFA (~1ms per window single-threaded, against ~70us for VADER +
+    the classifier on the same window). mart_game_aspect_reviews.sql hit the identical wall on its
+    excerpts and replaced the regex with an anchored-run cut (see its PERFORMANCE (2026-08-28)
+    note): the match is boundary-free, so it lies inside the maximal boundary-free run of the
+    slice that holds the FIRST keyword; inside that run [^.!?;\\n] and [\\s\\S] are the same class;
+    so two anchored, alternation-free extractions find the run, and one anchored [\\s\\S] pattern
+    with a one-character sentinel cuts the window out of it. This function now uses that SAME
+    algebra over the same slice — so scoring and excerpts cut their windows the same way again —
+    and its output is byte-identical to the regex it replaces, which is what keeps every cached
+    score valid with no wipe: pinned by a differential fuzz over adversarial reviews in
+    tests/test_aspect_window_sql_rewrite.py, and checked against 34K real pool reviews from the
+    live source before it shipped (0 differences; ~900us -> ~40us per window).
+
+    ONE DEVIATION from the excerpt arm's spelling, and it is a correctness fix, not a style
+    choice: the left half of the run is found with an END-anchored extraction ('[^.!?;\\n]*$' over
+    the prefix), NOT reverse() / '^[^.!?;\\n]*' / reverse(). DuckDB's reverse() reverses GRAPHEME
+    CLUSTERS whenever the string has any non-ASCII character, and a CR LF pair is one cluster —
+    so "…\\r\\nI've…" reverses with its "\\r\\n" intact, the anchored scan eats the '\\r' before
+    stopping at the '\\n', and the window gains a stray leading '\\r' the regex never produced.
+    Measured on the real sample: 214 of 29,676 windows (0.7%, every Windows-line-ending review
+    with a non-ASCII character in it) — the sequence the excerpt fuzz never generates. A boundary
+    character followed by a combining mark is the same bug from the other side.
+
+    Each step is its own nested SELECT so every value is computed once, and a caller that
+    selects only the key columns (repair_sentiment_arms' raw-arm scan) still has all of it
+    pruned away."""
+    sc = ASPECT_SENTENCE_CHARS
     arms = []
     for label, _placeholder, rx in ASPECT_LEXICON:
         rxe = rx.replace("'", "''")  # SQL single-quote escape (none today, but be safe)
-        sent_e = _aspect_sentence_regex(rx).replace("'", "''")
         pos_e = _aspect_keyword_position_regex(rx).replace("'", "''")
         label_e = label.replace("'", "''")
         arms.append(
             f"""
         SELECT appid, recommendationid, '{label_e}' AS aspect,
-            regexp_extract(
-                CASE WHEN kw_pos - {ASPECT_WINDOW_SLICE_BEFORE} > 1
-                     THEN regexp_replace(
-                              substr(review_text, kw_pos - {ASPECT_WINDOW_SLICE_BEFORE}, {ASPECT_WINDOW_SLICE_CHARS}),
-                              '^\\S+', '')
-                     ELSE substr(review_text, 1, {ASPECT_WINDOW_SLICE_CHARS})
-                END,
-                '{sent_e}', 0, 'i'
-            ) AS window_text
+            CASE WHEN regexp_matches(slice, '{rxe}', 'i')
+                 THEN substr(regexp_extract(
+                          CASE WHEN length(clause_l) > {sc}
+                               THEN substr(clause_l || clause_r, length(clause_l) - {sc})
+                               ELSE ' ' || clause_l || clause_r
+                          END,
+                          '^[\\s\\S][\\s\\S]{{0,{sc}}}(?:{rxe})[\\s\\S]{{0,{sc}}}', 0, 'i'
+                      ), 2)
+                 ELSE ''
+            END AS window_text
         FROM (
-            SELECT appid, recommendationid, review_text,
-                length(regexp_extract(review_text, '{pos_e}', 1, 'i')) + 1 AS kw_pos
-            FROM {pool}
-            WHERE regexp_matches(review_text, '{rxe}', 'i')
+            SELECT appid, recommendationid, slice,
+                regexp_extract(substr(slice, 1, kw_off - 1), '[^.!?;\\n]*$', 0) AS clause_l,
+                regexp_extract(substr(slice, kw_off), '^[^.!?;\\n]*', 0) AS clause_r
+            FROM (
+                SELECT appid, recommendationid, slice,
+                    length(regexp_extract(slice, '^([\\s\\S]*?)(?:{rxe})', 1, 'i')) + 1 AS kw_off
+                FROM (
+                    SELECT appid, recommendationid,
+                        CASE WHEN kw_pos - {ASPECT_WINDOW_SLICE_BEFORE} > 1
+                             THEN regexp_replace(
+                                      substr(review_text, kw_pos - {ASPECT_WINDOW_SLICE_BEFORE}, {ASPECT_WINDOW_SLICE_CHARS}),
+                                      '^\\S+', '')
+                             ELSE substr(review_text, 1, {ASPECT_WINDOW_SLICE_CHARS})
+                        END AS slice
+                    FROM (
+                        SELECT appid, recommendationid, review_text,
+                            length(regexp_extract(review_text, '{pos_e}', 1, 'i')) + 1 AS kw_pos
+                        FROM {pool}
+                        WHERE regexp_matches(review_text, '{rxe}', 'i')
+                    )
+                )
+            )
         )"""
         )
     return "\nUNION ALL\n".join(arms)
@@ -2722,6 +2834,14 @@ def _aspect_window_sql(pool: str) -> str:
 # @ASPECT_SENTENCE_CHARS@ would render to), so the rendered SQL is byte-identical to the
 # hand-maintained original — pinned by rendering before/after in review, and any future
 # change to this template must keep the rendered output diffable against the marts.
+#
+# ONE DELIBERATE CHANGE SINCE (2026-09-22): clause_l is an END-anchored extraction, not
+# reverse() / '^[^.!?;\n]*' / reverse(). DuckDB's reverse() reverses grapheme clusters as soon as
+# a string has any non-ASCII character, and CR LF is one cluster, so on a Windows-line-ending
+# review with (say) an em dash in it the old spelling kept a stray '\r' in front of the clause —
+# a window that is not a substring of the review, so strpos() missed it and the excerpt lost its
+# '…' markers too. The end-anchored form is what the old regex always produced (see
+# _aspect_window_sql, where the same fix is pinned by tests/test_aspect_window_sql_rewrite.py).
 _ASPECT_EXCERPT_ARM = """    SELECT appid, recommendationid, aspect, sentiment, votes_up, playtime_minutes,
         timestamp_created, language,
         CASE WHEN kw_pos - {slice_before} > 1
@@ -2729,7 +2849,7 @@ _ASPECT_EXCERPT_ARM = """    SELECT appid, recommendationid, aspect, sentiment, 
              ELSE substr(review_text, 1, {slice_chars})
         END AS slice,
         length(regexp_extract(slice, '^([\\s\\S]*?)(?:{rx})', 1, 'i')) + 1 AS kw_off,
-        reverse(regexp_extract(reverse(substr(slice, 1, kw_off - 1)), '^[^.!?;\\n]*', 0)) AS clause_l,
+        regexp_extract(substr(slice, 1, kw_off - 1), '[^.!?;\\n]*$', 0) AS clause_l,
         regexp_extract(substr(slice, kw_off), '^[^.!?;\\n]*', 0) AS clause_r,
         CASE WHEN regexp_matches(slice, '{rx}', 'i')
              THEN substr(regexp_extract(
@@ -2763,6 +2883,125 @@ def _aspect_excerpt_arms_sql() -> str:
             sentence_chars=ASPECT_SENTENCE_CHARS,
         ))
     return "\n\n    UNION ALL\n".join(arms)
+
+
+# --------------------------------------------------------------------------------------
+# REVIEW TEXT BY PRIMARY KEY (2026-09-22). DuckDB's sqlite scanner has NO filter pushdown —
+# checked with SET sqlite_debug_show_queries: `WHERE recommendationid = 'x'`, an IN-list and a
+# JOIN all reach SQLite as `SELECT ... FROM "reviews" WHERE ROWID BETWEEN ? AND ?`, i.e. the
+# whole table. So every `JOIN src.reviews r ON r.recommendationid = ...` streamed all ~63M rows
+# (44.7GB) to pick out the few thousand it needed — 213s for one 33,719-review scoring bucket on
+# 2026-09-21, and the scoring loop pays it once PER BUCKET (~9 a night, ~196 on a wipe).
+# recommendationid is the table's TEXT PRIMARY KEY, so SQLite can answer the same question from
+# its index; sqlite_query() hands it the lookup verbatim. Measured against a read-only clone of
+# the live source (Mac, 2026-09-22), the text of 33,586 pool reviews:
+#     JOIN src.reviews (stream)               32.6s
+#     sqlite_query IN-lists, 1 thread          7.6s   cold page cache
+#     sqlite_query IN-lists, 8 threads         2.0s   cold            (16x the stream)
+# with a byte-identical result (same sha256 over every (id, text)). The lookups are random reads,
+# latency-bound, which is why threads help: each runs its own SQLite read transaction on its own
+# DuckDB cursor.
+#
+# IDENTICAL BY CONSTRUCTION: the text is still read by the same DuckDB sqlite extension (a Python
+# sqlite3 fetch would decode differently at the edges); SQLite compares the TEXT key with its
+# default BINARY collation, i.e. byte equality, exactly like the DuckDB join; and the fetched rows
+# are joined back to the keys in DuckDB, so nothing the join would not have produced can get
+# through. Streaming still wins for LARGE id sets: the per-id random reads overtake one sequential
+# pass at ~550K ids on the measurement above, so past REVIEW_TEXT_PK_FETCH_MAX ids (the uncached
+# full-pool path, a 1M-review --repair-arms bucket) _fetch_review_text streams as before. It also
+# streams whenever `src` is not an ATTACHed SQLite file whose reviews table has an index led by
+# recommendationid — the tests' in-memory `src` schema, or a source without the key — because
+# there an IN-list would be a full scan per chunk.
+# --------------------------------------------------------------------------------------
+REVIEW_TEXT_PK_FETCH_MAX = 500_000   # ids; above this one sequential stream is cheaper
+REVIEW_TEXT_FETCH_CHUNK = 1_000      # ids per SQLite IN-list (~12KB of SQL per lookup)
+REVIEW_TEXT_FETCH_THREADS = 8        # concurrent lookups — IO-bound, so not tied to the core count
+
+
+def _src_reviews_keyed(con: duckdb.DuckDBPyConnection) -> bool:
+    """True when `src` is an ATTACHed SQLite database whose `reviews` table has an index led by
+    recommendationid (the TEXT PRIMARY KEY's autoindex on the real source) — the precondition
+    for fetching review text by key instead of streaming the table."""
+    try:
+        if not con.execute(
+            "SELECT count(*) FROM duckdb_databases() WHERE database_name = 'src' AND type = 'sqlite'"
+        ).fetchone()[0]:
+            return False
+        return con.execute(
+            "SELECT count(*) FROM sqlite_query('src', ?)",
+            ["SELECT 1 FROM pragma_index_list('reviews') il, pragma_index_info(il.name) ii "
+             "WHERE ii.seqno = 0 AND ii.name = 'recommendationid'"],
+        ).fetchone()[0] > 0
+    except duckdb.Error:
+        return False
+
+
+def _fetch_review_text(con: duckdb.DuckDBPyConnection, keys_sql: str, out_table: str) -> str:
+    """CREATE TEMP TABLE out_table(appid, recommendationid, review_text): the rows
+
+        SELECT k.appid, k.recommendationid, r.review_text
+        FROM (keys_sql) k JOIN src.reviews r ON r.recommendationid = k.recommendationid
+
+    which is exactly what it builds when streaming, and what it builds from primary-key lookups
+    when the key set is small enough to make that cheaper (see REVIEW TEXT BY PRIMARY KEY).
+    `keys_sql` must return (appid, recommendationid). Returns which path it took, "by key" or
+    "streamed", for the caller's timing line."""
+    con.execute(f"DROP TABLE IF EXISTS {out_table}")
+    ids = None
+    if _src_reviews_keyed(con):
+        n = con.execute(f"SELECT count(*) FROM ({keys_sql})").fetchone()[0]
+        if n <= REVIEW_TEXT_PK_FETCH_MAX:
+            ids = [r[0] for r in con.execute(
+                f"SELECT DISTINCT recommendationid FROM ({keys_sql}) "
+                "WHERE recommendationid IS NOT NULL ORDER BY 1").fetchall()]
+    if ids is None:
+        con.execute(
+            f"""
+            CREATE TEMP TABLE {out_table} AS
+            SELECT k.appid, k.recommendationid, r.review_text
+            FROM ({keys_sql}) k
+            JOIN src.reviews r ON r.recommendationid = k.recommendationid
+            """
+        )
+        return "streamed"
+    # A REGULAR landing table, not TEMP: the lookup threads run on their own cursors, which are
+    # separate connections and cannot see this connection's TEMP tables. Dropped in the finally,
+    # so it never outlives the call (nor ships in a mart).
+    landing = f"{out_table}__by_key"
+    con.execute(f"DROP TABLE IF EXISTS {landing}")
+    con.execute(f"CREATE TABLE {landing}(recommendationid VARCHAR, review_text VARCHAR)")
+    try:
+        chunks = [ids[i:i + REVIEW_TEXT_FETCH_CHUNK]
+                  for i in range(0, len(ids), REVIEW_TEXT_FETCH_CHUNK)]
+
+        def lookup(my_chunks: list[list[str]]) -> None:
+            cur = _cursor(con)
+            try:
+                for chunk in my_chunks:
+                    keys = ", ".join("'" + k.replace("'", "''") + "'" for k in chunk)
+                    cur.execute(
+                        f"INSERT INTO {landing} "
+                        "SELECT recommendationid, review_text FROM sqlite_query('src', ?)",
+                        [f"SELECT recommendationid, review_text FROM reviews "
+                         f"WHERE recommendationid IN ({keys})"])
+            finally:
+                cur.close()
+
+        n_threads = max(1, min(REVIEW_TEXT_FETCH_THREADS, len(chunks)))
+        with ThreadPoolExecutor(max_workers=n_threads, thread_name_prefix="text-by-key") as ex:
+            for fut in [ex.submit(lookup, chunks[i::n_threads]) for i in range(n_threads)]:
+                fut.result()
+        con.execute(
+            f"""
+            CREATE TEMP TABLE {out_table} AS
+            SELECT k.appid, k.recommendationid, t.review_text
+            FROM ({keys_sql}) k
+            JOIN {landing} t ON t.recommendationid = k.recommendationid
+            """
+        )
+    finally:
+        con.execute(f"DROP TABLE IF EXISTS {landing}")
+    return "by key"
 
 
 def _rescore_bucket_count(n_new_reviews: int) -> int:
@@ -3318,6 +3557,32 @@ def _build_aspect_keyword_votes(con: duckdb.DuckDBPyConnection, mention_table: s
     con.execute("DROP TABLE IF EXISTS _kw_votes_part")
 
 
+@dataclass(frozen=True)
+class PoolCoverage:
+    """How much of the in-scope review pool the sentiment cache has scored, as of the end of this
+    run's scoring loop — the full-text cadence's guard against publishing marts built from a
+    partly scored pool (see _decide_fulltext).
+
+      total    reviews in the pool (TEARDOWN_MIN_REVIEWS floor + the per-game cap)
+      scored   how many of them have a scored_review record"""
+    scored: int
+    total: int
+
+    @property
+    def complete(self) -> bool:
+        return self.scored >= self.total
+
+    @property
+    def pct(self) -> float:
+        return (100.0 * self.scored / self.total) if self.total else 100.0
+
+
+# Set by every compute_aspect_sentiment() call (None before one, and on --light, which never
+# scores); main() hands it to _decide_fulltext. Module state rather than a return value so the
+# function's contract — it returns a row count the tests pin — does not move.
+_SENTIMENT_POOL_COVERAGE: PoolCoverage | None = None
+
+
 def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
                              scoring_only: bool = False) -> int:
     """Precompute per-(appid, aspect) VADER text sentiment for the Game Teardown (see the
@@ -3371,6 +3636,8 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
     VADER+classifier stream, ~16 min per bucket) runs with it DETACHED, writing into a local
     staging table. Measured hold to commit one 125k-review bucket into a production-sized cache:
     ~0.8s on a dev laptop, ~3s scaled to the droplet, i.e. a duty cycle around 0.3%."""
+    global _SENTIMENT_POOL_COVERAGE
+    _SENTIMENT_POOL_COVERAGE = None
     # Idempotent per connection: the nightly calls this once per process, but tests (and any
     # future re-entry) may not, and CREATE TEMP TABLE has no IF NOT EXISTS to fall back on.
     con.execute("DROP TABLE IF EXISTS stg_aspect_mention_sentiment")
@@ -3502,6 +3769,9 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
         _build_aspect_keyword_votes(con, "_sent_raw")
         con.execute("DROP TABLE IF EXISTS _sent_raw")
         con.execute("DROP TABLE IF EXISTS _sent_windows")
+        # Uncached, the whole pool was scanned just now — complete by construction.
+        _n_pool = con.execute("SELECT COUNT(*) FROM _sent_pool_meta").fetchone()[0]
+        _SENTIMENT_POOL_COVERAGE = PoolCoverage(scored=_n_pool, total=_n_pool)
     else:
         # PHASE 1 of three, and the cache is attached for ONLY these few seconds: work out what
         # this run has to score. See the docstring — the lock is exclusive and cross-process, so
@@ -3623,9 +3893,10 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
             _score_buckets = _rescore_bucket_count(n_new_reviews)
             # Which buckets have work, from one lean pass over the ids (no text). This is not
             # an optimisation for the wipe — there every bucket is full — it is what keeps the
-            # ORDINARY night honest: each bucket's text query streams the whole sqlite reviews
-            # table past a hash join, so an unguarded loop would run _score_buckets full scans
-            # of 24.8M rows on a night with nothing (or three things) to score.
+            # ORDINARY night honest: a bucket's text fetch, its window build and its cache
+            # commit each have a fixed cost (and a text fetch the key lookup does not cover
+            # streams the whole sqlite reviews table), so an unguarded loop would pay
+            # _score_buckets of them on a night with nothing (or three things) to score.
             _todo = sorted(int(b) for (b,) in con.execute(
                 f"SELECT DISTINCT hash(recommendationid) % {_score_buckets} FROM _sent_new_ids"
             ).fetchall())
@@ -3686,28 +3957,24 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
                 # budget.
                 #
                 # Text is read straight from src.reviews (sqlite) rather than from a staging
-                # copy: there is no corpus-wide text table any more, and streaming the source
-                # to pick out the bucket's rows never materialises the rows it discards. The
-                # cost of bucketing is one such stream per bucket instead of one in total —
-                # paid deliberately, because the alternative (one full-pool copy, sliced
-                # afterwards) is the 8.45GB TEMP table that just killed the build.
+                # copy: there is no corpus-wide text table any more. It used to be read by
+                # STREAMING the whole source past a join — one full pass of the 44.7GB table
+                # per bucket, 213s for a 33,719-review bucket on 2026-09-21 — and is now fetched
+                # by primary key (see REVIEW TEXT BY PRIMARY KEY at _fetch_review_text), so a
+                # bucket's text costs what the bucket holds, not what the table holds. The
+                # rows are identical either way; the helper still streams when the bucket is
+                # too big for key lookups to win.
                 #
                 # A TABLE, not a VIEW, so the 10-arm window scan below reads it without
-                # re-running the join per arm (a view here cost a 9.7h phase and a 22.7GiB
+                # re-running the fetch per arm (a view here cost a 9.7h phase and a 22.7GiB
                 # spill in 2026-08).
                 #
-                # The bucket filter is applied inside the subquery rather than as an aliased
-                # WHERE on the join, so the predicate text is the SAME _sent_pred the DELETE
-                # above and the INSERT below use. It also shrinks the join's build side to the
-                # bucket instead of hashing the whole delta once per bucket.
-                con.execute(
-                    f"""
-                    CREATE TEMP TABLE _sent_new AS
-                    SELECT n.appid, n.recommendationid, r.review_text
-                    FROM (SELECT appid, recommendationid FROM _sent_new_ids
-                          WHERE {_sent_pred}) n
-                    JOIN src.reviews r ON r.recommendationid = n.recommendationid
-                    """
+                # The keys are selected with the SAME _sent_pred string the DELETE above and the
+                # INSERT below use — the invariant is those three agreeing.
+                _text_path = _fetch_review_text(
+                    con,
+                    f"SELECT appid, recommendationid FROM _sent_new_ids WHERE {_sent_pred}",
+                    "_sent_new",
                 )
                 # The expensive regex runs ONLY over this bucket of the delta, never the full
                 # pool. REGULAR (not TEMP) so the INDEPENDENT read cursor in
@@ -3793,7 +4060,8 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
                 # pool, or the main thread inline), and the cache commit.
                 _t_stream = _t_scored - _t_windows
                 print(f"[etl] aspect sentiment bucket {n_done}/{len(_todo)} (hash bucket {_b}): "
-                      f"text+windows {_t_windows - _t_bucket:,.0f}s, {n_bucket_mentions:,} "
+                      f"text ({_text_path}) + windows {_t_windows - _t_bucket:,.0f}s, "
+                      f"{n_bucket_mentions:,} "
                       f"mention(s) scored in {_t_stream:,.0f}s "
                       f"({(n_bucket_mentions / _t_stream) if _t_stream > 0 else 0.0:,.0f}/s), "
                       f"commit {_elapsed - (_t_scored - _t_bucket):,.1f}s")
@@ -3824,6 +4092,16 @@ def compute_aspect_sentiment(con: duckdb.DuckDBPyConnection, data_dir: Path,
             # which is exactly the pool's unscored part as of phase 1, so the pool's scored
             # count follows from those two numbers without another join over the cache.
             _pool_scored = _pool_reviews - n_new_reviews + (_scored_reviews - _scored_before)
+            # What the full-text cadence reads (_decide_fulltext): is the pool COMPLETELY scored?
+            # Decided from this run's own bookkeeping, not from _pool_scored: every review
+            # unscored at phase 1 sits in a bucket of _todo, so the pool is complete exactly
+            # when every bucket of _todo committed — no deadline stop. _pool_scored itself can
+            # overshoot when a concurrent --rescore-only commits into scored_review between
+            # phase 1 and here, so it is only trusted below the total, never to claim it.
+            _SENTIMENT_POOL_COVERAGE = PoolCoverage(
+                scored=(_pool_reviews if n_done == len(_todo)
+                        else max(0, min(_pool_scored, _pool_reviews - 1))),
+                total=_pool_reviews)
             con.execute("DELETE FROM cache.rescore_status")
             con.execute(
                 "INSERT INTO cache.rescore_status VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -4210,14 +4488,13 @@ def repair_sentiment_arms(con: duckdb.DuckDBPyConnection, data_dir: Path) -> dic
             con.execute("CREATE TEMP TABLE _repair_mismatch(recommendationid VARCHAR)")
             if checked:
                 # THE ONLY REVIEW TEXT THIS RUN MATERIALISES: one bucket of the candidates, read
-                # straight from src.reviews — the same shape as the scoring loop's _sent_new.
-                con.execute(
-                    f"""
-                    CREATE TEMP TABLE _repair_text AS
-                    SELECT n.appid, n.recommendationid, r.review_text
-                    FROM (SELECT appid, recommendationid FROM _repair_ids WHERE {_pred}) n
-                    JOIN src.reviews r ON r.recommendationid = n.recommendationid
-                    """
+                # from src.reviews by the same helper as the scoring loop's _sent_new (by key
+                # when the bucket is small enough for that to win, streamed otherwise — a
+                # default 1M-review repair bucket streams).
+                _fetch_review_text(
+                    con,
+                    f"SELECT appid, recommendationid FROM _repair_ids WHERE {_pred}",
+                    "_repair_text",
                 )
                 # RAW ARMS: the (review, arm) pairs the text matches TODAY, from the one generator
                 # that defines an arm. Only the two key columns are selected, so the window and
@@ -4502,7 +4779,8 @@ def _optional_meta(con: duckdb.DuckDBPyConnection, sql: str) -> tuple | None:
 def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str,
                build_mode: str = "full", absent_sources: list[str] | tuple[str, ...] = (),
                classifier_absent: bool = False, fulltext_mode: str = "build",
-               fulltext_built_at: str = "", fulltext_scored_reviews: str = "") -> None:
+               fulltext_built_at: str = "", fulltext_scored_reviews: str = "",
+               source_info: dict[str, str] | None = None) -> None:
     """Provenance/meta rows for the mart. Beyond the headline stats:
 
       build_mode           'full' | 'light' — a --light build copies the heavy teardown/aspect
@@ -4530,9 +4808,16 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
                            accepted a missing aspect model — flags a degraded build whose
                            aspect counts are keyword-only (inflated ~28%).
       source_db_mtime/size the source SQLite's mtime (ISO-8601 UTC) + size in bytes, from
-                           os.stat at build time — lets a mart be matched back to the exact
-                           source snapshot it was built from ('' when unreadable: the build
-                           obviously succeeded, so this is provenance, not a gate).
+                           os.stat — lets a mart be matched back to the exact source snapshot
+                           it was built from ('' when unreadable: the build obviously
+                           succeeded, so this is provenance, not a gate). main() passes
+                           `source_info`, taken at build START (_source_snapshot) before staging
+                           read a byte; without it they are stat'ed now, as they always were.
+      source_db_wal_mtime  (with source_info) the source's -wal mtime ('' without one): in WAL
+                           mode recent writes live there until a checkpoint.
+      source_last_write_at (with source_info) the newer of the two — when the scraper last wrote.
+      source_age_hours     (with source_info) how old that was when the build started; main()
+                           warns past --max-source-age-hours (default 48).
       etl_git_sha          the ETL code's git SHA (best-effort `git rev-parse HEAD` from the
                            repo root; '' when not in a git checkout or git is unavailable).
       duckdb_version       the duckdb library version that built the file.
@@ -4661,6 +4946,7 @@ def write_meta(con: duckdb.DuckDBPyConnection, source_db: str, mart_version: str
         "absent_sources": ",".join(absent_sources),
         "source_db_mtime": source_mtime,
         "source_db_size": source_size,
+        **(source_info or {}),
         "etl_git_sha": git_sha,
         "duckdb_version": duckdb.__version__,
     }
@@ -4763,7 +5049,7 @@ def _validate_max_drop_pct() -> float:
 def _mart_row_counts(db_path: Path) -> dict[str, int]:
     """Row count of every mart% table in a mart file, opened READ-ONLY (the previous mart may
     be concurrently served; the new one is finished and closed)."""
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect(str(db_path), read_only=True)
     try:
         tables = [r[0] for r in con.execute(
             "SELECT table_name FROM information_schema.tables "
@@ -4778,7 +5064,7 @@ def _mart_table_columns(db_path: Path) -> dict[str, set[str]]:
     """Column-name set of every mart% table in a mart file, opened READ-ONLY (same
     concurrency story as _mart_row_counts). Row counts alone cannot see a renamed or dropped
     column — the table keeps its name and roughly its size while a consumer's query breaks."""
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect(str(db_path), read_only=True)
     try:
         rows = con.execute(
             "SELECT table_name, column_name FROM information_schema.columns "
@@ -4799,7 +5085,7 @@ def _recorded_absent_sources(db_path: Path) -> set[str]:
     file. An unreadable/absent mart_meta yields no exemptions — refuse to explain away
     emptiness we cannot prove was intended."""
     try:
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = _connect(str(db_path), read_only=True)
         try:
             row = con.execute(
                 "SELECT value FROM mart_meta WHERE key = 'absent_sources'"
@@ -4958,7 +5244,7 @@ def _light_overwrite_error(versioned: Path) -> str | None:
     if not versioned.exists():
         return None
     try:
-        c = duckdb.connect(str(versioned), read_only=True)
+        c = _connect(str(versioned), read_only=True)
         try:
             row = c.execute("SELECT value FROM mart_meta WHERE key = 'build_mode'").fetchone()
         finally:
@@ -5043,7 +5329,7 @@ def _read_mart_meta(db_path: Path) -> dict[str, str]:
     {} when the file, or its mart_meta, cannot be read — the cadence reads that as "no
     provenance" and rebuilds, the same verdict a pre-cadence mart gets."""
     try:
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = _connect(str(db_path), read_only=True)
         try:
             rows = con.execute("SELECT key, value FROM mart_meta").fetchall()
         finally:
@@ -5086,7 +5372,8 @@ def _parse_fulltext_provenance(meta: dict[str, str]) -> tuple[datetime, int] | N
 def _decide_fulltext(requested: str, prev_name: str | None, prev_meta: dict[str, str],
                      scored_now: int | None, now: datetime | None = None,
                      max_age_hours: float | None = None,
-                     rebuild_delta: int | None = None) -> FulltextPlan:
+                     rebuild_delta: int | None = None,
+                     pool: PoolCoverage | None = None) -> FulltextPlan:
     """The cadence verdict for one build, evaluated after the night's delta has been scored.
 
       requested    the --fulltext flag. 'build' and 'copy' are obeyed as-is (main() passes
@@ -5094,21 +5381,42 @@ def _decide_fulltext(requested: str, prev_name: str | None, prev_meta: dict[str,
                    copy from, when its provenance is missing (the first night after this
                    landed, or a cache-off build), when its full-text tables are older than
                    max_age_hours, or when more than rebuild_delta reviews were scored since
-                   they were built — and copies otherwise.
+                   they were built — and copies otherwise. EXCEPT while the pool is only partly
+                   scored (below): then 'auto' copies whenever there is anything to copy.
       prev_name    the published mart's name, for the log (None = nothing is published).
       prev_meta    its mart_meta rows (_read_mart_meta).
       scored_now   COUNT(*) of cache.scored_review after this run's scoring; None when the
                    cache is disabled, which 'auto' reads as "the delta cannot be bounded" and
                    rebuilds (with the cache off every run rescans the whole corpus anyway).
+      pool         this run's PoolCoverage (compute_aspect_sentiment); None = unknown, read
+                   as complete (--light, and callers that predate it).
       now / max_age_hours / rebuild_delta
                    injectable for tests; None = the clock and the env knobs.
+
+    A PARTLY SCORED POOL NEVER FEEDS A REBUILD (2026-09-22). After a cache wipe with
+    PROSPECT_SENTIMENT_DEADLINE_SECONDS set, the cache refills over several nights, and the rules
+    above used to rebuild anyway: the scored delta goes negative (never a trigger) but the age
+    rule fires after FULLTEXT_MAX_AGE_HOURS, and the teardown / aspect marts were then rebuilt
+    from a hash-sampled, part-refilled cache — mention counts silently low while
+    n_reviews_sampled (the pool, not the scored part of it) stayed full, and
+    mart_game_review_aspects still has games x 10 rows, so the validation gate cannot see it.
+    Now, while the pool is incomplete, 'auto' copies the published tables regardless of age and
+    rebuilds once scoring catches up; with nothing published it has no choice but to build, and
+    says so. An explicit --fulltext build is obeyed, with the same warning.
 
     Pure by design — no I/O — so every branch is unit-testable (tests/test_fulltext_cadence)."""
     now = datetime.now(timezone.utc) if now is None else now
     max_age_hours = _fulltext_max_age_hours() if max_age_hours is None else max_age_hours
     rebuild_delta = _fulltext_rebuild_delta() if rebuild_delta is None else rebuild_delta
+    partial = None
+    if pool is not None and not pool.complete:
+        partial = (f"the sentiment pool is only {pool.pct:.1f}% scored "
+                   f"({pool.total - pool.scored:,} of {pool.total:,} reviews unscored)")
 
     def build(reason: str) -> FulltextPlan:
+        if partial is not None:
+            reason += (f" — WARNING: {partial}, so this build's teardown/aspect mention counts "
+                       "are LOW for the unscored reviews' games")
         return FulltextPlan("build", reason, now.isoformat(timespec="seconds"),
                             "" if scored_now is None else str(scored_now))
 
@@ -5125,6 +5433,10 @@ def _decide_fulltext(requested: str, prev_name: str | None, prev_meta: dict[str,
 
     if prev_name is None:
         return build("rebuilding (no published mart to copy from)")
+    if partial is not None:
+        return copy(f"copied from {prev_name}: {partial} — the full-text marts are never rebuilt "
+                    "from a partly scored pool, whatever their age; they rebuild once scoring "
+                    "catches up")
     provenance = _parse_fulltext_provenance(prev_meta)
     if provenance is None:
         return build(f"rebuilding ({prev_name} carries no full-text provenance: the first build "
@@ -5164,20 +5476,51 @@ def _count_scored_reviews(con: duckdb.DuckDBPyConnection, data_dir: Path) -> int
 # Build scratch: `prospect_<version>.duckdb.building` (the in-progress build), its `.wal`,
 # and the `.building.tmp/` DuckDB spill directory (documented to reach 18GB on the droplet).
 # Disk is the droplet's scarcest resource, so a dead build must not leave any of it behind —
-# but the globs used to be UNSCOPED, so a run's pre-build sweep deleted EVERY version's
-# scratch, including the live 18GB spill of a concurrent build (the midday --light run vs a
-# nightly that overran, both writing the same-day version). Sweeping is now scoped to this
-# run's version plus other versions' provably-dead leftovers, and never touches scratch that
-# was written recently enough to belong to a build still in flight.
+# and a LIVE build's scratch must never be touched. Both rules used to be enforced by guesses:
+# the unscoped globs of 2026-08 deleted the 18GB spill of a concurrent build; the age rules that
+# replaced them (an hour without writes = dead, another version's scratch kept 12h) spared a
+# dead spill for an hour and would delete a live build's scratch the moment it went quiet; and a
+# second run of the SAME version, correctly refused by DuckDB's file lock, then deleted the live
+# build's .building, .wal and spill in its own finally — the live build died at its next spill
+# or at validate_mart, losing the night's mart (2026-09-22 review, reproduced with a holder
+# process).
+#
+# LIVENESS IS A LOCK NOW, NOT A GUESS (2026-09-22). Every run holds an exclusive flock in the
+# data dir for its whole life (_RunLock): mart builds (full and --light) BUILD_LOCK_NAME,
+# --rescore-only RESCORE_LOCK_NAME — its own, so it keeps running beside a build as designed —
+# and --repair-arms both, since it must run beside neither. A second run of a family exits
+# EXIT_BUSY before touching anything. A run holding a family's lock KNOWS every scratch of that
+# family is dead (nothing else of the family can be alive), so its pre-build sweep reclaims them
+# whatever their version or age; another family's scratch it reclaims only while it can take
+# that family's lock itself, for as long as the deletion takes. Two belts on top: a scratch
+# database another process still has OPEN is never swept (DuckDB's own POSIX lock on it — an
+# older build_marts that takes no flock, a `duckdb` shell on a kept artifact), and main()
+# connects to its scratch BEFORE the try/finally that sweeps it, so a refused connect cannot
+# reach that sweep at all.
 # --------------------------------------------------------------------------------------
-SCRATCH_STALE_HOURS = 12.0      # another version's scratch older than this is provably dead
-                                # (no build here has ever run longer than ~10h)
-SCRATCH_ACTIVE_SECONDS = 3600   # anything written more recently than this may belong to a
-                                # RUNNING build — never delete it, whatever version it is.
-                                # Generous on purpose: the cost of guessing "dead" wrongly is
-                                # a destroyed multi-hour build + its 18GB spill; the cost of
-                                # guessing "alive" wrongly is that we build into an existing
-                                # scratch file (every mart file DROPs before it CREATEs).
+BUILD_LOCK_NAME = ".build.lock"       # held by every mart build (full or --light) for its life
+RESCORE_LOCK_NAME = ".rescore.lock"   # held by --rescore-only; --repair-arms holds both
+LOCK_GRACE_SECONDS = 15.0             # a run waits this long for its own lock before exiting
+                                      # EXIT_BUSY: long enough to ride out another run's sweep
+                                      # borrowing it for a deletion, nowhere near a real build
+EXIT_BUSY = 3                         # another run holds the lock — see the module docstring
+EXIT_LOW_DISK = 4                     # below PROSPECT_DISK_MIN_FREE_GB after the sweep
+
+# UNATTENDED-RUN DEFAULTS (2026-09-22). These guards used to exist only in the droplet's shell
+# wrappers (deploy/prospect-refresh.sh exported the spill cap and ran a df gate), so a build
+# started any other way — a laptop, a new server, cron without the wrapper — ran without them.
+# They live here now, with the wrapper's own post-resize numbers as defaults; each is an env
+# knob (README, ETL section) and each is logged as applied.
+DISK_MIN_FREE_GB_DEFAULT = 30.0       # PROSPECT_DISK_MIN_FREE_GB: refuse to start (exit 4) with
+                                      # less free disk than this in the data dir, in GiB (the
+                                      # unit `df -h` shows). 30 = the droplet's floor for its
+                                      # ~2.4GB marts + a spill that has reached 18GB. 0 = off.
+DUCKDB_TEMP_MAX_DEFAULT_GIB = 40      # PROSPECT_DUCKDB_TEMP_MAX unset -> the spill budget is the
+DUCKDB_TEMP_MAX_FREE_FRACTION = 0.5   # SMALLER of 40GiB and half the free space where the spill
+                                      # lands — never DuckDB's own default of 90% of free disk,
+                                      # which is how 2026-08-30 filled the volume
+MAX_SOURCE_AGE_HOURS = 48.0           # --max-source-age-hours: warn when the source's last
+                                      # write is older than this (a stalled scraper, or a copy)
 _SCRATCH_RE = re.compile(r"^prospect_(.+?)\.duckdb\.building(\.wal|\.tmp)?$")
 
 # --rescore-only gets its OWN scratch name, outside the prospect_<version>.duckdb.building
@@ -5187,49 +5530,155 @@ _SCRATCH_RE = re.compile(r"^prospect_(.+?)\.duckdb\.building(\.wal|\.tmp)?$")
 #
 #   * the nightly derives prospect_<YYYYMMDD>.duckdb.building from the SAME UTC date, so a
 #     multi-day rescore and a nightly that starts under it open the IDENTICAL file (plus the
-#     GB-scale .building.tmp/ spill beside it), and prospect-refresh.sh has no guard that
-#     would stop the nightly from trying;
-#   * deploy/light-build-cron.sh sweeps `prospect_*.duckdb.building*` by age, and
-#     prospect-refresh.sh's post-success cleanup does it with no age test at all — both would
-#     happily delete a live rescore's spill;
+#     GB-scale .building.tmp/ spill beside it);
+#   * the old droplet cron sweeps globbed `prospect_*.duckdb.building*` — one by age, one with
+#     no age test at all — and would happily have deleted a live rescore's spill;
 #   * the only way to keep those apart used to be a build hold, which freezes ALL published
 #     data for the length of the rescore — precisely what --rescore-only exists to avoid.
 #
 # The name is deliberately NOT `prospect_*`: it cannot match those shell globs, and it cannot
 # match main()'s `prospect_*.duckdb` retention glob either, so no --keep value can ever see it
 # as a dated mart. Nothing in it is durable (progress lives in the sentiment cache), so it is
-# safe to reuse, recreate or delete between runs.
+# safe to recreate or delete between runs.
 #
 # LIFECYCLE — it must survive a multi-DAY rescore and still never linger forever:
 #   * a clean or crashed exit removes it in main()'s finally, like any other scratch;
-#   * a SIGKILL leaves it behind, so it is swept HERE instead, by every build_marts run
-#     (nightly + light build = at least twice a day) under the same age rules as the versioned
-#     scratch. Age is measured with _scratch_age_seconds, which looks one level INTO the spill
-#     dir — a scoring rescore writes there continuously and to the scratch file once a bucket
-#     (~16 min), so a live rescore is never mistaken for a dead one;
-#   * a rescore that resumes reuses the file if it is there, and DuckDB's own file lock is then
-#     what stops a SECOND rescore from starting on top of the first (see main()).
+#   * a SIGKILL leaves it behind; the next rescore-family run holds RESCORE_LOCK_NAME and so
+#     sweeps it as provably dead before it starts (it used to REUSE it, which made every stray
+#     REGULAR table in it a resume-breaker), and every mart build reclaims it too whenever it
+#     can borrow that lock — i.e. whenever no rescore is running;
+#   * two rescores can never share it: the second one exits EXIT_BUSY on the lock.
 RESCORE_SCRATCH_DB_NAME = "rescore_scratch.duckdb"
-# The pseudo-version this scratch is grouped under, so _sweep_stale_scratch's existing
-# own-version/other-version rules apply to it unchanged. Never a real mart version (those are
-# YYYYMMDD), which is what keeps "a rescore is running" and "a mart build is running" separate.
+# The pseudo-version this scratch is grouped under by _scratch_paths. Never a real mart version
+# (those are YYYYMMDD), which is what keeps "a rescore is running" and "a mart build is running"
+# separate: _scratch_family maps it to the rescore lock, every other version to the build lock.
 RESCORE_SCRATCH_VERSION = "rescore"
 
 
-def _scratch_paths(data_dir: Path) -> dict[str, list[Path]]:
-    """Every build-scratch path in data_dir, grouped by the mart version it belongs to
-    (--rescore-only's scratch groups under RESCORE_SCRATCH_VERSION). Never matches
-    prospect_*.duckdb, current.duckdb or the sentiment cache."""
+class _RunLock:
+    """An exclusive, non-blocking flock on one file in the data dir, held for a run's whole life.
+
+    flock, not fcntl record locks: it belongs to the open file DESCRIPTION, so it is released
+    the instant the process dies (SIGKILL included — nothing stale to clean up), it conflicts
+    even between two descriptors of ONE process (the tests rely on that), and forked scoring
+    workers share it instead of dropping it. The file is never deleted — unlinking a lock file
+    while someone waits on it is how two processes both end up holding "the" lock — and it
+    carries the holder's pid and command line, which the refusal message quotes."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._fd: int | None = None
+
+    def acquire(self, wait_seconds: float = 0.0) -> bool:
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        deadline = time.monotonic() + max(0.0, wait_seconds)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                if e.errno not in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+                    os.close(fd)
+                    raise
+                if time.monotonic() >= deadline:
+                    os.close(fd)
+                    return False
+                time.sleep(0.25)
+        self._fd = fd
+        try:
+            os.ftruncate(fd, 0)
+            os.write(fd, (f"pid={os.getpid()} since="
+                          f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} "
+                          f"argv={' '.join(sys.argv[1:])}\n").encode("utf-8", "replace"))
+        except OSError:
+            pass  # informational only; the flock is the lock
+        return True
+
+    def holder(self) -> str:
+        try:
+            return self.path.read_text(encoding="utf-8", errors="replace").strip() or "?"
+        except OSError:
+            return "?"
+
+    def release(self) -> None:
+        if self._fd is not None:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self._fd)
+                self._fd = None
+
+
+def _scratch_family(version: str) -> str:
+    """'rescore' for the --rescore-only/--repair-arms scratch, 'build' for every mart build's."""
+    return "rescore" if version == RESCORE_SCRATCH_VERSION else "build"
+
+
+def _lock_path(data_dir: Path, family: str) -> Path:
+    return data_dir / (RESCORE_LOCK_NAME if family == "rescore" else BUILD_LOCK_NAME)
+
+
+def _scratch_db(data_dir: Path, version: str) -> Path:
+    """The scratch DATABASE of a version's group — the file a live run has open."""
+    if version == RESCORE_SCRATCH_VERSION:
+        return data_dir / RESCORE_SCRATCH_DB_NAME
+    return data_dir / f"prospect_{version}.duckdb.building"
+
+
+def _spill_root(data_dir: Path) -> Path | None:
+    """Where DuckDB spills when PROSPECT_DUCKDB_TEMP_DIR is set: a subdirectory of it NAMED FOR
+    THIS DATA DIR, so two data dirs sharing one temp dir can never sweep each other's spill.
+    None = DuckDB's default, `<scratch db>.tmp` beside the scratch in the data dir."""
+    raw = os.environ.get("PROSPECT_DUCKDB_TEMP_DIR", "").strip()
+    if not raw:
+        return None
+    tag = hashlib.sha256(str(data_dir).encode("utf-8")).hexdigest()[:12]
+    return Path(raw).expanduser().resolve() / f"prospect-{tag}"
+
+
+def _duckdb_file_in_use(path: Path) -> bool:
+    """True when another process holds DuckDB's lock on this database file. DuckDB takes a POSIX
+    record lock on every database file it opens (F_SETLK: F_WRLCK read-write, F_RDLCK
+    read-only), and a non-blocking write-lock probe conflicts with either. Conservative: a file
+    that exists but cannot be opened for the probe counts as in use — never delete what cannot
+    be proven idle. Never call it on a file THIS process has open through DuckDB: POSIX record
+    locks are per-process, so closing the probe's descriptor would drop DuckDB's own lock."""
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    else:
+        fcntl.lockf(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def _scratch_paths(data_dir: Path, spill_root: Path | None = None) -> dict[str, list[Path]]:
+    """Every build-scratch path in data_dir — and in spill_root, where DuckDB spills when
+    PROSPECT_DUCKDB_TEMP_DIR is set — grouped by the mart version it belongs to (--rescore-only's
+    scratch groups under RESCORE_SCRATCH_VERSION). Never matches prospect_*.duckdb,
+    current.duckdb, the sentiment cache or the lock files."""
     groups: dict[str, list[Path]] = {}
-    for p in sorted(data_dir.glob("prospect_*.duckdb.building*")):
-        m = _SCRATCH_RE.match(p.name)
-        if m:
-            groups.setdefault(m.group(1), []).append(p)
-    # The rescore scratch, its .wal and its .tmp/ spill dir — one glob, since the name is a
-    # fixed prefix rather than a version pattern.
-    rescore = sorted(data_dir.glob(f"{RESCORE_SCRATCH_DB_NAME}*"))
-    if rescore:
-        groups[RESCORE_SCRATCH_VERSION] = rescore
+    dirs = [data_dir] + ([spill_root] if spill_root is not None and spill_root != data_dir else [])
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for p in sorted(d.glob("prospect_*.duckdb.building*")):
+            m = _SCRATCH_RE.match(p.name)
+            if m:
+                groups.setdefault(m.group(1), []).append(p)
+        # The rescore scratch, its .wal and its .tmp/ spill dir — one glob, since the name is a
+        # fixed prefix rather than a version pattern.
+        rescore = sorted(d.glob(f"{RESCORE_SCRATCH_DB_NAME}*"))
+        if rescore:
+            groups.setdefault(RESCORE_SCRATCH_VERSION, []).extend(rescore)
     return groups
 
 
@@ -5242,10 +5691,9 @@ def _scratch_label(version: str) -> str:
 
 
 def _scratch_age_seconds(paths: list[Path]) -> float:
-    """Seconds since the newest write anywhere in this version's scratch. The spill dir is
-    checked one level deep: DuckDB writes its temp blocks INSIDE it, and on some filesystems
-    that never touches the directory's own mtime — reading only the dir would make a
-    furiously-spilling build look idle."""
+    """Seconds since the newest write anywhere in this version's scratch (log lines only — it no
+    longer decides anything). The spill dir is checked one level deep: DuckDB writes its temp
+    blocks INSIDE it, and on some filesystems that never touches the directory's own mtime."""
     newest = 0.0
     for p in paths:
         try:
@@ -5268,8 +5716,6 @@ def _remove_scratch(paths: list[Path], keep_artifact: bool = False) -> None:
     whatever database file it was given, so the rescore scratch's is rescore_scratch.duckdb.tmp
     and the narrower test silently left every byte of it on the disk (it is a directory, so the
     `is_file()` arm below skipped it too — a leak with no error and no log line)."""
-    import shutil
-
     for p in sorted(paths):
         is_spill = p.name.endswith(".tmp")
         if keep_artifact and not is_spill:
@@ -5286,38 +5732,57 @@ def _remove_scratch(paths: list[Path], keep_artifact: bool = False) -> None:
             print(f"[etl] WARNING: could not remove scratch {p.name}: {e}")
 
 
-def _sweep_stale_scratch(data_dir: Path, version: str) -> None:
-    """PRE-BUILD sweep. Removes this run's own leftovers (a crashed earlier run of the same
-    version) plus any OTHER version's scratch that is provably dead, and leaves everything
-    else strictly alone. A version whose scratch was touched within SCRATCH_ACTIVE_SECONDS
-    is treated as a build in flight and skipped loudly — if it really is running, DuckDB's
-    own file lock stops us from opening it a moment later, which is the correct outcome.
+def _sweep_stale_scratch(data_dir: Path, held: set[str] | frozenset[str],
+                         spill_root: Path | None = None) -> None:
+    """PRE-BUILD sweep, run with the caller's run lock(s) held — `held` names the families it
+    holds ('build' and/or 'rescore'). Reclaims every scratch group it can PROVE dead and leaves
+    everything else strictly alone:
 
-    `version` is RESCORE_SCRATCH_VERSION for a --rescore-only run, so the rescore scratch is
-    "own" to a rescore (reclaimed once provably dead) and "another version's" to a mart build
-    (spared for SCRATCH_STALE_HOURS) — which is what lets a multi-day rescore and the nightly
-    share the data dir. It is also why every build_marts run is what stops a SIGKILLed
-    rescore's scratch from living on the disk forever: nothing else sweeps that name."""
-    for v, paths in sorted(_scratch_paths(data_dir).items()):
-        age = _scratch_age_seconds(paths)
-        if age < SCRATCH_ACTIVE_SECONDS:
-            print(f"[etl] NOT sweeping {_scratch_label(v)} — written "
-                  f"{age / 60:.0f} min ago, a build may still be using it "
-                  f"(remove it by hand if you know it is dead)")
-            continue
-        if v != version and age < SCRATCH_STALE_HOURS * 3600:
-            print(f"[etl] NOT sweeping {_scratch_label(v)} — another version's "
-                  f"scratch, only {age / 3600:.1f}h old (stale threshold "
-                  f"{SCRATCH_STALE_HOURS:.0f}h)")
-            continue
-        _remove_scratch(paths)
+      * a group of a family the caller holds the lock for is dead by construction, whatever its
+        version or age — no other run of that family can be alive;
+      * a group of another family is dead only while the caller can take THAT family's lock
+        itself; it holds it for the deletion and releases it at once (a run of that family
+        starting meanwhile waits LOCK_GRACE_SECONDS for it rather than failing);
+      * a group whose scratch database another process still has OPEN is spared either way
+        (see _duckdb_file_in_use), and the connect a moment later refuses to build into it.
+
+    This is what makes a SIGKILLed build's 18GB spill disappear on the very next run instead of
+    after an hour, a validation-failure artifact live until the next build of any version, and
+    a live build's scratch untouchable however long it goes without writing."""
+    for v, paths in sorted(_scratch_paths(data_dir, spill_root).items()):
+        family = _scratch_family(v)
+        borrowed = None
+        if family not in held:
+            borrowed = _RunLock(_lock_path(data_dir, family))
+            if not borrowed.acquire():
+                print(f"[etl] NOT sweeping {_scratch_label(v)} — a {family} run holds "
+                      f"{_lock_path(data_dir, family).name} ({borrowed.holder()})")
+                continue
+        try:
+            db = _scratch_db(data_dir, v)
+            if _duckdb_file_in_use(db):
+                print(f"[etl] NOT sweeping {_scratch_label(v)} — {db.name} is open in another "
+                      "process that holds no run lock (a build_marts older than the lock? a "
+                      "duckdb shell?); remove it by hand once that process is gone")
+                continue
+            age = _scratch_age_seconds(paths)
+            print(f"[etl] sweeping dead scratch {_scratch_label(v)} (no run holds it; last "
+                  f"written {age / 3600:,.1f}h ago)")
+            _remove_scratch(paths)
+        finally:
+            if borrowed is not None:
+                borrowed.release()
 
 
-def _sweep_own_scratch(data_dir: Path, version: str, keep_artifact: bool = False) -> None:
-    """POST-BUILD sweep (main()'s finally): only THIS run's scratch, which is unambiguously
-    ours to clean up. On success only the `.wal`/`.tmp` leftovers still exist — the
-    `.building` file has already been os.replace()d into place."""
-    _remove_scratch(_scratch_paths(data_dir).get(version, []), keep_artifact=keep_artifact)
+def _sweep_own_scratch(data_dir: Path, version: str, keep_artifact: bool = False,
+                       spill_root: Path | None = None) -> None:
+    """POST-BUILD sweep (main()'s finally): only THIS run's scratch — its own version's group,
+    which the run lock proves nobody else's — and only once main()'s connect to that scratch
+    has SUCCEEDED (the connect is outside the try whose finally calls this). On success only the
+    `.wal`/`.tmp` leftovers still exist — the `.building` file has already been os.replace()d
+    into place."""
+    _remove_scratch(_scratch_paths(data_dir, spill_root).get(version, []),
+                    keep_artifact=keep_artifact)
 
 
 def _refuse_publishing_rescore_scratch(building: Path) -> None:
@@ -5334,36 +5799,25 @@ def _refuse_publishing_rescore_scratch(building: Path) -> None:
         )
 
 
-def _live_mart_build_scratch(data_dir: Path) -> str | None:
-    """The scratch label of a MART build (a nightly or a --light run, never the rescore
-    family) written within SCRATCH_ACTIVE_SECONDS — i.e. one that may still be running — or
-    None. --repair-arms refuses to start beside one: it deletes and rewrites cache rows a
-    full build's read-back treats as settled, and a config wipe under it would be fed rows
-    scored under the previous config. The other direction is enforced by the cron guards
-    (deploy/prospect-refresh.sh and deploy/light-build-cron.sh skip themselves while any
-    build_marts that is not a --rescore-only run is alive), and two rescore-family runs are
-    kept apart by DuckDB's file lock on the scratch they share. Same liveness test as
-    _sweep_stale_scratch, so a scratch this refuses is one the sweep would also have spared."""
-    for v, paths in sorted(_scratch_paths(data_dir).items()):
-        if v == RESCORE_SCRATCH_VERSION:
-            continue
-        if _scratch_age_seconds(paths) < SCRATCH_ACTIVE_SECONDS:
-            return _scratch_label(v)
-    return None
-
-
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Build Prospect DuckDB marts.")
-    # Default source: PROSPECT_SOURCE_DB env first (the droplet's layout differs from the
-    # laptop's), then the historical local path so a plain `task etl` keeps working.
-    ap.add_argument("--source",
-                    default=os.environ.get(
-                        "PROSPECT_SOURCE_DB",
-                        "/Users/maximbaginskiy/hobby/steam-scraper/steam_games.db"),
-                    help="Path to the read-only steam_games.db SQLite source "
-                         "(default: $PROSPECT_SOURCE_DB, else the local steam-scraper path).")
-    ap.add_argument("--data-dir", default=str(HERE.parent / "data"),
-                    help="Directory for versioned duckdb files + current.duckdb symlink.")
+    # NO PATH DEFAULTS (2026-09-22). --source used to fall back to a hard-coded laptop path —
+    # which by then held a stale August copy of the scraper DB — and --data-dir to the repo's own
+    # data/, and `task etl` passed neither: a bare run built a weeks-old mart in the wrong place
+    # and exited 0. Each is now required unless its env var is set (main() refuses with exit 2),
+    # and main() logs the resolved paths and how long ago the source was last written.
+    ap.add_argument("--source", default=os.environ.get("PROSPECT_SOURCE_DB") or None,
+                    help="Path to the read-only steam_games.db SQLite source. Required unless "
+                         "$PROSPECT_SOURCE_DB is set.")
+    ap.add_argument("--data-dir", default=os.environ.get("PROSPECT_DATA_DIR") or None,
+                    help="Existing directory for the versioned marts, the current.duckdb "
+                         "symlink, the sentiment cache and the run locks. Required unless "
+                         "$PROSPECT_DATA_DIR is set; never created implicitly.")
+    ap.add_argument("--max-source-age-hours", type=float, default=MAX_SOURCE_AGE_HOURS,
+                    help="Warn loudly (the build still runs) when the source DB — or its -wal — "
+                         "was last written more than this many hours ago: a stalled scraper, or "
+                         f"a copy instead of the live file. 0 = never warn. Default "
+                         f"{MAX_SOURCE_AGE_HOURS:g}.")
     # 2 = the serving mart + one rollback. Disk is the droplet's scarcest resource and the
     # deploy script's own duplicate prune is being removed separately — retention is owned
     # here, and 3 versions of a ~4GB mart was one version of pure waste.
@@ -5516,15 +5970,191 @@ def _env_config_errors() -> list[str]:
             errors.append(f"PROSPECT_FULLTEXT_REBUILD_DELTA={raw!r} is not a non-negative integer "
                           "(reviews scored since the published full-text marts were built beyond "
                           f"which a full build rebuilds them; unset = {FULLTEXT_REBUILD_DELTA:,})")
+    # The unattended-run knobs (2026-09-22; see DISK_MIN_FREE_GB_DEFAULT and _configure_duckdb).
+    raw = os.environ.get("PROSPECT_DISK_MIN_FREE_GB", "").strip()
+    if raw:
+        try:
+            gib = float(raw)
+        except ValueError:
+            gib = -1.0
+        if not gib >= 0.0:
+            errors.append(f"PROSPECT_DISK_MIN_FREE_GB={raw!r} is not a non-negative number (GiB "
+                          "the data dir must have free before a build starts; 0 = no floor; "
+                          f"unset = {DISK_MIN_FREE_GB_DEFAULT:g})")
+    raw = os.environ.get("PROSPECT_DUCKDB_THREADS", "").strip()
+    if raw:
+        try:
+            threads = int(raw)
+        except ValueError:
+            threads = 0
+        if threads < 1:
+            errors.append(f"PROSPECT_DUCKDB_THREADS={raw!r} is not a positive integer (DuckDB "
+                          "worker threads; unset = DuckDB's default, every core)")
+    raw = os.environ.get("PROSPECT_DUCKDB_TEMP_DIR", "").strip()
+    if raw and not Path(raw).expanduser().is_dir():
+        errors.append(f"PROSPECT_DUCKDB_TEMP_DIR={raw!r} is not an existing directory (where "
+                      "DuckDB spills; unset = beside the build's scratch file in the data dir)")
+    raw = os.environ.get("PROSPECT_DUCKDB_TEMP_MAX", "").strip()
+    if raw:
+        # DuckDB's own parser is the contract (40GiB, 10GB, 500MB ...), so ask it.
+        probe = duckdb.connect()
+        try:
+            probe.execute("SET max_temp_directory_size = '" + raw.replace("'", "''") + "'")
+        except duckdb.Error:
+            errors.append(f"PROSPECT_DUCKDB_TEMP_MAX={raw!r} is not a size DuckDB accepts for "
+                          "max_temp_directory_size (e.g. 40GiB); unset = min(40GiB, half the "
+                          "free disk where the spill lands)")
+        finally:
+            probe.close()
+    raw = os.environ.get("PROSPECT_SCORE_CONTEXT", "").strip().lower()
+    if raw == "fork" and sys.platform == "darwin":
+        # _score_context() never picks fork here on its own; this refuses asking for it. The
+        # build process runs DuckDB's threads (and macOS system frameworks that do not survive
+        # a fork of a threaded parent — CPython made spawn the macOS default for this reason),
+        # so a forked scoring worker can deadlock or abort mid-bucket.
+        errors.append("PROSPECT_SCORE_CONTEXT='fork' is unsafe on macOS: the build forks from a "
+                      "process running DuckDB's threads, and macOS does not support fork "
+                      "without exec there. Use spawn (the default on macOS) or forkserver.")
     return errors
+
+
+def _source_snapshot(source_db: str) -> dict[str, str]:
+    """What the build knows about its source, taken at START — before staging reads a byte —
+    so mart_meta describes the snapshot the marts were built from, not the file as it stood hours
+    later (the scraper keeps writing throughout). The source runs in WAL mode, where writes land
+    in `<db>-wal` and reach the main file only at a checkpoint, so "when was it last written" is
+    the newer of the two mtimes. Keys are write_meta's (see there)."""
+    def iso(ts: float | None) -> str:
+        return "" if ts is None else datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(
+            timespec="seconds")
+
+    st = os.stat(source_db)
+    try:
+        wal_mtime: float | None = os.stat(source_db + "-wal").st_mtime
+    except OSError:
+        wal_mtime = None
+    last = max(st.st_mtime, wal_mtime or 0.0)
+    return {
+        "source_db_mtime": iso(st.st_mtime),
+        "source_db_size": str(st.st_size),
+        "source_db_wal_mtime": iso(wal_mtime),
+        "source_last_write_at": iso(last),
+        "source_age_hours": f"{max(0.0, time.time() - last) / 3600.0:.1f}",
+    }
+
+
+def _free_gib(path: Path) -> float:
+    """Free space on the filesystem holding `path`, in GiB — the number `df -h` shows."""
+    return shutil.disk_usage(path).free / 2**30
+
+
+def _disk_min_free_gb() -> float:
+    """PROSPECT_DISK_MIN_FREE_GB, else DISK_MIN_FREE_GB_DEFAULT (0 = no floor). A garbled value is
+    refused up front by _env_config_errors; here it falls back, like every other knob."""
+    raw = os.environ.get("PROSPECT_DISK_MIN_FREE_GB", "").strip()
+    if raw:
+        try:
+            value = float(raw)
+            if value >= 0.0:
+                return value
+        except ValueError:
+            pass
+    return DISK_MIN_FREE_GB_DEFAULT
+
+
+def _default_temp_max(spill_parent: Path) -> str:
+    """The spill budget when PROSPECT_DUCKDB_TEMP_MAX is unset: the smaller of
+    DUCKDB_TEMP_MAX_DEFAULT_GIB and DUCKDB_TEMP_MAX_FREE_FRACTION of the free space where the
+    spill will land — never DuckDB's own default of 90% of free disk (see there)."""
+    free = shutil.disk_usage(spill_parent).free
+    cap = min(DUCKDB_TEMP_MAX_DEFAULT_GIB * 2**30, int(free * DUCKDB_TEMP_MAX_FREE_FRACTION))
+    return f"{max(1, cap // 2**20)}MiB"
+
+
+def _configure_duckdb(con: duckdb.DuckDBPyConnection, building: Path,
+                      spill_dir: Path | None) -> None:
+    """Every DuckDB resource knob, applied to the build connection before its first query and
+    LOGGED AS DUCKDB REPORTS IT, so the log states the limits the build actually ran under:
+
+      PROSPECT_DUCKDB_MEMORY_LIMIT  memory_limit. Unset leaves DuckDB's default — 80% of RAM —
+                                    which on a shared box leaves nothing for the scoring
+                                    workers, the app or the OS; warned about, not refused.
+      PROSPECT_DUCKDB_THREADS       threads (unset: DuckDB's default, every core).
+      PROSPECT_DUCKDB_TEMP_DIR      where the spill goes (unset: `<scratch>.tmp` beside the
+                                    scratch in the data dir). See _spill_root.
+      PROSPECT_DUCKDB_TEMP_MAX      max_temp_directory_size, i.e. the spill budget. Unset is NOT
+                                    DuckDB's default any more — see _default_temp_max.
+
+    SPILL CONTROL (2026-08-31). The 2026-08-30 nightly died with
+        OutOfMemoryException: failed to offload data block (20.6 GiB/20.6 GiB used)
+        This limit was set by the 'max_temp_directory_size' setting.
+    after 5.35h with nothing built: that setting defaults to 90% of free disk, so DuckDB spilled
+    until the volume was full. The cap keeps a runaway query failing on its own budget while the
+    box still has room, instead of taking the filesystem — and the scraper's SQLite, the app's
+    mart and the next build's scratch — down with it. The droplet exported 40GiB from its shell
+    wrapper; the default here is the same idea without the wrapper.
+
+    preserve_insertion_order=false is the other half of that incident's fix. Nothing here
+    depends on insertion order: every mart that has a meaningful order states it in an explicit
+    ORDER BY, and the pre-swap validation gate compares row COUNTS. Turning it off lets DuckDB
+    stream large materialisations instead of buffering to preserve an order nobody reads."""
+    mem = os.environ.get("PROSPECT_DUCKDB_MEMORY_LIMIT", "").strip()
+    if mem:
+        con.execute(f"SET memory_limit = '{mem}'")
+    threads = os.environ.get("PROSPECT_DUCKDB_THREADS", "").strip()
+    if threads:
+        con.execute(f"SET threads = {int(threads)}")
+    if spill_dir is not None:
+        spill_dir.parent.mkdir(parents=True, exist_ok=True)
+        con.execute("SET temp_directory = '" + str(spill_dir).replace("'", "''") + "'")
+    con.execute("SET preserve_insertion_order = false")
+    tmp_max = os.environ.get("PROSPECT_DUCKDB_TEMP_MAX", "").strip()
+    con.execute(f"SET max_temp_directory_size = "
+                f"'{tmp_max or _default_temp_max(spill_dir.parent if spill_dir else building.parent)}'")
+    eff = dict(con.execute(
+        "SELECT name, value FROM duckdb_settings() WHERE name IN ('memory_limit', 'threads', "
+        "'temp_directory', 'max_temp_directory_size')").fetchall())
+    print(f"[etl] duckdb     : memory_limit={eff.get('memory_limit')}"
+          f"{'' if mem else ' (DuckDB default)'} threads={eff.get('threads')}"
+          f"{'' if threads else ' (DuckDB default)'} max_temp_directory_size="
+          f"{eff.get('max_temp_directory_size')}"
+          f"{'' if tmp_max else ' (default: min(40GiB, 50% of free disk))'} "
+          f"temp_directory={eff.get('temp_directory') or building.name + '.tmp'} "
+          "preserve_insertion_order=false")
+    if not mem:
+        print("[etl] WARNING: PROSPECT_DUCKDB_MEMORY_LIMIT is unset, so DuckDB may take 80% of "
+              "this machine's RAM — the sentiment workers (~0.75GB each), the app and the OS "
+              "need theirs on top. Set it (README, ETL section) on any box that does anything "
+              "else.", file=sys.stderr)
 
 
 def main() -> int:
     args = build_arg_parser().parse_args()
 
-    source_db = str(Path(args.source).resolve())
-    if not Path(source_db).exists():
+    # WHERE: both paths are required (see build_arg_parser for why there are no defaults), the
+    # source must be a file, and the data dir must already exist — it is never created on the
+    # fly, because a typo'd one would otherwise start a fresh mart AND a full multi-night
+    # sentiment rescore in the wrong place, and exit 0.
+    missing = [f"{flag} (or ${env})" for flag, env, value in (
+        ("--source", "PROSPECT_SOURCE_DB", args.source),
+        ("--data-dir", "PROSPECT_DATA_DIR", args.data_dir)) if not value]
+    if missing:
+        print(f"ERROR: {' and '.join(missing)} must be given — there are no path defaults "
+              "(one used to point at a stale copy of the source).", file=sys.stderr)
+        return 2
+    source_db = str(Path(args.source).expanduser().resolve())
+    if not Path(source_db).is_file():
         print(f"ERROR: source DB not found: {source_db}", file=sys.stderr)
+        return 2
+    data_dir = Path(args.data_dir).expanduser().resolve()
+    if not data_dir.is_dir():
+        print(f"ERROR: data dir not found: {data_dir} — it is not created implicitly (a typo "
+              "would start a fresh mart and a full sentiment rescore in the wrong place). "
+              "For a first-ever build, create it: mkdir -p " + str(data_dir), file=sys.stderr)
+        return 2
+    if not args.max_source_age_hours >= 0.0:   # written this way round so nan is refused too
+        print(f"ERROR: --max-source-age-hours {args.max_source_age_hours} is not a non-negative "
+              "number of hours (0 = never warn).", file=sys.stderr)
         return 2
 
     # Garbled env knobs are refused HERE, next to the classifier probe, for the same reason
@@ -5545,9 +6175,7 @@ def main() -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
 
-    data_dir = Path(args.data_dir).resolve()
-    data_dir.mkdir(parents=True, exist_ok=True)
-    mart_version = date.today().strftime("%Y%m%d")
+    mart_version = _utc_today().strftime("%Y%m%d")   # UTC, whatever the host zone (ONE CLOCK)
     versioned = data_dir / f"prospect_{mart_version}.duckdb"
     current = data_dir / "current.duckdb"
 
@@ -5595,6 +6223,10 @@ def main() -> int:
         if err is not None:
             print(f"ERROR: {err}", file=sys.stderr)
             return 2
+        if not current.exists():
+            print("ERROR: --light needs a published mart to copy the heavy tables from "
+                  f"({current} missing) — run a full build first.", file=sys.stderr)
+            return 2
 
     # --fulltext is a FULL build's choice. --light never scores, so it has nothing to build the
     # full-text marts from and always copies: `build` contradicts it outright (`copy`/`auto` are
@@ -5610,42 +6242,105 @@ def main() -> int:
               f"({current} missing) — run a full build first.", file=sys.stderr)
         return 2
 
+    # WHAT this run reads and where it writes, first thing in the log — and whether the source
+    # is still being written at all. A stale source is WARNED about, not refused: building from
+    # an old snapshot is sometimes exactly what an operator wants, but never silently.
+    source_info = _source_snapshot(source_db)
+    wal_note = (" (via its -wal)" if source_info["source_db_wal_mtime"]
+                and source_info["source_db_wal_mtime"] > source_info["source_db_mtime"] else "")
+    print(f"[etl] source     : {source_db}")
+    print(f"[etl]              last written {source_info['source_last_write_at']}{wal_note}, "
+          f"{float(source_info['source_age_hours']):,.1f}h ago; "
+          f"{int(source_info['source_db_size']) / 2**30:,.1f} GiB")
+    print(f"[etl] data dir   : {data_dir}")
+    if args.max_source_age_hours and float(source_info["source_age_hours"]) > args.max_source_age_hours:
+        print(f"[etl] WARNING: the source was last written {source_info['source_age_hours']}h ago "
+              f"({source_info['source_last_write_at']}) — older than --max-source-age-hours "
+              f"({args.max_source_age_hours:g}). Is the scraper still running, and is this the "
+              f"LIVE database rather than a copy? The build carries on and will publish marts "
+              f"from this snapshot; mart_meta.source_age_hours records how old it was.",
+              file=sys.stderr)
+
+    # THE RUN LOCK(S) — see the Build scratch notes above _RunLock. Taken after every refusal
+    # that needs no lock (so a refused run never even creates the lock file) and before anything
+    # that touches the data dir. Held until this function returns; the kernel drops them if the
+    # process dies any other way.
+    families = (["build", "rescore"] if args.repair_arms
+                else ["rescore"] if args.rescore_only else ["build"])
+    locks: list[_RunLock] = []
+    for family in families:
+        lock = _RunLock(_lock_path(data_dir, family))
+        if not lock.acquire(LOCK_GRACE_SECONDS):
+            who = ("a mart build (nightly, --light or --repair-arms)" if family == "build"
+                   else "a --rescore-only or --repair-arms run")
+            print(f"[etl] BUSY: {who} already holds {lock.path} ({lock.holder()}). This run did "
+                  f"nothing and touched nothing — exit {EXIT_BUSY}; run it again once that one "
+                  "is done.", file=sys.stderr)
+            for held in reversed(locks):
+                held.release()
+            return EXIT_BUSY
+        locks.append(lock)
+    try:
+        return _build(args, source_db, data_dir, mart_version, source_info, frozenset(families))
+    finally:
+        for lock in reversed(locks):
+            lock.release()
+
+
+def _build(args: argparse.Namespace, source_db: str, data_dir: Path, mart_version: str,
+           source_info: dict[str, str], held: frozenset[str]) -> int:
+    """Everything main() does once it holds its run lock(s): sweep, disk gate, build, validate,
+    swap. Split out of main() only so the locks' try/finally wraps all of it."""
+    versioned = data_dir / f"prospect_{mart_version}.duckdb"
+    current = data_dir / "current.duckdb"
+
     # Build into a scratch file and only os.replace() it over the versioned name once the
     # build succeeds. A SAME-DAY rerun otherwise deletes and rebuilds the very file
     # current.duckdb points at, so the serving app and the ETL fight over a DuckDB file
     # lock — any app (re)start mid-build then crash-loops on "Conflicting lock is held"
-    # (took the site down on 2026-08-04 after several manual same-day rebuilds). The
-    # nightly never hits this only because each day gets a fresh filename; this makes
-    # reruns safe regardless of restart timing. A failed/killed run leaves stale .building
-    # scratch (the file, its .wal, an up-to-18GB .tmp spill dir) — swept here before the
-    # build (scoped: this version plus provably-dead leftovers, never a live build's spill)
-    # and again in the try/finally below, so a failed run cleans up after itself.
+    # (took the site down on 2026-08-04 after several manual same-day rebuilds). A failed or
+    # killed run leaves stale .building scratch (the file, its .wal, an up-to-18GB .tmp spill
+    # dir) — swept here before the build, as provably dead because no run holds its lock (see
+    # _sweep_stale_scratch), and again in the try/finally below, so a failed run cleans up
+    # after itself.
     #
-    # --rescore-only builds into RESCORE_SCRATCH_DB_NAME instead, under its own pseudo-version.
-    # It writes no mart, so naming its scratch after the date's mart made a multi-day rescore
-    # and the nightly fight over one filename (and one spill dir) with nothing but a build hold
-    # — i.e. a total publishing freeze — to keep them apart. See RESCORE_SCRATCH_DB_NAME.
-    #
-    # --repair-arms shares that scratch and its pseudo-version: it too writes only the sentiment
-    # cache, may run for hours, and must not be swept by a nightly's stale-scratch sweep. Unlike
-    # a rescore it must never run BESIDE a mart build, which is checked right after the sweep
-    # on the sweep's own liveness test (see _live_mart_build_scratch).
+    # --rescore-only builds into RESCORE_SCRATCH_DB_NAME instead, under its own pseudo-version
+    # and its own lock, so a multi-day rescore and the nightly never share a filename, a spill
+    # dir or a lock. See RESCORE_SCRATCH_DB_NAME. --repair-arms shares that scratch; it holds
+    # the build lock as well, which is what keeps it from running beside any mart build.
     cache_only = args.rescore_only or args.repair_arms
     scratch_version = RESCORE_SCRATCH_VERSION if cache_only else mart_version
-    _sweep_stale_scratch(data_dir, scratch_version)
-    if args.repair_arms:
-        live = _live_mart_build_scratch(data_dir)
-        if live is not None:
-            print(f"ERROR: --repair-arms must not run beside a mart build, and {live} was written "
-                  f"less than {SCRATCH_ACTIVE_SECONDS / 60:.0f} min ago — a nightly or --light "
-                  "build may be in flight. Wait for it to finish (or remove that scratch by hand "
-                  "if you know it is dead).", file=sys.stderr)
-            return 2
+    spill_root = _spill_root(data_dir)
+    _sweep_stale_scratch(data_dir, held, spill_root)
+
+    # FREE-DISK GATE (2026-09-22), after the sweep — which may just have freed the headroom. It
+    # used to live in the droplet's shell wrapper (DISK_MIN_FREE_GB, deploy/prospect-refresh.sh),
+    # so a build run any other way had none: it would spill into a full disk and die hours in,
+    # taking the scraper's SQLite and the serving mart's volume with it. Checked where the
+    # scratch and the new mart land (the data dir); a separate spill volume is reported, and its
+    # budget is bounded by max_temp_directory_size instead (see _configure_duckdb).
+    floor = _disk_min_free_gb()
+    free = _free_gib(data_dir)
+    spill_note = ""
+    if spill_root is not None:
+        spill_base = Path(os.environ["PROSPECT_DUCKDB_TEMP_DIR"]).expanduser().resolve()
+        if os.stat(spill_base).st_dev != os.stat(data_dir).st_dev:
+            spill_note = f"; spill dir {spill_base}: {_free_gib(spill_base):,.1f} GiB free"
+    print(f"[etl] disk       : {free:,.1f} GiB free in the data dir (floor {floor:g} GiB, "
+          f"PROSPECT_DISK_MIN_FREE_GB){spill_note}")
+    if floor > 0 and free < floor:
+        print(f"ERROR: only {free:,.1f} GiB free in {data_dir}, below the {floor:g} GiB floor "
+              f"(PROSPECT_DISK_MIN_FREE_GB) even after sweeping dead scratch. A build needs "
+              f"room for its scratch, its spill and the new mart; below the floor it would die "
+              f"hours in on a full disk. Nothing was built (exit {EXIT_LOW_DISK}); free space, "
+              f"or lower the floor deliberately.", file=sys.stderr)
+        return EXIT_LOW_DISK
+
     building = (data_dir / RESCORE_SCRATCH_DB_NAME if cache_only
                 else data_dir / f"prospect_{mart_version}.duckdb.building")
+    spill_dir = None if spill_root is None else spill_root / f"{building.name}.tmp"
 
     params = build_params()
-    print(f"[etl] source     : {source_db}")
     if cache_only:
         # Deliberately NOT the versioned mart path: these modes never write one, and printing
         # one would put a filename in the log that nothing on disk will ever match.
@@ -5659,56 +6354,23 @@ def main() -> int:
     # finished artifact is then kept on disk (see the remedy printed below). Every other
     # exit — success, crash, source error — cleans its scratch up as before.
     validation_failed = False
-    # Resuming is the NORMAL case for a multi-night rescore, so the scratch it opens is often
-    # the one a SIGKILL left behind minutes ago — the sweep above spares those on purpose (it
-    # cannot tell a killed run's file from a running one's). Reusing it is safe and REQUIRES NO
-    # CLEANUP: nothing in this file is durable (progress lives in the sentiment cache, staging
-    # is rebuilt from src every run), and every working table the scoring path creates is either
-    # TEMP or DROP-IF-EXISTS'd immediately before it is created — keep it that way, because a
-    # plain CREATE TABLE added there would turn every resume into "Table with name X already
-    # exists". test_a_killed_rescore_resumes_on_the_same_scratch pins exactly that.
-    #
-    # Not deleting the file first is also deliberate: DuckDB's file lock refusing this connect
-    # is the ONLY thing that keeps a second rescore off a live one's scratch, and unlinking the
-    # name would hand both processes their own inode and let them both run.
-    reused_scratch = cache_only and building.exists()
+    # CONNECT OUTSIDE THE try/finally THAT SWEEPS (2026-09-22). This used to be the first line
+    # INSIDE it: a run refused here by DuckDB's file lock — i.e. one whose scratch belongs to a
+    # LIVE build — then ran that finally and deleted the live build's .building, .wal and spill.
+    # The run lock makes that unreachable for any build_marts that takes it; this keeps it
+    # unreachable for one that does not (the sweep above spared its open scratch too).
     try:
-      con = duckdb.connect(str(building))
-      if reused_scratch:
-          print(f"[etl] reusing the scratch {building.name} left by a previous run "
-                "(nothing in it is durable — see the rescore-scratch notes)")
+        con = _connect(str(building))
+    except duckdb.IOException as e:
+        if "lock" not in str(e).lower():
+            raise
+        print(f"[etl] BUSY: {building.name} is open in another process that holds no run lock "
+              f"({e}). This run did nothing and touched nothing — exit {EXIT_BUSY}.",
+              file=sys.stderr)
+        return EXIT_BUSY
+    try:
       try:
-        # On memory-constrained hosts (e.g. a small Droplet) cap DuckDB's memory so it spills
-        # to its on-disk temp dir instead of being OOM-killed. Env-driven; unset = default.
-        _mem = os.environ.get("PROSPECT_DUCKDB_MEMORY_LIMIT")
-        if _mem:
-            con.execute(f"SET memory_limit='{_mem}'")
-            print(f"[etl] duckdb memory_limit={_mem}")
-
-        # SPILL CONTROL (2026-08-31). The 2026-08-30 nightly died here:
-        #   OutOfMemoryException: failed to offload data block (20.6 GiB/20.6 GiB used)
-        #   This limit was set by the 'max_temp_directory_size' setting.
-        # It defaults to ALL free disk, so DuckDB spilled until the volume was full and then
-        # failed — after 5.35h, with nothing built. Two settings, both straight out of that
-        # error's own "possible solutions":
-        #
-        # preserve_insertion_order=false is the big one. Nothing here depends on insertion
-        # order: every mart that has a meaningful order states it in an explicit ORDER BY
-        # (and mart_game_aspect_reviews' was just given a unique tiebreak, so it no longer
-        # varies at all), and the pre-swap validation gate compares row COUNTS. Turning it off
-        # lets DuckDB stream large materialisations instead of buffering to preserve an order
-        # nobody reads — which is exactly what the 15M-row rebuild of
-        # stg_aspect_mention_sentiment at compute_aspect_sentiment() was buffering.
-        #
-        # max_temp_directory_size caps the spill BELOW free disk so a runaway query fails on
-        # its own budget while the box still has room, instead of taking the filesystem — and
-        # the scraper's SQLite, the app's mart and the next build's scratch down with it.
-        con.execute("SET preserve_insertion_order=false")
-        _tmp_max = os.environ.get("PROSPECT_DUCKDB_TEMP_MAX")
-        if _tmp_max:
-            con.execute(f"SET max_temp_directory_size='{_tmp_max}'")
-        print(f"[etl] duckdb preserve_insertion_order=false"
-              f"{f' max_temp_directory_size={_tmp_max}' if _tmp_max else ''}")
+        _configure_duckdb(con, building, spill_dir)
         con.execute("INSTALL sqlite; LOAD sqlite;")
         con.execute(f"ATTACH '{source_db}' AS src (TYPE sqlite, READ_ONLY)")
 
@@ -5811,6 +6473,7 @@ def main() -> int:
                 None if prev_mart is None else prev_mart.stem,
                 {} if prev_mart is None else _read_mart_meta(prev_mart),
                 _count_scored_reviews(con, data_dir),
+                pool=_SENTIMENT_POOL_COVERAGE,
             )
             print(f"[etl] full-text marts: {fulltext.reason}")
         copy_fulltext = fulltext.mode == "copy"
@@ -5845,7 +6508,8 @@ def main() -> int:
                    classifier_absent=_CLF_ABSENT,
                    fulltext_mode=fulltext.mode,
                    fulltext_built_at=fulltext.built_at,
-                   fulltext_scored_reviews=fulltext.scored_reviews)
+                   fulltext_scored_reviews=fulltext.scored_reviews,
+                   source_info=source_info)
 
         # Per-mart row counts.
         tables = [r[0] for r in con.execute(
@@ -5890,7 +6554,8 @@ def main() -> int:
                   f"                    ln -sfn {versioned.name} {current}\n"
                   f"          discard : rm -rf {building} {building}.wal\n"
                   f"        (--skip-validation swaps unconditionally but REBUILDS from scratch;\n"
-                  f"         the next build of version {mart_version} sweeps this file.)",
+                  f"         the NEXT BUILD OF ANY VERSION sweeps this file as dead scratch —\n"
+                  f"         inspect or ship it before then.)",
                   file=sys.stderr)
               return 1
 
@@ -5927,7 +6592,8 @@ def main() -> int:
         # is disposable (progress is in the sentiment cache), so every exit that runs a finally
         # removes it. Only a SIGKILL can leave it behind, and the next run's _sweep_stale_scratch
         # collects it.
-        _sweep_own_scratch(data_dir, scratch_version, keep_artifact=validation_failed)
+        _sweep_own_scratch(data_dir, scratch_version, keep_artifact=validation_failed,
+                           spill_root=spill_root)
 
     print(f"[etl] done in {time.perf_counter() - t0:.1f}s  (version {mart_version})")
     return 0

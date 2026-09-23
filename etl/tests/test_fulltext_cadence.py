@@ -179,6 +179,60 @@ def test_naive_timestamps_are_read_as_utc():
 
 
 # ------------------------------------------------------------------------------------------
+# A partly scored pool never feeds a rebuild (2026-09-22)
+#
+# After a cache wipe with PROSPECT_SENTIMENT_DEADLINE_SECONDS set, the cache refills over
+# several nights. The scored delta goes NEGATIVE (never a trigger) but the age rule still fired
+# once the published tables passed FULLTEXT_MAX_AGE_HOURS, and the teardown / aspect marts were
+# rebuilt from a hash-sampled, part-refilled cache: mention counts silently low while
+# n_reviews_sampled stayed full, and mart_game_review_aspects still has games x 10 rows, so the
+# validation gate could not see it.
+# ------------------------------------------------------------------------------------------
+PARTIAL = bm.PoolCoverage(scored=7_000_000, total=24_000_000)
+COMPLETE = bm.PoolCoverage(scored=24_000_000, total=24_000_000)
+
+
+def test_pool_coverage_reads_complete_only_when_every_review_is_scored():
+    assert COMPLETE.complete and COMPLETE.pct == 100.0
+    assert not PARTIAL.complete and round(PARTIAL.pct, 1) == 29.2
+    assert not bm.PoolCoverage(scored=23_999_999, total=24_000_000).complete
+    assert bm.PoolCoverage(scored=0, total=0).complete, "an empty pool has nothing left to score"
+
+
+def test_a_partly_scored_pool_copies_whatever_the_age_and_delta():
+    """The defect's exact shape: tables 3 days old (age rule says rebuild), delta negative."""
+    prov = _prov(72.0, 24_000_000)
+    plan = _decide(prev_meta=prov, scored_now=7_000_000, pool=PARTIAL)
+    assert plan.mode == "copy", plan.reason
+    assert "only 29.2% scored (17,000,000 of 24,000,000 reviews unscored)" in plan.reason
+    assert "never rebuilt from a partly scored pool" in plan.reason
+    # carried forward unchanged: the next complete night still sees the tables' real age
+    assert (plan.built_at, plan.scored_reviews) == (prov["fulltext_built_at"], "24000000")
+    # ...and so does a big positive delta, or a pre-cadence mart with no provenance at all
+    assert _decide(prev_meta=_prov(1.0, 1), scored_now=7_000_000, pool=PARTIAL).mode == "copy"
+    assert _decide(prev_meta={}, scored_now=7_000_000, pool=PARTIAL).mode == "copy"
+
+
+def test_a_complete_pool_decides_exactly_as_before():
+    for pool in (COMPLETE, None):
+        assert _decide(prev_meta=_prov(72.0, 24_000_000), scored_now=24_000_000,
+                       pool=pool).reason == "rebuilding (age 72.0h > 44h)"
+        assert _decide(prev_meta=_prov(1.0, 24_000_000), scored_now=24_000_000,
+                       pool=pool).mode == "copy"
+
+
+def test_with_nothing_to_copy_or_an_explicit_build_it_builds_and_says_so():
+    first = _decide(prev_name=None, scored_now=7_000_000, pool=PARTIAL)
+    assert first.mode == "build"
+    assert first.reason.startswith("rebuilding (no published mart to copy from) — WARNING: "
+                                   "the sentiment pool is only 29.2% scored")
+    forced = _decide("build", prev_meta=_prov(1.0, 1), scored_now=7_000_000, pool=PARTIAL)
+    assert forced.mode == "build" and "WARNING" in forced.reason and "LOW" in forced.reason
+    assert _decide("copy", prev_meta=_prov(1.0, 1), scored_now=1, pool=PARTIAL).reason == (
+        "copied from prospect_20260902 (--fulltext copy)")
+
+
+# ------------------------------------------------------------------------------------------
 # The env knobs
 # ------------------------------------------------------------------------------------------
 def test_env_knobs_drive_the_thresholds(monkeypatch):
@@ -479,3 +533,56 @@ def test_flag_conflicts_are_refused_before_any_work(tmp_path):
     assert sorted(p.name for p in data.iterdir()) == [], "a refusal must not touch the data dir"
     with pytest.raises(SystemExit):
         _run(argv + ["--fulltext", "sometimes"])
+
+
+
+class _StopAfter:
+    """A sentiment deadline that lets exactly `n` scoring buckets start. The loop asks
+    `now + bucket_cost >= deadline` before each one; float >= object falls through to this
+    object's __le__, which answers "not yet" n times and "stop" after that."""
+
+    def __init__(self, n: int):
+        self.left = n
+
+    def __le__(self, _now_plus_cost: float) -> bool:
+        self.left -= 1
+        return self.left < 0
+
+
+def test_a_wiped_cache_refilling_under_a_deadline_copies_until_scoring_catches_up(
+        tmp_path, monkeypatch, capsys):
+    """End to end, the incident's sequence: a published mart; a scoring-config change wipes the
+    cache and the night's deadline stops the rescore HALF-way; the published full-text tables
+    are old enough that the age rule alone would rebuild them — from a half-refilled cache, and
+    the validation gate would pass it (same row counts, lower mention counts). They must be
+    COPIED instead, and rebuilt on the first night the pool is complete again."""
+    monkeypatch.setenv("PROSPECT_RESCORE_BUCKET_REVIEWS", "200")      # 1200 reviews -> 6 buckets
+    data, argv = _fresh_source(tmp_path)
+    assert _run(argv) == 0
+    first_counts = _counts(data)
+    _rewrite_published_provenance(data, fulltext_built_at=_hours_ago(50))
+    capsys.readouterr()
+
+    # Night 2: the config hash moves (-> wipe) and the deadline stops the rescore after 3 of
+    # its 6 buckets.
+    monkeypatch.setattr(bm, "SENTIMENT_CACHE_VERSION", bm.SENTIMENT_CACHE_VERSION + 1000)
+    with pytest.MonkeyPatch.context() as night:
+        night.setattr(bm, "_sentiment_deadline", lambda: _StopAfter(3))
+        assert _run(argv) == 0
+    out = capsys.readouterr().out
+    assert "cache cleared, full rescore" in out
+    assert "STOPPED EARLY between buckets" in out
+    m = re.search(r"full-text marts: copied from prospect_\d{8}: the sentiment pool is only "
+                  r"(\d+\.\d)% scored \(([\d,]+) of 1,200 reviews unscored\)", out)
+    assert m and 0 < float(m.group(1)) < 100, out
+    assert "ran mart_game_aspect_reviews.sql" not in out
+    assert _meta(data)["fulltext_mode"] == "copy"
+    assert _counts(data) == first_counts, "the published full-text tables must be carried as-is"
+
+    # Night 3: no deadline, the rescore completes -> the age rule applies again and rebuilds.
+    assert _run(argv) == 0
+    out = capsys.readouterr().out
+    assert re.search(r"full-text marts: rebuilding \(age 5\d\.\dh > 44h\)$", out, re.M), out
+    assert "ran mart_game_aspect_reviews.sql" in out
+    assert _meta(data)["fulltext_mode"] == "build"
+    assert _counts(data) == first_counts, "same fixture, fully rescored: same tables"
