@@ -1,6 +1,52 @@
 import { describe, expect, it } from "vitest";
 
-import { addMonths, daysIntoMonth, fillMonthlyGaps, fmtDay, fmtMonth, monthRange, partialMonth } from "./dates";
+import { addMonths, daysIntoMonth, fillMonthlyGaps, fmtDay, fmtMonth, launchFacts, monthRange, partialMonth } from "./dates";
+
+/** GET /api/games/{appid} on the 2026-09-23 mart, verbatim fields. */
+describe("launchFacts — Early Access counts as the launch", () => {
+  it("reads a graduate as both dates (Hades)", () => {
+    const f = launchFacts({
+      release_date: "2019-12-10",
+      first_public_date: "2019-12-10",
+      release_date_1_0: "2020-09-17",
+      is_ea_graduate: true,
+      release_date_source: "first_review",
+    });
+    expect(f.kind).toBe("ea-graduate");
+    expect(f.line).toBe("Early Access since Dec 10, 2019 · 1.0 on Sep 17, 2020");
+    expect(f.launchDate).toBe("2019-12-10");
+    expect(f.source).toMatch(/first Steam review/);
+  });
+
+  it("prints a month-precision date as '~Aug 2018', never a made-up day (SCUM)", () => {
+    const f = launchFacts({
+      release_date: "2018-08-01",
+      first_public_date: "2018-08-01",
+      release_date_1_0: "2025-06-17",
+      is_ea_graduate: true,
+      release_date_source: "first_review_month",
+    });
+    expect(f.line).toBe("Early Access since ~Aug 2018 · 1.0 on Jun 17, 2025");
+    expect(f.approximate).toBe(true);
+    expect(f.line).not.toContain("Aug 1, 2018");
+  });
+
+  it("reads a plain launch as one date (The Witcher 3)", () => {
+    const f = launchFacts({
+      release_date: "2015-05-18",
+      first_public_date: "2015-05-18",
+      release_date_1_0: "2015-05-18",
+      is_ea_graduate: false,
+      release_date_source: "store",
+    });
+    expect(f.line).toBe("Released May 18, 2015");
+  });
+
+  it("falls back to release_date on a mart without the new columns", () => {
+    expect(launchFacts({ release_date: "2017-02-24" }).line).toBe("Released Feb 24, 2017");
+    expect(launchFacts({ release_date: null }).line).toBe("Release date unknown");
+  });
+});
 
 describe("fmtDay / fmtMonth — one date vocabulary", () => {
   it("prints a day as 'Feb 20, 2024' from a date, a DuckDB timestamp or an ISO timestamp", () => {

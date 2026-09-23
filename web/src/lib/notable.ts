@@ -204,6 +204,12 @@ export function markerMonths(
 
 // ---- labels ------------------------------------------------------------------------------
 
+/** A catalog event as the labeller reads it — the kind, and the title when it has one. */
+export interface PlumbEvent {
+  kind: string;
+  title?: string | null;
+}
+
 /** Plural nouns for a multi-event month: "2 UPDATES" but "2 PRESS" (a mass noun — "presses"
  * is a different word). Kinds this table does not know just take an S. */
 const KIND_PLURAL: Record<string, string> = { update: "UPDATES", press: "PRESS" };
@@ -232,10 +238,19 @@ function fmtMultiple(ratio: number): string {
  *                                tooltip lists them; "2 UPDATES ▲" would not fit)
  * @param events The month's catalog events; only their `kind` is read.
  */
-export function plumbLineLabel(reason: MarkerReason, events: ReadonlyArray<{ kind: string }> = []): string {
-  if (reason.release) return "RELEASED";
+export function plumbLineLabel(reason: MarkerReason, events: ReadonlyArray<PlumbEvent> = []): string {
+  if (reason.release) {
+    // An Early Access graduate is dated from its EA start (the rebuilt mart's release event is
+    // titled "Early Access launch"), so that line is the EA launch, not a "release".
+    const release = events.find((e) => e.kind === "release");
+    return release?.title && /^early access/i.test(release.title) ? "EA LAUNCH" : "RELEASED";
+  }
   const glyph = changeGlyph(reason);
-  const kinds = events.map((e) => e.kind).filter((k) => k !== "release");
+  // The graduate's 1.0 ships as an 'update' titled "1.0 release" — it is the second-biggest
+  // spike on most EA charts, so it says "1.0", not "UPDATE".
+  const kinds = events
+    .map((e) => (e.kind === "update" && /^1\.0 release/i.test(e.title ?? "") ? "1.0" : e.kind))
+    .filter((k) => k !== "release");
   if (kinds.length === 0) {
     if (glyph !== undefined && reason.ratio !== undefined) return `${glyph} ${fmtMultiple(reason.ratio)}`;
     return glyph ?? "•";
@@ -298,7 +313,7 @@ export function layoutPlumbLabels(
   visiblePeriods: readonly string[],
   reasonsByMonth: ReadonlyMap<string, MarkerReason>,
   plotWidthPx: number,
-  eventsByMonth?: ReadonlyMap<string, ReadonlyArray<{ kind: string }>>,
+  eventsByMonth?: ReadonlyMap<string, ReadonlyArray<PlumbEvent>>,
 ): Map<string, PlumbLabel> {
   interface Slot extends PlumbLabel {
     period: string;
@@ -327,7 +342,15 @@ export function layoutPlumbLabels(
   });
 
   const width = (s: Slot) => s.text.length * LABEL_CHAR_PX;
-  const overlaps = (a: Slot, b: Slot) => Math.abs(a.x - b.x) < (width(a) + width(b)) / 2 + LABEL_GAP_PX;
+  // Where the label is DRAWN: centred on its line, but pinned inside the plot at either edge
+  // (the chart anchors an overhanging label to the edge instead of letting it hang over an
+  // axis). Measured on the current text, so a degraded glyph re-centres.
+  const drawnX = (s: Slot) => {
+    const half = width(s) / 2;
+    if (plotWidthPx <= 2 * half) return plotWidthPx / 2;
+    return Math.min(Math.max(s.x, half), plotWidthPx - half);
+  };
+  const overlaps = (a: Slot, b: Slot) => Math.abs(drawnX(a) - drawnX(b)) < (width(a) + width(b)) / 2 + LABEL_GAP_PX;
 
   // The labels placed on each row and still visible, left to right.
   const placed: [Slot[], Slot[]] = [[], []];

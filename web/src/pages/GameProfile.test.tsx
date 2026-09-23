@@ -384,6 +384,54 @@ describe("GameProfile — Launch shape reads per week, with one takeaway", () =>
   });
 });
 
+/** GET /api/games/1145360 on the rebuilt (2026-09-23) mart: an Early Access graduate. */
+const HADES_DATES = {
+  release_date: "2019-12-10",
+  first_public_date: "2019-12-10",
+  release_date_1_0: "2020-09-17",
+  is_ea_graduate: true,
+  release_date_source: "first_review",
+};
+
+describe("GameProfile — header dates and price read as what they are", () => {
+  it("shows an Early Access graduate's EA start and its 1.0", async () => {
+    serve(/^\/api\/games\/367520(\?|$)/, { ...PROFILE, ...HADES_DATES });
+    renderProfile();
+    expect((await screen.findByTestId("launch-dates")).textContent).toBe("Early Access since Dec 10, 2019 · 1.0 on Sep 17, 2020");
+  });
+
+  it("prints a month-precision launch as '~Aug 2018'", async () => {
+    serve(/^\/api\/games\/367520(\?|$)/, {
+      ...PROFILE,
+      release_date: "2018-08-01",
+      first_public_date: "2018-08-01",
+      release_date_1_0: "2025-06-17",
+      is_ea_graduate: true,
+      release_date_source: "first_review_month",
+    });
+    renderProfile();
+    expect((await screen.findByTestId("launch-dates")).textContent).toBe("Early Access since ~Aug 2018 · 1.0 on Jun 17, 2025");
+  });
+
+  it("prints one release date in the page's date format on a mart without the EA columns", async () => {
+    renderProfile();
+    expect((await screen.findByTestId("launch-dates")).textContent).toBe("Released Feb 24, 2017");
+    expect(document.body.textContent).not.toContain("2017-02-24");
+  });
+
+  it("says 'Price unknown' — not 'Free' — for a $0 price Steam doesn't call free", async () => {
+    serve(/^\/api\/games\/367520(\?|$)/, { ...PROFILE, price_initial: 0, is_free: 0, price_status: "unknown", est_rev_reviews: null });
+    renderProfile();
+    expect(await screen.findByText("Price unknown")).toBeTruthy();
+  });
+
+  it("names our own first sighting as ours, not as a fact about the game", async () => {
+    renderProfile();
+    expect(await screen.findByText("First seen by Prospect: Jul 5, 2026")).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/in catalog since/);
+  });
+});
+
 /**
  * A card whose query failed used to render as an empty frame — reviews-summary, comparables,
  * the launch curve and the press card had no error branch at all, and an empty frame reads as

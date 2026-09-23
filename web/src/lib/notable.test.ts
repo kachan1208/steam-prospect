@@ -298,6 +298,16 @@ describe("plumbLineLabel — <= ~9 characters of uppercase", () => {
     expect(plumbLineLabel(release, [{ kind: "release" }, { kind: "press" }])).toBe("RELEASED");
   });
 
+  it("names an Early Access launch and a 1.0 for what they are (the rebuilt mart's events)", () => {
+    // mart_game_event: an EA graduate's 'release' is "Early Access launch" (or "… (month
+    // approximate)"), and its 1.0 is an 'update' titled "1.0 release".
+    expect(plumbLineLabel(release, [{ kind: "release", title: "Early Access launch" }])).toBe("EA LAUNCH");
+    expect(plumbLineLabel(release, [{ kind: "release", title: "Early Access launch (month approximate)" }])).toBe("EA LAUNCH");
+    expect(plumbLineLabel(flat, [{ kind: "update", title: "1.0 release" }])).toBe("1.0");
+    expect(plumbLineLabel({ ...spike(3), eventMonth: true }, [{ kind: "update", title: "1.0 release" }])).toBe("1.0 ▲");
+    expect(plumbLineLabel(flat, [{ kind: "update", title: "Patch 1.0.3 notes" }])).toBe("UPDATE");
+  });
+
   it("names a change by its multiple of the trailing median", () => {
     expect(plumbLineLabel(spike(107 / 35.5))).toBe("▲ 3.0×");
     expect(plumbLineLabel(spike(209 / 49.5))).toBe("▲ 4.2×");
@@ -451,6 +461,21 @@ describe("layoutPlumbLabels — two rows, degrade then hide", () => {
       { text: "▲ 3.0×", row: 1, show: true },
       { text: "▲ 4.2×", row: 1, show: true },
     ]);
+  });
+
+  it("measures a label where it is drawn: pinned inside the plot at the edges", () => {
+    // 37 months on 740px: 20px bands. Centred, "RELEASED" (52px) on month 0 sits at x=10 and
+    // "▲ 3.0×" (39px) on month 3 at x=70 — 60px apart, clear of the 53.5px they need. But the
+    // chart pins RELEASED inside the plot (centre 26), so they are really 44px apart and
+    // would overlap on one row: the spike has to take the row above.
+    const periods = series(new Array(37).fill(0)).map((p) => p.period);
+    const reasons = new Map<string, MarkerReason>([
+      [periods[0], { release: true, eventMonth: true }],
+      [periods[3], spike(3.0)],
+    ]);
+    const layout = layoutPlumbLabels(periods, reasons, 740, undefined);
+    expect(layout.get(periods[0])).toEqual({ text: "RELEASED", row: 1, show: true });
+    expect(layout.get(periods[3])).toEqual({ text: "▲ 3.0×", row: 0, show: true });
   });
 
   it("two adjacent labels on a narrow plot split rows, both in full", () => {

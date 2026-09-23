@@ -55,7 +55,8 @@ import {
 } from "../lib/api";
 import { COMPARE_CAP, toggleCompare, useCompareList } from "../lib/compareList";
 import { splitEntities } from "../lib/entities";
-import { addMonths, fmtDay, fmtMonth, partialMonth } from "../lib/dates";
+import { addMonths, fmtDay, fmtMonth, launchFacts, partialMonth } from "../lib/dates";
+import { fmtListPrice, priceStatus } from "../lib/priceStatus";
 import { estimatedUnits } from "../lib/estimates";
 import { DEFAULT_NICHE_CUT, findNicheVariant } from "../lib/nicheSelection";
 import { axisScale, fmtCompact, fmtInt, fmtMinutes, fmtMonths, fmtPct, fmtPrice, fmtRevenue, fmtUsd, monthName, isFreeTitle } from "../lib/format";
@@ -364,8 +365,11 @@ const VELOCITY_SERIES_ROW_PX = 21;
  * "Highlighted:" caption (`mt-1` + one 11px italic line) — so its loading placeholder
  * reserves the same and the card does not jump when the data lands. */
 const VELOCITY_BLOCK_HEIGHT = VELOCITY_CHART_HEIGHT + VELOCITY_SERIES_ROW_PX + PLUMB_LEGEND_ROW_PX + 21;
-/** Both y-axes are 40px; the right margin stays 8px. What usePlotWidth subtracts. */
-const VELOCITY_AXIS_CHROME = 40 + 40 + 8;
+/** Each y-axis column is 40px wide; the right margin stays 8px. */
+const VELOCITY_Y_AXIS_PX = 40;
+/** Both y-axes plus the right margin — what usePlotWidth subtracts. The plot then runs from
+ * x = 40 to x = 40 + plot width, the bounds the plumb labels are pinned inside. */
+const VELOCITY_AXIS_CHROME = VELOCITY_Y_AXIS_PX + VELOCITY_Y_AXIS_PX + 8;
 /** The rating line — paper ink, not the bars' accent, so it stays legible where it crosses
  * a bar of the same hue (the peak bar is full accent). */
 const RATING_STROKE = MONO.paper75;
@@ -396,6 +400,7 @@ export function ReviewVelocityBars({
   eventMarker,
   events,
   asOf,
+  launchDate,
 }: {
   points: ReviewTimelinePoint[];
   eventMarker?: { period: string; label: string };
@@ -403,6 +408,9 @@ export function ReviewVelocityBars({
   /** The data's as-of date (lib/dataAge) — decides which month is still being counted.
    * Without it the viewer's current month stands in. */
   asOf?: Date | null;
+  /** The game's launch day ('YYYY-MM-DD' — the first public date, Early Access included), for
+   * the launch line when the catalog events carry no release event. */
+  launchDate?: string | null;
 }) {
   // Every month gets a slot: the timeline skips months with no reviews (CS2 jumps from
   // 2012-05 to 2012-08), and a category axis would draw those neighbours side by side.
@@ -451,7 +459,8 @@ export function ReviewVelocityBars({
   // CS2's real inflections (2019 operations, the 2023-03 CS2 announcement, the 2023-09
   // release) predate our article scrape, so gating lines on having an event erased them
   // all. Every month's events stay readable in the tooltip regardless.
-  const releaseMonth = (events ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7);
+  const releaseMonth =
+    (events ?? []).find((e) => e.kind === "release")?.event_date.slice(0, 7) ?? (launchDate ? launchDate.slice(0, 7) : undefined);
   const reasons = markerReasons(
     points.map((p) => ({ period: p.period, value: p.n_reviews })),
     eventsByMonth.keys(),
@@ -546,7 +555,7 @@ export function ReviewVelocityBars({
               stroke="var(--text-muted)"
               strokeDasharray="2 5"
               strokeOpacity={month === releaseMonth ? 0.9 : 0.5}
-              label={plumbLabelProps(label, month === releaseMonth)}
+              label={plumbLabelProps(label, month === releaseMonth, { left: VELOCITY_Y_AXIS_PX, right: VELOCITY_Y_AXIS_PX + plot.width })}
             />
           ))}
           <Tooltip
@@ -701,6 +710,7 @@ export default function GameProfile() {
     .filter((e) => e.opp !== null);
 
   const profile = profileQ.data;
+  const launch = launchFacts(profile ?? {});
   // The genre as prose ("a typical Action game"); null for the catalog-wide fallback.
   const genreName = profile?.primary_genre && profile.primary_genre !== "__all__" ? profile.primary_genre : null;
 
@@ -859,11 +869,36 @@ export default function GameProfile() {
                   competing as equals, so nothing was findable. Split by what each answers, and
                   badges are now spent only on the two that are a SIGNAL rather than a label. */}
 
-              {/* What is this game: when, how much, what kind. */}
+              {/* What is this game: when, how much, what kind. An Early Access graduate reads
+                  as both of its dates (the rebuilt mart dates a game from its first PUBLIC day),
+                  and a $0 price is "Free" only when Steam says so — otherwise "Price unknown". */}
               <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-ink-secondary">
-                <span>{profile.release_date ?? "Release date unknown"}</span>
+                <span className="inline-flex items-center gap-1" data-testid="launch-dates">
+                  {launch.line}
+                  {launch.kind !== "unknown" && (
+                    <InfoTip
+                      label="Launch date"
+                      meaning="When the game was first buyable on Steam. For an Early Access game that is the day Early Access opened — its launch — and the 1.0 date is Steam's full release."
+                      worked={
+                        launch.kind === "ea-graduate"
+                          ? `Early Access from ${launch.firstPublic}; 1.0 on ${launch.fullRelease}`
+                          : `Released ${launch.firstPublic}`
+                      }
+                      source={launch.source ?? undefined}
+                    />
+                  )}
+                </span>
                 <span aria-hidden="true">·</span>
-                <span>{fmtPrice(profile.price_initial)}</span>
+                <span className="inline-flex items-center gap-1">
+                  {fmtListPrice(profile)}
+                  {priceStatus(profile) === "unknown" && (
+                    <InfoTip
+                      label="Price unknown"
+                      meaning="Steam gives no price for this game and doesn't mark it free — delisted, region-locked or not yet priced. Every revenue figure needs a list price, so none is estimated."
+                      sentinel="no list price"
+                    />
+                  )}
+                </span>
                 {profile.primary_genre && (
                   <>
                     <span aria-hidden="true">·</span>
@@ -877,19 +912,13 @@ export default function GameProfile() {
                   </>
                 )}
                 {/* When WE first saw the game — provenance about our own coverage, not a fact
-                    about the game, so it is the quietest thing here and it is dropped below
-                    `sm`. On a phone it otherwise wrapped to a line of its own led by an
-                    orphaned separator, spending a whole row on the least useful item. */}
-                {profile.first_seen && !Number.isNaN(Date.parse(profile.first_seen)) && (
-                  <span
-                    className="hidden items-center gap-x-2 text-ink-muted sm:inline-flex"
-                    title={`First seen in our catalog: ${profile.first_seen}`}
-                  >
+                    about the game (it read "in catalog since Jul 2026" beside a 2015 release,
+                    which looked like a date about the game). The quietest thing here, dropped
+                    below `sm`, where it wrapped to a line of its own. */}
+                {fmtDay(profile.first_seen) && (
+                  <span className="hidden items-center gap-x-2 text-ink-muted sm:inline-flex">
                     <span aria-hidden="true">·</span>
-                    <span>
-                      in catalog since{" "}
-                      {new Date(profile.first_seen).toLocaleDateString(undefined, { year: "numeric", month: "short" })}
-                    </span>
+                    <span>First seen by Prospect: {fmtDay(profile.first_seen)}</span>
                   </span>
                 )}
               </div>
@@ -1012,7 +1041,14 @@ export default function GameProfile() {
             {reviewsQ.isError && (
               <InlineError what="the review history" error={reviewsQ.error} onRetry={() => void reviewsQ.refetch()} />
             )}
-            {reviewsQ.data && <ReviewVelocityBars points={reviewsQ.data.timeline} events={eventsQ.data} asOf={dataAge.asOf} />}
+            {reviewsQ.data && (
+              <ReviewVelocityBars
+                points={reviewsQ.data.timeline}
+                events={eventsQ.data}
+                asOf={dataAge.asOf}
+                launchDate={launch.launchDate}
+              />
+            )}
           </BlueprintPanel>
 
           {/* FULL-WIDTH stack, not the mockup's sm:grid-cols-2 pair (changed 2026-08-25):

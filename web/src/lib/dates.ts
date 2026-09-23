@@ -101,6 +101,70 @@ export function partialMonth(lastPeriod: string | null | undefined, asOf: Date |
   return lastPeriod === current ? lastPeriod : null;
 }
 
+export interface LaunchFacts {
+  /** "ea-graduate": went Early Access -> 1.0; "released": one launch date; "unknown": no date. */
+  kind: "ea-graduate" | "released" | "unknown";
+  /** The first day the game was buyable: "Dec 10, 2019", or "~Aug 2018" when only the month is
+   * known. Null when there is no date. */
+  firstPublic: string | null;
+  /** The 1.0 date for a graduate ("Sep 17, 2020"), else null. */
+  fullRelease: string | null;
+  /** The date "since launch" counts from ('YYYY-MM-DD'): the first public date when served,
+   * else the release date. */
+  launchDate: string | null;
+  /** Only the month of the first public date is known. */
+  approximate: boolean;
+  /** The one-line header text. */
+  line: string;
+  /** Where the date came from, in words — for the ⓘ. */
+  source: string | null;
+}
+
+/**
+ * When the game launched, EARLY ACCESS INCLUDED (2026-09-23).
+ *
+ * The rebuilt mart dates a game from its FIRST PUBLIC day — the Early Access start for a
+ * graduate (Hades: Steam Early Access Dec 10, 2019, 1.0 on Sep 17, 2020) — where the old one
+ * used Steam's store date, the 1.0. A graduate is read as both dates; a date known only to
+ * the month (dated from the month of its first review) prints "~Aug 2018", never a fake day.
+ * Every field is gated: on a mart without them this falls back to `release_date`.
+ */
+export function launchFacts(p: {
+  release_date?: string | null;
+  first_public_date?: string | null;
+  release_date_1_0?: string | null;
+  is_ea_graduate?: boolean | null;
+  release_date_source?: string | null;
+}): LaunchFacts {
+  const raw = p.first_public_date ?? p.release_date ?? null;
+  const approximate = p.release_date_source === "first_review_month";
+  const firstPublic = raw ? (approximate ? (fmtMonth(raw) ? `~${fmtMonth(raw)}` : null) : fmtDay(raw)) : null;
+  const source =
+    p.release_date_source === "first_review_month"
+      ? "dated from the month of its first Steam review — accurate to the month only"
+      : p.release_date_source === "first_review"
+        ? "dated from its first Steam review, which came before the store page's date"
+        : p.release_date_source === "store"
+          ? "the date on the Steam store page"
+          : null;
+  const oneZero = p.release_date_1_0 ? fmtDay(p.release_date_1_0) : null;
+  if (!firstPublic) {
+    return { kind: "unknown", firstPublic: null, fullRelease: null, launchDate: null, approximate, line: "Release date unknown", source };
+  }
+  if (p.is_ea_graduate === true && oneZero && p.release_date_1_0 !== raw) {
+    return {
+      kind: "ea-graduate",
+      firstPublic,
+      fullRelease: oneZero,
+      launchDate: raw,
+      approximate,
+      line: `Early Access since ${firstPublic} · 1.0 on ${oneZero}`,
+      source,
+    };
+  }
+  return { kind: "released", firstPublic, fullRelease: null, launchDate: raw, approximate, line: `Released ${firstPublic}`, source };
+}
+
 /** Day-of-month the as-of date reached, for "partial (21 of 30 days)" copy; null without one. */
 export function daysIntoMonth(asOf: Date | null | undefined): { day: number; of: number } | null {
   if (!asOf) return null;

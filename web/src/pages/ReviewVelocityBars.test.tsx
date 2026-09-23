@@ -181,3 +181,57 @@ describe("ReviewVelocityBars — rating line on the right axis", () => {
     expect(screen.queryByText(/right axis/)).toBeNull();
   });
 });
+
+/** 36 months from Feb 2024, a steady 100 reviews a month: narrow bands, so a label centred
+ * on the FIRST month would overhang the plot's left edge. */
+const LONG: ReviewTimelinePoint[] = Array.from({ length: 36 }, (_, i) => {
+  const y = 2024 + Math.floor((i + 1) / 12);
+  const m = ((i + 1) % 12) + 1;
+  return {
+    period: `${y}-${String(m).padStart(2, "0")}`,
+    n_reviews: 100,
+    n_positive: 90,
+    cum_reviews: 0,
+    cum_positive: 0,
+    cum_positive_share: null,
+    trailing_reviews: null,
+    trailing_positive_share: null,
+  };
+});
+
+describe("ReviewVelocityBars — labels stay inside the plot", () => {
+  it("pins the first month's label to the plot's left edge instead of over the y-axis ticks", () => {
+    const { container } = render(
+      <ReviewVelocityBars points={LONG} events={[{ event_date: "2024-02-20", kind: "release", title: "Released", url: null }]} />,
+      { wrapper: Page },
+    );
+    const label = container.querySelector("text.plumb-label-release")!;
+    expect(label.textContent).toBe("RELEASED");
+    // Centred it would start ~26px left of its line, over the axis's top tick ("RELEASED"
+    // over "25K"); pinned, it starts exactly at the plot's left edge (the 40px axis column).
+    expect(label.getAttribute("text-anchor")).toBe("start");
+    expect(Number(label.getAttribute("x"))).toBe(40);
+  });
+
+  it("labels an Early Access launch and its 1.0 as what they are", () => {
+    const { container } = render(
+      <ReviewVelocityBars
+        points={LONG}
+        events={[
+          { event_date: "2024-02-10", kind: "release", title: "Early Access launch", url: null },
+          { event_date: "2025-06-17", kind: "update", title: "1.0 release", url: null },
+        ]}
+      />,
+      { wrapper: Page },
+    );
+    const labels = Array.from(container.querySelectorAll("text.plumb-label")).map((t) => t.textContent?.trim());
+    expect(labels).toContain("EA LAUNCH");
+    expect(labels).toContain("1.0");
+    expect(labels).not.toContain("RELEASED");
+  });
+
+  it("falls back to the game's launch date for the launch line when no release event came", () => {
+    const { container } = render(<ReviewVelocityBars points={LONG} events={[]} launchDate="2024-05-10" />, { wrapper: Page });
+    expect(container.querySelector("text.plumb-label-release")?.textContent).toBe("RELEASED");
+  });
+});

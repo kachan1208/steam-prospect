@@ -17,6 +17,7 @@ import type { LabelProps } from "recharts";
 
 import {
   changeSummary,
+  LABEL_CHAR_PX,
   MARKER_RATIO,
   MARKER_WINDOW,
   UNMEASURED_PLOT_PX,
@@ -40,14 +41,53 @@ export const PLUMB_LABEL_BAND = 2 * PLUMB_ROW_PITCH + 4;
  * `.recharts-label { fill }` rule beats any fill ATTRIBUTE, which is why the old label's
  * `fill: var(--text-muted)` never applied either.
  */
-export function plumbLabelProps(label: PlumbLabel, release: boolean): LabelProps | undefined {
+export function plumbLabelProps(
+  label: PlumbLabel,
+  release: boolean,
+  /** The plot's left and right edges in SVG px. When given, a label that would overhang
+   * either edge is pinned inside it — see plumbLabelX. */
+  bounds?: PlotBounds,
+): LabelProps | undefined {
   if (!label.show) return undefined;
+  const className = release ? "plumb-label plumb-label-release" : "plumb-label";
+  const dy = (label.row - 1) * PLUMB_ROW_PITCH;
+  if (!bounds) return { value: label.text, position: "top", dy, className };
   return {
     value: label.text,
     position: "top",
-    dy: (label.row - 1) * PLUMB_ROW_PITCH,
-    className: release ? "plumb-label plumb-label-release" : "plumb-label",
+    className,
+    // A custom renderer so the anchor can change at the edges; same row, same class, same
+    // baseline Recharts' "top" position gives (5px above the plot edge, then the row offset).
+    content: (props: { viewBox?: unknown }) => {
+      const vb = props.viewBox as { x?: number; y?: number } | undefined;
+      if (!vb || typeof vb.x !== "number" || typeof vb.y !== "number") return null;
+      const { x, anchor } = plumbLabelX(vb.x, label.text, bounds);
+      return (
+        <text className={className} x={x} y={vb.y - 5} dy={dy} textAnchor={anchor}>
+          {label.text}
+        </text>
+      );
+    },
   };
+}
+
+export interface PlotBounds {
+  left: number;
+  right: number;
+}
+
+/**
+ * Where a plumb label sits horizontally: centred on its line, unless that would push it past
+ * the plot's left or right edge — then it is pinned to that edge (anchored start / end), still
+ * spanning its line. Centred, the first month's "RELEASED" hung ~26px left of the plot and
+ * over the y-axis column, printed on top of the axis's top tick ("RELEASED" over "25K").
+ * Width is the layout's own estimate (LABEL_CHAR_PX per character).
+ */
+export function plumbLabelX(lineX: number, text: string, bounds: PlotBounds): { x: number; anchor: "middle" | "start" | "end" } {
+  const half = (text.length * LABEL_CHAR_PX) / 2;
+  if (lineX - half < bounds.left) return { x: bounds.left, anchor: "start" };
+  if (lineX + half > bounds.right) return { x: bounds.right, anchor: "end" };
+  return { x: lineX, anchor: "middle" };
 }
 
 /**
