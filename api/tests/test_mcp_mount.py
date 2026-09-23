@@ -836,3 +836,26 @@ def test_mart_swap_is_hot_reloaded_and_probes_rerun(load_mcp, tmp_path):
     # No swap -> no reopen.
     m.find_niches()
     assert m._generation == 1
+
+
+def test_same_day_rebuild_over_the_same_name_is_reloaded(load_mcp, tmp_path):
+    # A same-day rebuild os.replace()s a NEW prospect_YYYYMMDD.duckdb over the SAME name, so
+    # the resolved path doesn't change — only the inode does. duckdb.connect(path) would hand
+    # back DuckDB's per-process cached instance of the OLD file while the old connection is
+    # still open (it is, during the swap), silently serving yesterday's data under a fresh
+    # generation. The private-instance ATTACH in _open() must read the file on disk now.
+    versioned = tmp_path / "prospect_20260801.duckdb"
+    _build_mart(versioned, v2=False, built_at=datetime(2026, 8, 1, tzinfo=timezone.utc))
+    link = tmp_path / "current.duckdb"
+    os.symlink(versioned.name, link)
+    m = load_mcp(link)
+    assert m.find_niches()["score_version"] == "v1-legacy"
+
+    rebuilt = tmp_path / "prospect_20260801.duckdb.building"
+    _build_mart(rebuilt, v2=True, built_at=datetime(2026, 8, 1, 23, tzinfo=timezone.utc))
+    os.replace(rebuilt, versioned)  # same name, new inode — the light-build/nightly collision
+    m.RELOAD_CHECK_S = 0.0
+    after = m.find_niches()
+    assert after["score_version"] == "v2", "reload returned the cached OLD instance"
+    assert "momentum" in after["niches"][0]
+    assert m._generation == 1

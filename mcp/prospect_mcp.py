@@ -36,6 +36,7 @@ import os
 import re
 import statistics
 import sys
+import tempfile
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -96,10 +97,39 @@ def _db_identity() -> tuple[str, int, int] | None:
     return real, st.st_dev, st.st_ino
 
 
+# The catalog name the mart is ATTACHed under; every cursor `USE`s it (see _open).
+_MART = "mart"
+
+
+def _open(path: str) -> duckdb.DuckDBPyConnection:
+    """A private in-memory DuckDB instance with the mart file ATTACHed read-only.
+
+    NOT duckdb.connect(path): DuckDB caches one database instance per path per process, so
+    after a same-day rebuild (a NEW prospect_YYYYMMDD.duckdb os.replace()d over the SAME
+    name) a plain connect hands back the cached instance — the OLD file's data — for as
+    long as any connection to it is open (measured on 1.5.5; api/app/analytics_db.py hit
+    the same trap and uses the same cure). Here the old connection is still open while the
+    new one is made, so a reload would swap in yesterday's data under a fresh generation.
+    An in-memory connection is never cached and ATTACH opens the file on disk right now."""
+    conn = duckdb.connect(
+        ":memory:",
+        # An in-memory instance would otherwise spill into ./.tmp of whatever cwd the stdio
+        # client launched us from.
+        config={"temp_directory": os.path.join(tempfile.gettempdir(), "prospect-mcp.tmp")},
+    )
+    try:
+        conn.execute(f"ATTACH '{path.replace(chr(39), chr(39) * 2)}' AS {_MART} (READ_ONLY)")
+        conn.execute(f"USE {_MART}")
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
 _identity = _db_identity()
 # Opened on the RESOLVED path so the connection reads exactly the file _identity describes,
 # even if the symlink is retargeted between the stat and the connect.
-_conn = duckdb.connect(_identity[0] if _identity else str(DB_PATH), read_only=True)
+_conn = _open(_identity[0] if _identity else str(DB_PATH))
 _lock = threading.Lock()  # serialises every read on the shared connection
 _reload_lock = threading.Lock()  # one reload check / swap at a time
 _generation = 0  # bumped on every swap; every cache below is keyed on it
@@ -128,7 +158,7 @@ def _maybe_reload(force: bool = False) -> bool:
         if new_identity is None or new_identity == _identity:
             return False
         try:
-            new_conn = duckdb.connect(new_identity[0], read_only=True)
+            new_conn = _open(new_identity[0])
         except duckdb.Error as exc:
             _log(f"mart swap to {new_identity[0]} seen but reopen failed ({exc!r}); "
                  f"still serving {_identity[0] if _identity else DB_PATH}")
@@ -181,6 +211,8 @@ def _needs_coercion(type_name: str) -> bool:
 def query(sql: str, params: list[Any] | None = None) -> list[dict]:
     with _lock:
         cur = _conn.cursor()
+        # A cursor is a new connection whose default catalog is the empty ":memory:" one.
+        cur.execute(f"USE {_MART}")
         cur.execute(sql, params or [])
         desc = cur.description or []
         rows = cur.fetchall()
