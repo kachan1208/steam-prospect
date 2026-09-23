@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import GameProfile from "./GameProfile";
 import { ThemeProvider } from "../lib/theme";
+import { installChartLayout } from "../test/recharts";
 
 /**
  * Three displayed-number contracts on /games/:appid, all pinned against the LIVE payloads for
@@ -152,6 +153,17 @@ function renderProfile() {
   );
 }
 
+/** Per-test route overrides, checked before the defaults below: a body to serve as JSON, or
+ * a function building the Response (an error status, a network failure). */
+type Route = unknown | ((url: string) => Response | Promise<Response>);
+let overrides: Array<[RegExp, Route]> = [];
+function serve(pattern: RegExp, route: Route) {
+  overrides.push([pattern, route]);
+}
+function failWith(status: number) {
+  return () => new Response(JSON.stringify({ detail: "boom" }), { status, headers: { "Content-Type": "application/json" } });
+}
+
 beforeEach(() => {
   vi.stubGlobal(
     "fetch",
@@ -159,6 +171,9 @@ beforeEach(() => {
       const url = String(input);
       const json = (body: unknown) =>
         new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      for (const [re, route] of overrides) {
+        if (re.test(url)) return typeof route === "function" ? (route as (u: string) => Response)(url) : json(route);
+      }
 
       const niche = url.match(/^\/api\/niches\/tag\/([^?]+)/);
       if (niche) {
@@ -193,16 +208,41 @@ beforeEach(() => {
       if (url.includes("/events")) return json({ appid: 367520, items: [] });
       if (url.includes("/channel-mix")) return json({ appid: 367520, channels: [] });
       if (url.startsWith("/api/launch-curve")) return json({ genre: "Action", eligible: false, points: [] });
+      if (url.includes("/price-history")) return json({ appid: 367520, items: [], status: "ok" });
+      if (url.startsWith("/api/health")) return json({ status: "ok", mart_version: "20260921", built_at: "2026-09-21T22:28:20+00:00", data_as_of: "2026-09-21", source_db: null });
       if (url.match(/^\/api\/games\/367520(\?|$)/)) return json(PROFILE);
       return json({});
     }),
   );
 });
 
+/** Undo installChartLayout after each test that drew charts. */
+let restoreLayout: (() => void) | null = null;
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  overrides = [];
+  restoreLayout?.();
+  restoreLayout = null;
+  try {
+    window.localStorage.removeItem("prospect-detail-view");
+  } catch {
+    // storage unavailable — nothing to reset
+  }
 });
+
+/** Render with charts that actually draw (a fake ResizeObserver, a fixed box). */
+function renderWithCharts() {
+  restoreLayout ??= installChartLayout(900, 320);
+  return renderProfile();
+}
+
+/** Render in the Detailed view, where the chart-heavy cards live. */
+function renderDetailed() {
+  window.localStorage.setItem("prospect-detail-view", "detailed");
+  return renderWithCharts();
+}
 
 describe("GameProfile — In niches quotes the app-default cut", () => {
   it("shows the >=50-reviews score, the one the linked niche page opens on", async () => {
@@ -312,5 +352,34 @@ describe("GameProfile — the Estimates footnote describes the estimator that ac
     // Same figures as before the copy fix: 559,257 x 30 x $14.99, and its 20/55 band ends.
     expect(await screen.findByText("$251.5M")).toBeTruthy();
     expect(await screen.findByText(/\$167\.7M – \$461\.1M/)).toBeTruthy();
+  });
+});
+
+/** GET /api/launch-curve?genre=Action, median column verbatim (mart 20260921). */
+const ACTION_CURVE = {
+  genre: "Action",
+  points: [
+    [7, 0.3],
+    [14, 0.38461538461538464],
+    [30, 0.48],
+    [60, 0.5852713178294574],
+    [90, 0.66],
+    [180, 0.8088235294117647],
+    [365, 1],
+  ].map(([day, median]) => ({ day, mean_cum_fraction: median, median_cum_fraction: median, n_games: 23443 })),
+};
+
+describe("GameProfile — Launch shape reads per week, with one takeaway", () => {
+  it("states the front-loaded pace instead of grading every genre 'Balanced'", async () => {
+    serve(/^\/api\/launch-curve/, ACTION_CURVE);
+    renderDetailed();
+    const headline = await screen.findByTestId("launch-shape-headline");
+    expect(headline.textContent).toMatch(
+      /^Front-loaded: a typical Action game collects 30% of its first-year reviews in week 1 alone, then 0\.7% a week in months 7–12/,
+    );
+    expect(document.body.textContent).not.toMatch(/Balanced\./);
+    // The caption no longer points at a card that was removed on 2026-09-19.
+    expect(document.body.textContent).not.toMatch(/Momentum card/);
+    expect(screen.getByText(/Genre median across 23,443 Action titles/)).toBeTruthy();
   });
 });

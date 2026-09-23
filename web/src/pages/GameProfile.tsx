@@ -18,7 +18,7 @@ import {
 import { AspectDivergingBars } from "../components/charts/AspectDivergingBars";
 import { GameMetricDrilldown, DRILLDOWN_META, type DrilldownMetric, type OwnersPerReview } from "../components/charts/GameMetricDrilldown";
 import { LanguageSplitChart } from "../components/charts/LanguageSplitChart";
-import { LaunchShapeBars } from "../components/charts/LaunchShapeBars";
+import { LaunchShapeBars, launchShapeSummary } from "../components/charts/LaunchShapeBars";
 import { PressBySourceChart } from "../components/charts/PressBySourceChart";
 import { PressTimelineChart } from "../components/charts/PressTimelineChart";
 import { PriceHistoryChart } from "../components/charts/PriceHistoryChart";
@@ -643,6 +643,8 @@ export default function GameProfile() {
     .filter((e) => e.opp !== null);
 
   const profile = profileQ.data;
+  // The genre as prose ("a typical Action game"); null for the catalog-wide fallback.
+  const genreName = profile?.primary_genre && profile.primary_genre !== "__all__" ? profile.primary_genre : null;
 
   const revenueRange = useMemo(() => {
     const bx = benchmarksQ.data?.cited.boxleiter_owners_per_review;
@@ -1248,54 +1250,34 @@ export default function GameProfile() {
                 profile should lead with the game's own story, then the genre yardstick. */}
             <BlueprintPanel
               title="Launch shape — front-loaded vs. slow-burn"
-              subtitle="How fast games in this genre earn their first-year reviews (a sales-momentum proxy) — tells you whether to bet on a big launch splash or a sustained slow-burn."
+              subtitle="How fast games in this genre earn their first-year reviews (a sales-momentum proxy) — whether to bet on the launch splash or a sustained slow burn."
             >
               {genreCurveQ.data &&
                 (() => {
-                  const pts = genreCurveQ.data.points;
-                  const at = (d: number) => pts.find((p) => p.day === d)?.median_cum_fraction ?? null;
-                  const d30 = at(30);
-                  if (d30 == null) return null;
-                  const d7 = at(7);
-                  const d30pct = Math.round(d30 * 100);
-                  const d7pct = d7 != null ? Math.round(d7 * 100) : null;
-                  const shape = d30pct >= 60 ? "Front-loaded" : d30pct <= 45 ? "Slow-burn" : "Balanced";
-                  const note =
-                    shape === "Front-loaded"
-                      ? "sales cluster at launch — the launch splash matters most here."
-                      : shape === "Slow-burn"
-                        ? "sales keep accruing all year — sustained marketing and updates pay off."
-                        : "there's a launch spike, but the long tail keeps building — both matter.";
-                  const genreLabel =
-                    profile.primary_genre && profile.primary_genre !== "__all__" ? profile.primary_genre : "These";
+                  // One takeaway, off the same per-week bars drawn below (2026-09-23). The old
+                  // callout graded the genre on its day-30 share (">= 60% front-loaded, <= 45%
+                  // slow-burn") and called every real genre "Balanced" (they all sit at 46-50%)
+                  // beside a chart that looked like a U — neither said what the data says.
+                  const summary = launchShapeSummary(genreCurveQ.data.points, genreName);
+                  if (!summary) return null;
                   return (
-                    <div className="mb-3 border border-chartborder bg-page px-3 py-2 text-xs text-ink-secondary">
-                      <span className="font-semibold text-ink-primary">{shape}.</span> {genreLabel} games land{" "}
-                      <span className="font-semibold text-ink-primary">~{d30pct}%</span> of first-year reviews in the first
-                      30 days{d7pct != null ? ` (${d7pct}% in week one)` : ""} — {note}
+                    <div className="mb-3 flex items-start gap-1.5 border border-chartborder bg-page px-3 py-2 text-xs text-ink-secondary">
+                      <p className="min-w-0" data-testid="launch-shape-headline">
+                        {summary.headline}
+                      </p>
+                      <InfoTip term="launch_shape" worked={summary.worked} />
                     </div>
                   );
                 })()}
-              {genreCurveQ.isLoading && (
-                <Loading className="h-40 text-xs" />
-              )}
+              {genreCurveQ.isLoading && <Loading className="h-40 text-xs" />}
               {genreCurveQ.data && <LaunchShapeBars points={genreCurveQ.data.points} height={220} />}
               {genreCurveQ.data && (
                 <p className="mt-2 text-[11px] italic text-ink-muted">
-                  Share of first-year reviews earned in each window after launch — genre median across{" "}
-                  {(genreCurveQ.data.points[0]?.n_games ?? 0).toLocaleString()} {profile.primary_genre &&
-                    profile.primary_genre !== "__all__"
-                    ? profile.primary_genre
-                    : ""}{" "}
-                  titles — a benchmark for this title's own month-by-month trajectory, shown on the Momentum card above.
+                  Genre median across {fmtInt(genreCurveQ.data.points[0]?.n_games ?? 0)} {genreName ?? ""} titles at least a
+                  year old — the yardstick for this game&apos;s own month-by-month reviews in Review velocity above.
                 </p>
               )}
             </BlueprintPanel>
-
-            {/* "Where this genre gets attention" (the genre channel mix) used to sit here with
-                the genre yardsticks; since 2026-09-19 it is the second half of the "Press &
-                attention" card below, next to this game's own press footprint — the two
-                marketing reads belong on one screen. */}
 
             <BlueprintPanel title="Language split" subtitle="Share of sampled reviews by language — a localization reference">
               {reviewsQ.isLoading && (
