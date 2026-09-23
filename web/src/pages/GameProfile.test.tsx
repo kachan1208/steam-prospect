@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -381,5 +381,52 @@ describe("GameProfile — Launch shape reads per week, with one takeaway", () =>
     // The caption no longer points at a card that was removed on 2026-09-19.
     expect(document.body.textContent).not.toMatch(/Momentum card/);
     expect(screen.getByText(/Genre median across 23,443 Action titles/)).toBeTruthy();
+  });
+});
+
+/**
+ * A card whose query failed used to render as an empty frame — reviews-summary, comparables,
+ * the launch curve and the press card had no error branch at all, and an empty frame reads as
+ * "no data here", which is a claim. Every one now says what failed and offers Retry.
+ */
+describe("GameProfile — every card says when its data failed to load", () => {
+  it("shows a retryable error for the review history, comparables, launch curve and press", async () => {
+    serve(/\/reviews-summary/, failWith(500));
+    serve(/\/comparables/, failWith(500));
+    serve(/^\/api\/launch-curve/, failWith(500));
+    serve(/\/teardown/, failWith(500));
+    renderDetailed();
+    expect(await screen.findByText(/Couldn't load the review history/)).toBeTruthy();
+    expect(screen.getByText(/Couldn't load comparable games/)).toBeTruthy();
+    expect(await screen.findByText(/Couldn't load the genre's launch curve/)).toBeTruthy();
+    expect(screen.getByText(/Couldn't load the review aspects/)).toBeTruthy();
+    expect(screen.getByText(/Couldn't load the press coverage/)).toBeTruthy();
+    expect(screen.getByText(/Couldn't load the language split/)).toBeTruthy();
+    // Never the raw exception text.
+    expect(document.body.textContent).not.toMatch(/Failed to load review aspects:/);
+    expect(screen.getAllByRole("button", { name: "Retry" }).length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("recovers on Retry", async () => {
+    let fail = true;
+    serve(/\/comparables/, () =>
+      fail
+        ? failWith(500)()
+        : new Response(
+            JSON.stringify({
+              appid: 367520,
+              primary_genre: "Action",
+              price_band: { low: 9, high: 20 },
+              items: [],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+    );
+    renderProfile();
+    const error = await screen.findByText(/Couldn't load comparable games/);
+    fail = false;
+    fireEvent.click(within(error.closest("[role=alert]") as HTMLElement).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("No comparable titles")).toBeTruthy();
+    expect(screen.queryByText(/Couldn't load comparable games/)).toBeNull();
   });
 });

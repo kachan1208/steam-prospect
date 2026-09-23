@@ -31,6 +31,7 @@ import { Badge } from "../components/ui/Badge";
 import { InfoTip } from "../components/ui/InfoTip";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ErrorState } from "../components/ui/ErrorState";
+import { InlineError } from "../components/ui/InlineError";
 import { Loading } from "../components/ui/Loading";
 import { SocialLinks } from "../components/ui/SocialLinks";
 import { TableScroll } from "../components/ui/TableScroll";
@@ -1008,6 +1009,9 @@ export default function GameProfile() {
                 <Loading className="h-full text-xs" />
               </div>
             )}
+            {reviewsQ.isError && (
+              <InlineError what="the review history" error={reviewsQ.error} onRetry={() => void reviewsQ.refetch()} />
+            )}
             {reviewsQ.data && <ReviewVelocityBars points={reviewsQ.data.timeline} events={eventsQ.data} asOf={dataAge.asOf} />}
           </BlueprintPanel>
 
@@ -1045,9 +1049,7 @@ export default function GameProfile() {
                 <Loading className="h-24 text-xs" />
               )}
               {teardownQ.isError && (
-                <div className="text-xs text-verdict-serious">
-                  Failed to load review aspects{teardownQ.error instanceof Error ? `: ${teardownQ.error.message}` : "."}
-                </div>
+                <InlineError what="the review aspects" error={teardownQ.error} onRetry={() => void teardownQ.refetch()} />
               )}
               {teardownQ.data && teardownQ.data.eligible_reviews && (
                 <AspectDivergingBars appid={appid} aspects={teardownQ.data.review_aspects} />
@@ -1328,6 +1330,9 @@ export default function GameProfile() {
                   );
                 })()}
               {genreCurveQ.isLoading && <Loading className="h-40 text-xs" />}
+              {genreCurveQ.isError && (
+                <InlineError what="the genre's launch curve" error={genreCurveQ.error} onRetry={() => void genreCurveQ.refetch()} />
+              )}
               {genreCurveQ.data && <LaunchShapeBars points={genreCurveQ.data.points} height={220} />}
               {genreCurveQ.data && (
                 <p className="mt-2 text-[11px] italic text-ink-muted">
@@ -1340,6 +1345,9 @@ export default function GameProfile() {
             <BlueprintPanel title="Language split" subtitle="Share of sampled reviews by language — a localization reference">
               {reviewsQ.isLoading && (
                 <Loading className="h-24 text-xs" />
+              )}
+              {reviewsQ.isError && (
+                <InlineError what="the language split" error={reviewsQ.error} onRetry={() => void reviewsQ.refetch()} />
               )}
               {reviewsQ.data && <LanguageSplitChart data={reviewsQ.data.language_split} />}
             </BlueprintPanel>
@@ -1375,6 +1383,14 @@ export default function GameProfile() {
                     {reviewsQ.data && reviewsQ.data.playtime_at_review.length === 0 && (
                       <span className="text-ink-muted">Not enough sampled reviews.</span>
                     )}
+                    {reviewsQ.isError && (
+                      <InlineError
+                        what="playtime at review"
+                        error={reviewsQ.error}
+                        onRetry={() => void reviewsQ.refetch()}
+                        className="w-full"
+                      />
+                    )}
                   </div>
                 </div>
               </div>
@@ -1393,6 +1409,9 @@ export default function GameProfile() {
           }
         >
           {comparablesQ.isLoading && <Loading label="Loading comparables…" className="py-1 text-xs" />}
+          {comparablesQ.isError && (
+            <InlineError what="comparable games" error={comparablesQ.error} onRetry={() => void comparablesQ.refetch()} />
+          )}
           {comparablesQ.data && comparablesQ.data.items.length === 0 && (
             <EmptyState
               className="py-6"
@@ -1474,6 +1493,9 @@ export default function GameProfile() {
           subtitle="This game's own coverage in the tracked games-press outlets — journalist articles only (Steam News excluded)"
         >
           {teardownQ.isLoading && <Loading className="h-32 text-xs" />}
+          {teardownQ.isError && (
+            <InlineError what="the press coverage" error={teardownQ.error} onRetry={() => void teardownQ.refetch()} />
+          )}
           {teardownQ.data && teardownQ.data.press.total_mentions === 0 && (
             <div className="flex h-24 items-center justify-center text-center text-xs text-ink-muted">
               No press coverage found for this game above the match-confidence floor.
