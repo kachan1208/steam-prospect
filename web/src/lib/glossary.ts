@@ -651,8 +651,9 @@ export const GLOSSARY = {
     short: "Price history",
     meaning: "The game's Steam store price over time, with discounts — when it went on sale, and how deep.",
     unit: "series",
-    notes: "Daily store snapshots since 24 Aug 2026; earlier history isn't recorded.",
-    source: "Steam store price, captured daily",
+    notes:
+      "Recorded only when Steam's own price-change counter moves, from 24 Aug 2026 — so one record means the price hasn't changed since tracking began, not a missing series. Earlier history isn't recorded.",
+    source: "Steam store price (US), recorded on change",
     computed: false,
     fields: ["final_cents", "original_cents", "discount_pct"],
   },

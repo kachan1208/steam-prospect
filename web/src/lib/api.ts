@@ -1336,20 +1336,38 @@ export interface PricePoint {
   country: string; // 'US' — the only market collected today
 }
 
-/** Daily price snapshots (signals.db, collection live since 2026-08-24 — a days-deep
- * series that grows by one point per day). Same ADDITIVE contract as the catalog events:
- * a stable miss (404/503) resolves to [] so the panel renders its honest "tracking just
- * started" state; transient failures get one retry first, and a cancelled fetch never
- * resolves to data. */
+/** Which EMPTY an empty price history is (GET /price-history `status`, 2026-09-23):
+ *   ok          the store was read — an empty list just means the collector hasn't reached
+ *               this game yet;
+ *   missing     no price store / table at all (the collector never ran on this server);
+ *   unavailable the store exists but couldn't be read (corrupt or locked) — "price history
+ *               unavailable", NOT "no price history yet".
+ * An API that predates the field sends none; that reads as "ok". */
+export type PriceHistoryStatus = "ok" | "missing" | "unavailable";
+
+export interface PriceHistory {
+  items: PricePoint[];
+  status: PriceHistoryStatus;
+}
+
+/** Price records (signals.db, collection live since 2026-08-24). The collector writes a row
+ * only when Steam's price-change counter moves, so most games have ONE row — their price when
+ * tracking began — and a row per change after it; it is not a daily series. Same ADDITIVE
+ * contract as the catalog events: a stable miss (404/503) resolves to an empty "missing"
+ * history so the panel renders its honest state; transient failures get one retry first and
+ * then surface as an error, and a cancelled fetch never resolves to data. */
 export function gamePriceHistoryQueryOptions(appid: number) {
   return {
     queryKey: ["game-price-history", appid] as const,
-    queryFn: async ({ signal }: { signal: AbortSignal }) => {
+    queryFn: async ({ signal }: { signal: AbortSignal }): Promise<PriceHistory> => {
       try {
-        const r = await request<{ appid: number; items: PricePoint[] }>(`/games/${appid}/price-history`, { signal });
-        return r.items;
+        const r = await request<{ appid: number; items?: PricePoint[]; status?: PriceHistoryStatus }>(
+          `/games/${appid}/price-history`,
+          { signal },
+        );
+        return { items: r.items ?? [], status: r.status ?? "ok" };
       } catch (error) {
-        if (isMissingOverlay(error)) return [] as PricePoint[];
+        if (isMissingOverlay(error)) return { items: [], status: "missing" };
         throw error; // transient → retryed once (retryTransientOnce); AbortError → never data
       }
     },

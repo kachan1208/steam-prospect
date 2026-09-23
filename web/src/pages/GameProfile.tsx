@@ -960,12 +960,13 @@ export default function GameProfile() {
               columns inside that third — wrapped at ~25 characters. Unreadable prose loses
               to mockup fidelity; both panels now get the main column's full measure. */}
           <div className="grid grid-cols-1 gap-[22px]">
-            {/* Price history went live 2026-08-24 (GET /api/games/{appid}/price-history ←
-                signals.db daily US snapshots), so this is a real series now — days deep and
-                growing daily. PriceHistoryChart owns the honest thin-data states (dots for
-                1-2 points, step line at 3+, F2P / no-snapshots messaging). */}
+            {/* Price history (GET /api/games/{appid}/price-history ← signals.db, from
+                2026-08-24) is a record per Steam price CHANGE, not a daily series: most games
+                have one row. PriceHistoryChart owns the states — a sentence for "no change
+                since tracking began", a step line on a time axis once the price has moved,
+                and the missing / unavailable / not-reached-yet / failed empties. */}
             <BlueprintPanel title="Price history">
-              <PriceHistoryChart appid={appid} priceInitial={profile.price_initial} />
+              <PriceHistoryChart appid={appid} priceInitial={profile.price_initial} isFree={profile.is_free} />
             </BlueprintPanel>
 
             {/* AspectDivergingBars is "What players say about each aspect" — the full
