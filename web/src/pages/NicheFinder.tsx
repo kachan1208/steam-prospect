@@ -330,6 +330,11 @@ export default function NicheFinder() {
     [patchParams],
   );
   const tiers = useMemo(() => parseTiers(searchParams.get("tiers")), [searchParams]);
+  // The solo/indie lens — the Radar's population rule, ON by default here too (owner,
+  // 2026-09-24): a solo dev's niche list shows the niches where small indie teams
+  // demonstrably succeed; ?solo=off (the Radar's own param) lists every niche.
+  const indieLens = searchParams.get("solo") !== "off";
+  const setIndieLens = useCallback((on: boolean) => patchParams({ solo: on ? null : "off" }), [patchParams]);
   const rawSort = searchParams.get("sort") as SortKey | null;
   const sort: SortKey = rawSort && FINDER_SORT_KEYS.includes(rawSort) ? rawSort : DEFAULT_SORT;
   const order: "asc" | "desc" = searchParams.get("order") === "asc" ? "asc" : "desc";
@@ -421,9 +426,14 @@ export default function NicheFinder() {
     order,
     q: debouncedQ || undefined,
     tiers: tiersParam,
+    indie_friendly: indieLens ? 1 : undefined,
     limit: LIMIT,
     offset,
   });
+  // A mart built before the solo/indie evidence answers the lens with a 503 — say so and
+  // offer the full list, rather than a generic "couldn't load".
+  const lensUnavailable =
+    isError && indieLens && /solo\/indie evidence/.test(error instanceof Error ? error.message : String(error ?? ""));
 
   // The verdicts' own population — the board's pinned cut — fetched only when the table
   // shows another cut (see VerdictCell). Same params as the Radar's query for the default
@@ -641,6 +651,7 @@ export default function NicheFinder() {
     q: debouncedQ || undefined,
     tiers: tiersParam,
     limit: 1000,
+    indie_friendly: indieLens ? 1 : undefined,
   });
 
   return (
@@ -708,6 +719,22 @@ export default function NicheFinder() {
             ≥100
           </SegButton>
         </Segmented>
+        <span className="inline-flex items-center gap-1.5">
+          <Segmented>
+            <SegButton
+              first
+              active={indieLens}
+              onClick={() => setIndieLens(true)}
+              title="Only niches where small indie teams demonstrably make money — the Radar's lens"
+            >
+              Solo/indie-friendly
+            </SegButton>
+            <SegButton active={!indieLens} onClick={() => setIndieLens(false)} title="Every niche, studio-dominated ones included">
+              All niches
+            </SegButton>
+          </Segmented>
+          <InfoTip term="indie_friendly" />
+        </span>
         <div className="relative" style={{ width: 220, maxWidth: "100%" }} {...recent.wrapperProps}>
           <input
             type="search"
@@ -763,7 +790,17 @@ export default function NicheFinder() {
         {isLoading && <Loading label="Loading niches…" className="p-8 text-sm" />}
         {/* Was `error.message` in raw — "Failed to load niches: Failed to fetch" with the
             API unreachable (measured on production 2026-09-01), and no way to try again. */}
-        {isError && <ErrorState title="Couldn't load niches" error={error} onRetry={() => void refetch()} className="p-8" />}
+        {lensUnavailable ? (
+          <div className="p-8 text-sm text-ink-secondary" data-testid="finder-lens-unavailable">
+            This data predates the solo/indie evidence, so the lens can&apos;t be applied yet — rebuild the data, or{" "}
+            <button type="button" onClick={() => setIndieLens(false)} className="text-brand underline-offset-2 hover:underline">
+              show all niches
+            </button>
+            .
+          </div>
+        ) : (
+          isError && <ErrorState title="Couldn't load niches" error={error} onRetry={() => void refetch()} className="p-8" />
+        )}
         {data && data.items.length === 0 && (
           <EmptyState
             title="No niches match these filters"

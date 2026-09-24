@@ -403,6 +403,10 @@ export interface NicheListParams {
    * NicheFinder too): 1 keeps only solo-friendly niches (solo_viability >= 0.8;
    * NULL = unknown = excluded). Only the Radar board passes it. */
   solo_only?: 0 | 1;
+  /** The solo/indie lens (mart_niche.indie_friendly): 1 keeps only niches where small indie
+   * teams demonstrably succeed. The Niche Finder sends it by default (its lens is on unless
+   * ?solo=off); 503 on a mart that predates the column. */
+  indie_friendly?: 0 | 1;
   limit: number;
   offset: number;
 }
@@ -786,6 +790,8 @@ export function nicheExportCsvUrl(params: {
   order?: "asc" | "desc";
   q?: string;
   tiers?: string;
+  /** Export exactly what the lens shows (1 = solo/indie-friendly niches only). */
+  indie_friendly?: 0 | 1;
   limit?: number;
 }): string {
   return `${API_BASE}/niches/export.csv${qs(params)}`;

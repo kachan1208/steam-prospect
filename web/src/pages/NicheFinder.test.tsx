@@ -638,3 +638,48 @@ describe("NicheFinder — cards below 640px", () => {
     await waitFor(() => expect(new URLSearchParams(lastLocation.search).get("order")).toBe("asc"));
   });
 });
+
+describe("NicheFinder solo/indie lens (2026-09-24)", () => {
+  const listRequests = () => requests.filter((u) => u.startsWith("/api/niches?"));
+
+  it("is ON by default: the list asks for solo/indie-friendly niches only, and the CSV follows it", async () => {
+    renderFinder();
+    await screen.findByTitle("Open the Rogue/Like deep dive");
+    expect(listRequests().some((u) => new URLSearchParams(u.split("?")[1]).get("indie_friendly") === "1")).toBe(true);
+    expect(screen.getByRole("button", { name: "Solo/indie-friendly" }).getAttribute("aria-pressed") ?? "").not.toBe("false");
+    expect(screen.getByText("Export CSV").getAttribute("href")).toContain("indie_friendly=1");
+  });
+
+  it("'All niches' drops the lens and remembers it in the URL (?solo=off, the Radar's param)", async () => {
+    renderFinder();
+    await screen.findByTitle("Open the Rogue/Like deep dive");
+    requests = [];
+    fireEvent.click(screen.getByRole("button", { name: "All niches" }));
+    await screen.findByTitle("Open the Rogue/Like deep dive");
+    expect(lastLocation.search).toContain("solo=off");
+    const last = listRequests().at(-1) ?? "";
+    expect(new URLSearchParams(last.split("?")[1]).get("indie_friendly")).toBeNull();
+  });
+
+  it("on a mart without the evidence it says so and offers the full list instead of a generic error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        requests.push(url);
+        if (url.startsWith("/api/niches?") && url.includes("indie_friendly=1")) {
+          return new Response(
+            JSON.stringify({ detail: "mart_niche predates the solo/indie evidence columns — rebuild the marts (task etl)." }),
+            { status: 503, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        const body = url.startsWith("/api/niches?") ? { items: KEYS.map(nicheRow), total: 3, limit: 50, offset: 0 } : {};
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    renderFinder();
+    const notice = await screen.findByTestId("finder-lens-unavailable");
+    fireEvent.click(within(notice).getByRole("button", { name: "show all niches" }));
+    expect(await screen.findByTitle("Open the Rogue/Like deep dive")).toBeTruthy();
+  });
+});
