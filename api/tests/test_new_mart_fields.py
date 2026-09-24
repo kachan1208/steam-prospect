@@ -162,3 +162,29 @@ def test_the_etl_shipped_shape_maps_onto_the_ea_contract(client, tmp_path):
         assert rows[1001]["release_date_1_0"] == "2024-03-01"
         assert rows[1002]["release_date_source"] == "store"
         assert rows[1002]["first_public_date"] == rows[1002]["release_date_1_0"]
+
+
+# ---- solo/indie evidence (etl/marts/mart_niche_indie.sql) ------------------------------------
+def test_indie_evidence_is_null_and_the_lens_is_a_503_on_an_older_mart(modern_mart):
+    row = modern_mart.get("/api/niches", params={"window": "all", "min_reviews": 50}).json()["items"][0]
+    for field in ("n_hits_100k", "n_small_indie_hits", "small_indie_hit_share", "indie_friendly"):
+        assert row[field] is None, field
+    r = modern_mart.get("/api/niches", params={"window": "all", "min_reviews": 50, "indie_friendly": True})
+    assert r.status_code == 503 and "solo/indie" in r.json()["detail"]
+
+
+def test_indie_evidence_flows_and_the_lens_filters(new_cols_client):
+    params = {"window": "all", "min_reviews": 50, "tiers": ""}
+    rows = {r["key"]: r for r in new_cols_client.get("/api/niches", params=params).json()["items"]}
+    assert (rows["Roguelike"]["n_hits_100k"], rows["Roguelike"]["n_small_indie_hits"],
+            rows["Roguelike"]["small_indie_hit_share"], rows["Roguelike"]["indie_friendly"]) == (10, 3, 0.3, False)
+    # The all/0 cut holds a studio-dominated niche (Roguelike) and an indie one (Deckbuilder).
+    lens = {**params, "min_reviews": 0, "indie_friendly": True}
+    kept = new_cols_client.get("/api/niches", params=lens).json()
+    assert [r["key"] for r in kept["items"]] == ["Deckbuilder"]
+    assert kept["total"] == 1
+    csv = new_cols_client.get("/api/niches/export.csv", params=lens).text
+    assert "small_indie_hit_share" in csv.splitlines()[0]
+    assert "Deckbuilder" in csv and "Roguelike" not in csv
+    r = new_cols_client.get("/api/niches", params={**params, "sort": "small_indie_hit_share"})
+    assert r.status_code == 200

@@ -737,6 +737,8 @@ def build_modern_mart(
         if new_niche_cols:
             extra += [
                 ("n_paid", "INTEGER"), ("n_free", "INTEGER"), ("n_price_unknown", "INTEGER"),
+                ("n_hits_100k", "BIGINT"), ("n_small_indie_hits", "BIGINT"),
+                ("small_indie_hit_share", "DOUBLE"), ("indie_friendly", "BOOLEAN"),
                 ("players_trend_7d_market_pct", "DOUBLE"), ("players_trend_7d_rel_pct", "DOUBLE"),
             ]
         decls = []
@@ -763,6 +765,9 @@ def build_modern_mart(
                 "supply_brake": 0.9, "momentum": 60.0,
             }
             if new_niche_cols:
+                base.update(n_hits_100k=10, n_small_indie_hits=3 if key == "Roguelike" else 6,
+                            small_indie_hit_share=0.3 if key == "Roguelike" else 0.6,
+                            indie_friendly=key != "Roguelike")
                 base.update(n_paid=n_games - 1, n_free=1, n_price_unknown=0,
                             players_trend_7d_market_pct=-1.0, players_trend_7d_rel_pct=-2.02)
             base.update(over)
