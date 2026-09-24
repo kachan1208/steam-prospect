@@ -220,6 +220,7 @@ export default function Studios() {
       <h1 className="sr-only">Studios</h1>
 
       <SearchBar
+        recentScope="studios"
         value={q}
         onChange={setQ}
         placeholder={`Search ${roleNoun} by name…`}

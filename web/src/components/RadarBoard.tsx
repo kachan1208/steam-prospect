@@ -31,6 +31,8 @@ import { PAID_MIN, paidCount } from "../lib/nichePaid";
 import { TooltipPanel } from "./charts/TooltipPanel";
 import { InfoTipBase } from "./ui/InfoTipBase";
 import { nicheDetailPath } from "../lib/nichePath";
+import { pushRecent, useRecordRecentSearch } from "../lib/recentSearches";
+import { RecentSearchChips } from "./search/RecentSearches";
 import {
   CLASS_LABEL,
   CLASS_ORDER,
@@ -1108,6 +1110,9 @@ export function RadarBoard({
   // The rail's niche search. Local state deliberately: the query is a reading aid for the
   // list (like hover), not page state a card elsewhere needs to drive.
   const [query, setQuery] = useState("");
+  // Focus-within for the rail search (input + its recent-search chips): the chips show only
+  // while the box is in use and empty, so the rail itself stays uncluttered.
+  const [searchFocused, setSearchFocused] = useState(false);
   // Keyboard cursor over the filtered rows (↑/↓ + Enter); reset whenever the query text
   // changes so the cursor can never point past a shrunken result set.
   const [activeIdx, setActiveIdx] = useState(0);
@@ -1191,6 +1196,7 @@ export function RadarBoard({
     for (const group of m.values()) group.sort((a, b) => (a.n ?? Infinity) - (b.n ?? Infinity));
     return m;
   }, [railEntries]);
+  useRecordRecentSearch("niches", query, query.trim() !== "" && railEntries.length > 0);
   /** The visible rows flattened in render order — the ↑/↓/Enter walk order. */
   const flatRows = useMemo(() => RING_ORDER.flatMap((r) => byRing.get(r)!), [byRing]);
 
@@ -1251,7 +1257,11 @@ export function RadarBoard({
     }
     if (e.key === "Enter") {
       const hit = flatRows[Math.min(activeIdx, flatRows.length - 1)];
-      if (hit) onSelect(hit.id);
+      if (hit) {
+        // Opening a niche from a search is the clearest "this was a search" signal.
+        if (query.trim()) pushRecent("niches", query);
+        onSelect(hit.id);
+      }
     }
   };
 
@@ -1828,6 +1838,13 @@ export function RadarBoard({
                 the placeholder so nobody has to guess it only reaches the plotted class),
                 EXCEPT while zoomed: search composes with the zoom filter, reading within the
                 ring's members only — and says so. */}
+            <div
+              onFocus={() => setSearchFocused(true)}
+              onBlur={(e) => {
+                if (e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)) return;
+                setSearchFocused(false);
+              }}
+            >
             <input
               type="text"
               data-testid="radar-search"
@@ -1851,6 +1868,17 @@ export function RadarBoard({
               spellCheck={false}
               className="mb-2 w-full border border-ink-primary/30 bg-transparent px-2.5 py-1.5 text-[13px] text-ink-primary placeholder:text-ink-muted"
             />
+            {searchFocused && query === "" && (
+              <RecentSearchChips
+                scope="niches"
+                onPick={(q) => {
+                  setQuery(q);
+                  setActiveIdx(0);
+                }}
+                className="mb-2"
+              />
+            )}
+            </div>
             <div className="flex items-baseline gap-2 border-b border-ink-primary/25 pb-2">
               <span className="kicker text-[11px] tracking-[.08em] text-ink-primary">Verdicts</span>
               <span className="tabular text-[11px] text-ink-muted">

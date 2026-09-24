@@ -547,6 +547,7 @@ export default function GameSearch() {
       {/* Large blueprint search field (4e): Lucide search glyph, accent caret, result count
           right in paper 55%. */}
       <SearchBar
+        recentScope="games"
         value={drafts.q}
         onChange={(q) => setDrafts((d) => ({ ...d, q }))}
         placeholder="Search by name…"
