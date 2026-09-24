@@ -160,13 +160,33 @@ describe("Radar — the singleplayer lens, named for what it does", () => {
     await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder");
     expect(screen.queryByTestId("radar-row-tag:Party Game")).toBeNull();
     expect(screen.queryByTestId("radar-row-tag:Unknown Share")).toBeNull();
-    expect(screen.getByTestId("radar-solo-population").textContent).toContain("6 of 8 niches kept — the other 2");
-    // The control carries the honest name and an ⓘ with the rule and this cut's numbers.
-    expect(screen.getByText("Singleplayer only")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "About Singleplayer only" }));
+    expect(screen.getByTestId("radar-solo-population").textContent).toContain("6 of 8 niches kept — in the other 2");
+    // The control carries the lens name and an ⓘ with the rule in force and this cut's numbers.
+    // These rows predate the solo/indie evidence, so the ⓘ says it fell back to singleplayer.
+    expect(screen.getByText("Solo/indie-friendly")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "About Solo/indie-friendly" }));
     const tip = screen.getByRole("tooltip").textContent ?? "";
+    expect(tip).toContain("predates the solo/indie evidence");
     expect(tip).toContain("singleplayer share ≥ 80%");
     expect(tip).toContain("6 of 8 niches kept, 2 hidden");
+  });
+
+  it("with the solo/indie evidence served, the lens keeps only niches where small indie teams succeed", async () => {
+    const withIndie = [
+      ...TAGS.map((r) => ({ ...r, n_hits_100k: 20, n_small_indie_hits: 11, small_indie_hit_share: 0.55, indie_friendly: true })),
+      // Single-player but studio-dominated (the Action RTS case): out, whatever its share.
+      { ...row("tag", "Studio Heavy", "micro", 50, 0.05, 95), solo_viability: 0.98,
+        n_hits_100k: 33, n_small_indie_hits: 8, small_indie_hit_share: 0.24, indie_friendly: false },
+    ];
+    fetchMock(GENRES.map((r) => ({ ...r, indie_friendly: true })), withIndie);
+    renderRadar();
+    await screen.findByTestId("radar-row-tag:Roguelike Deckbuilder");
+    expect(screen.queryByTestId("radar-row-tag:Studio Heavy")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "About Solo/indie-friendly" }));
+    const tip = screen.getByRole("tooltip").textContent ?? "";
+    expect(tip).toContain("small indie teams demonstrably make money");
+    expect(tip).toContain("45%");
+    expect(tip).not.toContain("predates");
   });
 
   it("switching the lens off shows them without refetching — the whole population is already here", async () => {

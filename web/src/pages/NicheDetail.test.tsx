@@ -1320,11 +1320,23 @@ describe("NicheDetail — the headline is the Radar's dossier", () => {
     ).toBeTruthy();
   });
 
+  it("says up front when the money goes to studios, and why the dot is off the default Radar", async () => {
+    stub(detailOf([radarListRow({
+      key: "Action RTS", solo_viability: 0.92,
+      n_hits_100k: 33, n_small_indie_hits: 8, small_indie_hit_share: 8 / 33, indie_friendly: false,
+    })]));
+    renderNiche();
+    expect(await screen.findByText(/Studio-dominated: only 8 of the 33 games over \$100K \(24%\) come from small indie teams/)).toBeTruthy();
+    const dossier = screen.getByTestId("radar-dossier");
+    expect(within(dossier).getByText(/8 of 33 of its games over \$100K come from small indie developers/)).toBeTruthy();
+    expect(within(dossier).getByRole("link", { name: "See on the Radar →" }).getAttribute("href")).toContain("solo=off");
+  });
+
   it("names the solo filter when that is what hides the dot, and opens the lens on the way back", async () => {
     stub(detailOf([radarListRow({ key: "Action RTS", solo_viability: 0.353 })]));
     renderNiche();
     const dossier = await screen.findByTestId("radar-dossier");
-    expect(within(dossier).getByText(/singleplayer share 35% is under the 80% bar of the board's “Singleplayer only” filter/)).toBeTruthy();
+    expect(within(dossier).getByText(/singleplayer share 35% is under the 80% bar of the board's “Solo\/indie-friendly” filter/)).toBeTruthy();
     expect(within(dossier).getByText("35%")).toBeTruthy(); // the tooltip's Singleplayer share row
     expect(within(dossier).getByRole("link", { name: "See on the Radar →" }).getAttribute("href")).toBe(
       "/radar?solo=off&niche=tag%3AAction+RTS",

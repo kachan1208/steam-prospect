@@ -155,12 +155,25 @@ describe("radarBoardAbsence — why a niche has no dot on the default board", ()
 
   it("names the singleplayer filter, with the share and the bar, and how to see the dot anyway", () => {
     const line = radarBoardAbsence({ dimension: "tag", tier: "micro", solo_viability: 0.353 });
-    expect(line).toMatch(/singleplayer share 35% is under the 80% bar of the board's “Singleplayer only” filter/);
+    expect(line).toMatch(/singleplayer share 35% is under the 80% bar of the board's “Solo\/indie-friendly” filter/);
     expect(line).toMatch(/with that filter off/);
     expect(line).not.toMatch(/solo-friendly/i); // the lens's old, over-promising name
     expect(radarBoardAbsence({ dimension: "tag", tier: "micro", solo_viability: null })).toMatch(
       /singleplayer share is unknown/,
     );
+  });
+
+  it("with the solo/indie evidence it names the studio-dominated reason, in numbers", () => {
+    const line = radarBoardAbsence({
+      dimension: "tag", tier: "micro", solo_viability: 0.92,
+      indie_friendly: false, n_hits_100k: 33, n_small_indie_hits: 8,
+    });
+    expect(line).toMatch(/8 of 33 of its games over \$100K come from small indie developers/);
+    expect(line).toMatch(/Turn the lens off to see it/);
+    expect(radarBoardAbsence({ dimension: "tag", tier: "micro", solo_viability: 0.5, indie_friendly: true })).toBeNull();
+    expect(
+      radarBoardAbsence({ dimension: "tag", tier: "micro", indie_friendly: false, n_hits_100k: 0, n_small_indie_hits: 0 }),
+    ).toMatch(/no game here has cleared \$100K yet/);
   });
 
   it("radarSector mirrors Radar.tsx's pool rule", () => {

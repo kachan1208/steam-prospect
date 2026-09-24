@@ -614,6 +614,9 @@ PLAYERS_TOP5_HITS = 0.6  # the players-lens falsification bar (methodology 'fals
 _FLAG_RULES: dict[str, str] = {
     "multiplayer_dependent": "solo_tier 'team' (singleplayer share < 0.80) — needs netcode, "
     "servers and a live player base: disqualify for a solo dev.",
+    "studio_dominated": "not indie_friendly — fewer than 45% (or fewer than 5) of the cut's "
+    "$100K+ games come from small indie teams (Indie-flagged, developer with <= 3 games on "
+    "Steam): the money goes to bigger studios. Not a solo/indie pick.",
     "umbrella_or_meta_tag": "a genre container or reception tag (Open World, Great "
     "Soundtrack) — not buildable, never a pick.",
     "decline_signature": "saturation_yoy < 0 with competition < 50 — releases shrinking in an "
@@ -687,6 +690,9 @@ def _niche_flags(r: dict) -> list[str]:
         solo = "team" if sv < SOLO_FRIENDLY_MIN else "mixed" if sv < SOLO_MIXED_MAX else "solo"
     if solo == "team":
         fired.add("multiplayer_dependent")
+    # Solo/indie evidence (mart_niche_indie.sql): only where the mart carries it.
+    if r.get("indie_friendly") is False:
+        fired.add("studio_dominated")
     elif solo == "mixed":
         fired.add("multiplayer_minority")
     tier = r.get("tier")
@@ -1394,6 +1400,7 @@ _NICHE_CORE = (
     "supply_room", "supply_brake",
     "demand_trend_24m_pct", "reviews_24m", "saturation_yoy", "n_recent_year", "n_prior_year",
     "competition", "entrant_ratio", "winner_concentration", "solo_tier",
+    "indie_friendly", "small_indie_hit_share", "n_small_indie_hits", "n_hits_100k",
     "n_games", "median_rev", "p90_rev", "hit_rate_200k",
 )
 # A v1-legacy mart has no v2 components: show the old score's own parts instead.
@@ -1523,7 +1530,11 @@ def find_niches(
     ] = _DEFAULT_INCLUDE_TIERS,
     solo_only: Annotated[
         bool,
-        Field(description="Keep only niches whose singleplayer share (solo_viability) >= 0.8; NULL = unknown = excluded. A no-netcode proxy, not a scope measure — same rule as the API's solo_only."),
+        Field(description="Keep only niches whose singleplayer share (solo_viability) >= 0.8; NULL = unknown = excluded. A no-netcode proxy, not a scope measure — same rule as the API's solo_only. For 'can a small team make money here' use indie_friendly."),
+    ] = False,
+    indie_friendly: Annotated[
+        bool,
+        Field(description="The Radar's solo/indie lens: keep only niches where >= 45% of the cut's $100K+ games come from small indie teams (Indie-flagged game, developer with <= 3 games on Steam), at least 5 such games, and singleplayer share >= 0.8. Needs a mart built since 2026-09-24."),
     ] = False,
     min_median_rev: Annotated[float | None, Field(ge=0, description="Post-filter: median_rev >= this (USD).")] = None,
     max_competition: Annotated[float | None, Field(ge=0, le=100, description="Post-filter: competition percentile <= this.")] = None,
@@ -1540,7 +1551,7 @@ def find_niches(
     - Negative saturation_yoy + low competition = DECLINE, not opportunity (decline_signature).
     - Recent entrants must get paid: entrant_ratio >= 1.0 (catalog norm ~0.79).
     - winner_concentration > 0.85 = winner-take-most: red flag; the Radar never rings it 'enter'.
-    - Solo devs: drop solo_tier 'team' (multiplayer_dependent), or pass solo_only=true.
+    - Solo devs: pass indie_friendly=true (small indie teams demonstrably earn there); studio_dominated rows are not solo picks.
     - Headline picks are micro-genres (the default include_tiers). Themes are modifiers to attach to a pick; umbrella/meta tags are never picks.
     - demand_emerging rows: the trend % is withheld — judge absolute reviews_24m.
     - Decide on window='24m' (the default); 'all' is history.
@@ -1592,6 +1603,11 @@ def find_niches(
         where.append("solo_viability >= ?")
         params.append(SOLO_FRIENDLY_MIN)
         filter_cols.append("solo_viability")
+    if indie_friendly:
+        if "indie_friendly" not in cols:
+            return {"error": "this mart predates the solo/indie evidence (indie_friendly) — rebuild the marts."}
+        where.append("indie_friendly")
+        filter_cols.append("indie_friendly")
     tiers_applied = None
     if dimension == "tag" and include_tiers is not None:
         tiers_applied = list(include_tiers)
@@ -1634,6 +1650,7 @@ def find_niches(
         "min_reviews": min_reviews,
         "include_tiers": tiers_applied,
         "solo_only": solo_only,
+        "indie_friendly": indie_friendly,
         "sort": sort,
         "order": order,
         "fields": fields,

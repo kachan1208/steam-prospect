@@ -367,6 +367,13 @@ export interface NicheRow {
   // players_trend_7d_pct minus it, in percentage points — read the trend against the market.
   players_trend_7d_market_pct?: number | null;
   players_trend_7d_rel_pct?: number | null;
+  // Solo/indie evidence (etl/marts/mart_niche_indie.sql; gated like the above): of the cut's
+  // $100K+ paid games, how many came from an Indie-flagged game whose developer has <= 3
+  // games on Steam — and the lens verdict built on it (lib/radarVerdict.ts radarLensPasses).
+  n_hits_100k?: number | null;
+  n_small_indie_hits?: number | null;
+  small_indie_hit_share?: number | null;
+  indie_friendly?: boolean | null;
 }
 
 export interface NicheList {

@@ -370,6 +370,32 @@ SOLO_TIER_TEAM_MAX = 0.80        # < this -> 'team' (multiplayer-dependent). Sam
                                  # Class-Based 0.851, Football (Soccer) 0.853) — the band
                                  # a bare "solo-friendly" badge used to hide.
 
+# SOLO/INDIE EVIDENCE (2026-09-24, owner: "we need solo/indie friendly niches on the radar").
+# solo_viability above only asks whether a niche's games can be PLAYED alone — 323 of 334
+# niches pass its 0.80 bar, so as a "solo-friendly" lens it filtered nothing, and Action RTS
+# topped the board under it while its recent hits were studio games (Broken Arrow, Dawn of
+# War DE, Tempest Rising, Star Wars Zero Company). The question a solo dev actually asks is
+# "do small indie teams SUCCEED here?", and the mart can answer it: of the niche cut's paid
+# games that earned INDIE_HIT_MIN_REV+ (est.), what share came from an is_indie game whose
+# developer has at most SMALL_DEV_MAX_GAMES games on Steam (mart_entity's catalog count — a
+# team-size proxy: poncle, LocalThunk, ConcernedApe-scale studios)? Calibrated on the
+# 2026-09-21 mart, tag / 24m / min50 (334 niches): share quartiles 0.36 / 0.42 / 0.47, p90
+# 0.53; Metroidvania 43/77 = 0.56, Roguelike Deckbuilder 50/92 = 0.54, Puzzle Platformer
+# 21/39 = 0.54, Souls-like 0.47, Cozy 0.46, Visual Novel 0.37, Party-Based RPG 0.32, Action
+# RTS 13/44 = 0.30. indie_friendly = share >= INDIE_FRIENDLY_MIN_SHARE (above the median)
+# with >= INDIE_FRIENDLY_MIN_HITS such games (evidence, not one lucky hit) AND the niche
+# still single-player (solo_viability >= INDIE_SINGLEPLAYER_MIN: no netcode). Re-measured on
+# a full build from main with the EA/free-game fixes (2026-09-24): quartiles 0.34 / 0.40 /
+# 0.46; 92 of 331 tags pass (41 of 124 game types) — Metroidvania 0.56, Roguelike
+# Deckbuilder 0.53, Souls-like 0.50, Cozy 0.45; out: Auto Battler 0.44, Visual Novel 0.38,
+# Party-Based RPG 0.31, Action RTS 8/33 = 0.24. Mirrored in api/app/routers/niches.py, web/src/lib/radarVerdict.ts and
+# mcp/prospect_mcp.py: move them together.
+INDIE_HIT_MIN_REV = 100_000      # est. revenue that counts as a hit (paid games only)
+SMALL_DEV_MAX_GAMES = 3          # developer catalog size that still reads "small team"
+INDIE_FRIENDLY_MIN_SHARE = 0.45  # small-indie share of the cut's hits
+INDIE_FRIENDLY_MIN_HITS = 5      # ... and at least this many small-indie hits
+INDIE_SINGLEPLAYER_MIN = 0.80    # == SOLO_TIER_TEAM_MAX: multiplayer-dependent niches stay out
+
 # Tag tiers. Curated TAG_TIER map below classifies the big/obvious tags; any UNMAPPED tag
 # falls back to a size heuristic: all-time n_games (win='all', min_reviews=
 # MIN_REVIEWS_DEFAULT cut) >= UMBRELLA_N_GAMES -> 'umbrella', else 'micro'. dimension=
@@ -1173,6 +1199,11 @@ MART_FILES = [
                             # stg_tag/genre_membership — TEMPs that live for the whole
                             # run, never dropped). Adjacency also keeps the CURRENT_DATE
                             # both files evaluate for the 24m window seconds apart.
+    "mart_niche_indie.sql",  # solo/indie evidence columns ON mart_niche (ALTER + UPDATE):
+                             # reads mart_niche_game (the cut's exact population, so it can't
+                             # disagree with mart_niche), mart_game and mart_entity(_games) —
+                             # hence after all three. Kept out of mart_niche.sql so the tests
+                             # that run that file alone need no entity stand-ins.
     "mart_tag_alias.sql",   # retired tag/genre spellings -> the canonical niche key
                             # (reads only staging's stg_niche_alias; placed with the niche
                             # family it resolves keys for)
@@ -1310,6 +1341,11 @@ def build_params() -> dict[str, str]:
         "OPP_MARKET_MEDIAN_W": OPP_MARKET_MEDIAN_W,
         "SUPPLY_BRAKE_FLOOR": SUPPLY_BRAKE_FLOOR,
         "SOLO_TIER_SOLO_MIN": SOLO_TIER_SOLO_MIN,
+        "INDIE_HIT_MIN_REV": INDIE_HIT_MIN_REV,
+        "SMALL_DEV_MAX_GAMES": SMALL_DEV_MAX_GAMES,
+        "INDIE_FRIENDLY_MIN_SHARE": INDIE_FRIENDLY_MIN_SHARE,
+        "INDIE_FRIENDLY_MIN_HITS": INDIE_FRIENDLY_MIN_HITS,
+        "INDIE_SINGLEPLAYER_MIN": INDIE_SINGLEPLAYER_MIN,
         "SOLO_TIER_TEAM_MAX": SOLO_TIER_TEAM_MAX,
         "UMBRELLA_N_GAMES": UMBRELLA_N_GAMES,
         "CURVE_MIN_REVIEWS": CURVE_MIN_REVIEWS,

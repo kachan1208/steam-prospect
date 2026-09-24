@@ -92,8 +92,7 @@ import {
   radarBoardAbsence,
   radarDossier,
   radarSector,
-  releasesYoyWorked,
-} from "../lib/radarVerdict";
+  releasesYoyWorked, INDIE_FRIENDLY_MIN_HITS, INDIE_FRIENDLY_MIN_SHARE, SMALL_DEV_MAX_GAMES } from "../lib/radarVerdict";
 import { useDragZoom } from "../lib/useDragZoom";
 import { SELECTION_AREA_PROPS, ZoomFrame } from "../components/charts/ZoomFrame";
 import { nicheDetailPath } from "../lib/nichePath";
@@ -295,6 +294,19 @@ function declineFlags(v: NicheRow, players: NichePlayers | null): { serious: boo
     flags.push({
       serious: v.entrant_ratio < 0.7,
       text: `Recent entrants earn ${v.entrant_ratio.toFixed(2)}× the back catalog's median (catalog norm ~${ENTRANT_RATIO_CATALOG_NORM}×) — newcomers underearn here.`,
+    });
+  }
+  // Solo/indie evidence (mart_niche_indie.sql): the owner's product question is whether a
+  // small team can make money here, so a studio-dominated niche says so up front.
+  if (v.indie_friendly === false && v.n_hits_100k != null && v.n_small_indie_hits != null) {
+    const hits = v.n_hits_100k;
+    const small = v.n_small_indie_hits;
+    flags.push({
+      serious: hits > 0 && small / hits < 0.3,
+      text:
+        hits === 0
+          ? "No game here has cleared an estimated $100K yet — no evidence a small team can make money in this niche."
+          : `Studio-dominated: only ${fmtInt(small)} of the ${fmtInt(hits)} games over $100K (${Math.round((100 * small) / hits)}%) come from small indie teams (Indie-flagged, developer with ≤ ${SMALL_DEV_MAX_GAMES} games on Steam) — the solo/indie lens needs ${Math.round(INDIE_FRIENDLY_MIN_SHARE * 100)}% and at least ${INDIE_FRIENDLY_MIN_HITS}.`,
     });
   }
   if (v.winner_concentration != null && v.winner_concentration > WC_WINNER_TAKE_MOST) {
@@ -765,7 +777,14 @@ export default function NicheDetail() {
   const dossierVariant = radarVariant ?? activeVariant;
   const dossier = radarDossier(dossierVariant);
   const failed = failedChecks(dossier.verdict.checks);
-  const absence = radarBoardAbsence({ dimension, tier, solo_viability: dossierVariant.solo_viability });
+  const absence = radarBoardAbsence({
+    dimension,
+    tier,
+    solo_viability: dossierVariant.solo_viability,
+    indie_friendly: dossierVariant.indie_friendly,
+    n_hits_100k: dossierVariant.n_hits_100k,
+    n_small_indie_hits: dossierVariant.n_small_indie_hits,
+  });
   const flags = declineFlags(dossierVariant, players);
   // The inverse of the board dossier's "Open deep dive →": select this niche on the board,
   // in its own class, with the singleplayer lens opened if that is what hides it there. The

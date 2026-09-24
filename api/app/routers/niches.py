@@ -100,6 +100,26 @@ def _apply_solo_only(where: str, params: list) -> tuple[str, list]:
     reading; see RADAR_SOLO_FRIENDLY_MIN."""
     return where + " AND solo_viability >= ?", params + [RADAR_SOLO_FRIENDLY_MIN]
 
+_INDIE_FRIENDLY_DESC = (
+    "Solo/indie lens: keep only niches where small indie teams demonstrably succeed — "
+    ">= 45% of the cut's $100K+ paid games come from an Indie-flagged game whose developer "
+    "has <= 3 games on Steam (at least 5 such games), and >= 80% of the games are "
+    "single-player. 503 on a mart that predates the columns."
+)
+
+
+def _apply_indie_friendly(where: str, params: list) -> tuple[str, list]:
+    """The Radar's solo/indie lens (mart_niche.indie_friendly — see
+    etl/marts/mart_niche_indie.sql). 503 on a mart built before the column existed, rather
+    than silently falling back to a weaker rule the caller didn't ask for."""
+    if not analytics_db.has_column("mart_niche", "indie_friendly"):
+        raise HTTPException(
+            status_code=503,
+            detail="mart_niche predates the solo/indie evidence columns — rebuild the marts (task etl).",
+        )
+    return where + " AND indie_friendly", params
+
+
 # Columns a client is allowed to sort on (prevents SQL injection via `sort`).
 SORTABLE = {
     "key",
@@ -120,6 +140,7 @@ SORTABLE = {
     "reviews_24m", "reviews_prev_24m", "demand_trend_24m_pct",
     "n_paid", "n_free", "n_price_unknown", "players_trend_7d_market_pct",
     "players_trend_7d_rel_pct",
+    "n_hits_100k", "n_small_indie_hits", "small_indie_hit_share",
 }
 _PLAYERS_COLS = ["total_players_now", "players_trend_7d_pct", "players_coverage"]
 _LIFETIME_COLS = ["lifetime_n_games", "lifetime_survival_12m", "lifetime_median_dead_months"]
@@ -165,6 +186,9 @@ _V2_PARTS_COLS = [
 _NEW_OPTIONAL_COLS = [
     "n_paid", "n_free", "n_price_unknown", "players_trend_7d_market_pct",
     "players_trend_7d_rel_pct",
+    # Solo/indie evidence (etl/marts/mart_niche_indie.sql, 2026-09-24): of the cut's $100K+
+    # paid games, how many came from small indie developers — and the verdict built on it.
+    "n_hits_100k", "n_small_indie_hits", "small_indie_hit_share", "indie_friendly",
 ]
 
 # Ordered base column list (single source of truth for SELECT + CSV header); the players
@@ -682,6 +706,7 @@ def list_niches(
     # so the radar's population rule must never filter it globally — the Radar board is
     # the consumer that passes solo_only=1.
     solo_only: bool = Query(False, description=_SOLO_ONLY_DESC + " Default off."),
+    indie_friendly: bool = Query(False, description=_INDIE_FRIENDLY_DESC + " Default off."),
     # Member-profile filters (see _PROFILE_BOUNDS). NULL (unmeasured) never passes.
     min_indie_share: float | None = Query(
         None, ge=0, le=1, description="Floor on indie_share (share of the cut's games Steam-Indie-flagged)."
@@ -714,6 +739,8 @@ def list_niches(
     where, params = where + psql, params + pparams
     if solo_only:
         where, params = _apply_solo_only(where, params)
+    if indie_friendly:
+        where, params = _apply_indie_friendly(where, params)
     total = analytics_db.scalar(f"SELECT COUNT(*) FROM mart_niche {where}", params)
     rows = _niche_query(where, params, sort, order, limit, offset)
     return NicheList(
@@ -1330,6 +1357,7 @@ def export_csv(
     max_median_price: float | None = Query(None, ge=0),
     min_med_playtime_h: float | None = Query(None, ge=0),
     max_med_playtime_h: float | None = Query(None, ge=0),
+    indie_friendly: bool = Query(False, description=_INDIE_FRIENDLY_DESC),
     limit: int = Query(1000, ge=1, le=5000),
 ) -> Response:
     # The SAME capability gates as list_niches — the export is the list in CSV clothes,
@@ -1346,6 +1374,8 @@ def export_csv(
         "min_med_playtime_h": min_med_playtime_h, "max_med_playtime_h": max_med_playtime_h,
     })
     where, params = where + psql, params + pparams
+    if indie_friendly:
+        where, params = _apply_indie_friendly(where, params)
     rows = _niche_query(where, params, sort, order, limit, None)
 
     fields = ["window" if c == "win" else c for c in _cols()]

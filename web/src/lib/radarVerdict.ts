@@ -378,6 +378,12 @@ export interface RadarVerdictInput {
    * them, and the concentration row then says so instead of a bare "unknown". Derived from
    * n_games − n_free − n_price_unknown when not served (lib/nichePaid.ts paidCount). */
   n_paid?: number | null;
+  /** Solo/indie evidence (etl/marts/mart_niche_indie.sql) — the lens' second trace row. Absent
+   * on marts built before 2026-09-24: the row is then omitted, never invented. */
+  n_hits_100k?: number | null;
+  n_small_indie_hits?: number | null;
+  small_indie_hit_share?: number | null;
+  indie_friendly?: boolean | null;
   n_free?: number | null;
   n_price_unknown?: number | null;
 }
@@ -396,7 +402,7 @@ export interface RadarVerdict {
  * that picks the ring — see the module doc's THE TRACE section. */
 export interface VerdictCheck {
   /** Stable machine id (tests/keys). "volume"/"new_share" appear on emerging traces only. */
-  id: "demand" | "supply" | "concentration" | "entrants" | "solo" | "volume" | "new_share";
+  id: "demand" | "supply" | "concentration" | "entrants" | "solo" | "indie" | "volume" | "new_share";
   label: string;
   /** The niche's own number, formatted; "unknown" when absent. */
   value: string;
@@ -552,6 +558,42 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
         : null,
   };
 
+  // The solo/indie LENS row (2026-09-24) — decides:false like the singleplayer row: the lens
+  // picks the board's population, it never moves a ring. Omitted on marts without the
+  // evidence columns (the lens then falls back to the singleplayer share alone).
+  const nHits = num(input.n_hits_100k);
+  const nSmall = num(input.n_small_indie_hits);
+  const indieShare = num(input.small_indie_hit_share);
+  const indieChecks: VerdictCheck[] =
+    nHits === null || nSmall === null
+      ? []
+      : [
+          {
+            id: "indie",
+            label: "Small indie teams succeed here",
+            value:
+              nHits === 0
+                ? "no games over $100K yet"
+                : `${fmtInt(nSmall)} of ${fmtInt(nHits)} games over $100K from small indie developers (${sharePct(indieShare ?? nSmall / nHits)})`,
+            threshold: `≥ ${sharePct(INDIE_FRIENDLY_MIN_SHARE)} and ≥ ${INDIE_FRIENDLY_MIN_HITS} such games`,
+            pass: nHits === 0 ? false : input.indie_friendly === true ? true : (indieShare ?? 0) >= INDIE_FRIENDLY_MIN_SHARE && nSmall >= INDIE_FRIENDLY_MIN_HITS,
+            note:
+              nHits === 0
+                ? "no evidence yet that anyone earns $100K here (a lens: never moves the ring)"
+                : nSmall < INDIE_FRIENDLY_MIN_HITS
+                  ? `too few small-indie successes to call it — ${fmtInt(nSmall)} (a lens: never moves the ring)`
+                  : (indieShare ?? 0) >= INDIE_FRIENDLY_MIN_SHARE
+                    ? "small teams demonstrably make money here (a lens: never moves the ring)"
+                    : "studio-dominated — most of the money goes to bigger teams (a lens: never moves the ring)",
+            decides: false,
+            term: "small_indie_hit_share",
+            worked:
+              nHits > 0
+                ? `${fmtInt(nSmall)} ÷ ${fmtInt(nHits)} = ${sharePct(nSmall / nHits)} (developer with ≤ ${SMALL_DEV_MAX_GAMES} games on Steam, Indie-flagged game, est. revenue ≥ $100K)`
+                : null,
+          },
+        ];
+
   // 0. emerging — pre-empts EVERYTHING (see precedence doc): an emerging niche's trend %
   //    AND its saturation read are both artifacts of its base, so neither the demand
   //    verdicts nor the crowding arms may fire. Not a caution: the evidence is solid; the
@@ -597,6 +639,7 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
           worked: null,
         },
         soloCheck,
+        ...indieChecks,
       ],
     };
   }
@@ -697,6 +740,7 @@ export function radarVerdictTrace(input: RadarVerdictInput): RadarVerdictTrace {
       worked: null,
     },
     soloCheck,
+    ...indieChecks,
   ];
 
   // Ring decision — the precedence chain in the module doc, expressed over the atoms above
@@ -943,12 +987,25 @@ export function radarBoardAbsence(row: {
   dimension: string;
   tier?: string | null;
   solo_viability?: number | null;
+  indie_friendly?: boolean | null;
+  n_hits_100k?: number | null;
+  n_small_indie_hits?: number | null;
 }): string | null {
   if (radarSector(row.dimension, row.tier) === null) {
     return `Not on the Radar board: of the community tags it plots only game types and themes, and this tag is ${
       row.tier ? (TIER_IN_WORDS[row.tier] ?? `a “${row.tier}” tag`) : "not sorted into a type yet"
     }.`;
   }
+  if (row.indie_friendly === false) {
+    const hits = num(row.n_hits_100k);
+    const small = num(row.n_small_indie_hits);
+    const evidence =
+      hits !== null && small !== null && hits > 0
+        ? `${fmtInt(small)} of ${fmtInt(hits)} of its games over $100K come from small indie developers`
+        : "no game here has cleared $100K yet";
+    return `Not on the Radar board by default: the board's “${SOLO_LENS_LABEL}” lens needs small indie teams to demonstrably succeed (≥ ${sharePct(INDIE_FRIENDLY_MIN_SHARE)} of the $100K+ games, at least ${INDIE_FRIENDLY_MIN_HITS}) in a mostly single-player niche — here ${evidence}. Turn the lens off to see it.`;
+  }
+  if (row.indie_friendly === true) return null;
   const solo = num(row.solo_viability);
   if (solo === null) {
     return `Not on the Radar board by default: its singleplayer share is unknown, and the board's “${SOLO_LENS_LABEL}” filter leaves unknowns out.`;
@@ -981,13 +1038,46 @@ export function sharePct(x: number): string {
 }
 
 /**
- * The Radar's population lens, named for exactly what it does (2026-09-23). It was "Solo-
- * friendly only", which promised a judgement about buildability; what it actually does is
- * keep niches whose singleplayer share is ≥ SOLO_FRIENDLY_MIN — and since the catalog median
- * is 0.975, that removes only the handful of multiplayer-dependent niches (7 of 218 tags on
- * the 2026-09-21 default cut).
+ * The Radar's population lens (2026-09-24, owner: "we need solo/indie friendly niches on the
+ * radar"). It was "Singleplayer only" — singleplayer share >= SOLO_FRIENDLY_MIN — which
+ * removed only the multiplayer-dependent few (323 of 334 tags passed), so Action RTS topped the
+ * board while its money went to studio games. The lens now asks whether SMALL INDIE TEAMS
+ * demonstrably succeed in the niche (mart_niche.indie_friendly — etl/marts/mart_niche_indie.sql):
+ * ≥ INDIE_FRIENDLY_MIN_SHARE of the cut's $100K+ paid games come from an Indie-flagged game
+ * whose developer has ≤ SMALL_DEV_MAX_GAMES games on Steam, with ≥ INDIE_FRIENDLY_MIN_HITS such
+ * games, and the niche stays single-player (≥ SOLO_FRIENDLY_MIN). On a mart without that
+ * column the lens falls back to the singleplayer share alone and says so (radarLensUsesIndie).
  */
-export const SOLO_LENS_LABEL = "Singleplayer only";
+export const SOLO_LENS_LABEL = "Solo/indie-friendly";
+
+/** Mirrors etl/build_marts.py's INDIE_* constants (and api/app/routers/niches.py's lens
+ * description) — move them together. Measured 2026-09-24, tag / 24m / min50: share quartiles
+ * 0.34 / 0.40 / 0.46; 92 of 331 tags pass (41 of 124 game types) — Metroidvania 0.56, Souls-like
+ * 0.50, Cozy 0.45 in; Auto Battler 0.44, Action RTS 0.24 out. */
+export const INDIE_FRIENDLY_MIN_SHARE = 0.45;
+export const INDIE_FRIENDLY_MIN_HITS = 5;
+export const SMALL_DEV_MAX_GAMES = 3;
+
+/** Does this niche pass the board's lens? The served mart verdict when the mart carries it;
+ * otherwise (older mart) the singleplayer-share rule the lens used to be. */
+export function radarLensPasses(row: { indie_friendly?: boolean | null; solo_viability?: number | null }): boolean {
+  if (typeof row.indie_friendly === "boolean") return row.indie_friendly;
+  return soloBucket(row.solo_viability) === "solo";
+}
+
+/** Does the evidence say this niche FAILS the lens? Unknown is not a failure: a niche with no
+ * reading draws filled, exactly as the old singleplayer lens treated its "unknown" bucket —
+ * hollow is a claim, and only evidence makes it. */
+export function radarLensFails(row: { indie_friendly?: boolean | null; solo_viability?: number | null }): boolean {
+  if (typeof row.indie_friendly === "boolean") return !row.indie_friendly;
+  return soloBucket(row.solo_viability) === "team";
+}
+
+/** True when the rows carry the solo/indie evidence (the lens is the real one); false means
+ * the fallback singleplayer rule is in force and the UI must say so. */
+export function radarLensUsesIndie(rows: readonly { indie_friendly?: boolean | null }[]): boolean {
+  return rows.some((r) => typeof r.indie_friendly === "boolean");
+}
 
 // ---- solo-viability lens (NOT part of the verdict — see module doc) ---------------------
 

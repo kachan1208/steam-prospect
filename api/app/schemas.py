@@ -720,6 +720,13 @@ class NicheRow(BaseModel):
     # n_paid: the paid games behind every revenue/price statistic, which the ETL withholds
     # (NULL) when n_paid < 30 — quote it in the 'withheld' sentinel. The three sum to n_games.
     n_paid: Optional[int] = None
+    # Solo/indie evidence (None until the mart carries it): of the cut's $100K+ paid games,
+    # n_small_indie_hits came from an Indie-flagged game whose developer has <= 3 games on
+    # Steam; indie_friendly = share >= 0.45 with >= 5 such games and >= 80% single-player.
+    n_hits_100k: Optional[int] = None
+    n_small_indie_hits: Optional[int] = None
+    small_indie_hit_share: Optional[float] = None
+    indie_friendly: Optional[bool] = None
     n_free: Optional[int] = None
     n_price_unknown: Optional[int] = None
     # The whole Steam panel's 7d player change over the same days, and this niche's

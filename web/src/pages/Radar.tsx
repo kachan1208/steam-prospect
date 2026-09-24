@@ -14,7 +14,17 @@ import { StartHere } from "../components/StartHere";
 import { InfoTipBase } from "../components/ui/InfoTipBase";
 import { Loading } from "../components/ui/Loading";
 import { useNiches, type NicheRow } from "../lib/api";
-import { RING_ORDER, SOLO_FRIENDLY_PCT, SOLO_LENS_LABEL, soloBucket } from "../lib/radarVerdict";
+import {
+  INDIE_FRIENDLY_MIN_HITS,
+  INDIE_FRIENDLY_MIN_SHARE,
+  RING_ORDER,
+  SMALL_DEV_MAX_GAMES,
+  SOLO_FRIENDLY_PCT,
+  SOLO_LENS_LABEL,
+  radarLensPasses,
+  radarLensUsesIndie,
+  sharePct,
+} from "../lib/radarVerdict";
 import type { RadarRing } from "../lib/radarVerdict";
 import { usePageTitle } from "../lib/usePageTitle";
 
@@ -272,10 +282,13 @@ function RadarBoardSection({
   zoom,
   onZoom,
   soloCounts,
+  lensUsesIndie,
 }: {
   blips: RadarBoardBlip[];
   pool: RadarBoardBlip[];
   soloCounts: { shown: number; total: number };
+  /** true = the real solo/indie lens (evidence served); false = the singleplayer fallback. */
+  lensUsesIndie: boolean;
   plotCap: number;
   loading: boolean;
   bothFailed: boolean;
@@ -329,8 +342,16 @@ function RadarBoardSection({
               <InfoTipBase
                 label={SOLO_LENS_LABEL}
                 ariaLabel={`About ${SOLO_LENS_LABEL}`}
-                meaning={`Keeps only niches where at least ${SOLO_FRIENDLY_PCT} of the games can be played single-player; a niche whose share is unknown is left out. Most niches pass — it removes the multiplayer-dependent few (party, MMO, battle royale), and says nothing about how big a game is to build.`}
-                formula={`keep a niche when singleplayer share ≥ ${SOLO_FRIENDLY_PCT}`}
+                meaning={
+                  lensUsesIndie
+                    ? `Keeps only niches where small indie teams demonstrably make money: of the games that earned an estimated $100K+, at least ${sharePct(INDIE_FRIENDLY_MIN_SHARE)} come from an Indie-flagged game whose developer has ${SMALL_DEV_MAX_GAMES} or fewer games on Steam (and at least ${INDIE_FRIENDLY_MIN_HITS} such games), and at least ${SOLO_FRIENDLY_PCT} of the games are single-player.`
+                    : `This data predates the solo/indie evidence, so the lens falls back to the singleplayer share: it keeps niches where at least ${SOLO_FRIENDLY_PCT} of the games can be played single-player — which says nothing about how big a game is to build. Rebuild the data to get the real lens.`
+                }
+                formula={
+                  lensUsesIndie
+                    ? `keep when small-indie share of $100K+ games ≥ ${sharePct(INDIE_FRIENDLY_MIN_SHARE)} AND ≥ ${INDIE_FRIENDLY_MIN_HITS} such games AND singleplayer share ≥ ${SOLO_FRIENDLY_PCT}`
+                    : `keep a niche when singleplayer share ≥ ${SOLO_FRIENDLY_PCT}`
+                }
                 worked={`On this cut: ${soloCounts.shown} of ${soloCounts.total} niches kept, ${
                   soloCounts.total - soloCounts.shown
                 } hidden.`}
@@ -401,7 +422,7 @@ function RadarBoardSection({
           carries its parts and its supply brake. Dot area = top-10% revenue; the number in a dot is its row in the
           list beside the board; dot colour repeats the verdict the band already names (green = enter, steel = watch,
           violet = emerging, amber = crowded, terracotta = declining — reinforcement only, every meaning survives
-          grayscale); a hollow dot is multiplayer-dependent (shown only with {SOLO_LENS_LABEL} off) and a dotted ring
+          grayscale); a hollow dot is outside the {SOLO_LENS_LABEL} lens (shown only with the lens off) and a dotted ring
           means the verdict rests on thin evidence. Verdicts:
           Enter now = demand past +40% / 24m without a flooding release pipeline and without winner-take-most
           revenue (the top 5% of games taking more than 85%) · Watch = demand holding or softening, demand surging
@@ -418,7 +439,7 @@ function RadarBoardSection({
           plotted dot across all three sectors, and its search covers the whole population of the cut — past the plot
           cap (while zoomed, the search reads within the zoomed ring).{" "}
           {soloOnly
-            ? `Population: ${SOLO_LENS_LABEL} — niches whose singleplayer share is ≥ ${SOLO_FRIENDLY_PCT} (${soloCounts.shown} of ${soloCounts.total} on this cut; a niche with no reading is left out — unknown is not a claim). Singleplayer share says the games skip netcode, not that they are small builds — the dossier's singleplayer row shows the member evidence behind it. It never changes a verdict.`
+            ? `Population: ${SOLO_LENS_LABEL} — ${soloCounts.shown} of ${soloCounts.total} niches on this cut: ones where small indie teams demonstrably make money (≥ ${sharePct(INDIE_FRIENDLY_MIN_SHARE)} of the $100K+ games from Indie-flagged developers with ≤ ${SMALL_DEV_MAX_GAMES} games on Steam, at least ${INDIE_FRIENDLY_MIN_HITS} of them) and the games are mostly single-player. The dossier's "Small indie teams succeed here" row shows each niche's numbers. It never changes a verdict.`
             : `Population: all niches — multiplayer-dependent ones (singleplayer share under ${SOLO_FRIENDLY_PCT}) are drawn hollow, in the same ring the market evidence puts them. Singleplayer share says the games skip netcode, not that they are small builds — the dossier's singleplayer row shows the member evidence behind it.`}
         </p>
       </details>
@@ -526,13 +547,16 @@ export default function Radar() {
    * niches with share >= SOLO_FRIENDLY_MIN (unknown excluded — the API's solo_only rule,
    * applied here so the legend can count what it removed). */
   const pool = useMemo<RadarBoardBlip[]>(
-    () => (soloOnly ? allBlips.filter((b) => soloBucket(b.solo_viability) === "solo") : allBlips),
+    () => (soloOnly ? allBlips.filter(radarLensPasses) : allBlips),
     [allBlips, soloOnly],
   );
   const soloCounts = useMemo(
-    () => ({ shown: allBlips.filter((b) => soloBucket(b.solo_viability) === "solo").length, total: allBlips.length }),
+    () => ({ shown: allBlips.filter(radarLensPasses).length, total: allBlips.length }),
     [allBlips],
   );
+  // The real solo/indie lens needs the evidence columns; an older mart falls back to the
+  // singleplayer share, and the lens explanation says which rule is in force.
+  const lensUsesIndie = useMemo(() => radarLensUsesIndie(allBlips), [allBlips]);
 
   /**
    * The plotted board: EVERY class, each cut to its OWN Top N/3 by opportunity (see
@@ -582,6 +606,7 @@ export default function Radar() {
         blips={blips}
         pool={pool}
         soloCounts={soloCounts}
+        lensUsesIndie={lensUsesIndie}
         plotCap={perClassCap(topN)}
         loading={loading}
         bothFailed={bothFailed}
