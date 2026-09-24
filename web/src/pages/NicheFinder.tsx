@@ -39,6 +39,8 @@ import {
   releasesYoyWorked,
 } from "../lib/radarVerdict";
 import { useDebounced } from "../lib/useDebounced";
+import { useRecordRecentSearch } from "../lib/recentSearches";
+import { useRecentCombobox } from "../components/search/RecentSearches";
 import { useMinWidth } from "../lib/useMinWidth";
 import { usePageTitle } from "../lib/usePageTitle";
 // From the leaf module, NEVER from pages/NicheCombined (which is where these lived until
@@ -624,6 +626,10 @@ export default function NicheFinder() {
   );
 
   const total = data?.total ?? 0;
+  // Recent searches (lib/recentSearches.ts): a query that settled and matched niches is
+  // remembered per browser and offered when the box is focused empty — shared with the Radar.
+  useRecordRecentSearch("niches", debouncedQ, !isFetching && total > 0);
+  const recent = useRecentCombobox({ scope: "niches", value: q, onPick: setQ });
   const rangeStart = total === 0 ? 0 : offset + 1;
   const rangeEnd = Math.min(offset + LIMIT, total);
   const csvUrl = nicheExportCsvUrl({
@@ -702,15 +708,20 @@ export default function NicheFinder() {
             ≥100
           </SegButton>
         </Segmented>
-        <input
-          type="search"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search niches…"
-          aria-label="Search niches"
-          className="bg-transparent text-[13px] text-ink-primary outline-none placeholder:text-ink-muted"
-          style={{ width: 220, maxWidth: "100%", border: `1px solid ${PAPER_30}`, padding: "6px 12px" }}
-        />
+        <div className="relative" style={{ width: 220, maxWidth: "100%" }} {...recent.wrapperProps}>
+          <input
+            type="search"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search niches…"
+            aria-label="Search niches"
+            autoComplete="off"
+            className="w-full bg-transparent text-[13px] text-ink-primary outline-none placeholder:text-ink-muted"
+            style={{ border: `1px solid ${PAPER_30}`, padding: "6px 12px" }}
+            {...recent.inputProps}
+          />
+          {recent.dropdown}
+        </div>
         {dimension === "tag" && (
           <span className="flex flex-wrap items-center gap-1.5 text-[11px] text-ink-muted">
             Show:
