@@ -384,8 +384,11 @@ SOLO_TIER_TEAM_MAX = 0.80        # < this -> 'team' (multiplayer-dependent). Sam
 # 21/39 = 0.54, Souls-like 0.47, Cozy 0.46, Visual Novel 0.37, Party-Based RPG 0.32, Action
 # RTS 13/44 = 0.30. indie_friendly = share >= INDIE_FRIENDLY_MIN_SHARE (above the median)
 # with >= INDIE_FRIENDLY_MIN_HITS such games (evidence, not one lucky hit) AND the niche
-# still single-player (solo_viability >= INDIE_SINGLEPLAYER_MIN: no netcode) — ~39% of
-# niches. Mirrored in api/app/routers/niches.py, web/src/lib/radarVerdict.ts and
+# still single-player (solo_viability >= INDIE_SINGLEPLAYER_MIN: no netcode). Re-measured on
+# a full build from main with the EA/free-game fixes (2026-09-24): quartiles 0.34 / 0.40 /
+# 0.46; 92 of 331 tags pass (41 of 124 game types) — Metroidvania 0.56, Roguelike
+# Deckbuilder 0.53, Souls-like 0.50, Cozy 0.45; out: Auto Battler 0.44, Visual Novel 0.38,
+# Party-Based RPG 0.31, Action RTS 8/33 = 0.24. Mirrored in api/app/routers/niches.py, web/src/lib/radarVerdict.ts and
 # mcp/prospect_mcp.py: move them together.
 INDIE_HIT_MIN_REV = 100_000      # est. revenue that counts as a hit (paid games only)
 SMALL_DEV_MAX_GAMES = 3          # developer catalog size that still reads "small team"

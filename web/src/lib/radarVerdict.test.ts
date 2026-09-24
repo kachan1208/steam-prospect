@@ -29,8 +29,7 @@ import {
   releasesYoyWorked,
   sharePct,
   soloBucket,
-  type RadarVerdictInput,
-} from "./radarVerdict";
+  type RadarVerdictInput, radarLensPasses, radarLensFails } from "./radarVerdict";
 import { isGlossaryKey } from "./glossary";
 
 describe("radarVerdictTrace — every check explains itself in place (2026-09-23)", () => {
@@ -728,5 +727,32 @@ describe("solo viability is a FLAG, not a scale", () => {
       radarVerdict({ ...market, solo_viability: 0.99 }),
     );
     expect(soloBucket(0.85)).toBe("solo"); // the filter bucket is unchanged by the band
+  });
+});
+
+describe("the solo/indie lens row (2026-09-24)", () => {
+  const base = { demand_trend_24m_pct: 60, saturation_yoy: 0.05, winner_concentration: 0.6, solo_viability: 0.95 };
+  it("prints the small-indie evidence, never moves the ring, and is omitted on older marts", () => {
+    const withEvidence = radarVerdictTrace({
+      ...base, n_hits_100k: 33, n_small_indie_hits: 8, small_indie_hit_share: 8 / 33, indie_friendly: false,
+    });
+    const row = withEvidence.checks.find((c) => c.id === "indie");
+    expect(row?.value).toBe("8 of 33 games over $100K from small indie developers (24%)");
+    expect(row?.pass).toBe(false);
+    expect(row?.decides).toBe(false);
+    expect(row?.note).toMatch(/studio-dominated/);
+    // The ring is the same with or without the lens evidence.
+    expect(withEvidence.ring).toBe(radarVerdictTrace(base).ring);
+    expect(radarVerdictTrace(base).checks.some((c) => c.id === "indie")).toBe(false);
+  });
+
+  it("radarLensPasses uses the served verdict, and falls back to the singleplayer share", () => {
+    expect(radarLensPasses({ indie_friendly: false, solo_viability: 1 })).toBe(false);
+    expect(radarLensPasses({ indie_friendly: true, solo_viability: 0.5 })).toBe(true);
+    expect(radarLensPasses({ solo_viability: 0.95 })).toBe(true);
+    expect(radarLensPasses({ solo_viability: null })).toBe(false);
+    // Hollow on the board is a claim: unknown never draws hollow.
+    expect(radarLensFails({ solo_viability: null })).toBe(false);
+    expect(radarLensFails({ indie_friendly: false })).toBe(true);
   });
 });

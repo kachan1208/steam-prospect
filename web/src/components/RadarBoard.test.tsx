@@ -156,14 +156,13 @@ function renderBoard(
 afterEach(cleanup);
 
 describe("RadarBoard — population legend", () => {
-  it("under the singleplayer lens it states the rule by its real name — and no hollow sample", () => {
+  it("under the solo/indie lens it states the rule by what it asks — and no hollow sample", () => {
     renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], true);
     const rule = screen.getByTestId("radar-solo-population");
-    expect(rule.textContent).toContain("Singleplayer only");
-    expect(rule.textContent).toContain(`singleplayer share ≥ ${SOLO_FRIENDLY_PCT}`);
-    expect(rule.textContent).toContain("unknown");
-    // No hollow sample may imply multiplayer-dependent niches could be present.
-    expect(screen.queryByText(/hollow = multiplayer-dependent/)).toBeNull();
+    expect(rule.textContent).toContain("Solo/indie-friendly");
+    expect(rule.textContent).toContain("small indie teams demonstrably succeed");
+    // No hollow sample may imply niches outside the lens could be present.
+    expect(screen.queryByText(/hollow = outside/)).toBeNull();
     // The old, over-promising name is gone.
     expect(document.body.textContent).not.toMatch(/solo-friendly/i);
   });
@@ -186,13 +185,13 @@ describe("RadarBoard — population legend", () => {
       </MemoryRouter>,
     );
     expect(screen.getByTestId("radar-solo-population").textContent).toBe(
-      "Singleplayer only: 220 of 228 niches kept — the other 8 have a singleplayer share under 80% (or unknown)",
+      "Solo/indie-friendly: 220 of 228 niches kept — in the other 8, small indie teams don't clearly succeed (or the games lean multiplayer)",
     );
   });
 
   it("with the lens off the hollow sample returns, named for what it marks", () => {
     renderBoard([makeBlip("Roguelike Deckbuilder", REFERENCE)], false);
-    expect(screen.getByText(new RegExp(`hollow = multiplayer-dependent \\(singleplayer share under ${SOLO_FRIENDLY_PCT}\\)`))).toBeTruthy();
+    expect(screen.getByText(/hollow = outside the Solo\/indie-friendly lens/)).toBeTruthy();
     expect(screen.queryByTestId("radar-solo-population")).toBeNull();
   });
 
@@ -203,7 +202,7 @@ describe("RadarBoard — population legend", () => {
 
   it("the empty state names the population when the lens is on", () => {
     renderBoard([], true);
-    expect(screen.getByText("No singleplayer niches match this cut.")).toBeTruthy();
+    expect(screen.getByText("No solo/indie-friendly niches match this cut.")).toBeTruthy();
     cleanup();
     renderBoard([], false);
     expect(screen.getByText("No niches match this cut.")).toBeTruthy();

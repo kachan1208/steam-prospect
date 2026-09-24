@@ -400,6 +400,35 @@ export const GLOSSARY = {
   },
 
   // ─────────────────────────────── solo lens ───────────────────────────────
+  small_indie_hit_share: {
+    label: "Small indie teams succeed here",
+    short: "Small-indie hits",
+    meaning:
+      "Of the niche's games that earned an estimated $100K or more, the share made by small indie teams — an Indie-flagged game whose developer has 3 or fewer games on Steam. It answers \u201ccan a solo dev or tiny team actually make money here?\u201d, which the singleplayer share can't.",
+    formula: "games over $100K from small indie developers ÷ all games over $100K (paid games only)",
+    unit: "percent",
+    notes:
+      "Developer size is a proxy: the number of games that developer has on Steam, not its headcount. Free and unknown-price games have no revenue estimate, so they are never counted. " +
+      CUT_NOTE,
+    source: "Estimated revenue (reviews × 30 × launch price), Steam's Indie genre flag, developer catalog from the store data",
+    computed: true,
+    fields: ["small_indie_hit_share", "n_small_indie_hits", "n_hits_100k"],
+  },
+  indie_friendly: {
+    label: "Solo/indie-friendly",
+    short: "Indie-friendly",
+    meaning:
+      "The Radar's lens: niches where small indie teams demonstrably succeed and the games don't depend on multiplayer.",
+    formula:
+      "small-indie share of $100K+ games ≥ 45% AND at least 5 such games AND singleplayer share ≥ 80%",
+    unit: "category",
+    notes:
+      "On the 24-month cut the median niche sits at 40%, so 45% means \u201cbetter than typical for small teams\u201d; about 3 in 10 niches pass (Metroidvania 56%, Souls-like 50%, Cozy 45% in; Auto Battler 44%, Action RTS 24% out). It picks which niches the board shows — it never changes a verdict. " +
+      CUT_NOTE,
+    computed: true,
+    fields: ["indie_friendly"],
+    replaces: ["Singleplayer only"],
+  },
   singleplayer_share: {
     label: "Singleplayer share",
     short: "Singleplayer",

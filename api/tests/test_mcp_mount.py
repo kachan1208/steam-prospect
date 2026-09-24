@@ -859,3 +859,17 @@ def test_same_day_rebuild_over_the_same_name_is_reloaded(load_mcp, tmp_path):
     assert after["score_version"] == "v2", "reload returned the cached OLD instance"
     assert "momentum" in after["niches"][0]
     assert m._generation == 1
+
+
+def test_studio_dominated_flag_and_the_indie_lens_on_an_older_mart(load_mcp, tmp_path):
+    # The solo/indie evidence (mart_niche_indie.sql): a niche whose $100K+ games mostly come
+    # from bigger teams carries studio_dominated; a mart without the column can't raise it,
+    # and asking for the lens there is a clear rebuild error, never a silent fallback.
+    path = tmp_path / "prospect_20260901.duckdb"
+    _build_mart(path, v2=True, built_at=datetime.now(timezone.utc))
+    m = load_mcp(path)
+    assert "studio_dominated" in m._niche_flags({"indie_friendly": False, "solo_tier": "solo"})
+    assert "studio_dominated" not in m._niche_flags({"indie_friendly": True, "solo_tier": "solo"})
+    assert "studio_dominated" not in m._niche_flags({"solo_tier": "solo"})
+    out = m.find_niches(indie_friendly=True)
+    assert "predates the solo/indie evidence" in out["error"]

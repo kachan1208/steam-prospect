@@ -20,6 +20,7 @@ import {
   cutPopulationLabel,
   radarSector,
   radarVerdictTrace,
+  radarLensFails,
   sharePct,
   soloBucket,
   type RadarRing,
@@ -226,6 +227,9 @@ export interface RadarBoardBlip {
    * production-scope measure); null = unknown (mart predates the column). A LENS only —
    * drawn as dot style (hollow = team-scale), never fed into the verdict. */
   solo_viability: number | null;
+  /** The board lens' served verdict (mart_niche.indie_friendly); null/absent on older marts,
+   * where radarLensPasses falls back to the singleplayer share. */
+  indie_friendly?: boolean | null;
   verdict: RadarVerdict;
   /** The verdict's decomposition (radarVerdictTrace's checks — produced by the SAME
    * evaluation as `verdict`); rendered by the rail dossier when the dot is selected. */
@@ -275,11 +279,17 @@ export function radarBlipFromRow(row: NicheRow): RadarBoardBlip | null {
     n_prior_year: row.n_prior_year ?? null,
     n_games: row.n_games,
     n_paid: paidCount(row),
+    // Solo/indie evidence — the lens' dossier row (never read by the ring decision).
+    n_hits_100k: row.n_hits_100k ?? null,
+    n_small_indie_hits: row.n_small_indie_hits ?? null,
+    small_indie_hit_share: row.small_indie_hit_share ?? null,
+    indie_friendly: row.indie_friendly ?? null,
   });
   return {
     dimension: row.dimension,
     key: row.key,
     tier: row.tier,
+    indie_friendly: row.indie_friendly ?? null,
     sector,
     n_games: row.n_games,
     p90_rev: row.p90_rev ?? null,
@@ -1294,7 +1304,7 @@ export function RadarBoard({
   if (blips.length === 0) {
     return (
       <div className="py-10 text-center text-sm text-ink-muted">
-        {soloOnly ? "No singleplayer niches match this cut." : "No niches match this cut."}
+        {soloOnly ? "No solo/indie-friendly niches match this cut." : "No niches match this cut."}
       </div>
     );
   }
@@ -1505,7 +1515,7 @@ export function RadarBoard({
               plane, drawn in the ring hue on a hollow one. */}
           <g aria-hidden>
             {visible.map((b) => {
-              const team = soloBucket(b.solo_viability) === "team";
+              const team = radarLensFails(b);
               const label = String(b.n);
               // THE NUMBER HAS TO BE READABLE (the fourth complaint of the second pass). The
               // reference runs a 9px number inside an r=9 blip; ours goes up to 11px inside
@@ -1705,7 +1715,7 @@ export function RadarBoard({
                 <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className="pointer-events-none shrink-0">
                   <circle cx="5" cy="5" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
                 </svg>
-                hollow = multiplayer-dependent (singleplayer share under {SOLO_FRIENDLY_PCT})
+                hollow = outside the {SOLO_LENS_LABEL} lens
               </span>
             )}
             <span className="inline-flex items-center gap-1">
@@ -1737,10 +1747,10 @@ export function RadarBoard({
             <span data-testid="radar-solo-population">
               {SOLO_LENS_LABEL}:{" "}
               {soloCounts
-                ? `${fmtInt(soloCounts.shown)} of ${fmtInt(soloCounts.total)} niches kept — the other ${fmtInt(
+                ? `${fmtInt(soloCounts.shown)} of ${fmtInt(soloCounts.total)} niches kept — in the other ${fmtInt(
                     soloCounts.total - soloCounts.shown,
-                  )} have a singleplayer share under ${SOLO_FRIENDLY_PCT} (or unknown)`
-                : `niches with a singleplayer share ≥ ${SOLO_FRIENDLY_PCT} (unknown left out)`}
+                  )}, small indie teams don't clearly succeed (or the games lean multiplayer)`
+                : `niches where small indie teams demonstrably succeed`}
             </span>
           )}
         </div>
